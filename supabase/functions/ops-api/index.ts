@@ -838,6 +838,7 @@ import {
   readGroupWorkOrderPublic,
   rekeyGroupWorkOrder,
   removeGroupWorkOrderParticipant,
+  restoreGroupWorkOrderParticipant,
   resolveGroupShareInvoiceExtra,
   revokeGroupSignoff,
   signGroupWorkOrderCrew,
@@ -12221,6 +12222,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'void_group_work_order':
       case 'rekey_group_work_order':
       case 'remove_group_work_order_participant':
+      case 'restore_group_work_order_participant':
       case 'office_approve_group_hours': {
         const officeCaller: GroupCaller = {
           userId: authUser?.id || '',
@@ -12246,6 +12248,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             ? rekeyGroupWorkOrder(client, officeCaller, officeBody)
             : action === 'remove_group_work_order_participant'
             ? removeGroupWorkOrderParticipant(client, officeCaller, officeBody)
+            : action === 'restore_group_work_order_participant'
+            ? restoreGroupWorkOrderParticipant(client, officeCaller, officeBody)
             : action === 'office_approve_group_hours'
             ? officeApproveGroupHours(client, officeCaller, officeBody)
             : readGroupWorkOrderOffice(client, officeCaller, officeBody),

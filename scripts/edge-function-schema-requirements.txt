@@ -1178,3 +1178,10 @@ xero-sync|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|ta
 
 # Shared installer population must exist before the matching edge reads.
 ops-api|supabase/migrations/20261106083000_group_work_order_crew.sql|function|group_work_order_crew
+
+# Crew already paid by the hour: the group opens, they are left out of the
+# split and the pot is reduced by their pay (read before the matching edge).
+ops-api|supabase/migrations/20261106160000_group_paid_by_hours_member.sql|column|group_work_orders.hours_paid_ex
+ops-api|supabase/migrations/20261106160000_group_paid_by_hours_member.sql|function|group_work_order_hours_paid
+ops-api|supabase/migrations/20261106170000_group_office_removal_wins.sql|table|group_work_order_crew_removals
+ops-api|supabase/migrations/20261106170000_group_office_removal_wins.sql|function|restore_group_work_order_participant

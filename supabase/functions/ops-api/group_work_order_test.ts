@@ -12,6 +12,7 @@ import {
   assert,
   assertEquals,
   assertRejects,
+  assertStringIncludes,
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { GOOGLE_REVIEW_URL } from "../_shared/google_review_link.ts";
@@ -41,6 +42,8 @@ import {
   GroupWorkOrderError,
   isGroupShareLine,
   isNormalWorkOrderPayLine,
+  isBilledHoursInvoice,
+  isPaidHoursLine,
   joinGroupWorkOrder,
   moneyToCents,
   PARTICIPANT_SHARE_KEYS,
@@ -51,6 +54,7 @@ import {
   rateOnDay,
   readGroupWorkOrderFeedback,
   readGroupWorkOrderMyShare,
+  readHoursPaidUserIds,
   readTradeGroupWorkOrder,
   readMyGroupWorkOrders,
   readInvoicePayableRoutes,
@@ -63,6 +67,7 @@ import {
   readGroupWorkOrderOffice,
   refuseClientLinkSend,
   removeGroupWorkOrderParticipant,
+  restoreGroupWorkOrderParticipant,
   resolveGroupShareInvoiceExtra,
   submitGroupWorkOrderFeedback,
   submitGroupWorkOrderHours,
@@ -143,6 +148,29 @@ class Memory {
     };
   }
 
+  /** An office removal on the job's live group beats a booking (20261106170000). */
+  standingRemoval(jobId: string, userId: string): boolean {
+    return this.rows("group_work_order_crew_removals").some((r) => {
+      const group = this.rows("group_work_orders").find((g) => g.id === r.group_id);
+      return String(r.job_id) === jobId && String(r.user_id) === userId && r.restored_at == null &&
+        group?.status !== "void";
+    });
+  }
+
+  /** Twin of public.group_work_order_hours_paid (20261106160000). */
+  hoursPaid(jobId: string): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const line of this.rows("trade_invoice_lines")) {
+      if (String(line.job_id) !== jobId || !isPaidHoursLine(line as any)) continue;
+      const invoice = this.rows("trade_invoices").find((row) => row.id === line.trade_invoice_id);
+      // Only hours billed in Xero count as paid (20261106160000).
+      if (!invoice?.user_id || !isBilledHoursInvoice(invoice)) continue;
+      const userId = String(invoice.user_id);
+      out.set(userId, (out.get(userId) || 0) + Number(line.line_total_ex || 0));
+    }
+    return out;
+  }
+
   runRpc(fn: string, args: Record<string, unknown>) {
     if (fn === "group_work_order_crew") {
       const jobs = args.p_job_ids as string[];
@@ -152,11 +180,14 @@ class Memory {
         if (!jobs.includes(String(row.job_id)) || row.is_ghost === true ||
           String(row.status || "").toLowerCase() === "cancelled" ||
           String(row.role || "").toLowerCase() === "observer" || user?.role === "admin") continue;
+        if (this.hoursPaid(String(row.job_id)).has(String(row.user_id))) continue;
+        if (this.standingRemoval(String(row.job_id), String(row.user_id))) continue;
         out.set(`${row.job_id}:${row.user_id}`, {job_id:row.job_id,user_id:row.user_id});
       }
       for (const member of this.rows("group_work_order_participants")) {
         const group = this.rows("group_work_orders").find((g) => g.id === member.group_id);
-        if (group && group.status !== "void" && jobs.includes(String(group.job_id))) {
+        if (group && group.status !== "void" && jobs.includes(String(group.job_id)) &&
+          !this.hoursPaid(String(group.job_id)).has(String(member.user_id))) {
           out.set(`${group.job_id}:${member.user_id}`,{job_id:group.job_id,user_id:member.user_id});
         }
       }
@@ -184,6 +215,9 @@ class Memory {
       group.hours_office_approved_at = "2099-01-01T00:00:00Z";
       group.hours_office_approved_by = actor;
       return { group_id: groupId, approved_at: group.hours_office_approved_at };
+    }
+    if (fn === "restore_group_work_order_participant") {
+      return this.restoreParticipant(group, String(args.p_user || ""), String(args.p_actor || ""));
     }
     if (fn === "remove_group_work_order_participant") {
       return this.removeParticipant(
@@ -324,8 +358,33 @@ class Memory {
       actor,
       user_id: userId,
     });
+    if (!this.standingRemoval(String(group.job_id), userId)) {
+      this.rows("group_work_order_crew_removals").push({
+        group_id: group.id, job_id: group.job_id, user_id: userId,
+        removed_by: actor, removed_at: "2026-11-06T00:00:00.000Z", restored_by: null, restored_at: null,
+      });
+    }
     this.touchHours(String(group.id));
     return { ok: true };
+  }
+
+  restoreParticipant(group: Row, userId: string, actor: string) {
+    if (!userId || !actor) throw new Error("group_actor_required");
+    if (group.status === "void") throw new Error("group_work_order_void");
+    if (group.split_frozen_at) throw new Error("group_split_frozen");
+    const removal = this.rows("group_work_order_crew_removals").find((r) =>
+      r.group_id === group.id && String(r.user_id) === userId && r.restored_at == null
+    );
+    if (!removal) throw new Error("group_removal_not_found");
+    removal.restored_by = actor;
+    removal.restored_at = "2026-11-06T01:00:00.000Z";
+    const people = this.rows("group_work_order_participants");
+    if (!people.some((r) => r.group_id === group.id && String(r.user_id) === userId)) {
+      people.push({ id: crypto.randomUUID(), group_id: group.id, user_id: userId });
+    }
+    this.rows("group_work_order_events").push({ group_id: group.id, action: "restore_participant", actor, user_id: userId });
+    this.touchHours(String(group.id));
+    return { restored: true };
   }
 
   latestHoursAt(jobId: string): string | null {
@@ -435,11 +494,19 @@ class Memory {
     const workOrder = this.rows("work_orders").find((row) =>
       row.id === group.work_order_id
     );
-    const potCents = workOrder && workOrder.kind === "job" &&
+    let potCents = workOrder && workOrder.kind === "job" &&
         workOrder.status === "approved" && workOrder.sealed_content_hash
       ? moneyToCents(workOrder.agreed_labour_ex)
       : null;
     if (potCents == null || potCents <= 0) throw new Error("group_pot_missing");
+    // Crew paid by the hour: out of the split, their pay off the pot
+    // (all_in_12_v2 uses gross plus 12%; gross_v1 uses gross).
+    const paid = this.hoursPaid(String(group.job_id));
+    for (const gross of paid.values()) {
+      const g = Math.round(gross * 100);
+      potCents -= group.pay_basis === "all_in_12_v2" ? g + Math.round(g * 0.12) : g;
+    }
+    if (potCents <= 0) throw new Error("group_pot_used_by_hours_pay");
     const points = new Map<string, bigint>();
     const hours = new Map<string, number>();
     const missingRate: string[] = [];
@@ -457,6 +524,7 @@ class Memory {
       if (!this.rows("group_work_order_participants").some((row) =>
         row.group_id === group.id && String(row.user_id) === userId
       )) continue;
+      if (paid.has(userId)) continue;
       hours.set(userId, (hours.get(userId) || 0) + worked);
       const raw = this.rows("trade_rates").filter((row) => {
         if (row.user_id !== userId || row.org_id !== group.org_id) return false;
@@ -574,7 +642,7 @@ class Memory {
 }
 
 class Query {
-  private filters: { op: "eq" | "in" | "neq"; col: string; value: unknown }[] = [];
+  private filters: { op: "eq" | "in" | "neq" | "is"; col: string; value: unknown }[] = [];
   private op: "select" | "insert" | "upsert" | "update" | "delete" = "select";
   private payload: unknown = null;
   private one: "none" | "maybe" | "single" = "none";
@@ -595,6 +663,7 @@ class Query {
     return this;
   }
   neq(col: string,value:unknown): this { this.filters.push({op:"neq",col,value}); return this; }
+  is(col: string,value:unknown): this { this.filters.push({op:"is",col,value}); return this; }
   order(col:string, options:{ascending?:boolean}={}): this { this.sorts.push({col,ascending:options.ascending!==false});return this; }
   range(start:number,end:number): this { this.bounds=[start,end]; return this; }
   insert(row: unknown): this {
@@ -640,6 +709,7 @@ class Query {
         return row[filter.col] === filter.value;
       }
       if (filter.op === "neq") return row[filter.col] !== filter.value;
+      if (filter.op === "is") return (row[filter.col] ?? null) === filter.value;
       return (filter.value as unknown[]).includes(row[filter.col]);
     });
   }
@@ -1476,7 +1546,7 @@ Deno.test("normal pay is every line that is not on the exclusion list", async ()
   assertEquals(body.includes("feature_flags"), false);
 });
 
-Deno.test("opening a group on a job that already has normal pay is refused", async () => {
+Deno.test("opening a group on a job that already has a work-order claim is refused", async () => {
   const memory = new Memory();
   seedSplit(memory);
   memory.rows("group_work_orders").splice(0, memory.rows("group_work_orders").length);
@@ -1484,7 +1554,7 @@ Deno.test("opening a group on a job that already has normal pay is refused", asy
   memory.rows("trade_invoice_lines").push({
     job_id: JOB,
     trade_invoice_id: INV,
-    line_type: "fencing",
+    line_type: "work order",
     group_share_id: null,
     source_work_order_id: null,
   });
@@ -1494,7 +1564,7 @@ Deno.test("opening a group on a job that already has normal pay is refused", asy
   );
   assertEquals(refused.code, "group_open_blocked_by_work_order_claim");
   assertEquals(refused.status, 409);
-  assert(refused.message.toLowerCase().includes("already has normal pay"));
+  assert(refused.message.toLowerCase().includes("work-order claim"));
   assertEquals(memory.rows("group_work_orders").length, 0);
 
   memory.rows("trade_invoices")[0].status = "ops-reject";
@@ -1642,6 +1712,58 @@ Deno.test("a signature is a PNG or JPEG, and markup never becomes an image sourc
   assertEquals(memory.rows("job_media").length, 0);
 });
 
+Deno.test("an office removal wins over a booking, is recorded, and the office can undo it", async () => {
+  const memory = new Memory();
+  seedSplit(memory);
+  memory.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 2 },
+    { group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 2 },
+  );
+  // Booked on the job but not named for the group.
+  memory.rows("job_assignments").push({
+    job_id: JOB, user_id: USER_C, scheduled_date: "2026-10-20", status: "scheduled", role: "lead_installer",
+  });
+  const before = await assertRejects(
+    () => freezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(before.code, "group_split_needs_hours");
+  assert(before.message.includes(USER_C));
+
+  await removeGroupWorkOrderParticipant(memory.client(), trade(USER_A, true), { group_id: GROUP, user_id: USER_C });
+  assertEquals(memory.rows("job_assignments").find((r) => r.user_id === USER_C)?.status, "scheduled");
+
+  const office = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), { group_id: GROUP });
+  assertEquals(office.needs_hours.includes(USER_C), false);
+  assertEquals(office.removed.map((r) => r.user_id), [USER_C]);
+  assertEquals(office.removed[0].removed_by, USER_A);
+  assert(office.removed[0].removed_at);
+
+  const tradeTry = await assertRejects(
+    () => restoreGroupWorkOrderParticipant(memory.client(), trade(USER_A), { group_id: GROUP, user_id: USER_C }),
+    GroupWorkOrderError,
+  );
+  assertEquals(tradeTry.status, 403);
+  await restoreGroupWorkOrderParticipant(memory.client(), trade(USER_A, true), { group_id: GROUP, user_id: USER_C });
+  assert(memory.rows("group_work_order_participants").some((r) => r.user_id === USER_C));
+  assertEquals(memory.rows("group_work_order_crew_removals")[0].restored_by, USER_A);
+  const back = await assertRejects(
+    () => freezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP }),
+    GroupWorkOrderError,
+  );
+  assertEquals(back.code, "group_split_needs_hours");
+  assert(back.message.includes(USER_C));
+  const again = await assertRejects(
+    () => restoreGroupWorkOrderParticipant(memory.client(), trade(USER_A, true), { group_id: GROUP, user_id: USER_C }),
+    GroupWorkOrderError,
+  );
+  assertEquals(again.code, "group_removal_not_found");
+  assertEquals(again.status, 404);
+  const office2 = await readGroupWorkOrderOffice(memory.client(), trade(USER_A, true), { group_id: GROUP });
+  assertEquals(office2.removed, []);
+  assert(office2.needs_hours.includes(USER_C));
+});
+
 Deno.test("freeze names an installer who has not joined, and removal is only before freeze", async () => {
   const memory = new Memory();
   seedSplit(memory);
@@ -1682,8 +1804,9 @@ Deno.test("freeze names an installer who has not joined, and removal is only bef
     () => freezeGroupWorkOrder(memory.client(), trade(USER_A, true), { group_id: GROUP }),
     GroupWorkOrderError,
   );
+  // The office removal wins over B's booking for this group (20261106170000).
   assertEquals(stillAssigned.code, "group_split_needs_hours");
-  assert(stillAssigned.message.includes(USER_B));
+  assertEquals(stillAssigned.message.includes(USER_B), false);
   assert(stillAssigned.message.includes(USER_C));
 
   for (const row of memory.rows("job_assignments")) {
@@ -2333,9 +2456,24 @@ Deno.test("allocated fencing and patio crew get the same price-free Create or Jo
     assertEquals(read.discovery, { state: "create" });
     assertEquals(Object.hasOwn(read, "pot_total"), false);
     assertEquals(Object.hasOwn(read, "share_token"), false);
-    db.rows("trade_invoice_lines").push({ job_id: JOB, line_type: "labour", trade_invoices: { status: "draft" } });
+    db.rows("trade_invoice_lines").push({ job_id: JOB, line_type: "work order", trade_invoices: { status: "draft", user_id: USER_B } });
     read = await readTradeGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB });
     assertEquals(read.discovery?.reason, "normal_pay_exists");
+    db.rows("trade_invoice_lines").splice(0);
+    // Someone else's hourly pay leaves the group open to the rest of the crew;
+    // the person paid by the hour is told so instead (20261106160000).
+    db.rows("trade_invoice_lines").push({ job_id: JOB, line_type: "labour", trade_invoices: { status: "paid", user_id: USER_B, xero_bill_id: "BILL-B", xero_bill_status: "PAID" } });
+    read = await readTradeGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB });
+    assertEquals(read.discovery, { state: "create" });
+    read = await readTradeGroupWorkOrder(db.client(), trade(USER_B), { job_id: JOB });
+    assertEquals(read.discovery?.reason, "paid_by_hours");
+    db.rows("trade_invoice_lines").splice(0);
+    // An hours draft not billed in Xero yet is not paid: it holds the group.
+    db.rows("trade_invoice_lines").push({ job_id: JOB, line_type: "labour", trade_invoices: { status: "draft", user_id: USER_B } });
+    read = await readTradeGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB });
+    assertEquals(read.discovery?.reason, "hours_claim_unresolved");
+    read = await readTradeGroupWorkOrder(db.client(), trade(USER_B), { job_id: JOB });
+    assertEquals(read.discovery?.reason, "hours_claim_unresolved");
     db.rows("trade_invoice_lines").splice(0);
     db.rows("group_work_orders").push(...groups);
     db.rows("group_work_order_participants").splice(0);
@@ -2855,4 +2993,154 @@ Deno.test("canonical crew RPC pages every person and refuses incomplete or forei
     assertEquals(error.code, "group_crew_unreadable");
     assertEquals(error.status, 503);
   }
+});
+
+/** A third crew member already paid ordinary hourly pay on the job: the
+ * invoice reached Xero as a live bill. Pass a claim to seed one not billed. */
+function seedPaidByHours(
+  db: Memory,
+  grossEx: number,
+  invoice: Record<string, unknown> = { status: "pushed_to_xero", xero_bill_id: "BILL-C", xero_bill_status: "AUTHORISED" },
+) {
+  db.rows("job_assignments").push({
+    job_id: JOB, user_id: USER_C, scheduled_date: "2026-10-20", status: "scheduled", role: "installer",
+  });
+  db.rows("trade_invoices").push({ id: INV, user_id: USER_C, ...invoice });
+  db.rows("trade_invoice_lines").push({
+    job_id: JOB, trade_invoice_id: INV, line_type: "labour", line_total_ex: grossEx,
+    group_share_id: null, source_work_order_id: null,
+    // This fake does not join tables; the live read embeds the invoice.
+    trade_invoices: { user_id: USER_C, ...invoice },
+  });
+}
+
+Deno.test("paid by the hour: the rest of the crew still get a group; the paid member cannot open or join it", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("group_work_orders").splice(0);
+  db.rows("group_work_order_participants").splice(0);
+  seedPaidByHours(db, 100);
+  const paidOpen = await createGroupWorkOrder(db.client(), trade(USER_C), { job_id: JOB })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(paidOpen?.code, "group_member_paid_by_hours");
+  assertEquals(paidOpen?.status, 409);
+  assertEquals(db.rows("group_work_orders").length, 0);
+
+  const opened = await createGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB });
+  assertEquals(opened.ok, true);
+  const group = db.rows("group_work_orders")[0];
+  const paidJoin = await joinGroupWorkOrder(db.client(), trade(USER_C), { group_id: group.id })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(paidJoin?.code, "group_member_paid_by_hours");
+  assertEquals(db.rows("group_work_order_participants").map((row) => row.user_id), [USER_A]);
+  const read = await readTradeGroupWorkOrder(db.client(), trade(USER_C), { job_id: JOB });
+  assertEquals(read.discovery?.reason, "paid_by_hours");
+
+  // A work-order claim on the job still stops a group being opened.
+  const blocked = new Memory();
+  seedSplit(blocked);
+  blocked.rows("group_work_orders").splice(0);
+  seedPaidByHours(blocked, 100);
+  blocked.rows("trade_invoice_lines")[0].line_type = "work order";
+  const refused = await createGroupWorkOrder(blocked.client(), trade(USER_A), { job_id: JOB })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(refused?.code, "group_open_blocked_by_work_order_claim");
+});
+
+Deno.test("paid by the hour: a claim not billed in Xero is not paid; it holds the group, named, and stays the person's own", async () => {
+  const unbilled: Record<string, unknown>[] = [
+    { status: "draft", xero_bill_id: null, xero_bill_status: null },
+    { status: "pending_acknowledgment", xero_bill_id: null, xero_bill_status: null },
+    { status: "pushed_to_xero", xero_bill_id: "BILL-C", xero_bill_status: null },
+    { status: "pushed_to_xero", xero_bill_id: "BILL-C", xero_bill_status: "VOIDED" },
+    { status: "approved", xero_bill_id: "BILL-C", xero_bill_status: "DELETED" },
+    { status: "pushed_to_xero", xero_bill_id: "BILL-C", xero_bill_status: "DRAFT" },
+  ];
+  for (const invoice of unbilled) {
+    const db = new Memory();
+    seedSplit(db);
+    db.rows("group_work_orders").splice(0);
+    db.rows("group_work_order_participants").splice(0);
+    db.rows("users").push({ id: USER_C, name: "Crew C", role: "crew", org_id: ORG });
+    seedPaidByHours(db, 100, invoice);
+    // Not paid: nothing is taken off the pot and they are not left out.
+    assertEquals((await readHoursPaidUserIds(db.client(), JOB)).size, 0);
+    const refused = await createGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB })
+      .then(() => null, (err) => err as GroupWorkOrderError);
+    assertEquals(refused?.code, "group_open_blocked_by_hours_claim", String(invoice.status));
+    assertEquals(refused?.status, 409);
+    assertStringIncludes(refused?.message || "", "Crew C");
+    assertStringIncludes(refused?.message || "", "withdrawn");
+    assertEquals(db.rows("group_work_orders").length, 0);
+    const read = await readTradeGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB });
+    assertEquals(read.discovery?.reason, "hours_claim_unresolved");
+    // With no group the person's own ordinary hours are not refused.
+    await assertGroupJobDraftUsesShare(db.client(), [{ job_id: JOB, line_type: "labour" }]);
+  }
+
+  // A live group whose paid member's bill was voided afterwards: the freeze
+  // waits, named, and writes no share.
+  const voided = new Memory();
+  seedSplit(voided);
+  voided.rows("users").push({ id: USER_C, name: "Crew C", role: "crew", org_id: ORG });
+  seedPaidByHours(voided, 100, { status: "pushed_to_xero", xero_bill_id: "BILL-C", xero_bill_status: "VOIDED" });
+  voided.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 6 },
+  );
+  const held = await freezeGroupWorkOrder(voided.client(), trade(USER_A), { group_id: GROUP })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(held?.code, "group_hours_claim_unresolved");
+  assertStringIncludes(held?.message || "", "Crew C");
+  assertEquals(voided.rows("group_work_order_shares").length, 0);
+
+  // Withdrawn (ops-reject): no claim at all, so the group opens and the
+  // person is ordinary crew again.
+  const withdrawn = new Memory();
+  seedSplit(withdrawn);
+  withdrawn.rows("group_work_orders").splice(0);
+  withdrawn.rows("group_work_order_participants").splice(0);
+  seedPaidByHours(withdrawn, 100, { status: "ops-reject", xero_bill_id: null, xero_bill_status: null });
+  const opened = await createGroupWorkOrder(withdrawn.client(), trade(USER_A), { job_id: JOB });
+  assertEquals(opened.ok, true);
+  assertEquals((await readHoursPaidUserIds(withdrawn.client(), JOB)).size, 0);
+});
+
+Deno.test("paid by the hour: the work order drops by that pay and the rest is split by hours", async () => {
+  for (const [basis, deducted] of [["all_in_12_v2", 112], ["gross_v1", 100]] as const) {
+    const db = new Memory();
+    seedSplit(db);
+    db.rows("group_work_orders")[0].pay_basis = basis;
+    seedPaidByHours(db, 100);
+    // An old participant row for the paid member: their hours never count.
+    db.rows("group_work_order_participants").push({ id: "p-c", group_id: GROUP, user_id: USER_C });
+    db.rows("group_work_order_time_entries").push(
+      { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 6 },
+      { group_id: GROUP, user_id: USER_B, work_date: "2026-10-21", hours: 2 },
+      { group_id: GROUP, user_id: USER_C, work_date: "2026-10-20", hours: 8 },
+    );
+    await freezeGroupWorkOrder(db.client(), trade(USER_A), { group_id: GROUP }).catch((err) => {
+      if (!(err instanceof GroupWorkOrderError) || err.code === "group_pot_used_by_hours_pay") throw err;
+    });
+    const shares = db.rows("group_work_order_shares");
+    assertEquals(shares.map((row) => row.user_id).sort(), [USER_A, USER_B]);
+    const pot = moneyToCents(482.15)! - deducted * 100;
+    assertEquals(shares.reduce((sum, row) => sum + moneyToCents(row.share_ex)!, 0), pot);
+    const byUser = new Map(shares.map((row) => [String(row.user_id), moneyToCents(row.share_ex)!]));
+    // The rest is split the usual way (hours at each person's rate), 6 hours to 2.
+    assert(byUser.get(USER_A)! > byUser.get(USER_B)! * 3);
+  }
+
+  // Paid more than the work order: no group pay to split, said plainly.
+  const over = new Memory();
+  seedSplit(over);
+  over.rows("group_work_orders")[0].pay_basis = "all_in_12_v2";
+  seedPaidByHours(over, 500);
+  over.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 2 },
+  );
+  const used = await freezeGroupWorkOrder(over.client(), trade(USER_A), { group_id: GROUP })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(used?.code, "group_pot_used_by_hours_pay");
+  assertEquals(used?.status, 409);
+  assertEquals(over.rows("group_work_orders")[0].split_frozen_at, undefined);
 });

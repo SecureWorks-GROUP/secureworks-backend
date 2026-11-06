@@ -93,7 +93,8 @@ export type PatioAutoGroupReason =
   | "crew_added"
   | "already_grouped"
   | "too_few_crew"
-  | "crew_paid_by_hours_already"
+  | "work_order_claimed_already"
+  | "hours_claim_unresolved"
   | "labour_outside_pool"
   | "group_frozen"
   | "group_void"
@@ -249,10 +250,12 @@ async function autoGroupJobs(client: any, kind: AutoGroupKind) {
       try {
         await assertNoNormalPayOnJob(client, jobId);
       } catch (e) {
+        const code = e instanceof GroupWorkOrderError ? e.code : "pay_unreadable";
         results.push({
           ...base,
-          reason: "crew_paid_by_hours_already",
-          code: e instanceof GroupWorkOrderError ? e.code : "pay_unreadable",
+          // An hours claim not billed in Xero yet holds the group (20261106160000).
+          reason: code === "group_open_blocked_by_hours_claim" ? "hours_claim_unresolved" : "work_order_claimed_already",
+          code,
         });
         continue;
       }
@@ -267,9 +270,10 @@ async function autoGroupJobs(client: any, kind: AutoGroupKind) {
       }).select("id").single();
       if (insertError) {
         const blocked = String(insertError.message || "").includes("group_open_blocked_by_work_order_claim");
+        const hoursClaim = String(insertError.message || "").includes("group_open_blocked_by_hours_claim");
         results.push({
           ...base,
-          reason: blocked ? "crew_paid_by_hours_already" : String(insertError.code) === "23505" ? "already_grouped" : "group_failed",
+          reason: hoursClaim ? "hours_claim_unresolved" : blocked ? "work_order_claimed_already" : String(insertError.code) === "23505" ? "already_grouped" : "group_failed",
           code: String(insertError.code || ""),
         });
         continue;

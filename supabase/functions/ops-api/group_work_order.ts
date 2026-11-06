@@ -345,6 +345,99 @@ export function isNormalWorkOrderPayLine(line: FenceLine): boolean {
   return !NOT_PAY_KEYS.has(key);
 }
 
+/**
+ * Ordinary hours pay: normal pay that is not a work-order claim. Owner, 6 Nov
+ * 2026: it no longer blocks a group; its payee is left out of the split and
+ * the pot is reduced by what they were paid. Mirror of
+ * public.group_work_order_line_is_paid_hours (20261106160000).
+ */
+export function isPaidHoursLine(line: FenceLine): boolean {
+  if (!isNormalWorkOrderPayLine(line)) return false;
+  if (line.source_work_order_id) return false;
+  return fenceLineType(line).replace(/ /g, "") !== "workorder";
+}
+
+/**
+ * The hours reached Xero as a live bill: not ops-reject, a Xero bill id, and
+ * our copy of the bill reads AUTHORISED or PAID. A draft, a pending claim, a
+ * bill not confirmed yet, or a voided or deleted bill is not paid. Mirror of
+ * public.group_work_order_invoice_billed (20261106160000).
+ */
+export function isBilledHoursInvoice(invoice: Record<string, unknown> | null | undefined): boolean {
+  if (!invoice || String(invoice.status || "") === "ops-reject") return false;
+  if (!String(invoice.xero_bill_id || "").trim()) return false;
+  return ["AUTHORISED", "PAID"].includes(String(invoice.xero_bill_status || "").trim().toUpperCase());
+}
+
+/** Hours claims on a job: who was paid (billed) and how much gross, and who
+ * holds a claim that is not ops-reject and not billed yet. */
+export async function readHoursPayOnJob(
+  client: any,
+  jobId: string,
+): Promise<{ paid: Map<string, number>; unresolved: Set<string> }> {
+  const lines = (await rowsOf(
+    client.from("trade_invoice_lines").select(
+      "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoice_id, line_total_ex",
+    ).eq("job_id", jobId),
+    "load hours already paid on the job",
+  )).filter((line) => isPaidHoursLine(line));
+  const invoiceIds = [...new Set(lines.map((line) => String(line.trade_invoice_id || "")).filter(Boolean))];
+  const invoices = invoiceIds.length === 0 ? [] : await rowsOf(
+    client.from("trade_invoices").select("id, status, user_id, xero_bill_id, xero_bill_status").in("id", invoiceIds),
+    "load the invoices paid on the job",
+  );
+  const paid = new Map<string, number>();
+  const unresolved = new Set<string>();
+  for (const line of lines) {
+    const invoice = invoices.find((row) => String(row.id) === String(line.trade_invoice_id));
+    if (!invoice || String(invoice.status || "") === "ops-reject") continue;
+    const userId = String(invoice.user_id || "");
+    if (!isBilledHoursInvoice(invoice)) {
+      unresolved.add(userId);
+      continue;
+    }
+    if (!userId) continue;
+    paid.set(userId, (paid.get(userId) || 0) + Number(line.line_total_ex || 0));
+  }
+  return { paid, unresolved };
+}
+
+/** Who was paid by the hour on a job (billed in Xero), and how much gross. */
+export async function readHoursPaidOnJob(client: any, jobId: string): Promise<Map<string, number>> {
+  return (await readHoursPayOnJob(client, jobId)).paid;
+}
+
+async function namesOf(client: any, ids: readonly string[]): Promise<string[]> {
+  const real = ids.filter(Boolean);
+  const people = real.length ? await rowsOf(
+    client.from("users").select("id, name").in("id", real),
+    "load crew names",
+  ) : [];
+  return [...ids].map((id) =>
+    String(people.find((row) => String(row.id) === id)?.name || "").trim() || "A crew member"
+  );
+}
+
+/** A plain refusal naming whose hours claim is not billed yet. */
+export async function unresolvedHoursClaimMessage(
+  client: any,
+  userIds: ReadonlySet<string>,
+  what: "open" | "freeze",
+): Promise<string> {
+  const names = (await namesOf(client, [...userIds])).sort();
+  const who = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  const has = names.length === 1 ? "has an hours invoice" : "have hours invoices";
+  const it = names.length === 1 ? "It" : "They";
+  return `${who} ${has} on this job that ${names.length === 1 ? "is" : "are"} not billed in Xero yet. ${it} must be withdrawn, or billed in Xero, before the group can ${what === "open" ? "be created" : "be finalised"}.`;
+}
+
+export async function readHoursPaidUserIds(client: any, jobId: string): Promise<Set<string>> {
+  return new Set((await readHoursPaidOnJob(client, jobId)).keys());
+}
+
+const PAID_BY_HOURS_MESSAGE =
+  "You were paid by the hour on this job, so its group pay is for the rest of the crew. Your paid days stay paid.";
+
 export function findFenceProblem(
   submittingUserId: string,
   submitting: readonly FenceLine[],
@@ -501,6 +594,19 @@ const QUERY_FAULTS: {
   keepDetail?: boolean;
 }[] = [
   {
+    needle: "group_removal_not_found",
+    code: "group_removal_not_found",
+    message: "That person was not removed from this group, so there is nothing to undo.",
+    status: 404,
+  },
+  {
+    needle: "group_pot_used_by_hours_pay",
+    code: "group_pot_used_by_hours_pay",
+    message:
+      "The hours already paid on this job use up the whole work-order amount, so there is nothing left to split. The office needs to check the work order.",
+    status: 409,
+  },
+  {
     needle: "group_split_frozen",
     code: "group_split_frozen",
     message:
@@ -641,6 +747,20 @@ const QUERY_FAULTS: {
     status: 409,
   },
   {
+    needle: "group_open_blocked_by_hours_claim",
+    code: "group_open_blocked_by_hours_claim",
+    message:
+      "Someone has an hours invoice on this job that is not billed in Xero yet. It must be withdrawn, or billed in Xero, before the group can be created.",
+    status: 409,
+  },
+  {
+    needle: "group_hours_claim_unresolved",
+    code: "group_hours_claim_unresolved",
+    message:
+      "Someone has an hours invoice on this job that is not billed in Xero yet. It must be withdrawn, or billed in Xero, before the group can be finalised.",
+    status: 409,
+  },
+  {
     needle: "group_open_blocked_by_work_order_claim",
     code: "group_open_blocked_by_work_order_claim",
     message: "This job already has normal pay.",
@@ -755,7 +875,7 @@ function potFromWorkOrder(workOrder: Record<string, unknown> | null): number {
 }
 
 const GROUP_COLUMNS =
-  "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by, split_frozen_at, pay_basis, approved_budget_ex, hours_office_approved_at, hours_office_approved_by, signoff_required_after";
+  "id, org_id, job_id, work_order_id, status, share_token, client_signed_at, created_by, split_frozen_at, pay_basis, approved_budget_ex, hours_office_approved_at, hours_office_approved_by, signoff_required_after, hours_paid_ex";
 
 async function loadGroupById(client: any, groupId: string) {
   const { data, error } = await client.from("group_work_orders").select(
@@ -919,13 +1039,24 @@ export async function assertNoNormalPayOnJob(client: any, jobId: string): Promis
     const invoiceId = String(line.trade_invoice_id || "");
     if (!statusById.has(invoiceId)) continue;
     if (String(statusById.get(invoiceId) || "") === "ops-reject") continue;
-    if (isNormalWorkOrderPayLine(line)) {
+    // Ordinary hours are taken off the pot instead (20261106160000).
+    if (isNormalWorkOrderPayLine(line) && !isPaidHoursLine(line)) {
       throw new GroupWorkOrderError(
         "group_open_blocked_by_work_order_claim",
-        "This job already has normal pay.",
+        "This job already has a work-order claim. The office needs to check it before a group can be created.",
         409,
       );
     }
+  }
+  // An hours claim not billed in Xero yet is not paid: it must be withdrawn
+  // or billed before the group opens (20261106160000).
+  const { unresolved } = await readHoursPayOnJob(client, jobId);
+  if (unresolved.size > 0) {
+    throw new GroupWorkOrderError(
+      "group_open_blocked_by_hours_claim",
+      await unresolvedHoursClaimMessage(client, unresolved, "open"),
+      409,
+    );
   }
 }
 
@@ -995,6 +1126,9 @@ export async function createGroupWorkOrder(
   // The amount is not returned.
   potFromWorkOrder(await loadWorkOrder(client, workOrderId));
   await assertNoNormalPayOnJob(client, jobId);
+  if ((await readHoursPaidUserIds(client, jobId)).has(caller.userId)) {
+    throw new GroupWorkOrderError("group_member_paid_by_hours", PAID_BY_HOURS_MESSAGE, 409);
+  }
   const token = newShareToken();
   const { data, error } = await client.from("group_work_orders").insert({
     org_id: job.org_id || caller.orgId,
@@ -1071,8 +1205,10 @@ export async function agentCreateGroupWorkOrder(client: any, body: Record<string
     created = true;
   }
   const on = await loadParticipants(client, String(group!.id));
+  const paid = await readHoursPaidUserIds(client, jobId);
   const added: string[] = [];
   for (const id of crewIds) {
+    if (paid.has(id)) continue;
     if (on.some((row) => String(row.user_id) === id)) continue;
     await insertParticipant(client, String(group!.id), id);
     added.push(id);
@@ -1082,13 +1218,16 @@ export async function agentCreateGroupWorkOrder(client: any, body: Record<string
     ...publicGroupCard(group!),
     created,
     job_number: job.job_number ?? null,
-    crew: crewIds.map((id) => ({ user_id: id, name: nameOf(id), added: added.includes(id) })),
+    crew: crewIds.map((id) => ({ user_id: id, name: nameOf(id), added: added.includes(id), paid_by_hours: paid.has(id) })),
     note: "Group set up. Each crew member logs hours, approves the crew's hours and invoices their share in the trade app; the client signs on the phone or the office signs off.",
   };
 }
 
 async function insertParticipant(client: any, groupId: string, userId: string) {
   const group = await loadGroupById(client, groupId);
+  if (group && (await readHoursPaidUserIds(client, String(group.job_id))).has(userId)) {
+    throw new GroupWorkOrderError("group_member_paid_by_hours", PAID_BY_HOURS_MESSAGE, 409);
+  }
   if (group?.split_frozen_at) {
     throw new GroupWorkOrderError(
       "group_split_frozen",
@@ -1529,7 +1668,9 @@ function groupDiscovery(
   group: Record<string, unknown> | undefined,
   member: boolean,
   workOrder: Record<string, unknown> | undefined,
-  hasNormalPay: boolean,
+  hasWorkOrderClaim: boolean,
+  callerPaidByHours = false,
+  hasUnresolvedHoursClaim = false,
 ): GroupDiscovery {
   if (group) {
     if (group.status === "void") {
@@ -1540,6 +1681,11 @@ function groupDiscovery(
       };
     }
     if (member) return { state: "member" };
+    // Paid by the hour on this job: the group is the rest of the crew's
+    // (20261106160000), so never offer a join that would be refused.
+    if (callerPaidByHours) {
+      return { state: "setup_required", reason: "paid_by_hours", message: PAID_BY_HOURS_MESSAGE };
+    }
     return group.split_frozen_at
       ? {
         state: "setup_required",
@@ -1548,13 +1694,24 @@ function groupDiscovery(
       }
       : { state: "join" };
   }
-  if (hasNormalPay) {
+  if (hasWorkOrderClaim) {
     return {
       state: "setup_required",
       reason: "normal_pay_exists",
       message:
-        "This job already has an ordinary pay claim. The office needs to check it before a group can be created.",
+        "This job already has a work-order claim. The office needs to check it before a group can be created.",
     };
+  }
+  if (hasUnresolvedHoursClaim) {
+    return {
+      state: "setup_required",
+      reason: "hours_claim_unresolved",
+      message:
+        "Someone has an hours invoice on this job that is not billed in Xero yet. It must be withdrawn, or billed in Xero, before the group can be created.",
+    };
+  }
+  if (callerPaidByHours) {
+    return { state: "setup_required", reason: "paid_by_hours", message: PAID_BY_HOURS_MESSAGE };
   }
   const reason = groupSetupReason(workOrder);
   if (reason === "group_missing") return { state: "create" };
@@ -1599,6 +1756,7 @@ export async function readInvoicePayableRoutes(
   groups: readonly Record<string, unknown>[],
   orgId: string,
   memberGroupIds: readonly string[] = [],
+  callerUserId: string | null = null,
 ): Promise<InvoicePayableRoute[]> {
   const ids = [...new Set(jobIds.filter(Boolean))];
   if (!ids.length) return [];
@@ -1619,18 +1777,22 @@ export async function readInvoicePayableRoutes(
       ["fencing", "patio"].includes(String(job.type)) &&
       !groups.some((group) => String(group.job_id) === String(job.id))
     ).map((job) => String(job.id));
+    // Pay is read on grouped jobs too, so a crew member already paid by the
+    // hour is told so rather than offered a join (20261106160000).
+    const payReadIds = jobs.filter((job) => ["fencing", "patio"].includes(String(job.type)))
+      .map((job) => String(job.id));
     const workOrderIds = jobs.filter((job) =>
       supportedIds.includes(String(job.id))
     )
       .map((job) => String(job.work_order_id || "")).filter(Boolean);
     const [prior, workOrders] = await Promise.all([
-      supportedIds.length
+      payReadIds.length
         ? rowsOf(
           client.from("trade_invoice_lines")
             .select(
-              "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoices!inner(status)",
+              "job_id, line_type, description, group_share_id, source_work_order_id, trade_invoices!inner(status, user_id, xero_bill_id, xero_bill_status)",
             )
-            .in("job_id", supportedIds),
+            .in("job_id", payReadIds),
           "check earlier pay on these jobs",
         )
         : [],
@@ -1659,12 +1821,19 @@ export async function readInvoicePayableRoutes(
         return String(row.job_id) === jobId && invoice &&
           invoice.status !== "ops-reject" && isNormalWorkOrderPayLine(row);
       });
+      const invoiceOf = (row: any) =>
+        Array.isArray(row.trade_invoices) ? row.trade_invoices[0] : row.trade_invoices;
       const discovery = supportedIds.includes(jobId) || group
         ? groupDiscovery(
           group,
           memberGroupIds.includes(String(group?.id)),
           workOrder,
-          normalPay.length > 0,
+          normalPay.some((row: any) => !isPaidHoursLine(row)),
+          Boolean(callerUserId) && normalPay.some((row: any) =>
+            isPaidHoursLine(row) && isBilledHoursInvoice(invoiceOf(row)) &&
+            String(invoiceOf(row)?.user_id || "") === callerUserId
+          ),
+          normalPay.some((row: any) => isPaidHoursLine(row) && !isBilledHoursInvoice(invoiceOf(row))),
         )
         : undefined;
       if (group && group.status !== "void") {
@@ -1989,6 +2158,7 @@ export async function readTradeGroupWorkOrder(
     existing ? [existing] : [],
     caller.orgId,
     memberIds,
+    caller.userId,
   );
   const discovery = route?.discovery ||
     {
@@ -2337,7 +2507,7 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
     }
   }
   const groups=[...byId.values()];
-  const payableRoutes = await readInvoicePayableRoutes(client, assignedIds, groups, caller.orgId, memberIds);
+  const payableRoutes = await readInvoicePayableRoutes(client, assignedIds, groups, caller.orgId, memberIds, caller.userId);
   if (!groups.length) return { enabled: true, groups: [], payable_routes: payableRoutes };
   const jobIds = [...new Set(groups.map(row => String(row.job_id)))];
   const jobs: Record<string,unknown>[] = [], claims: Record<string,unknown>[] = [];
@@ -2790,7 +2960,7 @@ export async function readGroupWorkOrderOffice(
 ) {
   assertOffice(caller);
   const group = await resolveGroup(client, body);
-  const [participants, entries, shares, feedback] = await Promise.all([
+  const [participants, entries, shares, feedback, removals] = await Promise.all([
     loadParticipants(client, String(group.id)),
     rowsOf(
       client.from("group_work_order_time_entries").select(
@@ -2810,13 +2980,29 @@ export async function readGroupWorkOrderOffice(
       ).eq("group_id", group.id),
       "load feedback",
     ),
+    // Office removals still standing: their bookings do not make them crew
+    // for this group (20261106170000).
+    rowsOf(
+      client.from("group_work_order_crew_removals").select(
+        "user_id, removed_by, removed_at",
+      ).eq("group_id", group.id).is("restored_at", null),
+      "load removals",
+    ),
   ]);
-  const [workOrder, view] = await Promise.all([
+  const [workOrder, view, hoursPay] = await Promise.all([
     loadWorkOrder(client, String(group.work_order_id)),
     loadShareView(client, group, participants),
+    readHoursPayOnJob(client, String(group.job_id)),
   ]);
-  const people = participants.length ? await rowsOf(
-    client.from("users").select("id, name").in("id", participants.map((p) => p.user_id)),
+  const hoursPaid = hoursPay.paid;
+  const unresolvedIds = [...hoursPay.unresolved].sort();
+  const unresolvedNames = await namesOf(client, unresolvedIds);
+  const nameIds = [...new Set([
+    ...participants.map((p) => String(p.user_id)),
+    ...removals.flatMap((r) => [String(r.user_id), String(r.removed_by)]),
+  ])];
+  const people = nameIds.length ? await rowsOf(
+    client.from("users").select("id, name").in("id", nameIds),
     "load crew names",
   ) : [];
   return {
@@ -2837,6 +3023,17 @@ export async function readGroupWorkOrderOffice(
         ? null
         : centsToMoney(moneyToCents(workOrder.agreed_labour_ex) || 0)
       : null,
+    // Crew paid by the hour on this job: left out of the split, and the pot
+    // is reduced by what they were paid (20261106160000).
+    paid_by_hours: [...hoursPaid].sort(([a], [b]) => a.localeCompare(b))
+      .map(([userId, gross]) => ({ user_id: userId, gross_ex: Math.round(gross * 100) / 100 })),
+    hours_paid_ex: group.hours_paid_ex == null ? null : Number(group.hours_paid_ex),
+    // Hours claims not billed in Xero yet: they hold the freeze until withdrawn
+    // or billed (20261106160000).
+    hours_claims_unresolved: unresolvedIds.map((userId) => ({
+      user_id: userId || null,
+      name: unresolvedNames[unresolvedIds.indexOf(userId)] ?? null,
+    })),
     needs_hours: view.needsHours,
     needs_rate: view.needsRate,
     needs_approval: view.needsApproval,
@@ -2846,6 +3043,13 @@ export async function readGroupWorkOrderOffice(
       name: people.find((p) => p.id === row.user_id)?.name || row.signature_name || null,
       signature_name: row.signature_name || null,
       crew_signed: Boolean(row.crew_signed_at),
+    })),
+    removed: removals.map((row) => ({
+      user_id: row.user_id,
+      name: people.find((p) => p.id === row.user_id)?.name || null,
+      removed_by: row.removed_by,
+      removed_by_name: people.find((p) => p.id === row.removed_by)?.name || null,
+      removed_at: row.removed_at,
     })),
     hours: entries,
     shares,
@@ -2913,6 +3117,18 @@ export async function freezeGroupWorkOrder(
   const group = await resolveGroup(client, body);
   const participants = await loadParticipants(client, String(group.id));
   if (!caller.isStaff) requireParticipant(participants, caller.userId);
+  // An hours claim not billed in Xero yet holds the freeze, named
+  // (20261106160000). The database refuses it too.
+  if (!group.split_frozen_at) {
+    const { unresolved } = await readHoursPayOnJob(client, String(group.job_id));
+    if (unresolved.size > 0) {
+      throw new GroupWorkOrderError(
+        "group_hours_claim_unresolved",
+        await unresolvedHoursClaimMessage(client, unresolved, "freeze"),
+        409,
+      );
+    }
+  }
   // The freeze waits for hours, rates and the client sign-off, never for one
   // crew member approving another's hours (owner, 6 Nov 2026).
   const { error } = await client.rpc("freeze_group_work_order_split", {
@@ -2980,6 +3196,34 @@ export async function removeGroupWorkOrderParticipant(
   });
   throwQuery(error, "remove the participant");
   return { ok: true, removed: true, group_id: group.id, user_id: userId };
+}
+
+/**
+ * Office undo of a removal: the person is back on the group and their
+ * bookings count again. Recorded with who and when (20261106170000).
+ */
+export async function restoreGroupWorkOrderParticipant(
+  client: any,
+  caller: GroupCaller,
+  body: Record<string, unknown>,
+) {
+  assertOffice(caller);
+  const group = await resolveGroup(client, body);
+  const userId = String(body.user_id || body.userId || "").trim();
+  if (!userId) {
+    throw new GroupWorkOrderError(
+      "group_actor_required",
+      "Name the person to put back.",
+      400,
+    );
+  }
+  const { error } = await client.rpc("restore_group_work_order_participant", {
+    p_group_id: group.id,
+    p_user: userId,
+    p_actor: caller.userId,
+  });
+  throwQuery(error, "put the participant back");
+  return { ok: true, restored: true, group_id: group.id, user_id: userId };
 }
 
 export async function rekeyGroupWorkOrder(
