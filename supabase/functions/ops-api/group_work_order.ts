@@ -1507,6 +1507,18 @@ export async function readPatioLegacyHoursJobIds(
   return legacy;
 }
 
+/**
+ * Whether an earlier ordinary pay claim on a patio job counts as the job being
+ * paid by hours. A draft, a rejected claim and a failed one never do. The
+ * route read (what the app offers) and the submit guard (what the server
+ * accepts) both use this, so the app never offers an hours card the submit
+ * then refuses.
+ */
+export function priorPayClaimHoldsHoursRoute(status: unknown): boolean {
+  const value = String(status || "");
+  return Boolean(value) && !["draft", "ops-reject", "failed"].includes(value);
+}
+
 export type GroupDiscovery = {
   state: "create" | "join" | "member" | "setup_required";
   reason?: string;
@@ -1668,7 +1680,7 @@ export async function readInvoicePayableRoutes(
         const invoice = Array.isArray(row.trade_invoices)
           ? row.trade_invoices[0]
           : row.trade_invoices;
-        return invoice.status !== "draft";
+        return priorPayClaimHoldsHoursRoute(invoice?.status);
       });
       if (!patioIds.includes(jobId) || (legacy && legacyJobs.has(jobId))) {
         result.push({
@@ -1731,10 +1743,9 @@ export async function assertPatioPaysThroughGroup(
   for (const jobId of patio) {
     const legacy = prior.some((row: any) => {
       const invoice = Array.isArray(row.trade_invoices) ? row.trade_invoices[0] : row.trade_invoices;
-      const status = String(invoice?.status || "");
       return String(row.job_id) === jobId &&
         String(row.trade_invoice_id || "") !== String(excludeInvoiceId || "") &&
-        Boolean(status) && !["draft", "ops-reject", "failed"].includes(status) &&
+        priorPayClaimHoldsHoursRoute(invoice?.status) &&
         isNormalWorkOrderPayLine(row);
     });
     const grouped = groups.some((g) =>
@@ -1761,6 +1772,29 @@ export async function assertPatioPaysThroughGroup(
       409,
     );
   }
+}
+
+/** The one plain next step for a job paid through a group work order. */
+export function groupRouteNextStep(route: InvoicePayableRoute | null | undefined): string {
+  if (!route) {
+    return "We could not check how this job is paid. Reload to try again.";
+  }
+  const discovery = route.discovery;
+  if (discovery?.state === "create") {
+    return "This job is paid through a group work order. Create the crew group, then add your hours there.";
+  }
+  if (discovery?.state === "join") {
+    return "This job is paid through a group work order. Join the crew group, then add your hours there.";
+  }
+  if (discovery?.state === "member") {
+    return "This job is paid through your crew group. Add your hours there.";
+  }
+  if (discovery?.message) return discovery.message;
+  return route.setup_reason === "work_order_not_approved"
+    ? "This job is paid through a group work order. The office needs to approve the job work order first."
+    : route.setup_reason === "work_order_missing" || route.setup_reason === "allowance_missing"
+    ? "This job is paid through a group work order. The office needs to set the job work-order amount first."
+    : "This job is paid through a group work order. Add your hours on the crew group.";
 }
 
 /** Drop assignments whose job has a non-void group. A row with no job stays. */

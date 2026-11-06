@@ -54,7 +54,7 @@ Preferred path:
    push, in the `production` environment. For changed functions and
    migration-only merges, its reviewed migration lane runs
    `scripts/apply-pending-migrations.sh`; migration-only merges deploy zero
-   functions. The runner applies
+   functions when no earlier function changes await deployment. The runner applies
    repository migrations missing from the production ledger in version order
    through the Management API. It verifies each migration request before
    writing and read-checking that migration's ledger row. The exact-file
@@ -100,11 +100,19 @@ Preferred path:
 
 What that run does is decided by `scripts/identify-edge-deploy-changes.sh`:
 
-- A merge touching `supabase/functions/**` deploys only the changed functions
-  and runs the post-deploy smoke for them. The schema preflight runs before
+- The workflow reads its successful main-branch push runs, then checks the
+  latest attempt's jobs for a successful `Deploy changed edge functions` step.
+  The newest matching run's source commit is the comparison base, not the
+  previous push. A green migration-only or verification-only run with a skipped
+  deploy step does not advance that base. Failed or partially failed releases
+  therefore leave their function changes in the next deployment set. History
+  reads have only `actions: read` permission; missing or unreadable history,
+  an unavailable commit, or a base outside HEAD's ancestry stops selection.
+- Source changes since that successful function deploy select only the changed
+  functions and run the post-deploy smoke for them. The schema preflight runs before
   any function deploy; if `ops-api` is one of them, the pre-deploy source check
   runs after it and the action-surface smoke runs last.
-- A merge touching only the ops-api verification contract (the deploy workflow
+- With no pending source changes, a merge touching only the ops-api verification contract (the deploy workflow
   itself, the classifier, `scripts/check-ops-api-source-actions.sh`,
   `scripts/smoke-ops-api-action-surface.sh`,
   `scripts/_ops-api-required-actions.txt`,
@@ -113,9 +121,12 @@ What that run does is decided by `scripts/identify-edge-deploy-changes.sh`:
   still runs the pre-deploy ops-api source check and the live action-surface
   smoke. A
   repair to a verifier therefore cannot go green without being exercised
-  against production, and cannot silently redeploy a function nobody changed.
-- If the push base commit cannot be resolved, the run fails before any deploy
-  selection rather than guessing an empty or repo-wide function set.
+  against production. If earlier failed releases left source changes pending,
+  that same run deploys those functions before verification.
+- The classifier's previous-push and parent fallbacks remain available for
+  standalone inspection. The production workflow requires its resolved
+  successful-deploy base and never uses those fallbacks or guesses a repo-wide
+  function set.
 
 Approved local break-glass path:
 

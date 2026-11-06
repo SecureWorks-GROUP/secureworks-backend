@@ -1574,3 +1574,134 @@ Deno.test("scope mint: the patio migration keeps no fencing literal inside the m
   assertStringIncludes(bodies, "next_job_number(v_request.type)");
   assertStringIncludes(sql, "DROP FUNCTION IF EXISTS public.reserve_fence_job_mint(uuid, uuid, uuid, text, text, text, text, text, uuid[], text, text, text, text, text, text, text);");
 });
+
+Deno.test("a second start for a customer with an open job returns that job, with no GHL create", async () => {
+  // Whole test 2 shape: a new customer typed with an email GHL already has, so
+  // the duplicate lookup finds the contact whose open job bind then reuses.
+  const calls: string[] = [];
+  const reusedDeps = deps({
+    findContacts: async () => {
+      calls.push("findContacts");
+      return [{ id: "contact-1" }];
+    },
+    createContact: async () => {
+      calls.push("createContact");
+      return { id: "contact-x" };
+    },
+    bindIdentity: async () =>
+      progress({
+        ownerRequestId: REQUEST_B,
+        state: "complete",
+        joined: true,
+        executor: false,
+        canonical: canonical("existing_contact_job_reused"),
+      }),
+    createStampedOpportunity: async () => {
+      calls.push("createStampedOpportunity");
+      throw new Error("must not create");
+    },
+    recordOpportunity: async () => {
+      calls.push("recordOpportunity");
+      throw new Error("must not record");
+    },
+    complete: async () => {
+      calls.push("complete");
+      throw new Error("must not complete");
+    },
+  });
+  const result = await executeFenceJobMint({
+    input: input(REQUEST_A, { contactId: null, phone: "", jobType: "patio" }),
+    actorId: "user-1",
+    deps: reusedDeps,
+  });
+  assertEquals(result.jobId, "job-1");
+  assertEquals(result.mapping.outcome, "existing_contact_job_reused");
+  assertEquals(result.revision.requiresLoad, true);
+  assertEquals(calls, ["findContacts"]);
+});
+
+Deno.test("a refused start retried with the same request id reconciles first, then finishes", async () => {
+  const failures: string[] = [];
+  let attempt = 0;
+  const scans: string[] = [];
+  const retryDeps = deps({
+    reserve: async () => {
+      attempt += 1;
+      return progress({ attemptCount: attempt });
+    },
+    bindIdentity: async ({ ownerRequestId, contact }) => {
+      if (attempt === 1) {
+        throw new FenceMintError(
+          409,
+          "opportunity_mapping_conflict",
+          "Opportunity is reserved by another mint request",
+        );
+      }
+      return progress({
+        ownerRequestId,
+        state: "contact_resolved",
+        contactId: contact.id,
+        attemptCount: attempt,
+      });
+    },
+    findStampedOpportunity: async ({ ownerRequestId }) => {
+      scans.push(ownerRequestId);
+      return null;
+    },
+    recordFailure: async ({ code }) => {
+      failures.push(code);
+    },
+  });
+  await assertRejects(
+    () =>
+      executeFenceJobMint({
+        input: input(REQUEST_A, { jobType: "patio" }),
+        actorId: "user-1",
+        deps: retryDeps,
+      }),
+    FenceMintError,
+    "reserved by another mint request",
+  );
+  assertEquals(failures, ["opportunity_mapping_conflict"]);
+  assertEquals(scans, []);
+
+  const result = await executeFenceJobMint({
+    input: input(REQUEST_A, { jobType: "patio" }),
+    actorId: "user-1",
+    deps: retryDeps,
+  });
+  assertEquals(result.jobId, "job-1");
+  // The retry is attempt 2, so the stamp is reconciled before any create.
+  assertEquals(scans, [REQUEST_A]);
+});
+
+Deno.test("scope mint: the open-job reuse migration settles every held opportunity and re-judges only unbound refusals", async () => {
+  const sql = await Deno.readTextFile(
+    new URL("../../migrations/20261106081500_scope_job_mint_reuse_open_job.sql", import.meta.url),
+  );
+  const bind = sql.slice(
+    sql.indexOf("CREATE OR REPLACE FUNCTION public.bind_fence_job_mint_identity("),
+    sql.indexOf("REVOKE ALL ON FUNCTION public._fence_mint_settle_held_opportunity("),
+  );
+  assertEquals(bind.split("_fence_mint_settle_held_opportunity(").length - 1, 3);
+  for (const outcome of ["existing_opportunity_reused", "existing_contact_job_reused", "concurrent_request_reused"]) {
+    const call = bind.split("\n").find((line) =>
+      line.includes("_fence_mint_settle_held_opportunity(v_request.request_id, p_contact_id") && line.includes(`'${outcome}');`)
+    );
+    assertEquals(typeof call, "string");
+  }
+  assertStringIncludes(
+    sql,
+    "ELSIF v_existing.state = 'conflict' AND v_existing.owner_request_id IS NULL\n      AND v_existing.opportunity_id IS NULL AND v_existing.job_id IS NULL THEN",
+  );
+  assertStringIncludes(sql, "REVOKE ALL ON FUNCTION public._fence_mint_settle_held_opportunity(uuid, text, text, uuid, text) FROM PUBLIC, anon, authenticated;");
+  const bodies = sql.slice(sql.indexOf("CREATE OR REPLACE FUNCTION public.reserve_fence_job_mint("));
+  const stray = bodies
+    .split("\n")
+    .filter((line) => line.includes("'fencing'"))
+    .filter((line) =>
+      !line.includes("p_type text DEFAULT 'fencing'") &&
+      !line.includes("p_type NOT IN ('fencing', 'patio')")
+    );
+  assertEquals(stray, []);
+});
