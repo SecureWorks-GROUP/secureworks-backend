@@ -524,10 +524,7 @@ class Memory {
       if (!this.rows("group_work_order_participants").some((row) =>
         row.group_id === group.id && String(row.user_id) === userId
       )) continue;
-<<<<<<< HEAD
       if (paid.has(userId)) continue;
-=======
->>>>>>> origin/main
       hours.set(userId, (hours.get(userId) || 0) + worked);
       const raw = this.rows("trade_rates").filter((row) => {
         if (row.user_id !== userId || row.org_id !== group.org_id) return false;
