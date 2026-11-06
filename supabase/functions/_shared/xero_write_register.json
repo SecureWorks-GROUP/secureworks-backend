@@ -173,13 +173,11 @@
       "id": "X13",
       "write": "Find or create a trade's or supplier's Xero contact",
       "owner": "CFO",
-      "gate_today": "Inside X6, X8 and X9",
+      "gate_today": "Inside X6, X8 and X9. The trade-invoice unarchive POST runs only after the contact's name or email matches this user; a cached contact that does not match is not unarchived.",
       "cfo_confirmed": true,
       "call_sites": [
-        "ops-api/index.ts :: resolveTradeXeroSupplierContact :: POST /Contacts",
-        "ops-api/index.ts :: resolveTradeXeroSupplierContact :: PUT /Contacts",
-        "ops-api/index.ts :: pickContactId :: POST /Contacts",
-        "ops-api/index.ts :: case submit_work_order_invoice :: PUT /Contacts",
+        "ops-api/trade_xero_contact.ts :: activateArchivedTradeContact :: POST /Contacts",
+        "ops-api/trade_xero_contact.ts :: resolveTradeXeroSupplierContact :: PUT /Contacts",
         "ops-api/index.ts :: pushPOToXero :: PUT /Contacts",
         "ops-api/xero_accpay_books.ts :: resolveSupplierContactId :: PUT /Contacts"
       ],

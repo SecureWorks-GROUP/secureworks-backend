@@ -713,6 +713,11 @@ import {
   tradeInvoiceXeroIdempotencyKey,
 } from './trade_invoice_persistence.ts'
 import {
+  resolveTradeXeroSupplierContact as resolveTradeXeroSupplierContactWithXero,
+  TradeXeroSupplierContactError,
+  type TradeXeroSupplierContactArgs,
+} from './trade_xero_contact.ts'
+import {
   buildWeeklyWorkOrderInvoice,
   calculateWeeklyInvoiceBreakdown,
   JOB_STATUS_FINISHED,
@@ -2651,6 +2656,8 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
     name: tradeName,
     email: tradeEmail,
     cachedContactId,
+    source: 'push_trade_invoice_to_xero',
+    actor,
     accessToken,
     tenantId,
   })
@@ -4437,100 +4444,26 @@ export const _xeroPostForTest = (
   method = 'POST', idempotencyKey?: string, requestFetch: typeof fetch = fetch,
 ) => xeroPost(path, accessToken, tenantId, body, method, idempotencyKey, requestFetch)
 
-function xeroContactWherePath(field: string, value: string): string {
-  const escaped = String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-  return '/Contacts?where=' + encodeURIComponent(`${field}=="${escaped}"`)
-}
-
+// Trade supplier contacts live in trade_xero_contact.ts. This wrapper binds
+// the live Xero transports and turns an identity refusal into a 409 the
+// caller can show. A wrong cached link is not resolved again here.
 async function resolveTradeXeroSupplierContact(
   client: any,
-  args: {
-    userId?: string | null
-    name?: string | null
-    email?: string | null
-    cachedContactId?: string | null
-    accessToken: string
-    tenantId: string
-  },
+  args: TradeXeroSupplierContactArgs,
 ): Promise<string | null> {
-  const cachedContactId = (args.cachedContactId || '').trim()
-  // Cached IDs go stale when a supplier is archived in Xero. Returning them
-  // blind makes trade invoice push fail with "contact has been archived".
-  if (cachedContactId) {
-    try {
-      const cached = await xeroGet(`/Contacts/${cachedContactId}`, args.accessToken, args.tenantId)
-      const contact = (cached?.Contacts || [])[0]
-      if (contact?.ContactID) {
-        if (String(contact.ContactStatus || '').toUpperCase() === 'ARCHIVED') {
-          await xeroPost('/Contacts', args.accessToken, args.tenantId, {
-            Contacts: [{ ContactID: contact.ContactID, ContactStatus: 'ACTIVE' }],
-          }, 'POST')
-        }
-        return contact.ContactID
-      }
-    } catch (error) {
-      if (error instanceof XeroCooldownError) throw error
-      // Fall through to email/name/create when the cache misses or Xero rejects it.
+  try {
+    return await resolveTradeXeroSupplierContactWithXero(client, args, { xeroGet, xeroPost })
+  } catch (error) {
+    if (error instanceof TradeXeroSupplierContactError) {
+      throw new ApiError(error.message, 409, {
+        ok: false,
+        code: error.code,
+        error: error.message,
+        userMessage: error.message,
+      })
     }
+    throw error
   }
-
-  const tradeName = (args.name || 'Trade').trim() || 'Trade'
-  const tradeEmail = (args.email || '').trim()
-  let xeroContactId: string | null = null
-
-  // 1) Email match covers the normal path where the Supabase login email is
-  // the same as the Xero supplier contact email.
-  const pickContactId = async (contactsPayload: any): Promise<string | null> => {
-    const list = contactsPayload?.Contacts || []
-    const active = list.find((c: any) => String(c.ContactStatus || '').toUpperCase() === 'ACTIVE')
-    const any = list[0]
-    const chosen = active || any
-    if (!chosen?.ContactID) return null
-    if (String(chosen.ContactStatus || '').toUpperCase() === 'ARCHIVED') {
-      await xeroPost('/Contacts', args.accessToken, args.tenantId, {
-        Contacts: [{ ContactID: chosen.ContactID, ContactStatus: 'ACTIVE' }],
-      }, 'POST')
-    }
-    return chosen.ContactID
-  }
-
-  if (tradeEmail) {
-    try {
-      const contacts = await xeroGet(xeroContactWherePath('EmailAddress', tradeEmail), args.accessToken, args.tenantId)
-      xeroContactId = await pickContactId(contacts)
-    } catch (error) {
-      if (error instanceof XeroCooldownError) throw error
-      /* fallback to name lookup/create */
-    }
-  }
-
-  // 2) Exact name match covers Jean-style contacts where the Xero supplier
-  // already exists under the trade name but has a different primary email.
-  // Without this, the create step hits Xero's duplicate-name validation and
-  // the mobile invoice is only saved locally.
-  if (!xeroContactId && tradeName) {
-    try {
-      const contacts = await xeroGet(xeroContactWherePath('Name', tradeName), args.accessToken, args.tenantId)
-      xeroContactId = await pickContactId(contacts)
-    } catch (error) {
-      if (error instanceof XeroCooldownError) throw error
-      /* fallback to create */
-    }
-  }
-
-  // 3) Create only when the contact is genuinely absent.
-  if (!xeroContactId) {
-    const createRes = await xeroPost('/Contacts', args.accessToken, args.tenantId, {
-      Contacts: [{ Name: tradeName, EmailAddress: tradeEmail || undefined, IsSupplier: true }],
-    }, 'PUT')
-    xeroContactId = createRes?.Contacts?.[0]?.ContactID || null
-  }
-
-  if (xeroContactId && args.userId) {
-    await client.from('users').update({ xero_contact_id: xeroContactId }).eq('id', args.userId)
-  }
-
-  return xeroContactId
 }
 
 // ════════════════════════════════════════════════════════════
@@ -12996,27 +12929,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
             // Resolve Xero supplier contact — auto-create only after money truth
             // is complete and the invoice can safely cross the Xero boundary.
-            let woXeroContactId = tradeXeroUser?.xero_contact_id || null
+            // The shared resolver looks up by email, then by exact name, and
+            // creates only when both miss. The inline email-then-create here
+            // filed a second contact for a trade whose login email differs
+            // from the supplier contact.
             const { accessToken: woAt, tenantId: woTi } = workOrderBoundary
-            if (!woXeroContactId) {
-              const woTradeEmail = tradeXeroUser?.email || tradeXeroUser?.trade_details?.email || ''
-              if (woTradeEmail) {
-                try {
-                  const woContacts = await xeroGet('/Contacts?where=EmailAddress%3D%3D%22' + encodeURIComponent(woTradeEmail) + '%22', woAt, woTi)
-                  if (woContacts?.Contacts?.length > 0) woXeroContactId = woContacts.Contacts[0].ContactID
-                } catch { /* fallback to create */ }
-              }
-              if (!woXeroContactId) {
-                const woCreateRes = await xeroPost('/Contacts', woAt, woTi, {
-                  Contacts: [{ Name: tradeXeroUser?.name || 'Trade', EmailAddress: tradeXeroUser?.email || undefined, IsSupplier: true }]
-                }, 'PUT')
-                woXeroContactId = woCreateRes?.Contacts?.[0]?.ContactID
-              }
-              if (woXeroContactId) {
-                await client.from('users').update({ xero_contact_id: woXeroContactId }).eq('id', tradeUser.id)
-              }
-              if (!woXeroContactId) throw new ApiError('Could not create Xero supplier contact', 500)
-            }
+            const woXeroContactId = await resolveTradeXeroSupplierContact(client, {
+              userId: tradeUser.id,
+              name: tradeXeroUser?.name || '',
+              email: tradeXeroUser?.email || tradeXeroUser?.trade_details?.email || '',
+              cachedContactId: tradeXeroUser?.xero_contact_id || null,
+              source: 'submit_work_order_invoice',
+              actor: tradeUser.id,
+              accessToken: woAt,
+              tenantId: woTi,
+            })
+            if (!woXeroContactId) throw new ApiError('Could not create Xero supplier contact', 500)
 
             // Push directly to Xero as DRAFT ACCPAY bill
             const tradeName = tradeXeroUser?.name || 'Trade'
@@ -14994,9 +14922,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               // the auto-push silently fails forever.
               xeroContactId = await resolveTradeXeroSupplierContact(client, {
                 userId: tradeUser.id,
-                name: userProfile?.name || 'Trade',
+                name: userProfile?.name || '',
                 email: tradeEmail,
                 cachedContactId: userProfile?.xero_contact_id || null,
+                source: 'generate_trade_invoice',
+                actor: tradeUser.id,
                 accessToken,
                 tenantId,
               })
@@ -15176,6 +15106,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 tradeInvoiceMoneyApiError(e)
               }
               if (createdXeroBillId) throw e
+              // A wrong or conflicting supplier link is not a transient Xero
+              // miss. Keep the saved invoice retryable and show the reason.
+              if (e instanceof ApiError) {
+                const contactRefusal = e.body && typeof e.body === 'object'
+                  ? String((e.body as { code?: string }).code || '')
+                  : ''
+                if (
+                  contactRefusal === 'stale_xero_contact' ||
+                  contactRefusal === 'xero_contact_ambiguous' ||
+                  contactRefusal === 'xero_contact_email_conflict'
+                ) {
+                  await markTradeInvoiceRetryable(client, invoice.id, e.message)
+                  throw e
+                }
+              }
               const errMsg = (e as Error).message
               console.log('[ops-api] Xero auto-push failed (non-blocking):', errMsg)
               // Change 6 (Q18): a Xero failure must NOT be swallowed as success and the
@@ -56594,9 +56539,11 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
   const { accessToken: stAt, tenantId: stTi } = await getToken(client)
   const stXeroContactId = await resolveTradeXeroSupplierContact(client, {
     userId,
-    name: tradeName,
+    name: tradeUser?.name || '',
     email: tradeUser?.email || '',
     cachedContactId: tradeUser?.xero_contact_id || null,
+    source: 'submit_trade_invoice',
+    actor: userId,
     accessToken: stAt,
     tenantId: stTi,
   })

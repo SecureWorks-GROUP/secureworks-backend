@@ -1,0 +1,43 @@
+{
+  "note": "Read-only fixture for the trade Xero contact identity rule. Names are the production users.name values named in the review. Emails are not in this repo and are left blank, so a row is accepted only by the name rule. Contact names are included only where this review stated them. The other trades have no contact name here, so the preflight cannot say whether their live link would be refused.",
+  "known": [
+    {
+      "user_id": "unknown",
+      "name": "Nithin",
+      "email": "",
+      "cached_contact_id": "8fea927a",
+      "contact_name": "Nithin Victor Silas",
+      "contact_email": "",
+      "basis": "Review: this is Nithin's correct contact."
+    },
+    {
+      "user_id": "unknown",
+      "name": "Nithin",
+      "email": "",
+      "cached_contact_id": "unknown",
+      "contact_name": "The Trustee for The CMI Unit Trust",
+      "contact_email": "",
+      "basis": "Review: the wrong cached contact on Nithin's user."
+    },
+    {
+      "user_id": "unknown",
+      "name": "Nithin",
+      "email": "",
+      "cached_contact_id": "unknown",
+      "contact_name": "Jaiama Investments t/a B&D Metals",
+      "contact_email": "",
+      "basis": "Review: the supplier contact that carries nithin@."
+    }
+  ],
+  "unchecked_names": [
+    "Henry",
+    "Isaac",
+    "Ryan",
+    "Hugo",
+    "Khairo",
+    "Anthony",
+    "Israel",
+    "Alyx",
+    "Marnin"
+  ]
+}
