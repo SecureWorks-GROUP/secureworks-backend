@@ -170,7 +170,7 @@
 - Requires `template_vars.new_date` (`YYYY-MM-DD`, must be a real calendar date) — 400 otherwise.
 - `{reschedule_date}` ("Thursday the 2nd of July"), `{street}` (street name only, no number/suburb) and `{service}` (the job's own service; fencing renders "fence") are server-derived from `new_date` and the job row, never caller-supplied.
 - Dedup is per **(job, new date)** against the most recent successfully-sent reschedule, not once-per-job: a double-tap on the same drop is swallowed, a later reschedule to a different date still sends, and a failed send never blocks a retry. A ghl-proxy in-band failure (HTTP 200 `success:false`) records `status='failed'`, not sent, so it can be retried too. Every other trigger keeps once-per-job (or per-contact) dedup.
-- The only SMS trigger WITHOUT the cross-sell footer — the approved wording ends "Cheers, Shaun".
+- The only SMS trigger WITHOUT the cross-sell footer. The approved wording is laid out in paragraphs (a blank line after the greeting, the body and the questions line) and ends "Cheers," and "Shaun" on two lines; `CLIENT_COMMS_TEMPLATES` in `ops-api/index.ts` holds the exact text.
 - Fired only from the ops calendar reschedule popup's explicit Yes; nothing sends it automatically.
 
 **Only `install_rescheduled` may text a customer** (Captain 28 Oct 2026; `CLIENT_UPDATE_SMS_TRIGGERS_ON` in `ops-api/index.ts`). Every other SMS trigger sends nothing: it still writes its `email_events` row as `status='failed'` (with `failure_reason` "`<trigger>` texts are switched off"), so every existing dedup behaves as before, and answers `sent:false` with that `reason`. An `install_rescheduled` SMS with `custom_message` is refused (`sent:false`, reason "custom reschedule texts are not allowed"). A failed send answers `reason` with ghl-proxy's own error; a sent one carries no `reason`. The send carries the service-role bearer (`ghl_proxy_send_sms.ts`), because ghl-proxy refuses a request with no login.
@@ -218,7 +218,7 @@ Uses source_ref deduplication to prevent duplicate annotations.
 | council_submitted | sms | We've submitted your application to {council}... |
 | council_approved | sms | Great news! Your {service} has been approved... |
 | crew_scheduled | sms | Your install is booked for {date}. {installer} and team will arrive... |
-| install_rescheduled | sms | Hi {name}, ... we've got your {service} install rescheduled for {reschedule_date} at {street}... Cheers, Shaun |
+| install_rescheduled | sms | Hi {name}, ... we've got your {service} install rescheduled for {reschedule_date} at {street}... Cheers, Shaun (paragraph layout, see above) |
 | crew_arriving | sms | Our crew is on their way to {address}... |
 | daily_progress | sms | Day {day} update: {progress_note} |
 | job_complete | email | Your {service} is complete! Please review and sign off... |

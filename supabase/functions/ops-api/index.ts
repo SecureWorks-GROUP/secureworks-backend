@@ -205,6 +205,7 @@ import {
   signoffRowCounts,
   type ClientSignoff,
 } from './trade_client_signoff.ts'
+import { ClientSignoffFormError, readOfficeClientSignoff, recordOfficeClientConfirmation, readOfficeClientSignedCopy, printableClientSignoff } from './client_signoff_form.ts'
 import {
   TRADE_QUOTE_EXTRACT_DOC_TYPE,
   TRADE_QUOTE_EXTRACT_SCHEMA,
@@ -797,6 +798,7 @@ import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quo
 import { autoGroupFenceJobs, autoGroupPatioJobs, openMissingFenceWorkOrders, openMissingPatioWorkOrders } from './patio_auto_group.ts'
 import {
   assertAllInGroupInvoiceStandalone,
+  assertGroupClientConfirmationBeforeCompletion,
   claimGroupReleaseForInvoice,
   releasedGroupSiblingInvoiceIds,
   assertGroupJobDraftUsesShare,
@@ -10277,6 +10279,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         })
         return json(await response.json(), response.status)
       }
+      case 'read_scope_payment_stages':
+      case 'confirm_scope_payment_stage': {
+        const { scopePaymentStagesAction } = await import('./scope_payment_stages.ts')
+        const response = await scopePaymentStagesAction(client, action, req.method, body, {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+          userId: authMode === 'jwt' ? authUser?.id || null : null,
+        })
+        return json(await response.json(), response.status)
+      }
       case 'freeze_scope': {
         if (!body || typeof body !== 'object') return json({ error: 'POST body required' }, 400)
         const job_id = body.job_id || body.jobId
@@ -10284,6 +10296,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const tool_kind = body.tool_kind ?? body.toolKind
         if (!_isToolKind(tool_kind)) {
           return json({ error: 'tool_kind required (one of patio, fencing, decking, quick_quote, gate, repair, general)' }, 400)
+        }
+        const scopeDraftActor = {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+        }
+        const preparesJobDraft = tool_kind === 'fencing' || tool_kind === 'patio'
+        if (preparesJobDraft) {
+          if (!scopeDraftActor.staff || !scopeDraftActor.orgId) return json({ code: 'operator_access_required' }, 403)
+          const owned = await client.from('jobs').select('id').eq('id', job_id).eq('org_id', scopeDraftActor.orgId).maybeSingle()
+          if (owned.error) return json({ code: 'scope_drafts_unavailable' }, 503)
+          if (!owned.data) return json({ code: 'scope_drafts_job_forbidden' }, 403)
         }
         const result = await _freezeScope(client, {
           job_id,
@@ -10301,6 +10324,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             : result.error.code === 'inconsistent_state' ? 409
             : 500
           return json({ error: result.error }, status)
+        }
+        if (preparesJobDraft) {
+          const { prepareScopeDraftsAfterFreeze } = await import('./scope_job_drafts.ts')
+          const job_drafts = await prepareScopeDraftsAfterFreeze(client, {
+            job_id, scope_revision_id: result.scope_revision_id,
+          }, scopeDraftActor)
+          return json({ ...result, job_drafts })
         }
         return json(result)
       }
@@ -12062,7 +12092,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return await groupWorkOrderJson(readGroupWorkOrderPublic(
           client,
           String(url.searchParams.get('token') || url.searchParams.get('share_token') || body.share_token || ''),
-        ))
+        ).then(async read => url.searchParams.get('format') === 'pdf' ? await printableClientSignoff(read.form) : read))
       case 'group_work_order_client_sign':
         return await groupWorkOrderJson(clientSignGroupWorkOrder(client, groupBody({
           ...body,
@@ -12073,6 +12103,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           ...body,
           share_token: body.share_token || url.searchParams.get('share_token') || url.searchParams.get('token'),
         })))
+      // The office files the client's actual confirmation; these routes send nothing.
+      // Recording requires its own identified staff JWT, not an agent or shared key.
+      case 'client_signoff_office':
+      case 'client_signoff_form_pdf':
+      case 'client_signoff_copy':
+      case 'record_client_signoff': {
+        const writing = action === 'record_client_signoff'
+        if (req.method !== (writing ? 'POST' : 'GET')) return json({error: 'Method not allowed', code:'method_not_allowed'}, 405)
+        const caller = {userId: authMode === 'jwt' ? authUser?.id || '' : '', orgId: authUser?.orgId || null, isStaff: _opsApiCallerIsStaffOperator(authMode, authUser)}
+        const jobId = String(body.job_id || url.searchParams.get('job_id') || '')
+        try {
+          if (writing) return json(await recordOfficeClientConfirmation(client, caller, body))
+          if (action === 'client_signoff_copy') return json(await readOfficeClientSignedCopy(client, caller, jobId, String(url.searchParams.get('signoff_id') || '')))
+          const read = await readOfficeClientSignoff(client, caller, jobId)
+          return json(action === 'client_signoff_form_pdf' ? await printableClientSignoff(read.form) : read)
+        } catch (error) {
+          if (error instanceof ClientSignoffFormError) return json({error:error.message,code:error.code}, error.status)
+          throw error
+        }
+      }
+
       // Office only. Not on the trade profile-scoped list, so a trade JWT is 403.
       case 'group_work_order_feedback':
       case 'group_work_order_office':
@@ -55183,6 +55234,13 @@ async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthCo
   if (ev && ev.applies && !ev.satisfied) {
     throw new ApiError(completionEvidenceMessage(ev, null, 'marked complete'), 422)
   }
+  // End-work and freeze use the same current client-confirmation boundary.
+  // A signature uploaded by this wizard may satisfy it before job completion.
+  let groupConfirmation: {grouped:boolean;requiresConfirmation:boolean;capture:unknown}
+  try {
+    groupConfirmation = await assertGroupClientConfirmationBeforeCompletion(client, job.id,
+      () => recordOnSiteClientSignoff(client, body, tradeUser, job))
+  } catch (error) { groupWorkOrderApiError(error) }
   const result = await completeJob(client, {
     job_id: job.id,
     user_id: tradeUser.id,
@@ -55197,9 +55255,9 @@ async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthCo
     console.warn('[ops-api] complete_my_job invoice queue failed (non-blocking):', e instanceof Error ? e.message : e)
     invoiceQueue = { lane: null, work_orders: [], error: e instanceof Error ? e.message : String(e) }
   }
-  // DSP-11: record the client's on-site sign-off. Never blocks completion.
-  let clientSignoff: any = null
-  try {
+  // Jobs on the ordinary hours route keep their existing non-blocking capture behaviour.
+  let clientSignoff: any = groupConfirmation.capture || (groupConfirmation.requiresConfirmation ? {recorded:false,reason:'already_on_file',counts:true} : null)
+  if (!groupConfirmation.requiresConfirmation) try {
     clientSignoff = await recordOnSiteClientSignoff(client, body, tradeUser, job)
   } catch (e) {
     console.error('[ops-api] complete_my_job client sign-off record failed (non-blocking):', e instanceof Error ? e.message : e)
@@ -62830,12 +62888,23 @@ async function updateCouncilStatus(client: any, body: any) {
   // Find the first non-complete step as current
   const newCurrentIdx = steps.findIndex((s: any) => s.status !== 'complete')
 
-  await client.from('council_submissions').update({
+  const { error: councilWriteError } = await client.from('council_submissions').update({
     steps,
     current_step_index: newCurrentIdx >= 0 ? newCurrentIdx : steps.length - 1,
     overall_status: overallStatus,
     updated_at: new Date().toISOString(),
   }).eq('id', submission_id)
+  if (councilWriteError) throw councilWriteError
+  if (status === 'complete') {
+    try {
+      const { error: stageError } = await client.rpc('consume_scope_council_payment_event', {
+        p_submission: submission_id, p_step: steps[idx].step_id,
+      })
+      if (stageError) console.error('[ops-api] local council payment stage held; council update retained')
+    } catch {
+      console.error('[ops-api] local council payment stage held for retry; council update retained')
+    }
+  }
 
   const { data: job } = await client.from('jobs').select('job_number').eq('id', sub.job_id).maybeSingle()
 
@@ -63302,7 +63371,7 @@ const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string
   // fencing job still renders the approved "fence". No cross-sell footer is
   // appended to this one. Fired ONLY from the calendar popup's explicit Yes —
   // never automatically.
-  install_rescheduled: { channel: 'sms', template: "Hi {name},\nHope you're well! Just letting you know we've got your {service} install rescheduled for {reschedule_date} at {street}. Our crew will be out between 7-10am to get it done. They'll be in contact with you closer to the day.\nLet us know if you have any questions.\nCheers, Shaun" },
+  install_rescheduled: { channel: 'sms', template: "Hi {name},\n\nHope you're well! Just letting you know we've got your {service} install rescheduled for {reschedule_date} at {street}. Our crew will be out between 7-10am to get it done. They'll be in contact with you closer to the day.\n\nLet us know if you have any questions.\n\nCheers,\nShaun" },
   crew_arriving: { channel: 'sms', template: 'Our crew is on their way to {address}. Expected arrival: {time}.' },
   daily_progress: { channel: 'sms', template: 'Day {day} update: {progress_note}' },
   job_complete: { channel: 'email', template: 'Your {service} is complete! Please review and sign off here: {link}' },
@@ -63436,7 +63505,7 @@ export async function sendClientUpdate(client: any, body: any) {
   }
 
   // Append cross-sell footer for SMS — except install_rescheduled, whose wording
-  // is approved verbatim and ends "Cheers, Shaun".
+  // is approved verbatim and ends "Cheers,\nShaun".
   if (channel === 'sms' && comms_trigger !== 'install_rescheduled') {
     message += '\n\nSecureWorks Group — Patios | Fencing | Decking | Screening | Makesafe'
   }

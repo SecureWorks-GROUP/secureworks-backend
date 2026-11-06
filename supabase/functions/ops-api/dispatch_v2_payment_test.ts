@@ -18,6 +18,7 @@ import {
   dispatchV2ApprovedNameFor,
   dispatchV2PaymentOf,
   dispatchV2PaymentTerms,
+  dispatchV2ReplyHasSubstance,
   dispatchV2ReplyStage,
   dispatchV2ReplyTiedToOrder,
   dispatchV2TermsFor,
@@ -1494,6 +1495,7 @@ Deno.test("reply: a Sent box moves on and names the earliest reply", () => {
     source: "reply",
     held_by_payment: false,
     reply: { email_id: REPLY.one, received_at: REPLY_AT, rung: "thread" },
+    reply_note: null,
   });
   assertEquals(sentStage({ terms: "on_account" }).key, "quote_received");
   assertEquals(sentStage({ terms: "unknown" }).key, "sent");
@@ -1543,6 +1545,7 @@ Deno.test("reply: a date confirmed after the reply is held by the gate, and the 
     source: "reply",
     held_by_payment: true,
     reply: { email_id: REPLY.one, received_at: REPLY_AT, rung: "thread" },
+    reply_note: null,
   });
 });
 
@@ -2189,5 +2192,104 @@ Deno.test("asap: choosing ASAP keeps a date already on the box; a bad choice is 
       date_mode,
     });
     assertEquals([r.status, r.code], [400, "invalid_request"]);
+  }
+});
+
+// Shaun, 6 Nov 2026 ("go"): a reply only moves a box on when it has a PDF, a
+// delivery date or a price. CMI's "All good Shaun. Seems like you're getting
+// busier." on SWP-261178 showed Quote received with nothing to check.
+const CHAT = "All good Shaun. Seems like you're getting busier. Cheers, Kris";
+
+Deno.test("reply substance: a PDF, a date or a price; a plain 'all good' is not", () => {
+  assert(dispatchV2ReplyHasSubstance({ has_pdf: true, snippet: CHAT }));
+  assert(dispatchV2ReplyHasSubstance({ has_pdf: false, delivery_date: "2026-11-25", snippet: CHAT }));
+  assert(dispatchV2ReplyHasSubstance({ has_pdf: false, snippet: "Hi Shaun, total is $1,234.50 inc GST" }));
+  assert(dispatchV2ReplyHasSubstance({ has_pdf: false, snippet: "Price 980.00 ex GST, ready Tuesday" }));
+  assert(!dispatchV2ReplyHasSubstance({ has_pdf: false, snippet: CHAT }));
+  // "I'll let you know once I got the price" names no amount.
+  assert(!dispatchV2ReplyHasSubstance({ has_pdf: false, snippet: "I'll let you know once I got the price. Ph 9248 1234" }));
+  // Attachments not read (null or left out): moves, as before.
+  assert(dispatchV2ReplyHasSubstance({ has_pdf: null, snippet: CHAT }));
+  assert(dispatchV2ReplyHasSubstance({ snippet: CHAT }));
+});
+
+Deno.test("reply substance: a plain reply leaves the box at Sent and comes back as a note", () => {
+  const chat = sentStage({
+    terms: "on_account",
+    replies: [reply(REPLY.one, { has_pdf: false, snippet: CHAT, delivery_date: null })],
+  });
+  assertEquals([chat.key, chat.source, chat.reply], ["sent", "worked_out", null]);
+  assertEquals(chat.reply_note, {
+    email_id: REPLY.one,
+    received_at: REPLY_AT,
+    snippet: CHAT,
+  });
+  // The same reply with a PDF: Quote received, and no note.
+  const pdf = sentStage({
+    terms: "on_account",
+    replies: [reply(REPLY.one, { has_pdf: true, snippet: CHAT })],
+  });
+  assertEquals([pdf.key, pdf.source, pdf.reply_note], ["quote_received", "reply", null]);
+  // Pay first: a chat reply is not an invoice either.
+  const payFirst = sentStage({
+    replies: [reply(REPLY.one, { has_pdf: false, snippet: CHAT })],
+  });
+  assertEquals(payFirst.key, "sent");
+  // A chat reply first, then a PDF later: the PDF reply moves it.
+  const later = sentStage({
+    terms: "on_account",
+    replies: [
+      reply(REPLY.one, { has_pdf: false, snippet: CHAT }),
+      reply(REPLY.two, { has_pdf: true, snippet: "Quote attached", received_at: "2026-10-28T06:00:00.000Z" }),
+    ],
+  });
+  assertEquals([later.key, later.reply?.email_id], ["quote_received", REPLY.two]);
+  // A long reply is cut for the note.
+  const long = sentStage({
+    terms: "on_account",
+    replies: [reply(REPLY.one, { has_pdf: false, snippet: "x ".repeat(200) })],
+  });
+  assert((long.reply_note?.snippet ?? "").length <= 140);
+  assert((long.reply_note?.snippet ?? "").endsWith("..."));
+});
+
+Deno.test("reply substance: dispatch_arrival reads the reply's PDFs; a failed attachments read moves as before", async () => {
+  const chatTables = () => {
+    const t = withReplies(true);
+    t.dispatch_v2_supplier_emails = [
+      reply(REPLY.one, { provider_message_id: "msg-chat", snippet: CHAT, delivery_date: null }),
+    ];
+    return t;
+  };
+  // No PDF kept from the email: still Sent, with the note.
+  {
+    const t = chatTables();
+    t.context_email_attachments = [
+      { id: "att-1", provider_message_id: "msg-chat", file_name: "logo.png", content_type: "image/png", status: "stored" },
+    ];
+    const { client } = makeClient(t);
+    const read: any = await dispatchArrivalRead(client, JOB.fence, ORG, TODAY);
+    const lysaght = orderFor(read.arrival, SUP.lysaght);
+    assertEquals(lysaght.material_stage, "sent");
+    assertEquals(lysaght.material_stage_reply, null);
+    assertEquals(lysaght.material_stage_reply_note?.snippet, CHAT);
+  }
+  // A PDF on the email: Awaiting payment (Lysaght is pay first).
+  {
+    const t = chatTables();
+    t.context_email_attachments = [
+      { id: "att-2", provider_message_id: "msg-chat", file_name: "Invoice 5521.pdf", content_type: "application/pdf", status: "stored" },
+    ];
+    const { client } = makeClient(t);
+    const read: any = await dispatchArrivalRead(client, JOB.fence, ORG, TODAY);
+    const lysaght = orderFor(read.arrival, SUP.lysaght);
+    assertEquals(lysaght.material_stage, "awaiting_payment");
+    assertEquals(lysaght.material_stage_reply_note, null);
+  }
+  // The attachments read fails: we cannot tell, so it moves as before.
+  {
+    const { client } = makeClient(chatTables(), { fail: ["context_email_attachments"] });
+    const read: any = await dispatchArrivalRead(client, JOB.fence, ORG, TODAY);
+    assertEquals(orderFor(read.arrival, SUP.lysaght).material_stage, "awaiting_payment");
   }
 });

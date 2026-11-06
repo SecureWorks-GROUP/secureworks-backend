@@ -25,7 +25,11 @@
 //     "Awaiting payment". The date stays saved; the box shows it is held.
 //   * A supplier reply matched to the box's newest order moves a Sent box on
 //     by itself: "Awaiting payment" when we pay first, "Quote received" when
-//     we are on account (only while the replies switch is on).
+//     we are on account (only while the replies switch is on). Only a reply
+//     that says something does (Shaun, 6 Nov 2026): a PDF attached, a
+//     delivery date, or a dollar amount (dispatchV2ReplyHasSubstance). A
+//     plain "All good Shaun" leaves the box at Sent and comes back as
+//     reply_note, so the screen can show the supplier answered.
 //   * An empty box with nothing sent is "Order materials".
 //   * An "Order confirmed" box with no date for the current order (no date
 //     of its own, none asked for in the newest order email) is waiting on
@@ -65,6 +69,7 @@ import {
   dispatchV2PaymentOf,
   type DispatchV2PaymentTerms,
   dispatchV2ReplyAt,
+  dispatchV2ReplyHasSubstance,
   dispatchV2ReplyStage,
   dispatchV2ReplyTiedToOrder,
 } from "./dispatch_v2_payment.ts";
@@ -240,6 +245,16 @@ export type DispatchMaterialStageReply = {
   rung: string | null;
 };
 
+// The newest reply on a box still at Sent to supplier that did not move it
+// (no PDF, date or price in it): shown as a note, never a stage.
+export type DispatchMaterialStageReplyNote = {
+  email_id: string;
+  received_at: string | null;
+  snippet: string | null;
+};
+
+const REPLY_NOTE_CHARS = 140;
+
 export type DispatchMaterialStageShown = {
   key: DispatchMaterialStageKey;
   // set = a person chose it and nothing newer happened; worked_out = read
@@ -253,6 +268,9 @@ export type DispatchMaterialStageShown = {
   // The reply that moved the box; null unless source is "reply". Present
   // only when the caller passed replies.
   reply?: DispatchMaterialStageReply | null;
+  // A reply that came in but did not move a box at Sent to supplier; null
+  // otherwise. Present only when the caller passed replies.
+  reply_note?: DispatchMaterialStageReplyNote | null;
 };
 
 // One candidate for the stage: what it is, the moment it happened and why.
@@ -358,6 +376,8 @@ function replyStep(
   let earliest: { at: number; reply: any } | null = null;
   for (const reply of input.replies || []) {
     if (!dispatchV2ReplyTiedToOrder(reply, input.newestSent ?? null)) continue;
+    // Only a reply with a PDF, a date or a price moves the box.
+    if (!dispatchV2ReplyHasSubstance(reply)) continue;
     const at = instant(dispatchV2ReplyAt(reply));
     if (at === null || at <= shown.at) continue;
     if (!earliest || at < earliest.at) earliest = { at, reply };
@@ -439,8 +459,36 @@ export function dispatchMaterialStageOf(
   }
   if (input.replies !== undefined) {
     answer.reply = lifted.source === "reply" ? lifted.reply ?? null : null;
+    answer.reply_note = lifted.key === "sent" ? replyNote(input) : null;
   }
   return answer;
+}
+
+// The newest reply tied to the box's newest order, for a box still at Sent
+// to supplier (it said too little to move the box).
+function replyNote(
+  input: DispatchMaterialStageInput,
+): DispatchMaterialStageReplyNote | null {
+  let newest: { at: number; reply: any } | null = null;
+  for (const reply of input.replies || []) {
+    if (!dispatchV2ReplyTiedToOrder(reply, input.newestSent ?? null)) continue;
+    const at = instant(dispatchV2ReplyAt(reply));
+    if (at === null) continue;
+    if (!newest || at > newest.at) newest = { at, reply };
+  }
+  if (!newest) return null;
+  const words = typeof newest.reply.snippet === "string"
+    ? newest.reply.snippet.replace(/\s+/g, " ").trim()
+    : "";
+  return {
+    email_id: String(newest.reply.id),
+    received_at: dispatchV2ReplyAt(newest.reply),
+    snippet: words
+      ? (words.length > REPLY_NOTE_CHARS
+        ? words.slice(0, REPLY_NOTE_CHARS - 3).trimEnd() + "..."
+        : words)
+      : null,
+  };
 }
 
 // A purchase order's stage, from its status (a v1 Dispatch order or one made
@@ -544,6 +592,9 @@ export type DispatchV2BoxStage = {
   held_by_payment: boolean;
   // The supplier reply that moved the box; null unless source is "reply".
   reply: DispatchMaterialStageReply | null;
+  // A reply that came in but said too little to move a box at Sent to
+  // supplier (no PDF, date or price): the screen shows it as a note.
+  reply_note: DispatchMaterialStageReplyNote | null;
   // A pickup whose date (own or asked for) is the install's first day: the
   // crew collects it on the way, so the screen leaves "Materials ready" out
   // of this box's strip and picker.
@@ -740,6 +791,7 @@ export function dispatchV2BoxStage(
     todo: dispatchMaterialTodo(shown.key, supplierName, installBooked, context),
     held_by_payment: shown.held_by_payment === true,
     reply: shown.reply ?? null,
+    reply_note: shown.reply_note ?? null,
     skips_ready: fulfilment === "pickup" && !!date && !!firstDay &&
       date === firstDay,
     date_mode: dateMode.mode,

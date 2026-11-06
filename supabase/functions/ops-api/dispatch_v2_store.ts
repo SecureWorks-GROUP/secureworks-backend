@@ -836,6 +836,9 @@ function boxMaterialStage(
     held_by_payment: view.held_by_payment,
     // The matched supplier reply that moved the box (source "reply").
     reply: view.reply,
+    // A reply that came in but said too little to move a box at Sent (no
+    // PDF, date or price): the screen shows it as a note.
+    reply_note: view.reply_note,
     // A pickup on the install's first day: leave Materials ready out of the
     // box's strip and picker.
     skips_ready: view.skips_ready,

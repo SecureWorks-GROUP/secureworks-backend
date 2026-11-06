@@ -5,6 +5,20 @@
 
 BEGIN;
 
+-- Later policy: reopening invalidates client approval even with unchanged
+-- hours. These invoice-recalculation fixtures explicitly reconfirm the work.
+CREATE FUNCTION pg_temp.group_fixture_client_reconfirms(j uuid) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE marker timestamptz; prior public.job_client_signoffs%ROWTYPE;
+BEGIN
+ SELECT (to_jsonb(g)->>'signoff_required_after')::timestamptz INTO marker
+ FROM public.group_work_orders g WHERE g.job_id=j AND g.status<>'void';
+ IF marker IS NULL THEN RETURN; END IF;
+ SELECT * INTO prior FROM public.job_client_signoffs WHERE job_id=j AND signature_media_id IS NOT NULL
+ ORDER BY created_at DESC,id DESC LIMIT 1;
+ INSERT INTO public.job_client_signoffs(job_id,method,signed_name,happy,signature_media_id,captured_by_actor,created_at)
+ VALUES(j,'share_link','Synthetic Client',true,prior.signature_media_id,'client link',greatest(clock_timestamp(),marker)+interval '1 microsecond');
+END $$;
+
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -1177,6 +1191,7 @@ BEGIN
     v_strip_job, 'share_link', 'Alex Client', true, 5,
     'd2140000-0000-4000-8000-000000000503', 'client link'
   );
+  PERFORM pg_temp.group_fixture_client_reconfirms(v_strip_job);
   SET LOCAL ROLE service_role;
   PERFORM public.freeze_group_work_order_split(v_strip_group);
   RESET ROLE;
@@ -1257,9 +1272,10 @@ BEGIN
     RAISE EXCEPTION 'group-wo: unfreeze did not leave the travel line and the queried status';
   END IF;
 
-  -- Hours were not edited, so the same sign-off still counts. A weekly
-  -- invoice keeps its final-payout header and does not take the recurring
+  -- The client reconfirms after reopening under the later sign-off policy.
+  -- A weekly invoice keeps its final-payout header and does not take the recurring
   -- deduction off gross.
+  PERFORM pg_temp.group_fixture_client_reconfirms(v_strip_job);
   SET LOCAL ROLE service_role;
   PERFORM public.freeze_group_work_order_split(v_strip_group);
   RESET ROLE;
@@ -1551,6 +1567,7 @@ BEGIN
     (v_ded_zero, v_a, 'Ute hire', 50, DATE '2026-10-05'),
     (v_ded_fit, v_a, 'Ute hire', 5, DATE '2026-09-28');
 
+  PERFORM pg_temp.group_fixture_client_reconfirms(v_ded_job);
   SET LOCAL ROLE service_role;
   PERFORM public.freeze_group_work_order_split(v_ded_group);
   RESET ROLE;
@@ -1592,6 +1609,7 @@ BEGIN
     RAISE EXCEPTION 'group-wo: unfreeze left a deduction the payable cannot cover';
   END IF;
 
+  PERFORM pg_temp.group_fixture_client_reconfirms(v_ded_job);
   SET LOCAL ROLE service_role;
   PERFORM public.freeze_group_work_order_split(v_ded_group);
   RESET ROLE;
@@ -1625,6 +1643,7 @@ BEGIN
     RAISE EXCEPTION 'group-wo: a zero payable kept the deduction or its note';
   END IF;
 
+  PERFORM pg_temp.group_fixture_client_reconfirms(v_ded_job);
   SET LOCAL ROLE service_role;
   PERFORM public.freeze_group_work_order_split(v_ded_group);
   RESET ROLE;

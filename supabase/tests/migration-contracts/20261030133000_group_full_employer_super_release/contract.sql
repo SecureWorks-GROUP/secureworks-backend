@@ -49,8 +49,10 @@ BEGIN
     (gen_random_uuid(),job,henry,'2026-10-19','scheduled'),(gen_random_uuid(),job,isaac,'2026-10-19','scheduled'),(gen_random_uuid(),job,ryan,'2026-10-19','scheduled');
   INSERT INTO public.group_work_order_time_entries(group_id,user_id,work_date,start_time,finish_time,break_minutes,hours) VALUES
     (grp,henry,'2026-10-19','07:00','16:30',30,18),(grp,isaac,'2026-10-19','07:00','16:30',30,18),(grp,ryan,'2026-10-19','07:00','16:45',30,18.5);
-  INSERT INTO public.job_client_signoffs(job_id,method,waiver_reason,captured_by_actor,created_at)
-    VALUES(job,'office_waiver','Synthetic owner-authorised office sign-off','user:'||office,clock_timestamp() + interval '1 second');
+  INSERT INTO public.job_media(id,job_id,phase,type,storage_url)
+    VALUES('f0310000-0000-4000-8000-000000000599',job,'signature','photo','data:image/png;base64,iVBORw0KGgo=');
+  INSERT INTO public.job_client_signoffs(job_id,method,signed_name,happy,signature_media_id,captured_by_actor,created_at)
+    VALUES(job,'share_link','Synthetic Client',true,'f0310000-0000-4000-8000-000000000599','client link',clock_timestamp() + interval '1 second');
   PERFORM public.freeze_group_work_order_split(grp);
   SELECT array_agg(share_ex ORDER BY user_id) INTO shares FROM public.group_work_order_shares WHERE group_id=grp;
   IF shares <> ARRAY[911.56,1002.72,805.72]::numeric[] THEN RAISE EXCEPTION 'Zoo-shaped shares wrong: %', shares; END IF;
@@ -74,7 +76,7 @@ BEGIN
   -- 5. Not ready: Ryan has not invoiced, Henry is not approved.
   v_state := public.group_work_order_release_state(grp);
   IF (v_state->>'ready')::boolean OR NOT (v_state->'reasons' ? 'share_not_invoiced') OR NOT (v_state->'reasons' ? 'share_not_approved')
-     OR (v_state->>'invoiced')::int <> 2 OR (v_state->>'approved')::int <> 1 OR v_state->>'signoff' <> 'office' THEN
+     OR (v_state->>'invoiced')::int <> 2 OR (v_state->>'approved')::int <> 1 OR v_state->>'signoff' <> 'client' THEN
     RAISE EXCEPTION 'release state before resubmission wrong: %', v_state;
   END IF;
   v_claim := public.claim_group_work_order_release(grp, 'user:'||office, office);

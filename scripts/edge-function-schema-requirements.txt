@@ -1152,3 +1152,21 @@ ops-api|supabase/migrations/20261106040518_scope_job_drafts.sql|function|read_sc
 ops-api|supabase/migrations/20261106040518_scope_job_drafts.sql|function|release_scope_job_drafts
 send-quote|supabase/migrations/20261106040518_scope_job_drafts.sql|table|scope_job_draft_sets
 send-quote|supabase/migrations/20261106040518_scope_job_drafts.sql|function|release_scope_job_drafts
+# Local payment-stage children and exact event consumers.
+ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|table|scope_payment_plans
+ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|table|scope_payment_stage_drafts
+ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|function|read_scope_payment_stages
+ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|function|confirm_scope_payment_stage
+ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|function|consume_scope_council_payment_event
+
+
+# Client confirmation and private signed-copy proof, before ops-api selects it.
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|column|job_client_signoffs.confirmation_kind
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|column|job_client_signoffs.signed_copy_path
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|column|job_client_signoffs.capture_request_id
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|column|group_work_orders.signoff_required_after
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|table|group_client_signoff_policy
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|constraint|job_client_signoffs_office_confirmation_check
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|trigger|group_work_orders.trg_group_reopen_client_confirmation
+
+ops-api|supabase/migrations/20261106062000_scope_work_order_saved_handoff.sql|function|prepare_scope_job_drafts
