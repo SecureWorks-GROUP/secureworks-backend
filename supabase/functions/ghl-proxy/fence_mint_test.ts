@@ -16,6 +16,7 @@ import {
   validateFenceMintInput,
 } from "./fence_mint.ts";
 import { GhlProviderReadError } from "./provider_reads.ts";
+import { lookupScopeMintDuplicates } from "./scope_mint_contacts.ts";
 
 const FENCE_PIPELINE_ID = "I9t8njpuR0Dm7B2NDcvI";
 const REQUEST_A = "11111111-1111-4111-8111-111111111111";
@@ -1396,6 +1397,88 @@ Deno.test("the recovery scan is bounded by wall clock inside the mint lease", as
 });
 
 const PATIO_PIPELINE_ID = "OGZLpPPVWVarN94HL6af";
+
+Deno.test("scope mint: duplicate lookup uses the documented GET query and version without a body", async () => {
+  const requests: { path: string; init: RequestInit }[] = [];
+  const replies = [{ contact: { id: "fixture-contact" } }, { contact: null }];
+  const matches = await lookupScopeMintDuplicates((path, init) => {
+    requests.push({ path, init });
+    return Promise.resolve(replies[requests.length - 1]);
+  }, "fixture-location", { email: "scope+test@example.invalid", phone: "+61000000000" });
+  assertEquals(matches, replies);
+  assertEquals(requests.length, 2);
+  for (const [index, { path, init }] of requests.entries()) {
+    const url = new URL(path, "https://provider.invalid");
+    assertEquals(url.pathname, "/contacts/search/duplicate");
+    assertEquals([...url.searchParams.entries()], [
+      ["locationId", "fixture-location"],
+      index === 0 ? ["email", "scope+test@example.invalid"] : ["number", "+61000000000"],
+    ]);
+    assertStringIncludes(path, index === 0 ? "scope%2Btest%40example.invalid" : "%2B61000000000");
+    assertEquals(init.method, "GET");
+    assertEquals(new Headers(init.headers).get("Version"), "v3");
+    assertEquals(init.body, undefined);
+    assertEquals(init.signal instanceof AbortSignal, true);
+  }
+});
+
+for (const jobType of ["fencing", "patio"] as const) {
+  Deno.test(`scope mint: ${jobType} reuses a duplicate and creates only after a successful no-match lookup`, async () => {
+    for (const found of [true, false]) {
+      let creates = 0;
+      let reads = 0;
+      await executeFenceJobMint({
+        input: input(REQUEST_A, { jobType, contactId: null, phone: null }),
+        actorId: "user-1",
+        deps: deps({
+          findContacts: async (candidate) => {
+            const matches = await lookupScopeMintDuplicates(() => {
+              reads++;
+              return Promise.resolve({ contact: found ? { id: "contact-1" } : null });
+            }, "fixture-location", candidate);
+            return matches.flatMap((raw) => {
+              const { contact } = raw as { contact: { id: string } | null };
+              return contact ? [contact] : [];
+            });
+          },
+          createContact: async () => {
+            creates++;
+            return { id: "contact-1" };
+          },
+        }),
+      });
+      assertEquals(reads, 1);
+      assertEquals(creates, found ? 0 : 1);
+    }
+  });
+
+  Deno.test(`scope mint: ${jobType} provider lookup failure returns 502 without creating a contact`, async () => {
+    let creates = 0;
+    const error = await assertRejects(() => executeFenceJobMint({
+      input: input(REQUEST_A, { jobType, contactId: null }),
+      actorId: "user-1",
+      deps: deps({
+        findContacts: async (candidate) => {
+          await lookupScopeMintDuplicates((path, init) => {
+            assertEquals(init.method, "GET");
+            if (new URL(path, "https://provider.invalid").searchParams.has("email")) {
+              return Promise.resolve({ contact: null });
+            }
+            return Promise.reject(new Error("GHL 503: provider unavailable"));
+          }, "fixture-location", candidate);
+          return [];
+        },
+        createContact: async () => {
+          creates++;
+          return { id: "unexpected-create" };
+        },
+      }),
+    }), FenceMintError, "GHL 503: provider unavailable");
+    assertEquals(error.status, 502);
+    assertEquals(error.code, "ghl_request_failed");
+    assertEquals(creates, 0);
+  });
+}
 
 Deno.test("scope mint: the trade defaults to fencing and only fencing or patio is accepted", async () => {
   assertEquals(input().jobType, "fencing");

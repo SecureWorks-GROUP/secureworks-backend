@@ -50,6 +50,7 @@ Rules:
   - `DELIBERATE_REPEAT`: a genuine additional job. Supply a human reason of at least three characters and the exact sorted `expectedExistingJobIds` shown when the operator confirmed. Changed evidence returns `stale_existing_job_evidence`, never a blind mint.
 - An existing `opportunityId` requires `contactId`. The server fetches both from GHL and rejects contact or fencing-pipeline mismatch before mapping.
 - A new contact requires email or phone. Email/phone duplicate checks run as one bounded batch. If they identify different contacts, the command stops with `contact_identity_conflict`.
+- Duplicate lookup uses HighLevel's [Get Duplicate Contact](https://marketplace.gohighlevel.com/docs/ghl/contacts/get-duplicate-contact/): `GET /contacts/search/duplicate`, `Version: v3`, and URL-encoded query parameters `locationId` plus `email` or `number` (phone). A match is reused; only a successful no-match read permits contact creation. Failed reads retain the provider error and do not fall through to create. Query strings are omitted from request logs.
 - Do not include scope, pricing, PDF, quote, or communication fields. They are rejected and must remain on their existing guarded paths. The request is capped at 32 KB and `expectedExistingJobIds` at 100 IDs.
 
 ### Success response
