@@ -9,6 +9,7 @@ const REV = crypto.randomUUID();
 const WO = crypto.randomUUID();
 const APPROVER = crypto.randomUUID();
 const STAMP = "2026-11-09T01:02:03.456789+00:00";
+const PDF_SHA = "a".repeat(64);
 
 type Opts = {
   authority?: string | null;
@@ -171,9 +172,31 @@ Deno.test("owner approvals: the price decision names the server's approver and o
     400,
     "owner_approval_input_invalid",
   ]);
+  const unshown = await call(client, "approve_scope_price", {
+    job_id: JOB,
+    scope_revision_id: REV,
+  });
+  assertEquals([unshown.status, unshown.body.code], [
+    400,
+    "quote_document_sha256s_required",
+  ]);
+  const badList = await call(client, "approve_scope_price", {
+    job_id: JOB,
+    scope_revision_id: REV,
+    quote_document_sha256s: ["not-a-hash"],
+  });
+  assertEquals([badList.status, badList.body.code], [
+    400,
+    "quote_document_sha256s_required",
+  ]);
+  assertEquals(
+    client.rpcs.filter((c) => c.fn === "record_scope_price_approval"),
+    [],
+  );
   const r = await call(client, "approve_scope_price", {
     job_id: JOB,
     scope_revision_id: REV,
+    quote_document_sha256s: [PDF_SHA],
   });
   assertEquals(r.status, 200);
   assertEquals(r.body.capabilities.authority, "owner");
@@ -188,9 +211,22 @@ Deno.test("owner approvals: the price decision names the server's approver and o
       p_approver: APPROVER,
       p_via: "session",
       p_org_id: ORG,
+      p_expected_documents: [PDF_SHA],
     },
   }]);
   assertEquals(r.body.state.job_id, JOB);
+});
+
+Deno.test("owner approvals: a quote PDF list the database does not hold is refused as changed", async () => {
+  const client = fakeClient({
+    recordError: { code: "23514", message: "scope_owner_approval_documents_changed" },
+  });
+  const r = await call(client, "approve_scope_price", {
+    job_id: JOB,
+    scope_revision_id: REV,
+    quote_document_sha256s: [],
+  });
+  assertEquals([r.status, r.body.code], [409, "scope_price_documents_changed"]);
 });
 
 Deno.test("owner approvals: the work order decision binds the draft as read, on its own revision", async () => {

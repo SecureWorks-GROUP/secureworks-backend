@@ -322,6 +322,18 @@ jobs:
             supabase/functions/send-quote/index_test.ts \
             supabase/functions/ops-api/quick_quote_test.ts
 
+      # The owner approves the price (with the exact quote PDFs it covers) and
+      # the work order before either counts (20261109040000). The Quick Quote
+      # file runs the real handler to the provider with every I/O faked.
+      - name: Test owner approval of the price, its quote PDFs and the work order
+        run: |
+          deno test --allow-env --allow-read \
+            supabase/functions/_shared/scope_freeze/owner_price_approval_test.ts
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/quick_quote_owner_pdf_test.ts \
+            supabase/functions/ops-api/scope_owner_approvals_test.ts \
+            supabase/functions/ops-api/job_work_order_office_approve_test.ts
+
       # A service-role key committed in 2026-03 stayed live for six months.
       # Refuse any tracked service_role JWT or sb_secret_ key, whatever path
       # it sits under.

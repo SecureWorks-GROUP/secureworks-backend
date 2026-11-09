@@ -4740,7 +4740,13 @@ rule every issue path reads (`release_scope_job_drafts`,
 `owner_approved_job_work_order_drafts`, backfill, and the crew trigger
 `work_orders_crew_owner_gate`, which holds a crew order on a saved-revision job
 out of sent, accepted, in progress and complete, from any earlier status
-including cancelled, until the job order is issued); it refuses `WO428`. A
+including cancelled, until the job order is issued); it refuses `WO428`. That
+refusal and every hold below apply only while
+`owner_approval_saved_revision_required_v1` is on: while it is off (as seeded)
+every issue path and crew move runs exactly as before and each case it would
+have held is recorded in `job_work_order_owner_unapproved` (append-only, with
+what was missing, one job event each) by `record_work_order_owner_unapproved`;
+the switch is read only through `owner_approval_required()`. A
 decision is only for a job in the approver's own company
 (`owner_approval_company_ok`; a NULL company never passes): the ops-api doors
 call the five-argument `approve_job_work_order` with the caller's company. The
@@ -4749,13 +4755,24 @@ only as owner may approve there. A missing decision holds the issue and keeps
 the customer's acceptance, and a deposit stage released later still dates from
 that acceptance. Decisions are recorded while the order is a draft and the
 issue validates, releases and seals in one transaction. An edit or a new
-revision needs a fresh decision. Every quote send path (send-quote `/send`,
-`/send-runs`, Quick Quote) refuses a saved revision with no price decision
-(`_shared/scope_freeze/owner_price_approval.ts`). A send naming no revision is
-refused only while `owner_approval_saved_revision_required_v1` is on (seeded
-off); otherwise it is claimed in `quote_send_price_unapproved_sends` (one row
-per document or Quick Quote call, forward only, never deleted) before the
-email, and nothing is sent when that write fails. Staff doors:
+revision needs a fresh decision. A quote send (send-quote `/send`,
+`/send-runs`, Quick Quote; `_shared/scope_freeze/owner_price_approval.ts`)
+with no price decision, saved revision or not, is refused only while
+`owner_approval_saved_revision_required_v1` is on (seeded off, the owner's
+call, after the owner list is written and the scoping tools store quote PDFs
+before the owner approves); while it is off it goes exactly as before and is
+claimed in `quote_send_price_unapproved_sends` (one row per document or Quick
+Quote call, with the revision it names, forward only, never deleted) before
+the email, and nothing is sent when that write fails. A price decision also records
+`quote_document_sha256s`: the revision's `quote_pdf` / `per_contact_pdf`
+`scope_artifacts` hashes when the owner decided (`scope_revision_quote_documents`;
+the approver echoes the list the read showed). On an approved revision a send
+fetches each PDF once and refuses unless its sha256 is on that list
+(`owner_price_pdf_not_approved`), then sends exactly those bytes; a `/send`
+document's stored page price must be a figure of the frozen price
+(`owner_price_document_price_mismatch`). A PDF stored after the decision needs
+a new revision and decision, so the scoping tools store the quote PDFs before
+the owner approves. Staff doors:
 `approve_scope_price`, `approve_scope_work_order`, `read_scope_owner_approvals`
 (`ops-api/scope_owner_approvals.ts`). While an issue is held, the local payment
 stage drafts made at release wait with it. The rollback goes with the

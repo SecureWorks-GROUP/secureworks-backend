@@ -2,8 +2,11 @@
 // Owner approval of the price and of the work order (TK-S28). Schema, policy
 // and the only writers: 20261109040000_scope_owner_approvals.sql.
 //
-//   approve_scope_price        POST {job_id, scope_revision_id}
-//       Records the price decision on a frozen (or superseded) saved revision.
+//   approve_scope_price        POST {job_id, scope_revision_id,
+//                                    quote_document_sha256s}
+//       Records the price decision on a frozen (or superseded) saved revision
+//       and the quote PDFs it covers: exactly the list the approver was shown,
+//       which must be what the server holds for that revision now.
 //       Any draft job work order on that revision whose work order decision is
 //       already recorded is issued in the same transaction.
 //   approve_scope_work_order   POST {job_id, scope_revision_id, work_order_id,
@@ -41,6 +44,7 @@ export type OwnerApprovalCapabilities = {
   reason: string | null;
 };
 
+const SHA256_RE = /^[0-9a-f]{64}$/;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -86,6 +90,7 @@ const RPC_CODES: Record<string, [number, string]> = {
   scope_owner_approval_revision_conflict: [409, "work_order_revision_conflict"],
   scope_owner_approval_revision_mismatch: [409, "work_order_revision_mismatch"],
   scope_owner_approval_via_invalid: [400, "approval_via_invalid"],
+  scope_owner_approval_documents_changed: [409, "scope_price_documents_changed"],
 };
 
 const SQLSTATE_CODES: Record<string, [number, string]> = {
@@ -172,10 +177,24 @@ export async function scopeOwnerApprovalsAction(
   }
 
   if (action === "approve_scope_price") {
-    if (!onlyKeys(input, ["job_id", "scope_revision_id"])) {
+    if (!onlyKeys(input, ["job_id", "scope_revision_id", "quote_document_sha256s"])) {
       return reply({
         code: "owner_approval_input_invalid",
-        error: "Only job_id and scope_revision_id are accepted.",
+        error: "Only job_id, scope_revision_id and quote_document_sha256s are accepted.",
+      }, 400);
+    }
+    // The quote PDFs the approver was shown (read_scope_owner_approvals,
+    // current_scope_revision.quote_document_sha256s). The decision covers
+    // exactly these; the database refuses a list it does not hold.
+    const documents = input.quote_document_sha256s;
+    if (
+      !Array.isArray(documents) ||
+      !documents.every((d) => typeof d === "string" && SHA256_RE.test(d))
+    ) {
+      return reply({
+        code: "quote_document_sha256s_required",
+        error:
+          "Read the quote again and send the quote PDFs it lists as quote_document_sha256s (an empty list when it lists none).",
       }, 400);
     }
     const { data, error } = await client.rpc("record_scope_price_approval", {
@@ -184,6 +203,7 @@ export async function scopeOwnerApprovalsAction(
       p_approver: actor.approver.userId,
       p_via: actor.approver.via,
       p_org_id: actor.orgId,
+      p_expected_documents: documents,
     });
     if (error) {
       const f = rpcFailure(error);

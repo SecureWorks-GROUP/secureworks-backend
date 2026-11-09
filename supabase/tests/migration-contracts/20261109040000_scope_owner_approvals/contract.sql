@@ -77,16 +77,20 @@ BEGIN
     AND NOT has_table_privilege('service_role', 'public.scope_owner_approvals', 'UPDATE')
     AND NOT has_table_privilege('service_role', 'public.scope_owner_approvals', 'DELETE'),
     'decisions are written only through the recording functions';
-  ASSERT NOT has_function_privilege('authenticated', 'public.record_scope_price_approval(uuid,uuid,uuid,text,uuid)', 'EXECUTE')
+  ASSERT NOT has_function_privilege('authenticated', 'public.record_scope_price_approval(uuid,uuid,uuid,text,uuid,text[])', 'EXECUTE')
     AND NOT has_function_privilege('anon', 'public.record_job_work_order_approval(uuid,uuid,text,timestamptz,uuid,uuid,boolean)', 'EXECUTE')
     AND NOT has_function_privilege('authenticated', 'public.issue_owner_approved_job_work_order(uuid)', 'EXECUTE')
     AND NOT has_function_privilege('authenticated', 'public.read_job_owner_approval_state(uuid,uuid)', 'EXECUTE'),
     'no browser role may decide, issue or read decisions';
-  ASSERT has_function_privilege('service_role', 'public.record_scope_price_approval(uuid,uuid,uuid,text,uuid)', 'EXECUTE')
+  ASSERT has_function_privilege('service_role', 'public.record_scope_price_approval(uuid,uuid,uuid,text,uuid,text[])', 'EXECUTE')
     AND has_function_privilege('service_role', 'public.record_job_work_order_approval(uuid,uuid,text,timestamptz,uuid,uuid,boolean)', 'EXECUTE')
     AND has_function_privilege('service_role', 'public.owner_approved_job_work_order_drafts(integer)', 'EXECUTE'),
     'ops-api (service role) records and reads decisions';
 END $$;
+
+-- Sections 2 to 11 and 13 judge the policy as it runs once the owner turns
+-- the switch on. Section 14 proves the shipped state (off) changes nothing.
+UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'owner_approval_saved_revision_required_v1';
 
 -- 2. Authority comes from the named lists. Until the owner list is filled the
 -- owner is never labelled owner; once filled, owner wins over a named list.
@@ -293,8 +297,8 @@ BEGIN
   -- refused issue): the sweep finds it and the automatic issue seals it once.
   SELECT public.job_work_order_content_hash(w) INTO v_hash FROM public.work_orders w WHERE w.id = f.wo;
   INSERT INTO public.scope_owner_approvals(kind, job_id, org_id, scope_revision_id, scope_hash, pricing_hash,
-      approver_user_id, authority, via)
-    VALUES ('price', f.job, org, f.rev, 'fixture', 'fixture', v_approver, 'approver_list', 'session');
+      quote_document_sha256s, approver_user_id, authority, via)
+    VALUES ('price', f.job, org, f.rev, 'fixture', 'fixture', '{}', v_approver, 'approver_list', 'session');
   INSERT INTO public.scope_owner_approvals(kind, job_id, org_id, scope_revision_id, work_order_id,
       work_order_content_hash, approver_user_id, authority, via)
     VALUES ('work_order', f.job, org, f.rev, f.wo, v_hash, v_approver, 'approver_list', 'session');
@@ -352,6 +356,7 @@ BEGIN
   SELECT id INTO w1 FROM public.work_orders WHERE job_id = j1 AND kind = 'job';
   SELECT id INTO w2 FROM public.work_orders WHERE job_id = j2 AND kind = 'job';
   UPDATE public.work_orders SET scope_items = '[{"description":"Install"}]', agreed_labour_ex = 500 WHERE id IN (w1, w2);
+  UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'owner_approval_saved_revision_required_v1';
   v := public.approve_job_work_order(w1, v_approver, 'session', pg_temp.wo_stamp(w1));
   ASSERT v->>'status' = 'approved' AND v->>'work_order_approval_id' IS NOT NULL AND v->>'price_approval_id' IS NULL
     AND v#>>'{owner_approval,approval,authority}' = 'approver_list', 'unbound: the approver''s decision seals and is recorded';
@@ -361,7 +366,6 @@ BEGIN
   EXCEPTION WHEN SQLSTATE 'WO428' THEN refused := true; END;
   ASSERT refused AND (SELECT status = 'draft' FROM public.work_orders WHERE id = w2),
     'with the switch on an order with no saved revision cannot be approved';
-  UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'owner_approval_saved_revision_required_v1';
 END $$;
 
 -- 9. Decisions are append only, and a price decision needs a frozen, intact
@@ -517,10 +521,25 @@ BEGIN
     AND NOT has_table_privilege('anon', 'public.quote_send_price_unapproved_sends', 'SELECT')
     AND NOT has_table_privilege('service_role', 'public.quote_send_price_unapproved_sends', 'INSERT')
     AND NOT has_function_privilege('authenticated',
-      'public.record_quote_send_price_unapproved(text, uuid, text, uuid, text)', 'EXECUTE')
+      'public.record_quote_send_price_unapproved(text, uuid, text, uuid, text, uuid)', 'EXECUTE')
     AND has_function_privilege('service_role',
-      'public.record_quote_send_price_unapproved(text, uuid, text, uuid, text)', 'EXECUTE'),
+      'public.record_quote_send_price_unapproved(text, uuid, text, uuid, text, uuid)', 'EXECUTE'),
     'records and their writer are the service role''s only';
+  -- A send naming a saved revision with no price decision, while the switch
+  -- is off: recorded with its revision and its own reason.
+  doc := gen_random_uuid();
+  r := public.record_quote_send_price_unapproved('quote_document:' || doc, f.job, 'send', doc, 'claimed', f.rev);
+  ASSERT r->>'recorded' = 'true' AND (SELECT scope_revision_id = f.rev FROM public.quote_send_price_unapproved_sends
+    WHERE send_key = 'quote_document:' || doc), 'the saved revision is recorded';
+  ASSERT EXISTS (SELECT 1 FROM public.job_events WHERE job_id = f.job AND event_type = 'quote_send_price_unapproved'
+    AND detail_json->>'reason' = 'no_price_decision' AND detail_json->>'scope_revision_id' = f.rev::text),
+    'its event says no price decision on that revision';
+  ASSERT EXISTS (SELECT 1 FROM public.job_events WHERE job_id = f.job AND event_type = 'quote_send_price_unapproved'
+    AND detail_json->>'reason' = 'no_saved_revision'), 'a send naming no revision keeps its reason';
+  refused := false;
+  BEGIN PERFORM public.record_quote_send_price_unapproved('quote_document:' || doc, f.job, 'send', doc, 'claimed', NULL);
+  EXCEPTION WHEN unique_violation THEN refused := true; END;
+  ASSERT refused, 'a key never changes its revision';
 END $$;
 
 -- 13. A late owner approval never moves the deposit: the quote_accepted event
@@ -564,6 +583,177 @@ BEGIN
     WHERE job_id = job AND kind = 'quote_accepted'), 'the quote_accepted event keeps the acceptance time';
   ASSERT (SELECT due_at = accepted_at + interval '2 days' FROM public.scope_payment_stage_drafts
     WHERE job_id = job AND stage_id = 'first'), 'the deposit is due from the acceptance, not the approval';
+END $$;
+
+-- The price decision covers the revision's quote PDFs as the server recorded
+-- them when the owner decided: a PDF stored later is not covered, an approver
+-- shown a different list is refused, and a replay keeps the original list.
+DO $$
+DECLARE
+  org uuid := (SELECT id FROM owa_people WHERE role = 'org');
+  v_approver uuid := (SELECT id FROM owa_people WHERE role = 'approver');
+  f record; g record; p jsonb; refused boolean;
+  pdf_a text := encode(sha256(convert_to('ZZTEST quote document A', 'UTF8')), 'hex');
+  pdf_b text := encode(sha256(convert_to('ZZTEST quote document B', 'UTF8')), 'hex');
+  render_c text := encode(sha256(convert_to('ZZTEST render C', 'UTF8')), 'hex');
+BEGIN
+  f := pg_temp.scope_job(org);
+  INSERT INTO public.scope_artifacts(scope_revision_id, artifact_type, storage_path, bucket_id, sha256,
+      size_bytes, content_type)
+    VALUES (f.rev, 'quote_pdf', 'zztest/a.pdf', 'scope-artifacts', pdf_a, 23, 'application/pdf'),
+           (f.rev, 'render_hero', 'zztest/c.png', 'scope-artifacts', render_c, 15, 'image/png');
+  ASSERT public.scope_revision_quote_documents(f.rev) = ARRAY[pdf_a],
+    'only quote PDFs count as customer documents';
+  ASSERT (public.read_job_owner_approval_state(f.job, org))#>'{current_scope_revision,quote_document_sha256s}'
+    = to_jsonb(ARRAY[pdf_a]), 'the read shows the approver the documents a decision covers';
+  refused := false;
+  BEGIN PERFORM public.record_scope_price_approval(f.job, f.rev, v_approver, 'session', org, ARRAY[pdf_a, pdf_b]);
+  EXCEPTION WHEN check_violation THEN refused := SQLERRM = 'scope_owner_approval_documents_changed'; END;
+  ASSERT refused AND public.scope_price_owner_approval(f.job, f.rev) IS NULL,
+    'a decision on a list the server does not hold is refused and records nothing';
+  p := public.record_scope_price_approval(f.job, f.rev, v_approver, 'session', org, ARRAY[pdf_a]);
+  ASSERT p#>'{approval,quote_document_sha256s}' = to_jsonb(ARRAY[pdf_a])
+    AND public.scope_price_owner_approval(f.job, f.rev)->'quote_document_sha256s' = to_jsonb(ARRAY[pdf_a]),
+    'the decision records the documents it covers and the send lookup returns them';
+  INSERT INTO public.scope_artifacts(scope_revision_id, artifact_type, storage_path, bucket_id, sha256,
+      size_bytes, content_type)
+    VALUES (f.rev, 'per_contact_pdf', 'zztest/b.pdf', 'scope-artifacts', pdf_b, 23, 'application/pdf');
+  ASSERT public.scope_price_owner_approval(f.job, f.rev)->'quote_document_sha256s' = to_jsonb(ARRAY[pdf_a]),
+    'a PDF stored after the decision is not covered by it';
+  refused := false;
+  BEGIN PERFORM public.record_scope_price_approval(f.job, f.rev, v_approver, 'session', org, ARRAY[pdf_a, pdf_b]);
+  EXCEPTION WHEN check_violation THEN refused := SQLERRM = 'scope_owner_approval_documents_changed'; END;
+  ASSERT refused, 'a replay never widens the documents a decision covers';
+  ASSERT (public.record_scope_price_approval(f.job, f.rev, v_approver, 'session', org, ARRAY[pdf_a]))->>'replayed' = 'true',
+    'a replay naming the same documents replays';
+  -- A revision with no quote PDF: the decision covers no document.
+  g := pg_temp.scope_job(org);
+  p := public.record_scope_price_approval(g.job, g.rev, v_approver, 'session', org, '{}'::text[]);
+  ASSERT p#>'{approval,quote_document_sha256s}' = '[]'::jsonb, 'a decision with no documents covers none';
+  refused := false;
+  BEGIN INSERT INTO public.scope_owner_approvals(kind, job_id, scope_revision_id, scope_hash, pricing_hash,
+      quote_document_sha256s, approver_user_id, authority, via)
+    VALUES ('price', g.job, g.rev, 'x', 'y', ARRAY['not-a-hash'], v_approver, 'owner', 'session');
+  EXCEPTION WHEN check_violation THEN refused := true; END;
+  ASSERT refused, 'a document entry must be a sha256';
+END $$;
+
+-- 14. Shipped state, switch off: deploying changes nothing staff can do.
+-- Release on acceptance, the manual approval, a direct approver write, the
+-- automatic issue and its sweep, and crew order moves all go as before with no
+-- decision at all; each one the switch would have refused or held is recorded
+-- once (job_work_order_owner_unapproved plus one job event), privately.
+UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'owner_approval_saved_revision_required_v1';
+DO $$
+DECLARE
+  org uuid := (SELECT id FROM owa_people WHERE role = 'org');
+  v_approver uuid := (SELECT id FROM owa_people WHERE role = 'approver');
+  acc record; man record; dir record; stranger record; auto record; crewjob record;
+  r jsonb; v_row jsonb; crew uuid; crew2 uuid; refused boolean;
+BEGIN
+  -- Acceptance releases as before; the work order stays a draft for the
+  -- approver or the automatic issue.
+  acc := pg_temp.scope_job(org, 'accepted');
+  r := public.release_scope_job_drafts(acc.job, acc.rev);
+  ASSERT r->>'released' = 'true' AND r->>'held' IS NULL, 'off: acceptance releases as before';
+  ASSERT (SELECT released_at IS NOT NULL FROM public.scope_job_draft_sets WHERE job_id = acc.job), 'off: released';
+  ASSERT (SELECT status = 'draft' FROM public.work_orders WHERE id = acc.wo), 'off: release never approves, as before';
+  ASSERT (SELECT count(*) FROM public.job_events WHERE job_id = acc.job
+    AND event_type = 'scope_job_draft_work_order_released') = 1, 'off: one release audit';
+  ASSERT NOT EXISTS (SELECT 1 FROM public.job_events WHERE job_id = acc.job
+    AND event_type = 'scope_job_draft_issue_held'), 'off: no held audit';
+  ASSERT (SELECT count(*) FROM public.job_work_order_owner_unapproved WHERE job_id = acc.job
+    AND event = 'released' AND missing @> ARRAY['price_approval', 'work_order_approval']) = 1,
+    'off: the release the switch would have held is recorded';
+  r := public.release_scope_job_drafts(acc.job, acc.rev);
+  ASSERT r->>'replayed' = 'true' AND (SELECT count(*) FROM public.job_work_order_owner_unapproved
+    WHERE job_id = acc.job) = 1, 'off: a repeat release records nothing more';
+
+  -- The approver's approval issues a bound order with no price decision.
+  man := pg_temp.filled_job(org);
+  r := public.record_job_work_order_approval(man.wo, v_approver, 'session', pg_temp.wo_stamp(man.wo));
+  ASSERT r#>>'{issue,issued}' = 'true' AND r#>'{issue,without_owner_approval}' = '["price_approval"]'::jsonb,
+    'off: the manual approval issues as before';
+  ASSERT (SELECT status = 'approved' AND approved_by = v_approver AND work_order_approval_id IS NOT NULL
+      AND price_approval_id IS NULL FROM public.work_orders WHERE id = man.wo),
+    'off: sealed by the approver, the decision made is still stamped';
+  ASSERT (SELECT work_order_id FROM public.jobs WHERE id = man.job) = man.wo, 'off: the job points at it';
+  ASSERT (SELECT count(*) FROM public.job_work_order_owner_unapproved WHERE work_order_id = man.wo
+    AND event = 'issued' AND path = 'session' AND scope_revision_id = man.rev
+    AND missing = ARRAY['price_approval']) = 1, 'off: the issue the switch would have refused is recorded';
+
+  -- A direct write by a named approver seals as before.
+  dir := pg_temp.filled_job(org);
+  UPDATE public.work_orders SET status = 'approved', approved_by = v_approver, approved_via = 'session'
+    WHERE id = dir.wo;
+  ASSERT (SELECT status = 'approved' FROM public.work_orders WHERE id = dir.wo), 'off: an approver write seals as before';
+  ASSERT EXISTS (SELECT 1 FROM public.job_work_order_owner_unapproved WHERE work_order_id = dir.wo
+    AND event = 'issued' AND missing @> ARRAY['price_approval', 'work_order_approval']), 'off: recorded';
+  stranger := pg_temp.filled_job(org);
+  refused := false;
+  BEGIN UPDATE public.work_orders SET status = 'approved', approved_by = gen_random_uuid(), approved_via = 'session'
+    WHERE id = stranger.wo;
+  EXCEPTION WHEN insufficient_privilege THEN refused := true; END;
+  ASSERT refused, 'off: someone not on the lists still cannot approve';
+
+  -- The automatic issue and its sweep work as before.
+  UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_work_order_auto_issue_v1';
+  auto := pg_temp.filled_job(org);
+  ASSERT EXISTS (SELECT 1 FROM public.owner_approved_job_work_order_drafts(100) d WHERE d.work_order_id = auto.wo),
+    'off: the sweep reads every filled draft, as before';
+  v_row := public.auto_issue_job_work_order(auto.wo, pg_temp.wo_stamp(auto.wo));
+  ASSERT v_row->>'status' = 'approved' AND v_row->>'approved_via' = 'auto' AND v_row->>'approved_by' IS NULL,
+    'off: the automatic issue seals as before';
+  ASSERT NOT EXISTS (SELECT 1 FROM public.scope_owner_approvals WHERE job_id = auto.job),
+    'off: the automatic issue still decides nothing';
+  ASSERT (SELECT count(*) FROM public.job_work_order_owner_unapproved WHERE work_order_id = auto.wo
+    AND event = 'issued' AND path = 'auto' AND missing @> ARRAY['price_approval', 'work_order_approval']) = 1,
+    'off: the automatic issue the switch would have refused is recorded';
+  UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'job_work_order_auto_issue_v1';
+
+  -- Crew orders on a saved-quote job move as before.
+  crewjob := pg_temp.scope_job(org, 'accepted');
+  INSERT INTO public.work_orders(org_id, job_id, kind, status) VALUES (org, crewjob.job, 'crew', 'sent') RETURNING id INTO crew;
+  INSERT INTO public.work_orders(org_id, job_id, kind, status) VALUES (org, crewjob.job, 'crew', 'draft') RETURNING id INTO crew2;
+  UPDATE public.work_orders SET status = 'sent' WHERE id = crew2;
+  UPDATE public.work_orders SET status = 'accepted' WHERE id = crew2;
+  ASSERT (SELECT count(*) FROM public.work_orders WHERE id IN (crew, crew2) AND status IN ('sent', 'accepted')) = 2,
+    'off: crew orders on a saved-quote job move as before';
+  ASSERT (SELECT count(*) FROM public.job_work_order_owner_unapproved WHERE job_id = crewjob.job
+    AND event = 'crew_status' AND work_order_kind = 'crew') = 2,
+    'off: each crew move out of draft the switch would have refused is recorded once';
+
+  -- One job event per record; records are private and append only.
+  ASSERT (SELECT count(*) FROM public.job_events WHERE event_type = 'work_order_owner_unapproved')
+    = (SELECT count(*) FROM public.job_work_order_owner_unapproved), 'one job event per record';
+  refused := false;
+  BEGIN DELETE FROM public.job_work_order_owner_unapproved WHERE job_id = crewjob.job;
+  EXCEPTION WHEN check_violation THEN refused := true; END;
+  ASSERT refused, 'records cannot be deleted';
+  refused := false;
+  BEGIN UPDATE public.job_work_order_owner_unapproved SET missing = '{}' WHERE job_id = crewjob.job;
+  EXCEPTION WHEN check_violation THEN refused := true; END;
+  ASSERT refused, 'records cannot be changed';
+  ASSERT (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.job_work_order_owner_unapproved'::regclass)
+    AND NOT has_table_privilege('authenticated', 'public.job_work_order_owner_unapproved', 'SELECT')
+    AND NOT has_table_privilege('anon', 'public.job_work_order_owner_unapproved', 'SELECT')
+    AND NOT has_table_privilege('service_role', 'public.job_work_order_owner_unapproved', 'INSERT')
+    AND has_table_privilege('service_role', 'public.job_work_order_owner_unapproved', 'SELECT')
+    AND NOT has_function_privilege('authenticated', 'public.record_work_order_owner_unapproved(uuid,uuid,text,text,text,uuid,text[])', 'EXECUTE')
+    AND NOT has_function_privilege('service_role', 'public.record_work_order_owner_unapproved(uuid,uuid,text,text,text,uuid,text[])', 'EXECUTE'),
+    'records are written only by the seal, the crew gate and the release';
+
+  -- The same steps with the switch on are refused (sections 3, 6 and 7);
+  -- turning it on here refuses the next of each kind.
+  UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'owner_approval_saved_revision_required_v1';
+  refused := false;
+  BEGIN INSERT INTO public.work_orders(org_id, job_id, kind, status) VALUES (org, crewjob.job, 'crew', 'sent');
+  EXCEPTION WHEN SQLSTATE 'WO428' THEN refused := true; END;
+  ASSERT refused, 'on: the same crew move is refused';
+  acc := pg_temp.scope_job(org, 'accepted');
+  r := public.release_scope_job_drafts(acc.job, acc.rev);
+  ASSERT r->>'held' = 'true', 'on: the same release is held';
+  UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'owner_approval_saved_revision_required_v1';
 END $$;
 
 ROLLBACK;

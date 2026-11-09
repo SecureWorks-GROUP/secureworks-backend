@@ -94,7 +94,12 @@ revision is never issued automatically. Anything else is refused
 `owner_approval_required` and stays a draft. The sweep lists only orders whose
 decisions exist (`owner_approved_job_work_order_drafts`). The decisions are
 recorded through `approve_scope_price` and `approve_scope_work_order`; see
-AGENTS.md, "Price And Work Order Issue On Two Owner Decisions".
+AGENTS.md, "Price And Work Order Issue On Two Owner Decisions". All of this
+holds only while `owner_approval_saved_revision_required_v1` is on (seeded
+off). While it is off the automatic issue, the sweep, acceptance release and
+an approver's approve run exactly as before, and each issue that would have
+been held is recorded in `job_work_order_owner_unapproved` with what was
+missing.
 
 What is issued, and what waits for the approver:
 

@@ -168,11 +168,7 @@ import {
   type NamedScopeRevisionRead,
   type SentQuoteSourceHashes,
 } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
-import {
-  markUnapprovedLegacySendSent,
-  ownerPriceBeforeSend,
-  unapprovedSendKeyForQuickQuote,
-} from '../_shared/scope_freeze/owner_price_approval.ts'
+import { approvedQuotePdf, markUnapprovedLegacySendSent, ownerPriceBeforeSend, quotePdfBase64, unapprovedSendKeyForQuickQuote } from '../_shared/scope_freeze/owner_price_approval.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
@@ -41366,9 +41362,10 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   if (!(totalIncGST > 0)) {
     throw new Error('Quote total is zero or missing. Set pricing on the job in the scoping tool before sending.')
   }
-  // TK-S28: a named saved revision needs the owner's price decision; a send
-  // naming none follows owner_approval_saved_revision_required_v1 and is
-  // recorded before the email (20261109040000). Refused: nothing is sent.
+  // TK-S28: with no owner price decision the send follows
+  // owner_approval_saved_revision_required_v1 (off: sent as today and
+  // recorded before the email; on: refused). With a decision its PDF must be
+  // one the decision covers (20261109040000). Refused: nothing is sent.
   const ownerPrice = await ownerPriceBeforeSend(client, {
     job_id, sealed: sealedSource, path: 'quick-quote',
     send_key: unapprovedSendKeyForQuickQuote(crypto.randomUUID()), document_id: null,
@@ -41412,8 +41409,19 @@ async function sendQuickQuoteEmail(client: any, body: any) {
     html: emailHtml,
   }
 
-  // Attach PDF if URL provided
-  if (pdf_url) {
+  // Attach PDF if URL provided. On an approved saved revision the PDF must be
+  // one the owner's price decision covers, and exactly those bytes are
+  // attached; otherwise nothing is sent.
+  if (pdf_url && ownerPrice.approved) {
+    const approvedPdf = await approvedQuotePdf(ownerPrice.approved, String(pdf_url))
+    if (!approvedPdf.ok) {
+      throw new ApiError(approvedPdf.body.error, approvedPdf.status, { ok: false, ...approvedPdf.body })
+    }
+    emailPayload.attachments = [{
+      filename: `${job.job_number || 'Quote'}.pdf`,
+      content: quotePdfBase64(approvedPdf.bytes),
+    }]
+  } else if (pdf_url) {
     try {
       const pdfResp = await fetch(pdf_url)
       if (pdfResp.ok) {

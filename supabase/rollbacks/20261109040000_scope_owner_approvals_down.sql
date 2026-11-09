@@ -6,8 +6,10 @@
 --
 -- Kept on purpose: the recorded decisions (scope_owner_approvals, append
 -- only), the decision ids stamped on work orders, the owner list, the
--- retained acceptances and the unapproved-send records
--- (quote_send_price_unapproved_sends, no writer after this down).
+-- retained acceptances, the unapproved-send records
+-- (quote_send_price_unapproved_sends, no writer after this down) and the
+-- unapproved work order records (job_work_order_owner_unapproved, append
+-- only, no writer after this down).
 --
 -- Pair this down with the application code from before 20261109040000: the
 -- send and approval handlers of this change call functions this down removes. A draft set whose acceptance was retained while an
@@ -368,7 +370,8 @@ BEGIN
 END $$;
 
 DROP FUNCTION IF EXISTS public.approve_job_work_order(uuid, uuid, text, timestamptz, uuid);
-DROP FUNCTION IF EXISTS public.record_quote_send_price_unapproved(text, uuid, text, uuid, text);
+DROP FUNCTION IF EXISTS public.record_quote_send_price_unapproved(text, uuid, text, uuid, text, uuid);
+DROP FUNCTION IF EXISTS public.record_work_order_owner_unapproved(uuid, uuid, text, text, text, uuid, text[]);
 DROP TRIGGER IF EXISTS trg_work_orders_crew_owner_gate ON public.work_orders;
 DROP FUNCTION IF EXISTS public.work_orders_crew_owner_gate();
 DROP FUNCTION IF EXISTS public.owner_approved_job_work_order_drafts(integer);
@@ -376,7 +379,8 @@ DROP FUNCTION IF EXISTS public.scope_price_owner_approval(uuid, uuid);
 DROP FUNCTION IF EXISTS public.read_job_owner_approval_state(uuid, uuid);
 DROP FUNCTION IF EXISTS public.scope_job_draft_issue_state(uuid);
 DROP FUNCTION IF EXISTS public.record_job_work_order_approval(uuid, uuid, text, timestamptz, uuid, uuid, boolean);
-DROP FUNCTION IF EXISTS public.record_scope_price_approval(uuid, uuid, uuid, text, uuid);
+DROP FUNCTION IF EXISTS public.record_scope_price_approval(uuid, uuid, uuid, text, uuid, text[]);
+DROP FUNCTION IF EXISTS public.scope_revision_quote_documents(uuid);
 DROP FUNCTION IF EXISTS public.issue_owner_approved_job_work_order(uuid);
 DROP FUNCTION IF EXISTS public.link_issued_job_work_order(uuid);
 DROP FUNCTION IF EXISTS public.job_work_order_issue_check(public.work_orders);
@@ -386,5 +390,6 @@ DROP FUNCTION IF EXISTS public.job_work_order_not_ready(public.work_orders);
 DROP FUNCTION IF EXISTS public.job_work_order_content_hash(public.work_orders);
 DROP FUNCTION IF EXISTS public.owner_approval_authority(uuid);
 DROP FUNCTION IF EXISTS public.owner_approval_company_ok(uuid, uuid, uuid);
+DROP FUNCTION IF EXISTS public.owner_approval_required();
 
 DELETE FROM public.feature_flags WHERE flag_name = 'owner_approval_saved_revision_required_v1';

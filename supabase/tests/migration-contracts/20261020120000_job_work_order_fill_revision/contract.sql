@@ -116,12 +116,6 @@ BEGIN
   INSERT INTO public.work_order_settings (id, approver_user_ids) VALUES (1, ARRAY[v_approver])
   ON CONFLICT (id) DO UPDATE SET approver_user_ids =
     array_append(COALESCE(public.work_order_settings.approver_user_ids, '{}'::uuid[]), v_approver);
-  -- Since 20261109040000 a draft bound to a revision is sealed only once the
-  -- price on that revision is approved as well.
-  INSERT INTO public.scope_owner_approvals (kind, job_id, scope_revision_id, scope_hash, pricing_hash,
-    approver_user_id, authority, via)
-  VALUES ('price', v_job, v_rev_old, 'contract', 'contract',
-    v_approver, 'approver_list', 'session');
   SELECT updated_at INTO v_updated FROM public.work_orders WHERE id = v_wo;
   PERFORM public.approve_job_work_order(v_wo, v_approver, 'session', v_updated);
   SELECT encode(sha256(convert_to(jsonb_build_object(

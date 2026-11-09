@@ -4,16 +4,20 @@
 DO $$
 BEGIN
   ASSERT to_regclass('public.scope_owner_approvals') IS NOT NULL, 'down keeps the recorded decisions';
-  ASSERT to_regprocedure('public.record_scope_price_approval(uuid,uuid,uuid,text,uuid)') IS NULL
+  ASSERT to_regprocedure('public.record_scope_price_approval(uuid,uuid,uuid,text,uuid,text[])') IS NULL
     AND to_regprocedure('public.record_job_work_order_approval(uuid,uuid,text,timestamptz,uuid,uuid,boolean)') IS NULL
     AND to_regprocedure('public.issue_owner_approved_job_work_order(uuid)') IS NULL
     AND to_regprocedure('public.job_work_order_owner_gate(public.work_orders,text)') IS NULL
     AND to_regprocedure('public.owner_approved_job_work_order_drafts(integer)') IS NULL
     AND to_regprocedure('public.approve_job_work_order(uuid,uuid,text,timestamptz,uuid)') IS NULL
     AND to_regprocedure('public.owner_approval_company_ok(uuid,uuid,uuid)') IS NULL
-    AND to_regprocedure('public.record_quote_send_price_unapproved(text,uuid,text,uuid,text)') IS NULL,
+    AND to_regprocedure('public.record_quote_send_price_unapproved(text,uuid,text,uuid,text,uuid)') IS NULL
+    AND to_regprocedure('public.scope_revision_quote_documents(uuid)') IS NULL
+    AND to_regprocedure('public.owner_approval_required()') IS NULL
+    AND to_regprocedure('public.record_work_order_owner_unapproved(uuid,uuid,text,text,text,uuid,text[])') IS NULL,
     'down removes the owner approval functions';
   ASSERT to_regclass('public.quote_send_price_unapproved_sends') IS NOT NULL, 'down keeps the unapproved-send records';
+  ASSERT to_regclass('public.job_work_order_owner_unapproved') IS NOT NULL, 'down keeps the unapproved work order records';
   ASSERT position('acceptance_recorded_at' IN pg_get_functiondef('public.scope_payment_acceptance_event()'::regprocedure)) = 0,
     'down restores the earlier deposit event time';
   ASSERT NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_work_orders_crew_owner_gate'), 'down removes the crew gate';

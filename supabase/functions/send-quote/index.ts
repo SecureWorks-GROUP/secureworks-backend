@@ -42,10 +42,14 @@ import {
 } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import {
+  approvedDocumentSnapshotPrice,
+  approvedQuotePdf,
+  approvedQuotePdfsByLabel,
   claimUnapprovedLegacySend,
   markUnapprovedLegacySendSent,
-  ownerPriceGate,
   type OwnerPriceGate,
+  ownerPriceGate,
+  quotePdfBase64,
   unapprovedSendKeyForDocument,
 } from '../_shared/scope_freeze/owner_price_approval.ts'
 import {
@@ -962,7 +966,7 @@ serve(async (req: Request) => {
       if (claimed.status !== 'claimed') {
         // Another call already claimed or published this document.
         console.log(`[send-quote] doc ${document_id} already sent/claimed — suppressing duplicate email`)
-        // A published send that named no saved revision: move its record to
+        // A published send with no owner price decision: move its record to
         // sent if a failure after the provider left it claimed. Never resends.
         if (ownerPrice.kind === 'legacy_unapproved' && doc.job_id && quoteDocumentHasClientSend(doc)) {
           await markUnapprovedLegacySendSent(sb, {
@@ -1005,12 +1009,31 @@ serve(async (req: Request) => {
         return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
           || jsonResponse(ownerPrice.body, ownerPrice.status, corsHeaders)
       }
-      // A send naming no saved revision is recorded before the email, so it
-      // is accounted for even if a later step fails. No record, no email.
+      // An approved saved revision: the price the document's page shows must
+      // be in the approved frozen price, and the PDF it links to must be one
+      // the owner's price decision covers.
+      if (ownerPrice.kind === 'approved') {
+        const shownPrice = approvedDocumentSnapshotPrice(doc.data_snapshot_json, sealedPricingJson)
+        const checked = shownPrice.ok && doc.pdf_url
+          ? await approvedQuotePdf(ownerPrice, String(doc.pdf_url))
+          : shownPrice
+        if (!checked.ok) {
+          console.log('[send-quote] quote PDF refused', JSON.stringify({
+            document_id, job_id: doc.job_id, code: checked.body.code,
+          }))
+          const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
+          return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+            || jsonResponse(checked.body, checked.status, corsHeaders)
+        }
+      }
+      // A send with no owner price decision (switch off) is recorded before
+      // the email, so it is accounted for even if a later step fails. No
+      // record, no email.
       if (ownerPrice.kind === 'legacy_unapproved' && doc.job_id) {
         const audit = await claimUnapprovedLegacySend(sb, {
           send_key: unapprovedSendKeyForDocument(document_id),
           job_id: doc.job_id, path: 'send', document_id,
+          scope_revision_id: ownerPrice.scope_revision_id,
         })
         if (!audit.ok) {
           const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
@@ -2799,6 +2822,7 @@ serve(async (req: Request) => {
       // pricing, not from the live job. An unprovable named revision refuses
       // here, before any claim or email.
       let ownerPriceRuns: OwnerPriceGate
+      let approvedRunPdfs: Map<string, Uint8Array> = new Map()
       {
         const sealedRuns = sealedSendSource(await sourceScopeRevisionReadRuns, job.id)
         if (sealedRuns.kind === 'refused') {
@@ -2815,6 +2839,19 @@ serve(async (req: Request) => {
             job_id: job.id, code: ownerPriceRuns.body.code,
           }))
           return jsonResponse(ownerPriceRuns.body, ownerPriceRuns.status, corsHeaders)
+        }
+        // An approved saved revision: every run PDF must be one the revision
+        // recorded before the owner's price decision. Read once here; the
+        // email carries these bytes, never the URL. Before any claim or email.
+        if (ownerPriceRuns.kind === 'approved') {
+          const checkedRunPdfs = await approvedQuotePdfsByLabel(ownerPriceRuns, run_pdfs)
+          if (!checkedRunPdfs.ok) {
+            console.log('[send-quote] send-runs quote PDF refused', JSON.stringify({
+              job_id: job.id, code: checkedRunPdfs.body.code,
+            }))
+            return jsonResponse(checkedRunPdfs.body, checkedRunPdfs.status, corsHeaders)
+          }
+          approvedRunPdfs = checkedRunPdfs.byLabel
         }
         const runsSource = quoteSendBuildSource(sealedRuns, job)
         job.scope_json = runsSource.scope_json
@@ -3102,8 +3139,8 @@ serve(async (req: Request) => {
         }
       }
 
-      // Documents already published on an earlier call that named no saved
-      // revision: move a record a failure left claimed to sent. Never resends.
+      // Documents already published on an earlier call with no owner price
+      // decision: move a record a failure left claimed to sent. Never resends.
       if (ownerPriceRuns.kind === 'legacy_unapproved') {
         for (const published of publishedExistingDocs) {
           if (typeof published?.id !== 'string') continue
@@ -3173,11 +3210,15 @@ serve(async (req: Request) => {
           if (run_pdfs) {
             for (const run of recipient.runs) {
               const pdfUrl = run_pdfs[run.run_label || '']
-              if (pdfUrl) {
-                attachments.push({
-                  path: pdfUrl,
-                  filename: `Quote_${job.job_number || 'SWF'}_${run.run_label || 'RUN'}.pdf`,
-                })
+              const filename = `Quote_${job.job_number || 'SWF'}_${run.run_label || 'RUN'}.pdf`
+              if (ownerPriceRuns.kind === 'approved') {
+                // Only the bytes checked against the approved revision.
+                const checkedBytes = approvedRunPdfs.get(run.run_label || '')
+                if (checkedBytes) {
+                  attachments.push({ content: quotePdfBase64(checkedBytes), filename })
+                }
+              } else if (pdfUrl) {
+                attachments.push({ path: pdfUrl, filename })
               }
             }
           }
@@ -3259,6 +3300,7 @@ serve(async (req: Request) => {
               const audit = await claimUnapprovedLegacySend(sb, {
                 send_key: unapprovedSendKeyForDocument(docId),
                 job_id: job.id, path: 'send-runs', document_id: docId,
+                scope_revision_id: ownerPriceRuns.scope_revision_id,
               })
               if (!audit.ok) {
                 return await abortAfterDocumentClaimRelease(
