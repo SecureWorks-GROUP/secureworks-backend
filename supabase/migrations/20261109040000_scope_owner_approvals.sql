@@ -104,11 +104,20 @@ CREATE TRIGGER trg_job_work_order_owner_unapproved_no_truncate
 -- effort: a record that cannot be written is logged as a warning and never
 -- stops or rolls back the issue, release or crew move it describes. Each
 -- caller also wraps the call, so a refused call is caught the same way.
+-- query_canceled is caught by name (OTHERS excludes it), so a statement
+-- timeout spent in the record cancels the record, not the staff action; the
+-- timer fires once, so the action then finishes as it would without the
+-- record. A lock wait is capped at 200 ms so the record cannot hold the
+-- action; the cap is put back before returning, and an error rolls it back
+-- with the block.
 CREATE OR REPLACE FUNCTION public.record_work_order_owner_unapproved(
   p_job_id uuid, p_work_order_id uuid, p_kind text, p_event text, p_path text,
   p_scope_revision_id uuid, p_missing text[]
 ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_lock_timeout text := current_setting('lock_timeout');
 BEGIN
+  PERFORM set_config('lock_timeout', '200ms', true);
   INSERT INTO public.job_work_order_owner_unapproved(job_id, work_order_id, work_order_kind,
       event, path, scope_revision_id, missing)
     VALUES (p_job_id, p_work_order_id, p_kind, p_event, p_path, p_scope_revision_id,
@@ -117,7 +126,8 @@ BEGIN
     (p_job_id, 'work_order_owner_unapproved', jsonb_build_object(
       'work_order_id', p_work_order_id, 'kind', p_kind, 'event', p_event, 'path', p_path,
       'scope_revision_id', p_scope_revision_id, 'missing', to_jsonb(COALESCE(p_missing, '{}'))));
-EXCEPTION WHEN OTHERS THEN
+  PERFORM set_config('lock_timeout', v_lock_timeout, true);
+EXCEPTION WHEN OTHERS OR query_canceled THEN
   RAISE WARNING 'work_order_owner_unapproved not recorded (%): %', SQLSTATE, SQLERRM;
 END $$;
 -- Only the seal, the crew gate and the release write a record; no API role.
@@ -482,7 +492,7 @@ BEGIN
       -- want; a read that fails never stops the issue.
       BEGIN
         v_gate := public.job_work_order_owner_gate(NEW, v_hash);
-      EXCEPTION WHEN OTHERS THEN
+      EXCEPTION WHEN OTHERS OR query_canceled THEN
         RAISE WARNING 'owner gate not read for work order % (%): %', NEW.id, SQLSTATE, SQLERRM;
         v_gate := jsonb_build_object('bound', false, 'missing', jsonb_build_array('owner_gate_unreadable'));
       END;
@@ -554,7 +564,7 @@ BEGIN
             WHERE a.kind = 'work_order' AND a.work_order_id = NEW.id
               AND a.scope_revision_id IS NULL AND a.work_order_content_hash = v_hash
               AND a.approver_user_id = NEW.approved_by;
-        EXCEPTION WHEN OTHERS THEN
+        EXCEPTION WHEN OTHERS OR query_canceled THEN
           RAISE WARNING 'owner decision not read for work order % (%): %', NEW.id, SQLSTATE, SQLERRM;
           v_unbound_decision := NULL;
         END;
@@ -592,7 +602,7 @@ BEGIN
           NEW.approved_via, (v_gate->>'revision_id')::uuid,
           ARRAY(SELECT jsonb_array_elements_text(v_gate->'missing'))
             || CASE WHEN v_mismatch THEN ARRAY['work_order_approver'] ELSE '{}'::text[] END);
-      EXCEPTION WHEN OTHERS THEN
+      EXCEPTION WHEN OTHERS OR query_canceled THEN
         RAISE WARNING 'work_order_owner_unapproved not recorded (%): %', SQLSTATE, SQLERRM;
       END;
     END IF;
@@ -625,7 +635,7 @@ BEGIN
         PERFORM public.record_work_order_owner_unapproved(NEW.job_id, NEW.id, 'crew', 'crew_status',
           NEW.status, NEW.scope_revision_id, ARRAY['job_work_order_not_issued_on_owner_approvals']);
       END IF;
-    EXCEPTION WHEN OTHERS THEN
+    EXCEPTION WHEN OTHERS OR query_canceled THEN
       RAISE WARNING 'crew work order owner check not recorded (%): %', SQLSTATE, SQLERRM;
     END;
     RETURN NEW;
@@ -1119,7 +1129,7 @@ BEGIN
             acceptance_scope_revision_id = COALESCE(acceptance_scope_revision_id, s.scope_revision_id),
             acceptance_legacy = COALESCE(p_legacy, false)
         WHERE job_id = j.id AND acceptance_recorded_at IS NULL;
-    EXCEPTION WHEN OTHERS THEN
+    EXCEPTION WHEN OTHERS OR query_canceled THEN
       RAISE WARNING 'scope draft acceptance time not kept (%): %', SQLSTATE, SQLERRM;
     END;
     UPDATE public.scope_job_draft_sets SET released_at = now() WHERE job_id = j.id AND released_at IS NULL;
@@ -1133,7 +1143,7 @@ BEGIN
           'acceptance', s.scope_revision_id,
           ARRAY(SELECT jsonb_array_elements_text(v_issue->'missing')));
       END IF;
-    EXCEPTION WHEN OTHERS THEN
+    EXCEPTION WHEN OTHERS OR query_canceled THEN
       RAISE WARNING 'work_order_owner_unapproved not recorded (%): %', SQLSTATE, SQLERRM;
     END;
     RETURN jsonb_build_object('released', true, 'replayed', false);
@@ -1190,7 +1200,7 @@ BEGIN
     -- stops the read.
     BEGIN
       v_issue := public.scope_job_draft_issue_state(p_job_id);
-    EXCEPTION WHEN OTHERS THEN
+    EXCEPTION WHEN OTHERS OR query_canceled THEN
       RAISE WARNING 'scope draft owner state not read (%): %', SQLSTATE, SQLERRM;
       v_issue := NULL;
     END;

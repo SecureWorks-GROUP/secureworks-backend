@@ -789,6 +789,62 @@ BEGIN
   UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'owner_approval_saved_revision_required_v1';
 END $$;
 
+-- 15a. Switch off, a statement timeout spent in the record: a test-only
+-- trigger makes the record sleep 1 s under a 500 ms statement timeout. The
+-- record is cancelled, and the manual approval, a direct approver write, the
+-- automatic issue, the release and a crew move from draft to sent still finish
+-- exactly as today. Each action is its own statement, because the timeout is
+-- per statement.
+CREATE TEMP TABLE owa_timeout(name text PRIMARY KEY, job uuid, wo uuid, rev uuid);
+CREATE FUNCTION public.owa_slow_record() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN PERFORM pg_sleep(1); RETURN NEW; END $$;
+DO $$
+DECLARE
+  org uuid := (SELECT id FROM owa_people WHERE role = 'org');
+  x record; crew uuid;
+BEGIN
+  ASSERT NOT public.owner_approval_required(), 'section 15a runs with the switch off';
+  UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_work_order_auto_issue_v1';
+  x := pg_temp.filled_job(org); INSERT INTO owa_timeout VALUES ('manual', x.job, x.wo, x.rev);
+  x := pg_temp.filled_job(org); INSERT INTO owa_timeout VALUES ('direct', x.job, x.wo, x.rev);
+  x := pg_temp.filled_job(org); INSERT INTO owa_timeout VALUES ('auto', x.job, x.wo, x.rev);
+  x := pg_temp.scope_job(org, 'accepted'); INSERT INTO owa_timeout VALUES ('release', x.job, x.wo, x.rev);
+  x := pg_temp.scope_job(org, 'accepted');
+  INSERT INTO public.work_orders(org_id, job_id, kind, status) VALUES (org, x.job, 'crew', 'draft')
+    RETURNING id INTO crew;
+  INSERT INTO owa_timeout VALUES ('crew', x.job, crew, x.rev);
+  CREATE TRIGGER owa_slow BEFORE INSERT ON public.job_work_order_owner_unapproved
+    FOR EACH ROW EXECUTE FUNCTION public.owa_slow_record();
+END $$;
+CREATE TEMP TABLE owa_timeout_count AS SELECT count(*) AS n FROM public.job_work_order_owner_unapproved;
+SET statement_timeout = '500ms';
+SELECT public.approve_job_work_order(t.wo, (SELECT id FROM owa_people WHERE role = 'approver'), 'session',
+  pg_temp.wo_stamp(t.wo), (SELECT id FROM owa_people WHERE role = 'org')) FROM owa_timeout t WHERE t.name = 'manual';
+UPDATE public.work_orders SET status = 'approved', approved_by = (SELECT id FROM owa_people WHERE role = 'approver'),
+  approved_via = 'session' WHERE id = (SELECT wo FROM owa_timeout WHERE name = 'direct');
+SELECT public.auto_issue_job_work_order(t.wo, pg_temp.wo_stamp(t.wo)) FROM owa_timeout t WHERE t.name = 'auto';
+SELECT public.release_scope_job_drafts(t.job, t.rev) FROM owa_timeout t WHERE t.name = 'release';
+UPDATE public.work_orders SET status = 'sent' WHERE id = (SELECT wo FROM owa_timeout WHERE name = 'crew');
+RESET statement_timeout;
+DO $$
+BEGIN
+  ASSERT (SELECT status = 'approved' FROM public.work_orders WHERE id = (SELECT wo FROM owa_timeout WHERE name = 'manual'))
+    AND (SELECT j.work_order_id = t.wo FROM public.jobs j JOIN owa_timeout t ON t.job = j.id WHERE t.name = 'manual'),
+    'timeout: the manual approval issues as today';
+  ASSERT (SELECT status = 'approved' AND sealed_content_hash IS NOT NULL FROM public.work_orders
+    WHERE id = (SELECT wo FROM owa_timeout WHERE name = 'direct')), 'timeout: an approver write seals as today';
+  ASSERT (SELECT status = 'approved' AND approved_via = 'auto' FROM public.work_orders
+    WHERE id = (SELECT wo FROM owa_timeout WHERE name = 'auto')), 'timeout: the automatic issue seals as today';
+  ASSERT (SELECT released_at IS NOT NULL FROM public.scope_job_draft_sets
+    WHERE job_id = (SELECT job FROM owa_timeout WHERE name = 'release')), 'timeout: the release goes as today';
+  ASSERT (SELECT status = 'sent' FROM public.work_orders WHERE id = (SELECT wo FROM owa_timeout WHERE name = 'crew')),
+    'timeout: the crew move from draft to sent goes as today';
+  ASSERT (SELECT count(*) FROM public.job_work_order_owner_unapproved) = (SELECT n FROM owa_timeout_count),
+    'timeout: every record was cancelled by the timeout, so the slow record was reached each time';
+  DROP TRIGGER owa_slow ON public.job_work_order_owner_unapproved;
+  UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'job_work_order_auto_issue_v1';
+END $$;
+
 -- 15. Switch off, fault injection: a record that cannot be written, or an
 -- owner gate that cannot be read, never stops or rolls back a release, an
 -- approval, an approver write, the automatic issue, its sweep, a crew move or

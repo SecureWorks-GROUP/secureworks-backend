@@ -4749,8 +4749,10 @@ read the gate's verdict, and no decision is written) and each case it would
 have held is recorded in `job_work_order_owner_unapproved` (append-only, with
 what was missing, one job event each) by `record_work_order_owner_unapproved`.
 That record is best effort: every write and gate read on the switch-off path
-sits in its own exception block, so a failed record or an unreadable gate is a
-warning and never blocks or rolls back an issue, release or crew move. The
+sits in its own exception block that also catches `query_canceled` by name
+(`OTHERS` excludes it), so a failed record, an unreadable gate or a statement
+timeout spent in either is a warning and never blocks or rolls back an issue,
+release or crew move; the writer caps its own lock waits at 200 ms. The
 switch is read only through `owner_approval_required()`. A
 decision is only for a job in the approver's own company
 (`owner_approval_company_ok`; a NULL company never passes): the ops-api doors
