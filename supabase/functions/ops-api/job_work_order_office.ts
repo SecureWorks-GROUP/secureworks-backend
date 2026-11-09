@@ -318,6 +318,7 @@ export async function approveOfficeJobWorkOrder(
   // The decision is recorded; the order is issued only when the owner
   // approval policy allows (owner_approval.issue says what it waits for).
   const { workOrder, ownerApproval, issued } = splitOwnerApprovalResult(data);
+  if (!ownerApproval) return { work_order: workOrder };
   return { work_order: workOrder, issued, owner_approval: ownerApproval };
 }
 

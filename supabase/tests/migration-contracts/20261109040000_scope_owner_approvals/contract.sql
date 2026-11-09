@@ -358,8 +358,8 @@ BEGIN
   UPDATE public.work_orders SET scope_items = '[{"description":"Install"}]', agreed_labour_ex = 500 WHERE id IN (w1, w2);
   UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'owner_approval_saved_revision_required_v1';
   v := public.approve_job_work_order(w1, v_approver, 'session', pg_temp.wo_stamp(w1));
-  ASSERT v->>'status' = 'approved' AND v->>'work_order_approval_id' IS NOT NULL AND v->>'price_approval_id' IS NULL
-    AND v#>>'{owner_approval,approval,authority}' = 'approver_list', 'unbound: the approver''s decision seals and is recorded';
+  ASSERT v->>'status' = 'approved' AND v->>'approved_by' = v_approver::text AND NOT v ? 'owner_approval',
+    'unbound, switch off: the approval seals as before, with the reply it gave before';
   UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'owner_approval_saved_revision_required_v1';
   refused := false;
   BEGIN PERFORM public.approve_job_work_order(w2, v_approver, 'session', pg_temp.wo_stamp(w2));
@@ -505,6 +505,21 @@ BEGIN
   r := public.record_quote_send_price_unapproved('quote_document:' || gen_random_uuid(), f.job, 'send', NULL, 'sent');
   ASSERT r->>'recorded' = 'false', 'a mark with no claim invents nothing';
   ASSERT (SELECT count(*) FROM public.quote_send_price_unapproved_sends WHERE job_id = f.job) = 1, 'one record';
+  -- A document claimed by a bundle attempt that failed is retried through
+  -- /send (and the reverse) on the same record, never refused.
+  DECLARE doc2 uuid := gen_random_uuid(); key2 text := 'quote_document:' || doc2;
+  BEGIN
+    r := public.record_quote_send_price_unapproved(key2, f.job, 'send-runs', doc2, 'claimed', f.rev);
+    r := public.record_quote_send_price_unapproved(key2, f.job, 'send', doc2, 'claimed');
+    ASSERT r->>'recorded' = 'true' AND r->>'state' = 'claimed' AND r->>'path' = 'send-runs',
+      'a /send retry of a document a bundle claimed keeps the one record';
+    r := public.record_quote_send_price_unapproved(key2, f.job, 'send', doc2, 'sent');
+    ASSERT r->>'state' = 'sent', 'the /send retry marks the record sent';
+    r := public.record_quote_send_price_unapproved(key2, f.job, 'send-runs', doc2, 'claimed', f.rev);
+    ASSERT r->>'recorded' = 'true', 'a later bundle claim of the same document replays';
+    ASSERT (SELECT count(*) FROM public.job_events WHERE job_id = f.job
+      AND event_type = 'quote_send_price_unapproved') = 2, 'one job event per document';
+  END;
   refused := false;
   BEGIN PERFORM public.record_quote_send_price_unapproved(key, gen_random_uuid(), 'send', doc, 'claimed');
   EXCEPTION WHEN unique_violation THEN refused := true; END;
@@ -536,10 +551,9 @@ BEGIN
     'its event says no price decision on that revision';
   ASSERT EXISTS (SELECT 1 FROM public.job_events WHERE job_id = f.job AND event_type = 'quote_send_price_unapproved'
     AND detail_json->>'reason' = 'no_saved_revision'), 'a send naming no revision keeps its reason';
-  refused := false;
-  BEGIN PERFORM public.record_quote_send_price_unapproved('quote_document:' || doc, f.job, 'send', doc, 'claimed', NULL);
-  EXCEPTION WHEN unique_violation THEN refused := true; END;
-  ASSERT refused, 'a key never changes its revision';
+  r := public.record_quote_send_price_unapproved('quote_document:' || doc, f.job, 'send', doc, 'claimed', NULL);
+  ASSERT r->>'recorded' = 'true' AND (SELECT scope_revision_id = f.rev FROM public.quote_send_price_unapproved_sends
+    WHERE send_key = 'quote_document:' || doc), 'a retry replays and the record keeps the revision it was claimed with';
 END $$;
 
 -- 13. A late owner approval never moves the deposit: the quote_accepted event
@@ -655,7 +669,7 @@ BEGIN
   -- approver or the automatic issue.
   acc := pg_temp.scope_job(org, 'accepted');
   r := public.release_scope_job_drafts(acc.job, acc.rev);
-  ASSERT r->>'released' = 'true' AND r->>'held' IS NULL, 'off: acceptance releases as before';
+  ASSERT r = '{"released": true, "replayed": false}'::jsonb, 'off: acceptance releases as before, same reply';
   ASSERT (SELECT released_at IS NOT NULL FROM public.scope_job_draft_sets WHERE job_id = acc.job), 'off: released';
   ASSERT (SELECT status = 'draft' FROM public.work_orders WHERE id = acc.wo), 'off: release never approves, as before';
   ASSERT (SELECT count(*) FROM public.job_events WHERE job_id = acc.job
@@ -666,21 +680,40 @@ BEGIN
     AND event = 'released' AND missing @> ARRAY['price_approval', 'work_order_approval']) = 1,
     'off: the release the switch would have held is recorded';
   r := public.release_scope_job_drafts(acc.job, acc.rev);
-  ASSERT r->>'replayed' = 'true' AND (SELECT count(*) FROM public.job_work_order_owner_unapproved
-    WHERE job_id = acc.job) = 1, 'off: a repeat release records nothing more';
+  ASSERT r = '{"released": true, "replayed": true}'::jsonb AND (SELECT count(*) FROM public.job_work_order_owner_unapproved
+    WHERE job_id = acc.job) = 1, 'off: a repeat release records nothing more, same reply';
 
-  -- The approver's approval issues a bound order with no price decision.
+  -- The approver's approval issues a bound order with no decision, exactly as
+  -- before: the same reply, nothing decided.
   man := pg_temp.filled_job(org);
-  r := public.record_job_work_order_approval(man.wo, v_approver, 'session', pg_temp.wo_stamp(man.wo));
-  ASSERT r#>>'{issue,issued}' = 'true' AND r#>'{issue,without_owner_approval}' = '["price_approval"]'::jsonb,
-    'off: the manual approval issues as before';
-  ASSERT (SELECT status = 'approved' AND approved_by = v_approver AND work_order_approval_id IS NOT NULL
+  v_row := public.approve_job_work_order(man.wo, v_approver, 'session', pg_temp.wo_stamp(man.wo), org);
+  ASSERT v_row->>'status' = 'approved' AND NOT v_row ? 'owner_approval',
+    'off: the manual approval issues as before, with the reply it gave before';
+  ASSERT (SELECT status = 'approved' AND approved_by = v_approver AND work_order_approval_id IS NULL
       AND price_approval_id IS NULL FROM public.work_orders WHERE id = man.wo),
-    'off: sealed by the approver, the decision made is still stamped';
+    'off: sealed by the approver';
+  ASSERT NOT EXISTS (SELECT 1 FROM public.scope_owner_approvals WHERE job_id = man.job),
+    'off: the approval records no owner decision';
   ASSERT (SELECT work_order_id FROM public.jobs WHERE id = man.job) = man.wo, 'off: the job points at it';
   ASSERT (SELECT count(*) FROM public.job_work_order_owner_unapproved WHERE work_order_id = man.wo
     AND event = 'issued' AND path = 'session' AND scope_revision_id = man.rev
-    AND missing = ARRAY['price_approval']) = 1, 'off: the issue the switch would have refused is recorded';
+    AND missing @> ARRAY['price_approval', 'work_order_approval']) = 1,
+    'off: the issue the switch would have refused is recorded';
+
+  dir := pg_temp.filled_job(org);
+  v_row := public.approve_job_work_order(dir.wo, v_approver, 'session', pg_temp.wo_stamp(dir.wo));
+  ASSERT v_row->>'status' = 'approved' AND NOT v_row ? 'owner_approval',
+    'off: the four-argument approval issues as before, with the reply it gave before';
+
+  -- A shared-lane draft approved before the customer accepted keeps the
+  -- error it gives today.
+  stranger := pg_temp.scope_job(org);
+  refused := false;
+  BEGIN PERFORM public.approve_job_work_order(stranger.wo, v_approver, 'session', pg_temp.wo_stamp(stranger.wo), org);
+  EXCEPTION WHEN check_violation THEN
+    refused := SQLERRM = 'scope_drafts_acceptance_required';
+  END;
+  ASSERT refused, 'off: approving before acceptance keeps the error it gives today';
 
   -- A direct write by a named approver seals as before.
   dir := pg_temp.filled_job(org);
@@ -754,6 +787,75 @@ BEGIN
   r := public.release_scope_job_drafts(acc.job, acc.rev);
   ASSERT r->>'held' = 'true', 'on: the same release is held';
   UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'owner_approval_saved_revision_required_v1';
+END $$;
+
+-- 15. Switch off, fault injection: a record that cannot be written, or an
+-- owner gate that cannot be read, never stops or rolls back a release, an
+-- approval, an approver write, the automatic issue, its sweep, a crew move or
+-- the draft read. Each does exactly what it does today.
+CREATE FUNCTION public.owa_injected_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'injected_audit_failure'; END $$;
+DO $$
+DECLARE
+  org uuid := (SELECT id FROM owa_people WHERE role = 'org');
+  v_approver uuid := (SELECT id FROM owa_people WHERE role = 'approver');
+  acc record; man record; dir record; auto record; crewjob record;
+  r jsonb; v_row jsonb; crew uuid; n_before bigint; pass int;
+BEGIN
+  ASSERT NOT public.owner_approval_required(), 'section 15 runs with the switch off';
+  UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_work_order_auto_issue_v1';
+  FOR pass IN 1..2 LOOP
+    IF pass = 1 THEN
+      CREATE TRIGGER owa_inject BEFORE INSERT ON public.job_work_order_owner_unapproved
+        FOR EACH ROW EXECUTE FUNCTION public.owa_injected_failure();
+    ELSE
+      DROP TRIGGER owa_inject ON public.job_work_order_owner_unapproved;
+      EXECUTE $f$CREATE OR REPLACE FUNCTION public.job_work_order_owner_gate(w public.work_orders, p_hash text DEFAULT NULL)
+        RETURNS jsonb LANGUAGE plpgsql STABLE AS $g$ BEGIN RAISE EXCEPTION 'injected_gate_failure'; END $g$ $f$;
+    END IF;
+    n_before := (SELECT count(*) FROM public.job_work_order_owner_unapproved);
+
+    acc := pg_temp.scope_job(org, 'accepted');
+    r := public.release_scope_job_drafts(acc.job, acc.rev);
+    ASSERT r = '{"released": true, "replayed": false}'::jsonb
+      AND (SELECT released_at IS NOT NULL FROM public.scope_job_draft_sets WHERE job_id = acc.job),
+      format('fault %s: the release goes as today', pass);
+    r := public.read_scope_job_drafts(acc.job, acc.rev, org);
+    ASSERT r#>>'{work_order,status}' = 'released', format('fault %s: the draft read goes as today', pass);
+
+    man := pg_temp.filled_job(org);
+    v_row := public.approve_job_work_order(man.wo, v_approver, 'session', pg_temp.wo_stamp(man.wo), org);
+    ASSERT v_row->>'status' = 'approved' AND NOT v_row ? 'owner_approval'
+      AND (SELECT work_order_id FROM public.jobs WHERE id = man.job) = man.wo,
+      format('fault %s: the manual approval issues as today', pass);
+
+    dir := pg_temp.filled_job(org);
+    UPDATE public.work_orders SET status = 'approved', approved_by = v_approver, approved_via = 'session'
+      WHERE id = dir.wo;
+    ASSERT (SELECT status = 'approved' AND sealed_content_hash IS NOT NULL FROM public.work_orders WHERE id = dir.wo),
+      format('fault %s: an approver write seals as today', pass);
+
+    auto := pg_temp.filled_job(org);
+    ASSERT EXISTS (SELECT 1 FROM public.owner_approved_job_work_order_drafts(100) d WHERE d.work_order_id = auto.wo),
+      format('fault %s: the sweep lists the draft as today', pass);
+    v_row := public.auto_issue_job_work_order(auto.wo, pg_temp.wo_stamp(auto.wo));
+    ASSERT v_row->>'status' = 'approved' AND v_row->>'approved_via' = 'auto',
+      format('fault %s: the automatic issue seals as today', pass);
+
+    crewjob := pg_temp.scope_job(org, 'accepted');
+    INSERT INTO public.work_orders(org_id, job_id, kind, status) VALUES (org, crewjob.job, 'crew', 'draft')
+      RETURNING id INTO crew;
+    UPDATE public.work_orders SET status = 'sent' WHERE id = crew;
+    INSERT INTO public.work_orders(org_id, job_id, kind, status) VALUES (org, crewjob.job, 'crew', 'sent');
+    ASSERT (SELECT count(*) FROM public.work_orders WHERE job_id = crewjob.job AND kind = 'crew' AND status = 'sent') = 2,
+      format('fault %s: crew moves go as today', pass);
+
+    IF pass = 1 THEN
+      ASSERT (SELECT count(*) FROM public.job_work_order_owner_unapproved) = n_before,
+        'fault 1: no record was written and nothing else was lost';
+    END IF;
+  END LOOP;
+  UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'job_work_order_auto_issue_v1';
 END $$;
 
 ROLLBACK;

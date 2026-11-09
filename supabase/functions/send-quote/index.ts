@@ -1027,19 +1027,14 @@ serve(async (req: Request) => {
         }
       }
       // A send with no owner price decision (switch off) is recorded before
-      // the email, so it is accounted for even if a later step fails. No
-      // record, no email.
+      // the email, best effort: a record that cannot be written is logged and
+      // the send goes as today.
       if (ownerPrice.kind === 'legacy_unapproved' && doc.job_id) {
-        const audit = await claimUnapprovedLegacySend(sb, {
+        await claimUnapprovedLegacySend(sb, {
           send_key: unapprovedSendKeyForDocument(document_id),
           job_id: doc.job_id, path: 'send', document_id,
           scope_revision_id: ownerPrice.scope_revision_id,
         })
-        if (!audit.ok) {
-          const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
-          return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
-            || jsonResponse(audit.body, audit.status, corsHeaders)
-        }
       }
       {
         const emailHtml = buildQuoteEmail({
@@ -3290,24 +3285,19 @@ serve(async (req: Request) => {
             )
           }
 
-          // A send naming no saved revision is recorded for each of this
-          // email's documents before it goes. No record, no email.
+          // A send with no owner price decision is recorded for each of this
+          // email's documents before it goes, best effort: a record that
+          // cannot be written is logged and the email goes as today.
           const recipientDocIds = recipient.docs
             .map((doc: { id?: string }) => doc?.id)
             .filter((id: unknown): id is string => typeof id === 'string')
           if (ownerPriceRuns.kind === 'legacy_unapproved') {
             for (const docId of recipientDocIds) {
-              const audit = await claimUnapprovedLegacySend(sb, {
+              await claimUnapprovedLegacySend(sb, {
                 send_key: unapprovedSendKeyForDocument(docId),
                 job_id: job.id, path: 'send-runs', document_id: docId,
                 scope_revision_id: ownerPriceRuns.scope_revision_id,
               })
-              if (!audit.ok) {
-                return await abortAfterDocumentClaimRelease(
-                  true,
-                  jsonResponse(audit.body, audit.status, corsHeaders),
-                )
-              }
             }
           }
 

@@ -66,8 +66,9 @@ function client(opts: {
   };
 }
 
-Deno.test("owner price gate: a saved revision with the owner's price decision is approved", async () => {
+Deno.test("owner price gate: switch on, a saved revision with the owner's price decision is approved", async () => {
   const sb = client({
+    flag: () => Promise.resolve({ data: { enabled: true }, error: null }),
     rpc: () =>
       Promise.resolve({
         data: { id: "a1", kind: "price", quote_document_sha256s: [SHA_A] },
@@ -81,10 +82,28 @@ Deno.test("owner price gate: a saved revision with the owner's price decision is
     scope_revision_id: REV,
     quote_document_sha256s: [SHA_A],
   });
-  assertEquals(sb.calls[0], {
+  assertEquals(sb.calls.find((c) => c.rpc), {
     rpc: "scope_price_owner_approval",
     args: { p_job_id: JOB, p_scope_revision_id: REV },
   });
+});
+
+Deno.test("owner price gate: switch off, an existing price decision is never read, so the send goes as today", async () => {
+  for (const flag of [FLAG_OFF, undefined]) {
+    const sb = client({
+      flag,
+      rpc: () =>
+        Promise.resolve({
+          data: { id: "a1", kind: "price", quote_document_sha256s: [SHA_A] },
+          error: null,
+        }),
+    });
+    assertEquals(await ownerPriceGate(sb, JOB, sealed), {
+      kind: "legacy_unapproved",
+      scope_revision_id: REV,
+    });
+    assertEquals(sb.calls.filter((c) => c.rpc), []);
+  }
 });
 
 const FLAG_ON = () => Promise.resolve({ data: { enabled: true }, error: null });
@@ -112,25 +131,33 @@ Deno.test("owner price gate: with the switch on, a saved revision with no price 
   assertEquals(gate.body.code, "owner_price_approval_required");
 });
 
-Deno.test("owner price gate: no decision and an unreadable switch fails closed", async () => {
-  const gate = await ownerPriceGate(
-    client({ flag: () => Promise.resolve({ data: null, error: { code: "x" } }) }),
-    JOB,
-    sealed,
-  );
-  assertEquals(gate.kind, "refused");
-  if (gate.kind !== "refused") return;
-  assertEquals(gate.status, 503);
+Deno.test("owner price gate: a switch that cannot be read counts as off, so the send goes as today", async () => {
+  for (
+    const flag of [
+      () => Promise.resolve({ data: null, error: { code: "x" } }),
+      () => Promise.reject(new Error("network")),
+    ]
+  ) {
+    const sb = client({
+      flag,
+      rpc: () => Promise.resolve({ data: { id: "a1", kind: "price" }, error: null }),
+    });
+    assertEquals(await ownerPriceGate(sb, JOB, sealed), {
+      kind: "legacy_unapproved",
+      scope_revision_id: REV,
+    });
+    assertEquals(sb.calls.filter((c) => c.rpc), []);
+  }
 });
 
-Deno.test("owner price gate: an unreadable decision fails closed", async () => {
+Deno.test("owner price gate: switch on, an unreadable decision fails closed", async () => {
   for (
     const rpc of [
       () => Promise.resolve({ data: null, error: { code: "57014" } }),
       () => Promise.reject(new Error("network")),
     ]
   ) {
-    const gate = await ownerPriceGate(client({ rpc }), JOB, sealed);
+    const gate = await ownerPriceGate(client({ rpc, flag: FLAG_ON }), JOB, sealed);
     assertEquals(gate.kind, "refused");
     if (gate.kind !== "refused") return;
     assertEquals(gate.status, 503);
@@ -184,9 +211,7 @@ Deno.test("owner price gate: a send naming no saved revision follows the switch"
     JOB,
     { kind: "legacy" },
   );
-  assertEquals(unreadable.kind, "refused");
-  if (unreadable.kind !== "refused") return;
-  assertEquals(unreadable.status, 503);
+  assertEquals(unreadable, { kind: "legacy_unapproved", scope_revision_id: null });
 });
 
 const legacyOff = () =>
@@ -204,7 +229,7 @@ Deno.test("unapproved send record: the claim is written before the email, ids on
     path: "send" as const,
     document_id: "d1",
   };
-  assertEquals(await claimUnapprovedLegacySend(sb, send), { ok: true });
+  assertEquals(await claimUnapprovedLegacySend(sb, send), { ok: true, recorded: true });
   assertEquals(recordCalls(sb)[0].args, {
     p_send_key: "quote_document:d1",
     p_job_id: JOB,
@@ -216,7 +241,7 @@ Deno.test("unapproved send record: the claim is written before the email, ids on
   assertEquals(unapprovedSendKeyForQuickQuote("c1"), "quick_quote:c1");
 });
 
-Deno.test("unapproved send record: a claim that cannot be written stops the send", async () => {
+Deno.test("unapproved send record: a claim that cannot be written is logged and never stops the send", async () => {
   for (
     const rpc of [
       () => Promise.resolve({ data: null, error: { code: "57014" } }),
@@ -230,12 +255,7 @@ Deno.test("unapproved send record: a claim that cannot be written stops the send
       path: "send-runs",
       document_id: "d1",
     });
-    assertEquals(out.ok, false);
-    if (out.ok) return;
-    assertEquals(
-      [out.status, out.body.code],
-      [503, "owner_price_unapproved_send_unrecorded"],
-    );
+    assertEquals(out, { ok: true, recorded: false });
   }
 });
 
@@ -310,8 +330,9 @@ Deno.test("before send: switch on, a named revision with no price decision is re
   assertEquals(recordCalls(sb), []);
 });
 
-Deno.test("before send: an approved revision goes with no record", async () => {
+Deno.test("before send: switch on, an approved revision goes with no record", async () => {
   const sb = client({
+    flag: FLAG_ON,
     rpc: () => Promise.resolve({ data: { id: "a1", kind: "price" }, error: null }),
   });
   const out = await ownerPriceBeforeSend(sb, {
@@ -328,7 +349,7 @@ Deno.test("before send: an approved revision goes with no record", async () => {
   assertEquals(recordCalls(sb), []);
 });
 
-Deno.test("before send: a send naming no revision is recorded first, or refused when it cannot be", async () => {
+Deno.test("before send: a send naming no revision is recorded first, and goes as today when it cannot be", async () => {
   const ok = client({
     flag: legacyOff,
     rpc: () => Promise.resolve({ data: { recorded: true }, error: null }),
@@ -365,9 +386,7 @@ Deno.test("before send: a send naming no revision is recorded first, or refused 
       document_id: "d1",
     },
   );
-  assertEquals(down.kind, "refused");
-  if (down.kind !== "refused") return;
-  assertEquals(down.body.code, "owner_price_unapproved_send_unrecorded");
+  assertEquals(down.kind, "go");
   // With the switch on, a send naming no revision is refused before any record.
   const on = client({
     flag: () => Promise.resolve({ data: { enabled: true }, error: null }),
@@ -415,6 +434,7 @@ const gateFor = (documents: string[] | null) => ({
 Deno.test("owner price gate: a decision record with no or a malformed document list covers no PDF", async () => {
   for (const list of [undefined, ["not-a-hash"], "x"]) {
     const sb = client({
+      flag: FLAG_ON,
       rpc: () => Promise.resolve({ data: { id: "a1", quote_document_sha256s: list }, error: null }),
     });
     const gate = await ownerPriceGate(sb, JOB, sealed);

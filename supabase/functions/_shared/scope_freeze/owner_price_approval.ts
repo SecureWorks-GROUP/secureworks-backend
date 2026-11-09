@@ -8,11 +8,12 @@
 //   PDF must be one the decision covers (approvedQuotePdf).
 //   A send with no price decision, naming a saved revision or none: refused
 //   while owner_approval_saved_revision_required_v1 is on (409
-//   owner_price_approval_required, or ..._requires_saved_revision). While it
-//   is off (as shipped, until the owner says), it is sent exactly as today,
-//   recorded before the email (claimUnapprovedLegacySend) and marked sent
-//   after it (markUnapprovedLegacySendSent), so deploying changes no send and
-//   every send without a decision is still accounted for.
+//   owner_price_approval_required, or ..._requires_saved_revision).
+//   While the switch is off (as shipped, until the owner says) every send goes
+//   exactly as today and no decision is read. It is recorded before the email
+//   (claimUnapprovedLegacySend) and marked sent after it
+//   (markUnapprovedLegacySendSent), best effort: a record that cannot be
+//   written is logged and never stops the send.
 
 import type { SealedSendSource } from "./quote_scope_revision_link.ts";
 
@@ -46,42 +47,19 @@ export async function ownerPriceGate(
   sealed: SealedSendSource,
 ): Promise<OwnerPriceGate> {
   if (sealed.kind === "refused") return { kind: "not_judged" };
-  if (sealed.kind === "sealed") {
-    try {
-      const { data, error } = await sb.rpc("scope_price_owner_approval", {
-        p_job_id: jobId,
-        p_scope_revision_id: sealed.revision_id,
-      });
-      if (error) return unreadable();
-      if (!data || typeof data !== "object" || !data.id) {
-        const required = await readRequiredFlag(sb);
-        if (required === null) return unreadable();
-        if (!required) {
-          return { kind: "legacy_unapproved", scope_revision_id: sealed.revision_id };
-        }
-        return {
-          kind: "refused",
-          status: 409,
-          body: {
-            error:
-              "The owner has not approved the price on this saved quote revision. Nothing was sent. Ask the owner to approve the price, then send again.",
-            code: "owner_price_approval_required",
-          },
-        };
-      }
-      return {
-        kind: "approved",
-        approval_id: String(data.id),
-        scope_revision_id: sealed.revision_id,
-        quote_document_sha256s: documentList(data.quote_document_sha256s),
-      };
-    } catch {
-      return unreadable();
-    }
-  }
+  const revisionId = sealed.kind === "sealed" ? sealed.revision_id : null;
+  // The switch first. Off (as shipped) the send goes exactly as today: no
+  // decision is read, so a decision recorded early never selects the stricter
+  // PDF check. A switch that cannot be read counts as off and is logged, so a
+  // flag read never stops a send that goes today.
   const required = await readRequiredFlag(sb);
-  if (required === null) return unreadable();
-  if (required) {
+  if (required !== true) {
+    if (required === null) {
+      console.error("[owner-price] switch unreadable; sending as today");
+    }
+    return { kind: "legacy_unapproved", scope_revision_id: revisionId };
+  }
+  if (sealed.kind !== "sealed") {
     return {
       kind: "refused",
       status: 409,
@@ -92,10 +70,35 @@ export async function ownerPriceGate(
       },
     };
   }
-  return { kind: "legacy_unapproved", scope_revision_id: null };
+  try {
+    const { data, error } = await sb.rpc("scope_price_owner_approval", {
+      p_job_id: jobId,
+      p_scope_revision_id: sealed.revision_id,
+    });
+    if (error) return unreadable();
+    if (!data || typeof data !== "object" || !data.id) {
+      return {
+        kind: "refused",
+        status: 409,
+        body: {
+          error:
+            "The owner has not approved the price on this saved quote revision. Nothing was sent. Ask the owner to approve the price, then send again.",
+          code: "owner_price_approval_required",
+        },
+      };
+    }
+    return {
+      kind: "approved",
+      approval_id: String(data.id),
+      scope_revision_id: sealed.revision_id,
+      quote_document_sha256s: documentList(data.quote_document_sha256s),
+    };
+  } catch {
+    return unreadable();
+  }
 }
 
-/** The switch, or null when it cannot be read (the caller refuses). */
+/** The switch, or null when it cannot be read (the caller counts it as off). */
 async function readRequiredFlag(sb: any): Promise<boolean | null> {
   try {
     const { data, error } = await sb.from("feature_flags").select("enabled")
@@ -144,13 +147,14 @@ type UnapprovedSend = {
   scope_revision_id?: string | null;
 };
 
-/** Before the email: the durable record of a send that names no saved
- * revision (quote_send_price_unapproved_sends). Idempotent on its key. When it
- * cannot be written, the caller sends nothing. */
+/** Before the email: the record of a send with no owner price decision
+ * (quote_send_price_unapproved_sends). Idempotent on its key, whichever send
+ * path claimed it first. Best effort: a record that cannot be written is
+ * logged and the send goes exactly as today. recorded says whether it holds. */
 export async function claimUnapprovedLegacySend(
   sb: any,
   send: UnapprovedSend,
-): Promise<{ ok: true } | { ok: false; status: 503; body: { error: string; code: string } }> {
+): Promise<{ ok: true; recorded: boolean }> {
   try {
     const { data, error } = await sb.rpc("record_quote_send_price_unapproved", {
       p_send_key: send.send_key,
@@ -160,23 +164,15 @@ export async function claimUnapprovedLegacySend(
       p_state: "claimed",
       p_scope_revision_id: send.scope_revision_id ?? null,
     });
-    if (!error && data?.recorded === true) return { ok: true };
+    if (!error && data?.recorded === true) return { ok: true, recorded: true };
     console.error(
-      "[owner-price] unapproved send record refused:",
+      "[owner-price] unapproved send not recorded; sending as today:",
       error?.code ?? "not_recorded",
     );
   } catch {
-    console.error("[owner-price] unapproved send record unreachable");
+    console.error("[owner-price] unapproved send record unreachable; sending as today");
   }
-  return {
-    ok: false,
-    status: 503,
-    body: {
-      error:
-        "Could not record this send, which has no owner price approval. Nothing was sent. Try again.",
-      code: "owner_price_unapproved_send_unrecorded",
-    },
-  };
+  return { ok: true, recorded: false };
 }
 
 /** After the provider took the email, or on a replay of a published document:
@@ -245,8 +241,7 @@ export async function ownerPriceBeforeSend(
     document_id: input.document_id,
     scope_revision_id: gate.scope_revision_id,
   };
-  const audit = await claimUnapprovedLegacySend(sb, unapproved);
-  if (!audit.ok) return { kind: "refused", status: audit.status, body: audit.body };
+  await claimUnapprovedLegacySend(sb, unapproved);
   return { kind: "go", unapproved, approved: null };
 }
 

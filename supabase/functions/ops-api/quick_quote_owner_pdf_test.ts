@@ -57,7 +57,12 @@ const PDF_B = syntheticPdf("Unapproved B: total AUD 220 inc GST");
 const URL_A = "https://fixture.invalid/approved-A.pdf";
 const URL_B = "https://fixture.invalid/unapproved-B.pdf";
 
-async function run(opts: { decision: "covers_a" | "none"; pdfUrl: string; switchOn?: boolean }) {
+async function run(opts: {
+  decision: "covers_a" | "none";
+  pdfUrl: string;
+  switchOn?: boolean;
+  recordFails?: boolean;
+}) {
   const job = crypto.randomUUID();
   const rev = crypto.randomUUID();
   const scope = await canonicalJsonAndHash({ title: "approved A" });
@@ -97,6 +102,9 @@ async function run(opts: { decision: "covers_a" | "none"; pdfUrl: string; switch
     rpc(name: string, args: any) {
       rpcCalls.push({ name, args });
       if (name === "record_quote_send_price_unapproved") {
+        if (opts.recordFails) {
+          return Promise.resolve({ data: null, error: { code: "XX000", message: "injected" } });
+        }
         return Promise.resolve({ data: { recorded: true, state: args.p_state }, error: null });
       }
       return Promise.resolve({
@@ -142,16 +150,16 @@ async function run(opts: { decision: "covers_a" | "none"; pdfUrl: string; switch
   }
 }
 
-Deno.test("Quick Quote: an approved revision with a PDF the decision does not cover is refused, nothing reaches the provider", async () => {
-  const out = await run({ decision: "covers_a", pdfUrl: URL_B });
+Deno.test("Quick Quote: switch on, an approved revision with a PDF the decision does not cover is refused, nothing reaches the provider", async () => {
+  const out = await run({ decision: "covers_a", pdfUrl: URL_B, switchOn: true });
   assert(out.error instanceof ApiError, "refused");
   assertEquals([out.error.status, out.error.detail.code], [409, "owner_price_pdf_not_approved"]);
   assertEquals(out.provider.length, 0);
   assertEquals(out.rpcCalls.map((c) => c.name), ["scope_price_owner_approval"]);
 });
 
-Deno.test("Quick Quote: the PDF the owner's decision covers goes out as those bytes, with the approved price", async () => {
-  const out = await run({ decision: "covers_a", pdfUrl: URL_A });
+Deno.test("Quick Quote: switch on, the PDF the owner's decision covers goes out as those bytes, with the approved price", async () => {
+  const out = await run({ decision: "covers_a", pdfUrl: URL_A, switchOn: true });
   assertEquals(out.error, null);
   assertEquals(out.provider.length, 1);
   assert(/\$110\.00/.test(out.provider[0].html), "the email quotes the approved frozen price");
@@ -172,6 +180,22 @@ Deno.test("Quick Quote: no approver set and the switch off, a saved-revision sen
   assertEquals(record.length, 1);
   assertEquals([record[0].args.p_state, record[0].args.p_path], ["claimed", "quick-quote"]);
   assertEquals(record[0].args.p_scope_revision_id, out.rpcCalls[0].args.p_scope_revision_id);
+});
+
+Deno.test("Quick Quote: switch off, an existing price decision is not read and the send goes exactly as today", async () => {
+  const out = await run({ decision: "covers_a", pdfUrl: URL_B });
+  assertEquals(out.error, null);
+  assertEquals(out.provider.length, 1);
+  // As today: the given PDF is attached unchecked, whatever the decision says.
+  assertEquals(out.provider[0].attachments[0].content, quotePdfBase64(PDF_B));
+  assertEquals(out.rpcCalls.map((c) => c.name), ["record_quote_send_price_unapproved"]);
+});
+
+Deno.test("Quick Quote: switch off, a record that cannot be written never stops the send", async () => {
+  const out = await run({ decision: "none", pdfUrl: URL_A, recordFails: true });
+  assertEquals(out.error, null);
+  assertEquals(out.provider.length, 1);
+  assertEquals(out.provider[0].attachments[0].content, quotePdfBase64(PDF_A));
 });
 
 Deno.test("Quick Quote: with the switch on, no price decision on the named revision is refused before any PDF or provider call", async () => {

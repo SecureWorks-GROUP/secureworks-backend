@@ -1978,6 +1978,9 @@ export async function approveJobWorkOrder(
       via: approver.via,
     }, approver.userId);
   }
+  // Switch off the database answers with the work order alone, as before;
+  // the reply keeps that shape.
+  if (!ownerApproval) return { work_order: workOrder };
   return {
     work_order: workOrder,
     issued,

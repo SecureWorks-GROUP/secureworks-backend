@@ -14,7 +14,9 @@ BEGIN
     AND to_regprocedure('public.record_quote_send_price_unapproved(text,uuid,text,uuid,text,uuid)') IS NULL
     AND to_regprocedure('public.scope_revision_quote_documents(uuid)') IS NULL
     AND to_regprocedure('public.owner_approval_required()') IS NULL
-    AND to_regprocedure('public.record_work_order_owner_unapproved(uuid,uuid,text,text,text,uuid,text[])') IS NULL,
+    AND to_regprocedure('public.record_work_order_owner_unapproved(uuid,uuid,text,text,text,uuid,text[])') IS NULL
+    AND to_regprocedure('public.work_orders_crew_owner_hold(public.work_orders)') IS NULL
+    AND to_regprocedure('public.approve_job_work_order_switch_off(uuid,uuid,text,timestamptz,uuid)') IS NULL,
     'down removes the owner approval functions';
   ASSERT to_regclass('public.quote_send_price_unapproved_sends') IS NOT NULL, 'down keeps the unapproved-send records';
   ASSERT to_regclass('public.job_work_order_owner_unapproved') IS NOT NULL, 'down keeps the unapproved work order records';

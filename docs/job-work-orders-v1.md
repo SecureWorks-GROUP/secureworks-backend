@@ -97,9 +97,10 @@ recorded through `approve_scope_price` and `approve_scope_work_order`; see
 AGENTS.md, "Price And Work Order Issue On Two Owner Decisions". All of this
 holds only while `owner_approval_saved_revision_required_v1` is on (seeded
 off). While it is off the automatic issue, the sweep, acceptance release and
-an approver's approve run exactly as before, and each issue that would have
-been held is recorded in `job_work_order_owner_unapproved` with what was
-missing.
+an approver's approve run main's logic and write no decision, and each issue
+that would have been held is recorded in `job_work_order_owner_unapproved` with
+what was missing. That record is best effort: a failed write or an unreadable
+gate is logged as a warning and never blocks or rolls back the issue.
 
 What is issued, and what waits for the approver:
 

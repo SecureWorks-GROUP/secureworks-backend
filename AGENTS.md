@@ -4743,10 +4743,15 @@ out of sent, accepted, in progress and complete, from any earlier status
 including cancelled, until the job order is issued); it refuses `WO428`. That
 refusal and every hold below apply only while
 `owner_approval_saved_revision_required_v1` is on: while it is off (as seeded)
-every issue path and crew move runs exactly as before and each case it would
+every issue path and crew move runs main's logic (approve through
+`approve_job_work_order_switch_off`, release, sweep and automatic issue never
+read the gate's verdict, and no decision is written) and each case it would
 have held is recorded in `job_work_order_owner_unapproved` (append-only, with
-what was missing, one job event each) by `record_work_order_owner_unapproved`;
-the switch is read only through `owner_approval_required()`. A
+what was missing, one job event each) by `record_work_order_owner_unapproved`.
+That record is best effort: every write and gate read on the switch-off path
+sits in its own exception block, so a failed record or an unreadable gate is a
+warning and never blocks or rolls back an issue, release or crew move. The
+switch is read only through `owner_approval_required()`. A
 decision is only for a job in the approver's own company
 (`owner_approval_company_ok`; a NULL company never passes): the ops-api doors
 call the five-argument `approve_job_work_order` with the caller's company. The
@@ -4763,11 +4768,15 @@ call, after the owner list is written and the scoping tools store quote PDFs
 before the owner approves); while it is off it goes exactly as before and is
 claimed in `quote_send_price_unapproved_sends` (one row per document or Quick
 Quote call, with the revision it names, forward only, never deleted) before
-the email, and nothing is sent when that write fails. A price decision also records
+the email. That claim is best effort too: a failed write is logged and the
+send goes, and a document claimed by one path (a failed bundle attempt) is
+replayed, not refused, when another path claims it. While the switch is off
+the send gate reads no price decision at all, and a switch it cannot read
+counts as off. A price decision also records
 `quote_document_sha256s`: the revision's `quote_pdf` / `per_contact_pdf`
 `scope_artifacts` hashes when the owner decided (`scope_revision_quote_documents`;
 the approver echoes the list the read showed). On an approved revision a send
-fetches each PDF once and refuses unless its sha256 is on that list
+fetches each PDF once (switch on only) and refuses unless its sha256 is on that list
 (`owner_price_pdf_not_approved`), then sends exactly those bytes; a `/send`
 document's stored page price must be a figure of the frozen price
 (`owner_price_document_price_mismatch`). A PDF stored after the decision needs

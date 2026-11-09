@@ -191,9 +191,11 @@ async function runApprovedPrelude(opts: {
 }) {
   const REV = crypto.randomUUID();
   const recordedShas = await Promise.all(opts.recorded.map(sha256Hex));
+  let decisionReads = 0;
   const sb = {
     rpc(name: string) {
       assertEquals(name, "scope_price_owner_approval");
+      decisionReads += 1;
       return Promise.resolve({
         data: opts.noDecision
           ? null
@@ -265,15 +267,16 @@ async function runApprovedPrelude(opts: {
     (gate: any, runPdfs: unknown) =>
       approvedQuotePdfsByLabel(gate, runPdfs, fakeFetch as typeof fetch),
   );
-  return { status: result.status, body: await result.json(), REV };
+  return { status: result.status, body: await result.json(), REV, decisionReads };
 }
 
-Deno.test("production send-runs on an approved revision refuses a caller PDF the owner's decision does not cover", async () => {
+Deno.test("production send-runs, switch on, on an approved revision refuses a caller PDF the owner's decision does not cover", async () => {
   const approvedPdf = new TextEncoder().encode("%PDF approved quote");
   const otherPdf = new TextEncoder().encode("%PDF other prices");
   const refused = await runApprovedPrelude({
     pdfs: { "https://example.test/b.pdf": otherPdf },
     recorded: [approvedPdf],
+    switchOn: true,
   });
   assertEquals(refused.status, 409);
   assertEquals(refused.body.code, "owner_price_pdf_not_approved");
@@ -285,18 +288,32 @@ Deno.test("production send-runs on an approved revision refuses a caller PDF the
       "https://example.test/b.pdf": otherPdf,
     },
     recorded: [approvedPdf],
+    switchOn: true,
   });
   assertEquals(mixed.body.code, "owner_price_pdf_not_approved");
 
   // No PDF named: nothing to check or attach.
-  const none = await runApprovedPrelude({ pdfs: {}, recorded: [approvedPdf] });
+  const none = await runApprovedPrelude({ pdfs: {}, recorded: [approvedPdf], switchOn: true });
   assertEquals(none.body.reached_pricing, true);
   const ok = await runApprovedPrelude({
     pdfs: { "https://example.test/a.pdf": approvedPdf },
     recorded: [approvedPdf],
+    switchOn: true,
   });
   assertEquals(ok.status, 200);
   assertEquals(ok.body.reached_pricing, true);
+});
+
+Deno.test("production send-runs, switch off: an existing price decision never selects the PDF check, the bundle goes as today", async () => {
+  const approvedPdf = new TextEncoder().encode("%PDF approved quote");
+  const otherPdf = new TextEncoder().encode("%PDF other prices");
+  const off = await runApprovedPrelude({
+    pdfs: { "https://example.test/b.pdf": otherPdf },
+    recorded: [approvedPdf],
+  });
+  assertEquals(off.status, 200);
+  assertEquals(off.body.reached_pricing, true);
+  assertEquals(off.decisionReads, 0);
 });
 
 Deno.test("production send-runs: no approver set and the switch off, a saved-revision bundle goes as today", async () => {
