@@ -74,7 +74,7 @@ type World = {
   externalRefs?: Array<{ job_id: string; external_ref: string }>;
 };
 
-type Captured = { status: number; body: any; writes: string[]; reads: string[] };
+type Captured = { status: number; body: any; writes: string[]; reads: string[]; lineRows: any[] };
 
 function filterValues(url: URL, column: string): string[] | null {
   const raw = url.searchParams.get(column);
@@ -89,6 +89,7 @@ function filterValues(url: URL, column: string): string[] | null {
 async function submit(extra_items: any[], world: World = {}, body: Record<string, unknown> = {}): Promise<Captured> {
   const writes: string[] = [];
   const reads: string[] = [];
+  const lineRows: any[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = ((input: Request | URL | string, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
@@ -109,6 +110,11 @@ async function submit(extra_items: any[], world: World = {}, body: Record<string
     }
     const table = url.pathname.match(/^\/rest\/v1\/(.+)$/)?.[1] || "";
     if (method !== "GET" && method !== "HEAD") writes.push(`${method} ${table}`);
+    if (table === "trade_invoice_lines" && method === "POST") {
+      const raw = typeof init?.body === "string" ? JSON.parse(init.body) : [];
+      lineRows.push(...(Array.isArray(raw) ? raw : [raw]));
+      return reply([]);
+    }
     else reads.push(`${table}?${url.searchParams.toString()}`);
     if (table === "users") {
       return reply([{
@@ -173,7 +179,7 @@ async function submit(extra_items: any[], world: World = {}, body: Record<string
     } catch {
       parsed = { raw: text };
     }
-    return { status: res.status, body: parsed, writes, reads };
+    return { status: res.status, body: parsed, writes, reads, lineRows };
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -321,4 +327,51 @@ handlerTest("extra job: an invoice of only their own job cards never runs the ex
   const out = await submit([], {}, { manual_assignments: [{ assignment_id: "c1", hours: 2 }] });
   assert(!out.reads.some((r) => r.startsWith("users?") && r.includes("invoice_any_job")));
   assert(!out.reads.some((r) => r.startsWith("job_assignments?") && r.includes("is_ghost")));
+});
+
+// ── One line type, one set of job references (review F1, F2) ────────────────
+
+handlerTest("extra job: a client line_type with no type never grants the commission rule", async () => {
+  // Direct request: line_type says commission, type is absent. The line
+  // would be saved as "other", so it is checked as "other" and refused.
+  const raw = { job_id: CREATED, line_type: "commission", description: "Fixture work", quantity: 1, rate: 10, date: "2026-08-25" };
+  assertRefused(await submit([raw]), "extra_job_not_allowed", "ZZF-1003");
+});
+
+handlerTest("extra job: a padded commission type is checked and saved as the same commission", async () => {
+  const out = await submit([line({ job_id: CREATED }, " Commission ")]);
+  assertAccepted(out);
+  assertEquals(out.lineRows.map((row) => row.line_type), ["commission"]);
+  // Padded, on a job they did not create: refused, not read as something else.
+  assertRefused(await submit([line({ job_id: NOT_BOOKED }, " Commission ")]), "extra_job_not_allowed", "ZZF-1002");
+});
+
+handlerTest("extra job: a whitespace job number on a no-week ordinary line is refused, nothing written", async () => {
+  for (const job_number of [" ", "   ", "\t"]) {
+    const out = await submit(
+      [{ type: "Materials", job_number, description: "Fixture materials", quantity: 1, rate: 10, date: "2026-08-25" }],
+      {},
+      { week_start: undefined },
+    );
+    assertEquals(out.status, 422, JSON.stringify(out.body));
+    assertStringIncludes(String(out.body.error), "missing job attribution");
+    assertEquals(out.writes, [], "nothing is written");
+  }
+  // A whitespace job id is no reference either.
+  const byId = await submit([{ ...line({}), job_id: "  " }], {}, { week_start: undefined });
+  assertEquals(byId.status, 422, JSON.stringify(byId.body));
+  assertEquals(byId.writes, []);
+});
+
+handlerTest("extra job: a padded valid job number is checked, resolved and saved trimmed", async () => {
+  const out = await submit([line({ job_number: "  ZZF-1001  " })]);
+  assertAccepted(out);
+  assertEquals(out.lineRows.map((row) => [row.job_id, row.job_number]), [[BOOKED, "ZZF-1001"]]);
+  const noWeek = await submit([line({ job_number: " ZZF-1001 " })], {}, { week_start: undefined });
+  assertAccepted(noWeek);
+  assertEquals(noWeek.lineRows.map((row) => [row.job_id, row.job_number]), [[BOOKED, "ZZF-1001"]]);
+  // Padded, on a job they are not booked on: refused, named trimmed.
+  const refused = await submit([line({ job_number: " ZZF-1002 " })], {}, { week_start: undefined });
+  assertRefused(refused, "extra_job_not_allowed", "ZZF-1002");
+  assertEquals(refused.body.jobs, ["ZZF-1002"]);
 });

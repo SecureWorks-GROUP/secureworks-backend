@@ -4,6 +4,7 @@ import {
   assertTradeMayBillExtraJobs,
   ExtraJobBillingRefusal,
   extraLineType,
+  normaliseExtraItem,
 } from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
@@ -14160,8 +14161,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let extraSubtotal = 0
             let clientPricedExtraCount = 0
             if (hasExtras) {
-              const requestedJobIds = [...new Set((invoiceExtraItems || []).map((i: any) => i?.job_id).filter(Boolean))]
-              const requestedJobNumbers = [...new Set((invoiceExtraItems || []).map((i: any) => String(i?.job_number || '').trim()).filter(Boolean))]
+              // Client lines are trimmed once (type and job references) and
+              // every step below reads those values. Weekly work-order lines
+              // are server-built and pass through as they are.
+              const extraItemsIn: any[] = weeklyInvoice
+                ? invoiceExtraItems
+                : (invoiceExtraItems || []).map(normaliseExtraItem)
+              const requestedJobIds = [...new Set(extraItemsIn.map((i: any) => i?.job_id).filter(Boolean))]
+              const requestedJobNumbers = [...new Set(extraItemsIn.map((i: any) => String(i?.job_number || '').trim()).filter(Boolean))]
               const activeJobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status'
               // Change 3: removed complete/completed/invoiced so WO/commission extra-item rows on completed
               // make-safes still resolve job_id (fixes null job_id on audit log for finished jobs)
@@ -14252,19 +14259,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               // shares, clock mirrors the loop below skips, and lines that name
               // no job.
               if (!weeklyInvoice) {
-                const jobLines = (invoiceExtraItems || []).filter((item: any) =>
+                const jobLines = extraItemsIn.filter((item: any) =>
                   item &&
                   item.source !== 'clock' && item._source !== 'clock' && item.source !== 'server_labour' &&
                   !isGroupShareInvoiceItem(item) && !item.group_share_id &&
-                  (String(item.job_id || '').trim() || String(item.job_number || '').trim())
-                ).map((item: any) => {
-                  const jobNumber = String(item.job_number || '').trim()
-                  return {
-                    lineType: extraLineType(item),
-                    ref: jobNumber || String(item.job_id),
-                    job: item.job_id ? (jobById[item.job_id] || null) : (jobByNumber[jobNumber] || null),
-                  }
-                })
+                  (item.job_id || item.job_number)
+                ).map((item: any) => ({
+                  lineType: extraLineType(item),
+                  ref: item.job_number || String(item.job_id),
+                  job: item.job_id ? (jobById[item.job_id] || null) : (jobByNumber[item.job_number] || null),
+                }))
                 await assertTradeMayBillExtraJobs(client, {
                   trade: {
                     id: tradeUser.id,
@@ -14315,7 +14319,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
               // B14: the office's rate limits for trade-typed extras.
               const extraRateRules = await loadExtraRateRules(client)
-              for (const rawItem of invoiceExtraItems) {
+              for (const rawItem of extraItemsIn) {
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
                 // They must never be accepted as extra items, or normal weekly hours are double-counted.
                 if (rawItem?.source === 'clock' || rawItem?._source === 'clock' || rawItem?.source === 'server_labour') continue
@@ -14435,7 +14439,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }
 
                 extraLineItems.push({
-                  line_type: item.type ? item.type.toLowerCase() : 'other',
+                  line_type: extraLineType(item),
                   description: woDescription || item.description || item.type || 'Extra item',
                   quantity: Number(item.quantity || 1),
                   // M0 guard reads total_hours for lines that bill hours; extras carry their

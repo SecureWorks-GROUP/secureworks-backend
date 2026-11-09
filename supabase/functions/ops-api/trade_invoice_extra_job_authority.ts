@@ -68,8 +68,33 @@ export function extraJobBillingRule(c: ExtraJobBillingCase): string | null {
   return EXTRA_JOB_BILLING_RULES.find((rule) => rule.allows(c))?.name ?? null;
 }
 
+// The line's type, decided once. The same value is checked here, read by the
+// pricing checks and saved as trade_invoice_lines.line_type. Only `type`
+// counts (a client `line_type` is never saved, so it never grants anything).
 export function extraLineType(item: any): string {
-  return String(item?.type || item?.line_type || "").trim().toLowerCase();
+  const type = item?.type;
+  return (typeof type === "string" ? type.trim().toLowerCase() : "") || "other";
+}
+
+function trimmedRef(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+// A client extra line with its type and job references trimmed once, so the
+// check, the job lookup, the attribution and the saved line all read the same
+// values. A blank or whitespace reference is no reference: an ordinary line
+// with none is then refused by the existing every-line-needs-a-job rule, and
+// a genuine adjustment keeps its jobless exception.
+export function normaliseExtraItem(item: any): any {
+  if (!item || typeof item !== "object") return item;
+  return {
+    ...item,
+    type: typeof item.type === "string" ? item.type.trim() : item.type,
+    job_id: trimmedRef(item.job_id),
+    job_number: trimmedRef(item.job_number),
+  };
 }
 
 export class ExtraJobBillingRefusal extends Error {
