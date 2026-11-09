@@ -172,8 +172,15 @@ DECLARE
   v_job uuid := gen_random_uuid();
   v_wo uuid;
   v_inv uuid := gen_random_uuid();
+  v_approver uuid := gen_random_uuid();
   v_row jsonb;
 BEGIN
+  -- A generated approver, named on the local settings list.
+  INSERT INTO public.users (id, org_id, name, role) VALUES
+    (v_approver, '00000000-0000-0000-0000-000000000001', 'ZZTEST Scope Checker', 'ops_manager');
+  UPDATE public.work_order_settings
+    SET approver_user_ids = array_append(COALESCE(approver_user_ids, '{}'::uuid[]), v_approver)
+    WHERE id = 1;
   INSERT INTO public.jobs (id, org_id, type, status, job_number)
   VALUES (v_job, '00000000-0000-0000-0000-000000000001', 'fencing', 'in_progress', 'WOA-ON-1');
   SELECT id INTO v_wo FROM public.work_orders WHERE job_id = v_job AND kind = 'job';
@@ -206,7 +213,7 @@ BEGIN
      OR (SELECT approved_at FROM public.work_orders WHERE id = v_wo) IS NOT NULL THEN
     RAISE EXCEPTION 'contract: a refused automatic issue must seal nothing';
   END IF;
-  v_row := to_jsonb(public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session',
+  v_row := to_jsonb(public.approve_job_work_order(v_wo, v_approver, 'session',
     (SELECT updated_at FROM public.work_orders WHERE id = v_wo)));
   IF v_row->>'status' <> 'approved' OR v_row->>'approved_via' <> 'session'
      OR v_row->>'approved_at' IS NULL OR length(v_row->>'sealed_content_hash') <> 64 THEN

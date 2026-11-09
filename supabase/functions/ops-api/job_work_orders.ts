@@ -1889,12 +1889,23 @@ export function splitOwnerApprovalResult(data: any): {
  * Otherwise the decision is kept, the draft stays a draft and the answer says
  * what the issue waits for (owner_approval.issue.missing).
  */
+/** orgId is the caller's verified company (the signed-in user's, or the
+ *  server's own for a terminal call). A work order in another company is
+ *  answered as not found, and the database checks the company again. */
 export async function approveJobWorkOrder(
   client: any,
   body: any,
   approver: WorkOrderApprover | null,
+  orgId: string | null,
 ) {
   const id = requireUuid(body?.work_order_id, "work_order_id");
+  if (!orgId) {
+    fail(
+      403,
+      "operator_access_required",
+      "Approving needs a signed-in session in this company.",
+    );
+  }
   if (!approver) {
     fail(
       403,
@@ -1929,6 +1940,9 @@ export async function approveJobWorkOrder(
     );
   }
   const wo = await readWorkOrder(client, id);
+  if (wo.org_id !== orgId) {
+    fail(404, "work_order_not_found", "Work order not found");
+  }
   if (wo.kind !== "job") {
     fail(422, "not_a_job_work_order", "Only a job work order is approved");
   }
@@ -1940,8 +1954,15 @@ export async function approveJobWorkOrder(
     p_approver: approver.userId,
     p_via: approver.via,
     p_expected_updated_at: expected,
+    p_org_id: orgId,
   });
   if (error) {
+    if (
+      String(error.code || "") === "42501" &&
+      String(error.message || "").includes("scope_owner_approval_job_forbidden")
+    ) {
+      fail(404, "work_order_not_found", "Work order not found");
+    }
     const mapped = APPROVE_ERRORS[String(error.code || "")];
     if (mapped) {
       fail(mapped[0], mapped[1], String(error.message || "Approval refused"));

@@ -4738,18 +4738,28 @@ acceptance or a role is never a decision. `job_work_order_owner_gate` is the one
 rule every issue path reads (`release_scope_job_drafts`,
 `approve_job_work_order`, `auto_issue_job_work_order` and its sweep
 `owner_approved_job_work_order_drafts`, backfill, and the crew trigger
-`work_orders_crew_owner_gate`, which keeps a crew order on a saved-revision job
-in draft until the job order is issued); it refuses `WO428`. A missing decision
-holds the issue and keeps the customer's acceptance; decisions are recorded
-while the order is a draft and the issue validates, releases and seals in one
-transaction. An edit or a new revision needs a fresh decision. Both quote send
-paths refuse a saved revision with no price decision
-(`_shared/scope_freeze/owner_price_approval.ts`); a send naming no revision is
-logged `quote_send_price_unapproved` and refused only while
-`owner_approval_saved_revision_required_v1` is on (seeded off). Staff doors:
+`work_orders_crew_owner_gate`, which holds a crew order on a saved-revision job
+out of sent, accepted, in progress and complete, from any earlier status
+including cancelled, until the job order is issued); it refuses `WO428`. A
+decision is only for a job in the approver's own company
+(`owner_approval_company_ok`; a NULL company never passes): the ops-api doors
+call the five-argument `approve_job_work_order` with the caller's company. The
+office queue's approve follows `owner_approval_authority`, so the owner listed
+only as owner may approve there. A missing decision holds the issue and keeps
+the customer's acceptance, and a deposit stage released later still dates from
+that acceptance. Decisions are recorded while the order is a draft and the
+issue validates, releases and seals in one transaction. An edit or a new
+revision needs a fresh decision. Every quote send path (send-quote `/send`,
+`/send-runs`, Quick Quote) refuses a saved revision with no price decision
+(`_shared/scope_freeze/owner_price_approval.ts`). A send naming no revision is
+refused only while `owner_approval_saved_revision_required_v1` is on (seeded
+off); otherwise it is claimed in `quote_send_price_unapproved_sends` (one row
+per document or Quick Quote call, forward only, never deleted) before the
+email, and nothing is sent when that write fails. Staff doors:
 `approve_scope_price`, `approve_scope_work_order`, `read_scope_owner_approvals`
 (`ops-api/scope_owner_approvals.ts`). While an issue is held, the local payment
-stage drafts made at release wait with it.
+stage drafts made at release wait with it. The rollback goes with the
+application code from before this migration.
 
 ## Crew Invoices Sit On The Job Work Order, Behind Flags That Default Off
 

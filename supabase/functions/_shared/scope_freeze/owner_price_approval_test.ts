@@ -1,9 +1,13 @@
 // deno-lint-ignore-file no-import-prefix no-explicit-any
 import { assertEquals } from "https://deno.land/std@0.208.0/assert/mod.ts";
 import {
+  claimUnapprovedLegacySend,
+  markUnapprovedLegacySendSent,
   OWNER_APPROVAL_SAVED_REVISION_FLAG,
+  ownerPriceBeforeSend,
   ownerPriceGate,
-  recordUnapprovedLegacySend,
+  unapprovedSendKeyForDocument,
+  unapprovedSendKeyForQuickQuote,
 } from "./owner_price_approval.ts";
 import type { SealedSendSource } from "./quote_scope_revision_link.ts";
 
@@ -17,7 +21,10 @@ const sealed: SealedSendSource = {
 };
 
 function client(opts: {
-  rpc?: () => Promise<{ data: unknown; error: unknown }>;
+  rpc?: (
+    name: string,
+    args: any,
+  ) => Promise<{ data: unknown; error: unknown }>;
   flag?: () => Promise<{ data: unknown; error: unknown }>;
   insert?: (row: any) => Promise<{ error: unknown }>;
 }) {
@@ -27,7 +34,7 @@ function client(opts: {
     rpc(name: string, args: unknown) {
       calls.push({ rpc: name, args });
       return opts.rpc
-        ? opts.rpc()
+        ? opts.rpc(name, args)
         : Promise.resolve({ data: null, error: null });
     },
     from(table: string) {
@@ -145,24 +152,177 @@ Deno.test("owner price gate: a send naming no saved revision follows the switch"
   assertEquals(unreadable.status, 503);
 });
 
-Deno.test("owner price gate: an unapproved legacy send is recorded with ids only, never blocking", async () => {
-  const sb = client({});
-  await recordUnapprovedLegacySend(sb, JOB, {
-    path: "send",
-    document_ids: ["d1"],
+const legacyOff = () =>
+  Promise.resolve({ data: { enabled: false }, error: null });
+const recordCalls = (sb: { calls: any[] }) =>
+  sb.calls.filter((c) => c.rpc === "record_quote_send_price_unapproved");
+
+Deno.test("unapproved send record: the claim is written before the email, ids only", async () => {
+  const sb = client({
+    rpc: () => Promise.resolve({ data: { recorded: true }, error: null }),
   });
-  assertEquals(sb.calls.find((c) => c.insert)?.insert, {
+  const send = {
+    send_key: unapprovedSendKeyForDocument("d1"),
     job_id: JOB,
-    event_type: "quote_send_price_unapproved",
-    detail_json: {
-      reason: "no_saved_revision",
-      path: "send",
-      document_ids: ["d1"],
+    path: "send" as const,
+    document_id: "d1",
+  };
+  assertEquals(await claimUnapprovedLegacySend(sb, send), { ok: true });
+  assertEquals(recordCalls(sb)[0].args, {
+    p_send_key: "quote_document:d1",
+    p_job_id: JOB,
+    p_path: "send",
+    p_document_id: "d1",
+    p_state: "claimed",
+  });
+  assertEquals(unapprovedSendKeyForQuickQuote("c1"), "quick_quote:c1");
+});
+
+Deno.test("unapproved send record: a claim that cannot be written stops the send", async () => {
+  for (
+    const rpc of [
+      () => Promise.resolve({ data: null, error: { code: "57014" } }),
+      () => Promise.resolve({ data: { recorded: false }, error: null }),
+      () => Promise.reject(new Error("network")),
+    ]
+  ) {
+    const out = await claimUnapprovedLegacySend(client({ rpc }), {
+      send_key: "quote_document:d1",
+      job_id: JOB,
+      path: "send-runs",
+      document_id: "d1",
+    });
+    assertEquals(out.ok, false);
+    if (out.ok) return;
+    assertEquals(
+      [out.status, out.body.code],
+      [503, "owner_price_unapproved_send_unrecorded"],
+    );
+  }
+});
+
+Deno.test("unapproved send record: marking sent moves the claim and never throws", async () => {
+  const sb = client({
+    rpc: () => Promise.resolve({ data: { recorded: true }, error: null }),
+  });
+  const send = {
+    send_key: "quick_quote:c1",
+    job_id: JOB,
+    path: "quick-quote" as const,
+    document_id: null,
+  };
+  assertEquals(await markUnapprovedLegacySendSent(sb, send), true);
+  assertEquals(recordCalls(sb)[0].args.p_state, "sent");
+  // No claim (recorded false), a refusal or a dropped call: false, no throw.
+  for (
+    const rpc of [
+      () => Promise.resolve({ data: { recorded: false }, error: null }),
+      () => Promise.resolve({ data: null, error: { code: "x" } }),
+      () => Promise.reject(new Error("down")),
+    ]
+  ) {
+    assertEquals(await markUnapprovedLegacySendSent(client({ rpc }), send), false);
+  }
+});
+
+Deno.test("before send: a named revision with no price decision is refused and nothing is recorded", async () => {
+  const sb = client({
+    rpc: (name) =>
+      Promise.resolve({
+        data: name === "record_quote_send_price_unapproved" ? { recorded: true } : null,
+        error: null,
+      }),
+  });
+  const out = await ownerPriceBeforeSend(sb, {
+    job_id: JOB,
+    sealed,
+    path: "quick-quote",
+    send_key: "quick_quote:c1",
+    document_id: null,
+  });
+  assertEquals(out.kind, "refused");
+  if (out.kind !== "refused") return;
+  assertEquals([out.status, out.body.code], [409, "owner_price_approval_required"]);
+  assertEquals(recordCalls(sb), []);
+});
+
+Deno.test("before send: an approved revision goes with no record", async () => {
+  const sb = client({
+    rpc: () => Promise.resolve({ data: { id: "a1", kind: "price" }, error: null }),
+  });
+  const out = await ownerPriceBeforeSend(sb, {
+    job_id: JOB,
+    sealed,
+    path: "send",
+    send_key: "quote_document:d1",
+    document_id: "d1",
+  });
+  assertEquals(out, { kind: "go", unapproved: null });
+  assertEquals(recordCalls(sb), []);
+});
+
+Deno.test("before send: a send naming no revision is recorded first, or refused when it cannot be", async () => {
+  const ok = client({
+    flag: legacyOff,
+    rpc: () => Promise.resolve({ data: { recorded: true }, error: null }),
+  });
+  const out = await ownerPriceBeforeSend(ok, {
+    job_id: JOB,
+    sealed: { kind: "legacy" },
+    path: "quick-quote",
+    send_key: "quick_quote:c1",
+    document_id: null,
+  });
+  assertEquals(out, {
+    kind: "go",
+    unapproved: {
+      send_key: "quick_quote:c1",
+      job_id: JOB,
+      path: "quick-quote",
+      document_id: null,
     },
   });
-  const failing = client({ insert: () => Promise.reject(new Error("down")) });
-  await recordUnapprovedLegacySend(failing, JOB, {
-    path: "send-runs",
-    document_ids: [],
+  assertEquals(recordCalls(ok).length, 1);
+  const down = await ownerPriceBeforeSend(
+    client({
+      flag: legacyOff,
+      rpc: () => Promise.resolve({ data: null, error: { code: "x" } }),
+    }),
+    {
+      job_id: JOB,
+      sealed: { kind: "legacy" },
+      path: "send",
+      send_key: "quote_document:d1",
+      document_id: "d1",
+    },
+  );
+  assertEquals(down.kind, "refused");
+  if (down.kind !== "refused") return;
+  assertEquals(down.body.code, "owner_price_unapproved_send_unrecorded");
+  // With the switch on, a send naming no revision is refused before any record.
+  const on = client({
+    flag: () => Promise.resolve({ data: { enabled: true }, error: null }),
   });
+  const refused = await ownerPriceBeforeSend(on, {
+    job_id: JOB,
+    sealed: { kind: "legacy" },
+    path: "send",
+    send_key: "quote_document:d1",
+    document_id: "d1",
+  });
+  assertEquals(refused.kind, "refused");
+  assertEquals(recordCalls(on), []);
+});
+
+Deno.test("before send: a source that could not be judged sends nothing", async () => {
+  const out = await ownerPriceBeforeSend(client({}), {
+    job_id: JOB,
+    sealed: { kind: "refused", status: 409, body: { error: "x", code: "x", reason: "x" } },
+    path: "send",
+    send_key: "quote_document:d1",
+    document_id: "d1",
+  });
+  assertEquals(out.kind, "refused");
+  if (out.kind !== "refused") return;
+  assertEquals(out.body.code, "owner_price_approval_not_judged");
 });

@@ -15,13 +15,24 @@
 -- issue, a backfill, a direct write). The automatic issue may carry out an
 -- issue both decisions already allow; it never creates a decision.
 --
+-- A crew work order on such a job reaches an issued state only after the job
+-- work order is issued on both decisions (work_orders_crew_owner_gate).
+--
 -- A customer acceptance with an approval missing is retained on the draft set
 -- and the issue waits. The decision that completes the pair issues it in the
 -- same transaction (release then seal, so the existing release guard holds).
+-- The local deposit keeps the retained acceptance time as its event and due
+-- date base, however late the owner approves.
+--
+-- Every decision is recorded in the job's own company: the caller's verified
+-- company, else the approver's own (owner_approval_company_ok). NULL never
+-- passes.
 --
 -- An order with no saved revision keeps the existing named-approver rule until
 -- the owner turns on owner_approval_saved_revision_required_v1 (seeded off),
 -- which then refuses it, and refuses a quote send that names no revision.
+-- While it is off, each such send is recorded before the email goes
+-- (quote_send_price_unapproved_sends).
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -272,6 +283,16 @@ END $$;
 
 -- ── 4. the seal: one policy for every path ───────────────────────────────────
 
+-- The seal digest keys moved, unchanged, into job_work_order_content_hash;
+-- the trigger returns a row, never these keys.
+-- output-key-guard: drop public.work_orders_job_kind_guard agreed_labour_ex
+-- output-key-guard: drop public.work_orders_job_kind_guard job_id
+-- output-key-guard: drop public.work_orders_job_kind_guard scheduled_date
+-- output-key-guard: drop public.work_orders_job_kind_guard scope_items
+-- output-key-guard: drop public.work_orders_job_kind_guard site_address
+-- output-key-guard: drop public.work_orders_job_kind_guard special_instructions
+-- output-key-guard: drop public.work_orders_job_kind_guard wo_number
+-- output-key-guard: drop public.work_orders_job_kind_guard work_order_id
 CREATE OR REPLACE FUNCTION public.work_orders_job_kind_guard()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -451,8 +472,11 @@ BEGIN
 END;
 $$;
 
--- A crew work order on a job whose work comes from a saved revision leaves
--- draft only once that job's work order is issued on both owner decisions.
+-- A crew work order on a job whose work comes from a saved revision reaches
+-- an issued state (sent, accepted, in progress, complete) only once that
+-- job's work order is issued on both owner decisions. Every way in is
+-- checked: an insert, a draft, and a cancelled order brought back. Only an
+-- order that was already issued before this rule stays editable as it was.
 CREATE OR REPLACE FUNCTION public.work_orders_crew_owner_gate()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 BEGIN
@@ -460,7 +484,8 @@ BEGIN
      OR NEW.status IN ('draft', 'cancelled') THEN
     RETURN NEW;
   END IF;
-  IF TG_OP = 'UPDATE' AND OLD.status IS DISTINCT FROM 'draft' THEN
+  IF TG_OP = 'UPDATE' AND OLD.kind = 'crew' AND OLD.job_id IS NOT DISTINCT FROM NEW.job_id
+     AND OLD.status IN ('sent', 'accepted', 'in_progress', 'complete') THEN
     RETURN NEW;
   END IF;
   IF NOT (
@@ -555,6 +580,18 @@ END $$;
 
 -- ── 6. recording the decisions ───────────────────────────────────────────────
 
+-- The company a decision is recorded in. The caller's verified company when
+-- the door passes one, else the approver's own company; it must be the job's,
+-- and an approver whose own company is another one is refused either way.
+-- NULL is never a way past the check.
+CREATE OR REPLACE FUNCTION public.owner_approval_company_ok(p_approver uuid, p_org_id uuid, p_job_org uuid)
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT p_job_org IS NOT NULL
+     AND COALESCE(p_org_id, u.org_id) IS NOT DISTINCT FROM p_job_org
+     AND (u.org_id IS NULL OR u.org_id = p_job_org)
+  FROM (SELECT (SELECT x.org_id FROM public.users x WHERE x.id = p_approver) AS org_id) u;
+$$;
+
 CREATE OR REPLACE FUNCTION public.record_scope_price_approval(
   p_job_id uuid, p_scope_revision_id uuid, p_approver uuid, p_via text, p_org_id uuid
 ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
@@ -568,7 +605,8 @@ DECLARE
   v_wo uuid;
 BEGIN
   SELECT * INTO j FROM public.jobs WHERE id = p_job_id FOR UPDATE;
-  IF NOT FOUND OR p_org_id IS NULL OR j.org_id IS DISTINCT FROM p_org_id THEN
+  IF NOT FOUND OR p_org_id IS NULL OR j.org_id IS DISTINCT FROM p_org_id
+     OR NOT public.owner_approval_company_ok(p_approver, p_org_id, j.org_id) THEN
     RAISE EXCEPTION 'scope_owner_approval_job_forbidden' USING ERRCODE = '42501';
   END IF;
   IF p_via IS NULL OR p_via NOT IN ('session', 'terminal') THEN
@@ -612,8 +650,9 @@ BEGIN
     'issues', v_issues);
 END $$;
 
--- p_scope_revision_id, when given, must be the order's own saved revision;
--- p_org_id, when given, must be the job's organisation.
+-- p_scope_revision_id, when given, must be the order's own saved revision.
+-- The company check always runs (owner_approval_company_ok): p_org_id, when
+-- given, is the caller's verified company; without it the approver's own.
 CREATE OR REPLACE FUNCTION public.record_job_work_order_approval(
   p_work_order_id uuid, p_approver uuid, p_via text, p_expected_updated_at timestamptz,
   p_scope_revision_id uuid DEFAULT NULL, p_org_id uuid DEFAULT NULL, p_require_revision boolean DEFAULT false
@@ -639,7 +678,7 @@ BEGIN
   IF w.kind <> 'job' THEN
     RAISE EXCEPTION 'only a job work order is approved' USING ERRCODE = '23514';
   END IF;
-  IF p_org_id IS NOT NULL AND j.org_id IS DISTINCT FROM p_org_id THEN
+  IF NOT public.owner_approval_company_ok(p_approver, p_org_id, j.org_id) THEN
     RAISE EXCEPTION 'scope_owner_approval_job_forbidden' USING ERRCODE = '42501';
   END IF;
   IF w.status <> 'draft' THEN
@@ -702,9 +741,12 @@ BEGIN
     'issue', v_issue);
 END $$;
 
--- The existing manual RPC (approve_work_order, approve_office_job_work_order):
--- records the work order decision and issues only when the policy allows. It
--- returns the work order as it now stands plus owner_approval.
+-- The existing manual RPC: records the work order decision and issues only
+-- when the policy allows. It returns the work order as it now stands plus
+-- owner_approval. This four-argument form judges the company from the
+-- approver's own; the two ops-api doors (approve_work_order,
+-- approve_office_job_work_order) call the five-argument form below with the
+-- caller's verified company.
 CREATE OR REPLACE FUNCTION public.approve_job_work_order(
   p_work_order_id uuid,
   p_approver uuid,
@@ -722,6 +764,32 @@ DECLARE
 BEGIN
   v_result := public.record_job_work_order_approval(p_work_order_id, p_approver, p_via,
     p_expected_updated_at, NULL, NULL, false);
+  SELECT * INTO v_out FROM public.work_orders WHERE id = p_work_order_id;
+  RETURN to_jsonb(v_out) || jsonb_build_object('owner_approval', v_result);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.approve_job_work_order(
+  p_work_order_id uuid,
+  p_approver uuid,
+  p_via text,
+  p_expected_updated_at timestamptz,
+  p_org_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_result jsonb;
+  v_out public.work_orders%ROWTYPE;
+BEGIN
+  IF p_org_id IS NULL THEN
+    RAISE EXCEPTION 'scope_owner_approval_job_forbidden' USING ERRCODE = '42501';
+  END IF;
+  v_result := public.record_job_work_order_approval(p_work_order_id, p_approver, p_via,
+    p_expected_updated_at, NULL, p_org_id, false);
   SELECT * INTO v_out FROM public.work_orders WHERE id = p_work_order_id;
   RETURN to_jsonb(v_out) || jsonb_build_object('owner_approval', v_result);
 END;
@@ -928,6 +996,38 @@ RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_
   WHERE a.kind = 'price' AND a.job_id = p_job_id AND a.scope_revision_id = p_scope_revision_id;
 $$;
 
+-- The local payment stages (20261106044806) date the quote_accepted signal
+-- from the release. The release may now wait for the owner, so the signal
+-- takes the customer's retained acceptance of the same revision instead; the
+-- release time is used only for an older record that has none. The drafts
+-- still wait for the issue; only the event time and the due date it sets
+-- keep the acceptance day.
+CREATE OR REPLACE FUNCTION public.scope_payment_acceptance_event()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE
+  signal record;
+  v_accepted_at timestamptz;
+BEGIN
+  IF OLD.released_at IS NULL AND NEW.released_at IS NOT NULL THEN
+    v_accepted_at := CASE
+      WHEN NEW.acceptance_recorded_at IS NOT NULL
+       AND NEW.acceptance_scope_revision_id IS NOT DISTINCT FROM NEW.scope_revision_id
+      THEN NEW.acceptance_recorded_at ELSE NEW.released_at END;
+    BEGIN
+      PERFORM public.record_scope_payment_signal(NEW.job_id,'quote_accepted',
+        jsonb_build_object('kind','quote_accepted','scope_revision_id',NEW.scope_revision_id),v_accepted_at);
+      FOR signal IN SELECT * FROM public.scope_payment_signals WHERE job_id=NEW.job_id AND scope_revision_id=NEW.scope_revision_id
+        AND kind IN ('install_scheduled','council_step_completed') ORDER BY happened_at,id LOOP
+        PERFORM public.apply_scope_payment_event(NEW.job_id,signal.kind,signal.coordinate,signal.happened_at);
+      END LOOP;
+    EXCEPTION
+      WHEN query_canceled THEN RAISE WARNING 'local payment stages held after timeout; acceptance retained';
+      WHEN OTHERS THEN RAISE WARNING 'local payment stages held; acceptance retained: %',SQLSTATE;
+    END;
+  END IF;
+  RETURN NULL;
+END $$;
+
 -- ── 8. the automatic issue carries out, never decides ────────────────────────
 
 CREATE OR REPLACE FUNCTION public.auto_issue_job_work_order(
@@ -1010,6 +1110,102 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   LIMIT GREATEST(1, LEAST(COALESCE(p_limit, 25), 100));
 $$;
 
+-- ── 8b. quote sends that name no saved revision ─────────────────────────────
+
+-- While owner_approval_saved_revision_required_v1 is off, a quote send that
+-- names no saved revision still goes out. Each one is recorded here BEFORE
+-- the email is handed to the provider (state claimed), so a send that went
+-- out is never unaccounted when a later step fails, and marked sent once the
+-- provider takes it. A replay only moves an existing record to sent; it never
+-- invents one and never sends again. One record per send key: a quote
+-- document for /send and /send-runs, one call for Quick Quote. Ids only.
+CREATE TABLE IF NOT EXISTS public.quote_send_price_unapproved_sends (
+  send_key text PRIMARY KEY CHECK (length(send_key) BETWEEN 1 AND 200),
+  job_id uuid NOT NULL,
+  path text NOT NULL CHECK (path IN ('send', 'send-runs', 'quick-quote')),
+  document_id uuid,
+  state text NOT NULL DEFAULT 'claimed' CHECK (state IN ('claimed', 'sent')),
+  claimed_at timestamptz NOT NULL DEFAULT now(),
+  sent_at timestamptz,
+  CHECK ((state = 'sent') = (sent_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS quote_send_price_unapproved_sends_job_idx
+  ON public.quote_send_price_unapproved_sends (job_id, claimed_at);
+ALTER TABLE public.quote_send_price_unapproved_sends ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.quote_send_price_unapproved_sends FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT ON public.quote_send_price_unapproved_sends TO service_role;
+
+-- A record is never deleted and only ever moves forward, claimed to sent.
+CREATE OR REPLACE FUNCTION public.quote_send_price_unapproved_forward_only()
+RETURNS trigger LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+BEGIN
+  IF TG_OP = 'DELETE' OR TG_OP = 'TRUNCATE' THEN
+    RAISE EXCEPTION 'quote_send_price_unapproved_sends is append only' USING ERRCODE = '42501';
+  END IF;
+  IF NEW.send_key IS DISTINCT FROM OLD.send_key OR NEW.job_id IS DISTINCT FROM OLD.job_id
+     OR NEW.path IS DISTINCT FROM OLD.path OR NEW.document_id IS DISTINCT FROM OLD.document_id
+     OR NEW.claimed_at IS DISTINCT FROM OLD.claimed_at
+     OR (OLD.state = 'sent' AND (NEW.state IS DISTINCT FROM 'sent' OR NEW.sent_at IS DISTINCT FROM OLD.sent_at)) THEN
+    RAISE EXCEPTION 'quote_send_price_unapproved_sends only moves from claimed to sent' USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_quote_send_price_unapproved_forward_only ON public.quote_send_price_unapproved_sends;
+CREATE TRIGGER trg_quote_send_price_unapproved_forward_only
+  BEFORE UPDATE OR DELETE ON public.quote_send_price_unapproved_sends
+  FOR EACH ROW EXECUTE FUNCTION public.quote_send_price_unapproved_forward_only();
+DROP TRIGGER IF EXISTS trg_quote_send_price_unapproved_no_truncate ON public.quote_send_price_unapproved_sends;
+CREATE TRIGGER trg_quote_send_price_unapproved_no_truncate
+  BEFORE TRUNCATE ON public.quote_send_price_unapproved_sends
+  FOR EACH STATEMENT EXECUTE FUNCTION public.quote_send_price_unapproved_forward_only();
+
+-- p_state claimed: before the email. Idempotent on the send key; the first
+-- claim also writes the job event quote_send_price_unapproved. A key already
+-- held by another job or path refuses. p_state sent: after the provider took
+-- it, or on a replay of a published document; only an existing record moves,
+-- and recorded is false when there is none.
+CREATE OR REPLACE FUNCTION public.record_quote_send_price_unapproved(
+  p_send_key text, p_job_id uuid, p_path text, p_document_id uuid, p_state text
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  r public.quote_send_price_unapproved_sends%ROWTYPE;
+BEGIN
+  IF p_send_key IS NULL OR length(p_send_key) NOT BETWEEN 1 AND 200 OR p_job_id IS NULL
+     OR p_path IS NULL OR p_path NOT IN ('send', 'send-runs', 'quick-quote')
+     OR p_state IS NULL OR p_state NOT IN ('claimed', 'sent') THEN
+    RAISE EXCEPTION 'quote_send_price_unapproved_input_invalid' USING ERRCODE = '22023';
+  END IF;
+  IF p_state = 'claimed' THEN
+    INSERT INTO public.quote_send_price_unapproved_sends(send_key, job_id, path, document_id)
+      VALUES (p_send_key, p_job_id, p_path, p_document_id)
+      ON CONFLICT (send_key) DO NOTHING
+      RETURNING * INTO r;
+    IF FOUND THEN
+      INSERT INTO public.job_events(job_id, event_type, detail_json) VALUES
+        (p_job_id, 'quote_send_price_unapproved', jsonb_build_object(
+          'reason', 'no_saved_revision', 'path', p_path,
+          'document_ids', CASE WHEN p_document_id IS NULL THEN '[]'::jsonb
+                               ELSE jsonb_build_array(p_document_id) END));
+    ELSE
+      SELECT * INTO r FROM public.quote_send_price_unapproved_sends WHERE send_key = p_send_key;
+    END IF;
+    IF r.job_id IS DISTINCT FROM p_job_id OR r.path IS DISTINCT FROM p_path
+       OR r.document_id IS DISTINCT FROM p_document_id THEN
+      RAISE EXCEPTION 'quote_send_price_unapproved_key_conflict' USING ERRCODE = '23505';
+    END IF;
+    RETURN jsonb_build_object('recorded', true, 'state', r.state);
+  END IF;
+  UPDATE public.quote_send_price_unapproved_sends
+    SET state = 'sent', sent_at = COALESCE(sent_at, now())
+    WHERE send_key = p_send_key AND job_id = p_job_id AND state = 'claimed'
+    RETURNING * INTO r;
+  IF NOT FOUND THEN
+    SELECT * INTO r FROM public.quote_send_price_unapproved_sends
+      WHERE send_key = p_send_key AND job_id = p_job_id;
+  END IF;
+  RETURN jsonb_build_object('recorded', r.send_key IS NOT NULL, 'state', r.state);
+END $$;
+
 -- ── 9. access ────────────────────────────────────────────────────────────────
 
 REVOKE ALL ON FUNCTION
@@ -1024,6 +1220,8 @@ REVOKE ALL ON FUNCTION
   public.record_scope_price_approval(uuid, uuid, uuid, text, uuid),
   public.record_job_work_order_approval(uuid, uuid, text, timestamptz, uuid, uuid, boolean),
   public.approve_job_work_order(uuid, uuid, text, timestamptz),
+  public.approve_job_work_order(uuid, uuid, text, timestamptz, uuid),
+  public.owner_approval_company_ok(uuid, uuid, uuid),
   public.scope_job_draft_issue_state(uuid),
   public.release_scope_job_drafts(uuid, uuid, boolean),
   public.read_scope_job_drafts(uuid, uuid, uuid),
@@ -1032,18 +1230,22 @@ REVOKE ALL ON FUNCTION
   public.auto_issue_job_work_order(uuid, timestamptz),
   public.owner_approved_job_work_order_drafts(integer),
   public.work_orders_crew_owner_gate(),
-  public.scope_owner_approvals_append_only()
+  public.scope_owner_approvals_append_only(),
+  public.quote_send_price_unapproved_forward_only(),
+  public.record_quote_send_price_unapproved(text, uuid, text, uuid, text)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION
   public.owner_approval_authority(uuid),
   public.record_scope_price_approval(uuid, uuid, uuid, text, uuid),
   public.record_job_work_order_approval(uuid, uuid, text, timestamptz, uuid, uuid, boolean),
   public.approve_job_work_order(uuid, uuid, text, timestamptz),
+  public.approve_job_work_order(uuid, uuid, text, timestamptz, uuid),
   public.release_scope_job_drafts(uuid, uuid, boolean),
   public.read_scope_job_drafts(uuid, uuid, uuid),
   public.read_job_owner_approval_state(uuid, uuid),
   public.scope_price_owner_approval(uuid, uuid),
   public.auto_issue_job_work_order(uuid, timestamptz),
   public.owner_approved_job_work_order_drafts(integer),
-  public.issue_owner_approved_job_work_order(uuid)
+  public.issue_owner_approved_job_work_order(uuid),
+  public.record_quote_send_price_unapproved(text, uuid, text, uuid, text)
   TO service_role;

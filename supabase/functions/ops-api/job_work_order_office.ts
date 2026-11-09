@@ -7,7 +7,11 @@
 // approver. This module never calls Xero and never sets
 // trade_invoice_lines.job_work_order_id.
 
-import { readFlag, splitOwnerApprovalResult } from "./job_work_orders.ts";
+import {
+  readFlag,
+  readOwnerApprovalAuthority,
+  splitOwnerApprovalResult,
+} from "./job_work_orders.ts";
 import {
   CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG,
   decideOfficeQueue,
@@ -40,6 +44,8 @@ export class JobWorkOrderOfficeError extends Error {
 export interface OfficeActor {
   staff: boolean;
   userId: string | null;
+  /** The signed-in user's company; approving needs it. */
+  orgId?: string | null;
 }
 
 const QUEUE_COLUMNS =
@@ -70,6 +76,18 @@ async function approverLists(client: any): Promise<{
   };
 }
 
+async function officeApproveAuthority(client: any, userId: string): Promise<string | null> {
+  try {
+    return await readOwnerApprovalAuthority(client, userId);
+  } catch {
+    throw new JobWorkOrderOfficeError(
+      503,
+      "approvers_unreadable",
+      "The work-order approver list could not be read.",
+    );
+  }
+}
+
 async function assertOfficeWrite(
   client: any,
   actor: OfficeActor,
@@ -77,10 +95,15 @@ async function assertOfficeWrite(
   lineAlreadyHeld = false,
   invoiceSubmitterId: string | null = null,
 ): Promise<void> {
-  const [officeFlagOn, reviewFlagOn, lists] = await Promise.all([
+  const [officeFlagOn, reviewFlagOn, lists, approveAuthority] = await Promise.all([
     readFlag(client, JOB_WORK_ORDER_OFFICE_FILL_FLAG),
     readFlag(client, CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG),
     approverLists(client),
+    // Approving follows the database's one rule (owner first, then the named
+    // lists); filling and line review keep their own lists.
+    action === "approve" && actor.staff && actor.userId
+      ? officeApproveAuthority(client, actor.userId)
+      : Promise.resolve(action === "approve" ? null : undefined),
   ]);
   const decision = decideOfficeWrite({
     staff: actor.staff,
@@ -92,6 +115,7 @@ async function assertOfficeWrite(
     backupIds: lists.backupIds,
     lineAlreadyHeld,
     invoiceSubmitterId,
+    approveAuthority,
   });
   if (!decision.ok) {
     throw new JobWorkOrderOfficeError(
@@ -246,6 +270,9 @@ function throwApproveRpc(error: { code?: string; message?: string }): never {
       "The draft changed after it was read. Read it again before approving.",
     );
   }
+  if (code === "42501" && message.includes("scope_owner_approval_job_forbidden")) {
+    throw new JobWorkOrderOfficeError(404, "work_order_not_found", "Work order not found.");
+  }
   if (code === "42501") {
     throw new JobWorkOrderOfficeError(403, "not_approver", message);
   }
@@ -267,6 +294,13 @@ export async function approveOfficeJobWorkOrder(
   actor: OfficeActor,
 ): Promise<Record<string, unknown>> {
   await assertOfficeWrite(client, actor, "approve");
+  if (!actor.orgId) {
+    throw new JobWorkOrderOfficeError(
+      403,
+      "operator_access_required",
+      "Approving needs a signed-in session in this company.",
+    );
+  }
   const id = requireId(body?.work_order_id || body?.id, "work_order_id_required", "work_order_id is required");
   const expected = requireId(
     body?.expected_updated_at,
@@ -278,6 +312,7 @@ export async function approveOfficeJobWorkOrder(
     p_approver: actor.userId,
     p_via: "session",
     p_expected_updated_at: expected,
+    p_org_id: actor.orgId,
   });
   if (error) throwApproveRpc(error);
   // The decision is recorded; the order is issued only when the owner

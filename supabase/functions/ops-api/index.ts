@@ -168,6 +168,11 @@ import {
   type NamedScopeRevisionRead,
   type SentQuoteSourceHashes,
 } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
+import {
+  markUnapprovedLegacySendSent,
+  ownerPriceBeforeSend,
+  unapprovedSendKeyForQuickQuote,
+} from '../_shared/scope_freeze/owner_price_approval.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
@@ -10159,7 +10164,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           authUserId: authUser?.id ?? null,
           serverSecretPresented,
           actor: requestActor,
-        }))))
+        }), authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID)))
       // Dry run unless apply:true AND feature flag job_work_order_backfill_v1.
       case 'backfill_job_work_orders': {
         if (authMode !== 'api_key' || !serverSecretPresented) {
@@ -17645,14 +17650,16 @@ async function readWorkOrderChargeRows(
 // The module throws JobWorkOrderError; the serve() handler answers ApiError.
 function officeJobWorkOrderActor(
   authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
-  authUser: Pick<TradeAuthContext, 'id' | 'role'> | null,
+  authUser: Pick<TradeAuthContext, 'id' | 'role' | 'orgId'> | null,
 ): {
   staff: boolean
   userId: string | null
+  orgId: string | null
 } {
   return {
     staff: _opsApiCallerIsStaffOperator(authMode, authUser),
     userId: authMode === 'jwt' ? authUser?.id || null : null,
+    orgId: authMode === 'jwt' ? authUser?.orgId || null : null,
   }
 }
 
@@ -41359,6 +41366,16 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   if (!(totalIncGST > 0)) {
     throw new Error('Quote total is zero or missing. Set pricing on the job in the scoping tool before sending.')
   }
+  // TK-S28: a named saved revision needs the owner's price decision; a send
+  // naming none follows owner_approval_saved_revision_required_v1 and is
+  // recorded before the email (20261109040000). Refused: nothing is sent.
+  const ownerPrice = await ownerPriceBeforeSend(client, {
+    job_id, sealed: sealedSource, path: 'quick-quote',
+    send_key: unapprovedSendKeyForQuickQuote(crypto.randomUUID()), document_id: null,
+  })
+  if (ownerPrice.kind === 'refused') {
+    throw new ApiError(ownerPrice.body.error, ownerPrice.status, { ok: false, ...ownerPrice.body })
+  }
   const paymentTerms = pricing.payment_terms || '50/50 split'
   const validDays = pricing.valid_days || 30
   const validUntil = new Date(Date.now() + validDays * 86400000).toLocaleDateString('en-AU', { day: 'numeric', month: 'long', year: 'numeric' })
@@ -41423,6 +41440,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   })
   const resendResult = await resendResp.json()
   if (!resendResp.ok) throw new Error('Email send failed: ' + (resendResult.message || JSON.stringify(resendResult)))
+  if (ownerPrice.unapproved) await markUnapprovedLegacySendSent(client, ownerPrice.unapproved)
 
   // ── Cap 0 release-truth: atomic draft → quoted transition + canonical events ──
   // Mirrors /send-quote/send (post-`350e943`) so Quick Quote inherits the same exactly-once

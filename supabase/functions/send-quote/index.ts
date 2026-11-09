@@ -41,7 +41,13 @@ import {
   type SentQuoteSourceHashes,
 } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
-import { ownerPriceGate, recordUnapprovedLegacySend, type OwnerPriceGate } from '../_shared/scope_freeze/owner_price_approval.ts'
+import {
+  claimUnapprovedLegacySend,
+  markUnapprovedLegacySendSent,
+  ownerPriceGate,
+  type OwnerPriceGate,
+  unapprovedSendKeyForDocument,
+} from '../_shared/scope_freeze/owner_price_approval.ts'
 import {
   currentQuoteForParty,
   QUOTE_PARTY_DOCUMENT_COLUMNS,
@@ -956,6 +962,14 @@ serve(async (req: Request) => {
       if (claimed.status !== 'claimed') {
         // Another call already claimed or published this document.
         console.log(`[send-quote] doc ${document_id} already sent/claimed — suppressing duplicate email`)
+        // A published send that named no saved revision: move its record to
+        // sent if a failure after the provider left it claimed. Never resends.
+        if (ownerPrice.kind === 'legacy_unapproved' && doc.job_id && quoteDocumentHasClientSend(doc)) {
+          await markUnapprovedLegacySendSent(sb, {
+            send_key: unapprovedSendKeyForDocument(document_id),
+            job_id: doc.job_id, path: 'send', document_id,
+          })
+        }
         if (sendRetiresPriorPartyQuotes(supersede_prior) && doc.job_id && quoteDocumentHasClientSend(doc)) {
           const retrySupersede = await supersedePriorPublishedQuoteDocuments(sb, {
             jobId: doc.job_id,
@@ -990,6 +1004,19 @@ serve(async (req: Request) => {
         const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
         return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
           || jsonResponse(ownerPrice.body, ownerPrice.status, corsHeaders)
+      }
+      // A send naming no saved revision is recorded before the email, so it
+      // is accounted for even if a later step fails. No record, no email.
+      if (ownerPrice.kind === 'legacy_unapproved' && doc.job_id) {
+        const audit = await claimUnapprovedLegacySend(sb, {
+          send_key: unapprovedSendKeyForDocument(document_id),
+          job_id: doc.job_id, path: 'send', document_id,
+        })
+        if (!audit.ok) {
+          const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
+          return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+            || jsonResponse(audit.body, audit.status, corsHeaders)
+        }
       }
       {
         const emailHtml = buildQuoteEmail({
@@ -1076,6 +1103,12 @@ serve(async (req: Request) => {
 
         if (emailRes.ok) {
           const resendData = await emailRes.json()
+          if (ownerPrice.kind === 'legacy_unapproved' && doc.job_id) {
+            await markUnapprovedLegacySendSent(sb, {
+              send_key: unapprovedSendKeyForDocument(document_id),
+              job_id: doc.job_id, path: 'send', document_id,
+            })
+          }
           await insertEmailEvent(sb, {
             emailType: 'quote', jobId: doc.job_id, recipient: client_email,
             subject: emailSubject, resendMessageId: resendData.id,
@@ -1166,9 +1199,6 @@ serve(async (req: Request) => {
             ? 'Failed to release quote send claim'
             : 'Failed to record quote send publication',
         }, 500, corsHeaders)
-      }
-      if (ownerPrice.kind === 'legacy_unapproved' && doc.job_id) {
-        await recordUnapprovedLegacySend(sb, doc.job_id, { path: 'send', document_ids: [document_id] })
       }
 
       // Update job status to quoted (release moment per ADR 2026-04-27)
@@ -3072,6 +3102,18 @@ serve(async (req: Request) => {
         }
       }
 
+      // Documents already published on an earlier call that named no saved
+      // revision: move a record a failure left claimed to sent. Never resends.
+      if (ownerPriceRuns.kind === 'legacy_unapproved') {
+        for (const published of publishedExistingDocs) {
+          if (typeof published?.id !== 'string') continue
+          await markUnapprovedLegacySendSent(sb, {
+            send_key: unapprovedSendKeyForDocument(published.id),
+            job_id: job.id, path: 'send-runs', document_id: published.id,
+          })
+        }
+      }
+
       // ── Cap 0 quote_revision precompute for /send-runs (Job Release Packet V1) ──
       // Per Codex stop-gate review (task-molbo0d5-4v6crc) we record the
       // quote_revisions row ONLY at the release moment (post-Resend success +
@@ -3207,6 +3249,26 @@ serve(async (req: Request) => {
             )
           }
 
+          // A send naming no saved revision is recorded for each of this
+          // email's documents before it goes. No record, no email.
+          const recipientDocIds = recipient.docs
+            .map((doc: { id?: string }) => doc?.id)
+            .filter((id: unknown): id is string => typeof id === 'string')
+          if (ownerPriceRuns.kind === 'legacy_unapproved') {
+            for (const docId of recipientDocIds) {
+              const audit = await claimUnapprovedLegacySend(sb, {
+                send_key: unapprovedSendKeyForDocument(docId),
+                job_id: job.id, path: 'send-runs', document_id: docId,
+              })
+              if (!audit.ok) {
+                return await abortAfterDocumentClaimRelease(
+                  true,
+                  jsonResponse(audit.body, audit.status, corsHeaders),
+                )
+              }
+            }
+          }
+
           const resendRes = await fetch('https://api.resend.com/emails', {
             method: 'POST',
             headers: {
@@ -3217,6 +3279,14 @@ serve(async (req: Request) => {
             body: JSON.stringify(emailPayload)
           })
           if (resendRes.ok) {
+            if (ownerPriceRuns.kind === 'legacy_unapproved') {
+              for (const docId of recipientDocIds) {
+                await markUnapprovedLegacySendSent(sb, {
+                  send_key: unapprovedSendKeyForDocument(docId),
+                  job_id: job.id, path: 'send-runs', document_id: docId,
+                })
+              }
+            }
             markSendRunsProviderAttempt(recipient.docs)
             emailsSent++
             successfulEmails.push(email)
@@ -3341,9 +3411,6 @@ serve(async (req: Request) => {
         }
       }
 
-      if (ownerPriceRuns.kind === 'legacy_unapproved' && publishedDocIds.length > 0) {
-        await recordUnapprovedLegacySend(sb, job.id, { path: 'send-runs', document_ids: publishedDocIds })
-      }
 
       const sendOutcome = sendRunsSendOutcome({
         emailsSent,

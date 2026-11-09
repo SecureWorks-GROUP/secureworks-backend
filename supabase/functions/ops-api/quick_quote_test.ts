@@ -1041,3 +1041,21 @@ Deno.test('JP24-Q11 quick-quote writer, slice 1b: each handler starts the named 
     assert(passed > start, `${label}: the read is handed to the release-row writer`)
   }
 })
+
+Deno.test('Quick Quote owner price: the gate and its record run before the provider, and a refusal sends nothing', async () => {
+  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const at = src.indexOf('async function sendQuickQuoteEmail(client: any, body: any) {')
+  assert(at > 0, 'handler found')
+  const end = src.indexOf('\nasync function ', at + 10)
+  const body = src.slice(at, end > at ? end : undefined)
+  const gate = body.indexOf('const ownerPrice = await ownerPriceBeforeSend(client, {')
+  const refused = body.indexOf("if (ownerPrice.kind === 'refused') {")
+  const thrown = body.indexOf('throw new ApiError(ownerPrice.body.error, ownerPrice.status', refused)
+  const provider = body.indexOf("fetch('https://api.resend.com/emails'")
+  const sent = body.indexOf('if (ownerPrice.unapproved) await markUnapprovedLegacySendSent(client, ownerPrice.unapproved)')
+  assert(gate > 0, 'the owner price gate is called')
+  assert(body.slice(gate, refused).includes('sealed: sealedSource'), 'the gate judges the sealed revision this send names')
+  assert(refused > gate && thrown > refused, 'a refusal throws')
+  assert(provider > thrown, 'the provider is reached only after the gate and its refusal')
+  assert(sent > provider, 'the record moves to sent only after the provider took the email')
+})

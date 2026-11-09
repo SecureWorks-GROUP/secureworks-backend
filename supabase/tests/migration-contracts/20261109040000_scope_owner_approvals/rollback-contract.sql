@@ -8,8 +8,14 @@ BEGIN
     AND to_regprocedure('public.record_job_work_order_approval(uuid,uuid,text,timestamptz,uuid,uuid,boolean)') IS NULL
     AND to_regprocedure('public.issue_owner_approved_job_work_order(uuid)') IS NULL
     AND to_regprocedure('public.job_work_order_owner_gate(public.work_orders,text)') IS NULL
-    AND to_regprocedure('public.owner_approved_job_work_order_drafts(integer)') IS NULL,
+    AND to_regprocedure('public.owner_approved_job_work_order_drafts(integer)') IS NULL
+    AND to_regprocedure('public.approve_job_work_order(uuid,uuid,text,timestamptz,uuid)') IS NULL
+    AND to_regprocedure('public.owner_approval_company_ok(uuid,uuid,uuid)') IS NULL
+    AND to_regprocedure('public.record_quote_send_price_unapproved(text,uuid,text,uuid,text)') IS NULL,
     'down removes the owner approval functions';
+  ASSERT to_regclass('public.quote_send_price_unapproved_sends') IS NOT NULL, 'down keeps the unapproved-send records';
+  ASSERT position('acceptance_recorded_at' IN pg_get_functiondef('public.scope_payment_acceptance_event()'::regprocedure)) = 0,
+    'down restores the earlier deposit event time';
   ASSERT NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_work_orders_crew_owner_gate'), 'down removes the crew gate';
   ASSERT NOT EXISTS (SELECT 1 FROM public.feature_flags WHERE flag_name = 'owner_approval_saved_revision_required_v1'),
     'down removes the saved-revision switch';

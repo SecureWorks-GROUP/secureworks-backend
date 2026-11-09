@@ -396,4 +396,174 @@ BEGIN
   ASSERT refused, 'a price whose frozen text does not match its hash is never approved';
 END $$;
 
+-- 10. Cancelling a crew order is no way round the gate: draft to cancelled to
+-- sent or accepted, a cancelled insert then sent, and a direct draft to sent
+-- are all refused until the job work order is issued on both decisions.
+DO $$
+DECLARE
+  org uuid := (SELECT id FROM owa_people WHERE role = 'org');
+  v_approver uuid := (SELECT id FROM owa_people WHERE role = 'approver');
+  f record; crew uuid; crew2 uuid; target text; refused boolean;
+BEGIN
+  f := pg_temp.scope_job(org, 'accepted');
+  INSERT INTO public.work_orders(org_id, job_id, kind, status) VALUES (org, f.job, 'crew', 'draft') RETURNING id INTO crew;
+  UPDATE public.work_orders SET status = 'cancelled' WHERE id = crew;
+  FOREACH target IN ARRAY ARRAY['sent', 'accepted', 'in_progress', 'complete'] LOOP
+    refused := false;
+    BEGIN UPDATE public.work_orders SET status = target WHERE id = crew;
+    EXCEPTION WHEN SQLSTATE 'WO428' THEN refused := true; END;
+    ASSERT refused, format('a cancelled crew order cannot become %s before the owner approvals', target);
+  END LOOP;
+  INSERT INTO public.work_orders(org_id, job_id, kind, status) VALUES (org, f.job, 'crew', 'cancelled') RETURNING id INTO crew2;
+  refused := false;
+  BEGIN UPDATE public.work_orders SET status = 'sent' WHERE id = crew2;
+  EXCEPTION WHEN SQLSTATE 'WO428' THEN refused := true; END;
+  ASSERT refused, 'a crew order inserted cancelled cannot then be sent';
+  UPDATE public.work_orders SET status = 'draft' WHERE id = crew2;
+  refused := false;
+  BEGIN UPDATE public.work_orders SET status = 'sent' WHERE id = crew2;
+  EXCEPTION WHEN SQLSTATE 'WO428' THEN refused := true; END;
+  ASSERT refused, 'a direct draft to sent is refused';
+  ASSERT (SELECT bool_and(status IN ('draft', 'cancelled')) FROM public.work_orders WHERE id IN (crew, crew2)),
+    'nothing was issued';
+  -- Once issued on both decisions, the cancelled order may come back, and an
+  -- issued one stays editable.
+  PERFORM public.release_scope_job_drafts(f.job, f.rev);
+  PERFORM public.record_scope_price_approval(f.job, f.rev, v_approver, 'session', org);
+  PERFORM public.record_job_work_order_approval(f.wo, v_approver, 'session', pg_temp.wo_stamp(f.wo));
+  UPDATE public.work_orders SET status = 'accepted' WHERE id = crew;
+  UPDATE public.work_orders SET status = 'complete' WHERE id = crew;
+  ASSERT (SELECT status = 'complete' FROM public.work_orders WHERE id = crew), 'issued on both decisions, the crew order moves';
+END $$;
+
+-- 11. Company: a named approver in company A never records a decision on a
+-- company B job, through either approval door, with the company passed or not.
+DO $$
+DECLARE
+  org uuid := (SELECT id FROM owa_people WHERE role = 'org');
+  other_org uuid := '0b0b0b0b-0000-4000-8000-0000000000bb';
+  v_approver uuid := (SELECT id FROM owa_people WHERE role = 'approver');
+  b record; own record; refused boolean; r jsonb;
+BEGIN
+  b := pg_temp.scope_job(other_org, 'accepted');
+  -- The old four-argument door: no company passed, the approver's own decides.
+  refused := false;
+  BEGIN PERFORM public.approve_job_work_order(b.wo, v_approver, 'session', pg_temp.wo_stamp(b.wo));
+  EXCEPTION WHEN insufficient_privilege THEN refused := SQLERRM = 'scope_owner_approval_job_forbidden'; END;
+  ASSERT refused, 'the four-argument door refuses another company''s order';
+  -- The five-argument door the ops-api doors call: the caller's company and
+  -- the approver's own must both be the job's.
+  FOREACH r IN ARRAY ARRAY[to_jsonb(org), to_jsonb(other_org), 'null'::jsonb] LOOP
+    refused := false;
+    BEGIN PERFORM public.approve_job_work_order(b.wo, v_approver, 'session', pg_temp.wo_stamp(b.wo), (r #>> '{}')::uuid);
+    EXCEPTION WHEN insufficient_privilege THEN refused := SQLERRM = 'scope_owner_approval_job_forbidden'; END;
+    ASSERT refused, format('the five-argument door refuses company %s for another company''s order', r);
+  END LOOP;
+  refused := false;
+  BEGIN PERFORM public.record_job_work_order_approval(b.wo, v_approver, 'session', pg_temp.wo_stamp(b.wo));
+  EXCEPTION WHEN insufficient_privilege THEN refused := true; END;
+  ASSERT refused, 'the writer refuses with no company passed';
+  FOREACH r IN ARRAY ARRAY[to_jsonb(org), to_jsonb(other_org)] LOOP
+    refused := false;
+    BEGIN PERFORM public.record_scope_price_approval(b.job, b.rev, v_approver, 'session', (r #>> '{}')::uuid);
+    EXCEPTION WHEN insufficient_privilege THEN refused := true; END;
+    ASSERT refused, format('a price decision in company %s is refused for another company''s job', r);
+  END LOOP;
+  ASSERT NOT EXISTS (SELECT 1 FROM public.scope_owner_approvals WHERE job_id = b.job), 'no decision recorded';
+  ASSERT (SELECT status = 'draft' FROM public.work_orders WHERE id = b.wo), 'nothing issued';
+  -- In its own company the five-argument door records the decision.
+  own := pg_temp.scope_job(org, 'accepted');
+  r := public.approve_job_work_order(own.wo, v_approver, 'session', pg_temp.wo_stamp(own.wo), org);
+  ASSERT r#>>'{owner_approval,approval,kind}' = 'work_order', 'its own company''s order is decided';
+END $$;
+
+-- 12. A quote send naming no saved revision is recorded before the email:
+-- claimed once (one job event), sent after the provider, replay safe, never
+-- invented, never deleted or moved back, and private to the service role.
+DO $$
+DECLARE
+  org uuid := (SELECT id FROM owa_people WHERE role = 'org');
+  f record; doc uuid := gen_random_uuid(); key text; r jsonb; refused boolean;
+BEGIN
+  f := pg_temp.scope_job(org);
+  key := 'quote_document:' || doc;
+  r := public.record_quote_send_price_unapproved(key, f.job, 'send', doc, 'claimed');
+  ASSERT r->>'recorded' = 'true' AND r->>'state' = 'claimed', 'claimed before the email';
+  r := public.record_quote_send_price_unapproved(key, f.job, 'send', doc, 'claimed');
+  ASSERT r->>'recorded' = 'true' AND r->>'state' = 'claimed', 'a repeated claim replays';
+  ASSERT (SELECT count(*) FROM public.job_events WHERE job_id = f.job
+    AND event_type = 'quote_send_price_unapproved') = 1, 'one job event per send';
+  r := public.record_quote_send_price_unapproved(key, f.job, 'send', doc, 'sent');
+  ASSERT r->>'state' = 'sent' AND (SELECT sent_at IS NOT NULL FROM public.quote_send_price_unapproved_sends
+    WHERE send_key = key), 'marked sent after the provider';
+  r := public.record_quote_send_price_unapproved(key, f.job, 'send', doc, 'sent');
+  ASSERT r->>'state' = 'sent', 'a replayed mark stays sent';
+  r := public.record_quote_send_price_unapproved('quote_document:' || gen_random_uuid(), f.job, 'send', NULL, 'sent');
+  ASSERT r->>'recorded' = 'false', 'a mark with no claim invents nothing';
+  ASSERT (SELECT count(*) FROM public.quote_send_price_unapproved_sends WHERE job_id = f.job) = 1, 'one record';
+  refused := false;
+  BEGIN PERFORM public.record_quote_send_price_unapproved(key, gen_random_uuid(), 'send', doc, 'claimed');
+  EXCEPTION WHEN unique_violation THEN refused := true; END;
+  ASSERT refused, 'a key held for another job refuses';
+  refused := false;
+  BEGIN DELETE FROM public.quote_send_price_unapproved_sends WHERE send_key = key;
+  EXCEPTION WHEN insufficient_privilege THEN refused := true; END;
+  ASSERT refused, 'a record is never deleted';
+  refused := false;
+  BEGIN UPDATE public.quote_send_price_unapproved_sends SET state = 'claimed', sent_at = NULL WHERE send_key = key;
+  EXCEPTION WHEN insufficient_privilege THEN refused := true; END;
+  ASSERT refused, 'a sent record never moves back';
+  ASSERT NOT has_table_privilege('authenticated', 'public.quote_send_price_unapproved_sends', 'SELECT')
+    AND NOT has_table_privilege('anon', 'public.quote_send_price_unapproved_sends', 'SELECT')
+    AND NOT has_table_privilege('service_role', 'public.quote_send_price_unapproved_sends', 'INSERT')
+    AND NOT has_function_privilege('authenticated',
+      'public.record_quote_send_price_unapproved(text, uuid, text, uuid, text)', 'EXECUTE')
+    AND has_function_privilege('service_role',
+      'public.record_quote_send_price_unapproved(text, uuid, text, uuid, text)', 'EXECUTE'),
+    'records and their writer are the service role''s only';
+END $$;
+
+-- 13. A late owner approval never moves the deposit: the quote_accepted event
+-- and the first stage's due date keep the customer's retained acceptance time.
+DO $$
+DECLARE
+  org uuid := (SELECT id FROM owa_people WHERE role = 'org');
+  v_approver uuid := (SELECT id FROM owa_people WHERE role = 'approver');
+  job uuid := gen_random_uuid(); rev uuid := gen_random_uuid(); wo uuid;
+  pricing jsonb; accepted_at timestamptz;
+BEGIN
+  pricing := jsonb_build_object('totalExGST', 10, 'gst', 1, 'totalIncGST', 11, 'labourCostEstimate', 4,
+    'parties', '[{"id":"__client__","ex_gst":10,"gst":1,"inc_gst":11}]'::jsonb,
+    'internal', jsonb_build_object('labour_lines', jsonb_build_array(jsonb_build_object('description', 'Synthetic labour', 'total', 4))),
+    'local_invoice_stages', jsonb_build_object('version', 1, 'currency', 'AUD', 'terms_version', '2026-11-06',
+      'total_inc_gst', 11, 'stages', jsonb_build_array(jsonb_build_object('id', 'first', 'label', 'First payment',
+        'printed_terms', 'Synthetic deposit terms', 'amount_inc_gst', 11, 'basis', 'deposit',
+        'trigger', jsonb_build_object('kind', 'quote_accepted'),
+        'due_rule', jsonb_build_object('kind', 'days_after_trigger', 'days', 2),
+        'payers', jsonb_build_array(jsonb_build_object('payer_id', '__client__', 'amount_inc_gst', 11))))));
+  INSERT INTO public.jobs(id, org_id, type, status, job_number)
+    VALUES (job, org, 'fencing', 'draft', 'ZZTEST-SE-OWD-' || left(job::text, 8));
+  INSERT INTO public.scope_revisions(id, job_id, revision_number, status, scope_canonical_text,
+      pricing_canonical_text, scope_hash, pricing_hash)
+    VALUES (rev, job, 1, 'frozen', '{}', pricing::text,
+      encode(sha256(convert_to('{}', 'UTF8')), 'hex'), encode(sha256(convert_to(pricing::text, 'UTF8')), 'hex'));
+  PERFORM public.prepare_scope_job_drafts(job, rev, org);
+  SELECT w.id INTO wo FROM public.work_orders w WHERE w.job_id = job AND w.kind = 'job';
+  UPDATE public.jobs SET status = 'accepted' WHERE id = job;
+  PERFORM public.release_scope_job_drafts(job, rev);
+  -- The customer accepted days before the owner approves.
+  UPDATE public.scope_job_draft_sets SET acceptance_recorded_at = acceptance_recorded_at - interval '5 days'
+    WHERE job_id = job RETURNING acceptance_recorded_at INTO accepted_at;
+  ASSERT NOT EXISTS (SELECT 1 FROM public.scope_payment_signals WHERE job_id = job AND kind = 'quote_accepted'),
+    'no deposit while the issue waits';
+  PERFORM public.record_scope_price_approval(job, rev, v_approver, 'session', org);
+  PERFORM public.record_job_work_order_approval(wo, v_approver, 'session', pg_temp.wo_stamp(wo));
+  ASSERT (SELECT released_at > accepted_at FROM public.scope_job_draft_sets WHERE job_id = job),
+    'released at the approval, later than the acceptance';
+  ASSERT (SELECT happened_at = accepted_at FROM public.scope_payment_signals
+    WHERE job_id = job AND kind = 'quote_accepted'), 'the quote_accepted event keeps the acceptance time';
+  ASSERT (SELECT due_at = accepted_at + interval '2 days' FROM public.scope_payment_stage_drafts
+    WHERE job_id = job AND stage_id = 'first'), 'the deposit is due from the acceptance, not the approval';
+END $$;
+
 ROLLBACK;

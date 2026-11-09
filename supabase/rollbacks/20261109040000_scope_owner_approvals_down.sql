@@ -5,8 +5,12 @@
 -- owner approval functions and the crew status gate.
 --
 -- Kept on purpose: the recorded decisions (scope_owner_approvals, append
--- only), the decision ids stamped on work orders, the owner list and the
--- retained acceptances. A draft set whose acceptance was retained while an
+-- only), the decision ids stamped on work orders, the owner list, the
+-- retained acceptances and the unapproved-send records
+-- (quote_send_price_unapproved_sends, no writer after this down).
+--
+-- Pair this down with the application code from before 20261109040000: the
+-- send and approval handlers of this change call functions this down removes. A draft set whose acceptance was retained while an
 -- approval was missing stays unreleased; release it again through the
 -- existing acceptance path after this down if the owner wants it issued.
 
@@ -342,6 +346,29 @@ GRANT EXECUTE ON FUNCTION
   public.read_scope_job_drafts(uuid, uuid, uuid)
   TO service_role;
 
+-- The local deposit's acceptance time, as 20261106044806 wrote it.
+CREATE OR REPLACE FUNCTION public.scope_payment_acceptance_event()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE signal record;
+BEGIN
+  IF OLD.released_at IS NULL AND NEW.released_at IS NOT NULL THEN
+    BEGIN
+      PERFORM public.record_scope_payment_signal(NEW.job_id,'quote_accepted',
+        jsonb_build_object('kind','quote_accepted','scope_revision_id',NEW.scope_revision_id),NEW.released_at);
+      FOR signal IN SELECT * FROM public.scope_payment_signals WHERE job_id=NEW.job_id AND scope_revision_id=NEW.scope_revision_id
+        AND kind IN ('install_scheduled','council_step_completed') ORDER BY happened_at,id LOOP
+        PERFORM public.apply_scope_payment_event(NEW.job_id,signal.kind,signal.coordinate,signal.happened_at);
+      END LOOP;
+    EXCEPTION
+      WHEN query_canceled THEN RAISE WARNING 'local payment stages held after timeout; acceptance retained';
+      WHEN OTHERS THEN RAISE WARNING 'local payment stages held; acceptance retained: %',SQLSTATE;
+    END;
+  END IF;
+  RETURN NULL;
+END $$;
+
+DROP FUNCTION IF EXISTS public.approve_job_work_order(uuid, uuid, text, timestamptz, uuid);
+DROP FUNCTION IF EXISTS public.record_quote_send_price_unapproved(text, uuid, text, uuid, text);
 DROP TRIGGER IF EXISTS trg_work_orders_crew_owner_gate ON public.work_orders;
 DROP FUNCTION IF EXISTS public.work_orders_crew_owner_gate();
 DROP FUNCTION IF EXISTS public.owner_approved_job_work_order_drafts(integer);
@@ -358,5 +385,6 @@ DROP FUNCTION IF EXISTS public.scope_owner_approval_json(public.scope_owner_appr
 DROP FUNCTION IF EXISTS public.job_work_order_not_ready(public.work_orders);
 DROP FUNCTION IF EXISTS public.job_work_order_content_hash(public.work_orders);
 DROP FUNCTION IF EXISTS public.owner_approval_authority(uuid);
+DROP FUNCTION IF EXISTS public.owner_approval_company_ok(uuid, uuid, uuid);
 
 DELETE FROM public.feature_flags WHERE flag_name = 'owner_approval_saved_revision_required_v1';
