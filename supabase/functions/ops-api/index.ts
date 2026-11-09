@@ -1,5 +1,10 @@
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
+import {
+  assertTradeMayBillExtraJobs,
+  ExtraJobBillingRefusal,
+  extraLineType,
+} from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
@@ -1870,7 +1875,8 @@ async function resolveJobsByExternalRef(
   client: any,
   refs: string[],
   activeJobStatusExclude: string,
-  jobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status'
+  jobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status',
+  orgId: string | null = null,
 ): Promise<{ byId: Record<string, any>; byRef: Record<string, any[]> }> {
   if (refs.length === 0) return { byId: {}, byRef: {} }
   // Build a list of digit cores to filter makesafe_job_details efficiently.
@@ -1899,11 +1905,13 @@ async function resolveJobsByExternalRef(
   )]
   if (matchedJobIds.length === 0) return { byId: {}, byRef: {} }
 
-  // Fetch the actual job rows (filtered to active statuses).
-  const { data: jobRows, error: jobErr } = await client.from('jobs')
+  // Fetch the actual job rows (filtered to active statuses, and to the
+  // caller's company when one is given).
+  let jobQuery = client.from('jobs')
     .select(jobSelect)
     .not('status', 'in', activeJobStatusExclude)
-    .in('id', matchedJobIds)
+  if (orgId) jobQuery = jobQuery.eq('org_id', orgId)
+  const { data: jobRows, error: jobErr } = await jobQuery.in('id', matchedJobIds)
   if (jobErr) throw jobErr
 
   // Build byId (all matched jobs) and byRef (jobs per normalised input ref).
@@ -14171,11 +14179,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               // own HOURLY_STATUS_WHITELIST above and is unaffected.
               const activeJobStatusExclude = '("lost","cancelled","deleted","duplicate","duplicated","void","voided")'
               const extraJobReads: PromiseLike<any>[] = []
+              // Every job read here is the caller's company only: an extra line
+              // can never name another company's job.
               if (requestedJobIds.length > 0) {
-                extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).in('id', requestedJobIds))
+                extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).eq('org_id', tradeUser.orgId).in('id', requestedJobIds))
               }
               if (requestedJobNumbers.length > 0) {
-                extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).in('job_number', requestedJobNumbers))
+                extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).eq('org_id', tradeUser.orgId).in('job_number', requestedJobNumbers))
               }
               const extraJobResults = extraJobReads.length > 0 ? await Promise.all(extraJobReads) : []
               const extraJobs = extraJobResults.flatMap((r: any) => r.data || [])
@@ -14183,10 +14193,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (extraJobsErr) throw extraJobsErr
               const jobById: Record<string, any> = {}
               const jobByNumber: Record<string, any> = {}
+              // A job number that matches more than one job is never guessed.
+              const ambiguousJobNumbers = new Set<string>()
               for (const j of (extraJobs || [])) {
                 if (j.id) jobById[j.id] = j
-                if (j.job_number) jobByNumber[String(j.job_number)] = j
+                if (!j.job_number) continue
+                const number = String(j.job_number)
+                if (jobByNumber[number] && jobByNumber[number].id !== j.id) ambiguousJobNumbers.add(number)
+                else jobByNumber[number] = j
               }
+              for (const number of ambiguousJobNumbers) delete jobByNumber[number]
 
               // M9 r2 FIX 2: resolve external_ref (MLB builder ref) for extra items that
               // were not resolved via exact job_id or job_number lookup above.
@@ -14201,6 +14217,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 const unresolvedExternalRefs = requestedJobNumbers.filter(ref => {
                   if (/^[0-9a-f-]{36}$/i.test(ref)) return false   // UUID — handled by jobById path
                   if (/^SWMS-/i.test(ref)) return false              // SWMS ref — not a builder ref
+                  if (ambiguousJobNumbers.has(ref)) return false     // several jobs: stays unresolved
                   return !jobByNumber[ref]                           // not already resolved
                 })
                 if (unresolvedExternalRefs.length > 0) {
@@ -14208,7 +14225,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     client,
                     unresolvedExternalRefs,
                     activeJobStatusExclude,
-                    activeJobSelect
+                    activeJobSelect,
+                    tradeUser.orgId,
                   )
                   for (const ref of unresolvedExternalRefs) {
                     // byRef[normRef(ref)] is the list of distinct active jobs that matched.
@@ -14224,6 +14242,52 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     // 2+ matches → ambiguous ref, refuse silently (error fires downstream)
                   }
                 }
+              }
+
+              // Who may bill each job (trade_invoice_extra_job_authority.ts).
+              // Before any extra line is priced or written, every line that
+              // names a job must name one job in the caller's company that the
+              // trade may bill, or the whole submission is refused. Not checked
+              // here: the weekly work-order lane (server-built lines), group
+              // shares, clock mirrors the loop below skips, and lines that name
+              // no job.
+              if (!weeklyInvoice) {
+                const jobLines = (invoiceExtraItems || []).filter((item: any) =>
+                  item &&
+                  item.source !== 'clock' && item._source !== 'clock' && item.source !== 'server_labour' &&
+                  !isGroupShareInvoiceItem(item) && !item.group_share_id &&
+                  (String(item.job_id || '').trim() || String(item.job_number || '').trim())
+                ).map((item: any) => {
+                  const jobNumber = String(item.job_number || '').trim()
+                  return {
+                    lineType: extraLineType(item),
+                    ref: jobNumber || String(item.job_id),
+                    job: item.job_id ? (jobById[item.job_id] || null) : (jobByNumber[jobNumber] || null),
+                  }
+                })
+                await assertTradeMayBillExtraJobs(client, {
+                  trade: {
+                    id: tradeUser.id,
+                    orgId: tradeUser.orgId,
+                    managedVerticals: tradeUser.managedVerticals || [],
+                    isMakesafeManager,
+                  },
+                  lines: jobLines,
+                  jobVertical: _jobVertical,
+                }).catch((error) => {
+                  if (error instanceof ExtraJobBillingRefusal) {
+                    throw new ApiError(error.message, 403, {
+                      ok: false,
+                      success: false,
+                      saved: false,
+                      code: error.code,
+                      jobs: error.jobs,
+                      error: error.message,
+                      userMessage: error.message,
+                    })
+                  }
+                  throw new ApiError(error?.message || 'Could not check the jobs on this invoice', 500)
+                })
               }
 
               // double-pay guard removed per Marnin 2026-06-18 — the office verifies every invoice
