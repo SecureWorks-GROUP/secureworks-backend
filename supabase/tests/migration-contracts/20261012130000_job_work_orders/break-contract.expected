@@ -1,1 +1,1 @@
-violates check constraint "work_orders_approved_sealed_check"
+contract: a direct update must not approve for a non-approver

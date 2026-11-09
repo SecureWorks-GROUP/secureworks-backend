@@ -16,6 +16,10 @@ import {
   sealedSendSource,
   startNamedScopeRevisionRead,
 } from "../_shared/scope_freeze/quote_scope_revision_link.ts";
+import {
+  OWNER_APPROVAL_SAVED_REVISION_FLAG,
+  ownerPriceGate,
+} from "../_shared/scope_freeze/owner_price_approval.ts";
 
 Deno.test("send-runs rejects every explicit runs property rather than silently widening selection", () => {
   for (const runs of [["REAR"], [], null, undefined, "REAR"]) {
@@ -92,8 +96,10 @@ const prelude = new AsyncFunction(
   "startNamedScopeRevisionRead",
   "sealedSendSource",
   "quoteSendBuildSource",
+  "ownerPriceGate",
   `${
     source.slice(start, end).replaceAll("refused!.", "refused.")
+      .replace("let ownerPriceRuns: OwnerPriceGate", "let ownerPriceRuns")
   } return jsonResponse({ reached_pricing: true }, 200, corsHeaders); }`,
 );
 
@@ -101,11 +107,30 @@ async function runPrelude(
   body: Record<string, unknown>,
   jobType: unknown,
   sameTenant = true,
+  savedRevisionRequired = false,
 ) {
   const reads: string[] = [];
   const sb = {
     from(table: string) {
       reads.push(table);
+      if (table === "feature_flags") {
+        return {
+          select() {
+            return this;
+          },
+          eq(column: string, value: unknown) {
+            assertEquals(column, "flag_name");
+            assertEquals(value, OWNER_APPROVAL_SAVED_REVISION_FLAG);
+            return this;
+          },
+          maybeSingle() {
+            return Promise.resolve({
+              data: { enabled: savedRevisionRequired },
+              error: null,
+            });
+          },
+        };
+      }
       assertEquals(table, "jobs");
       return {
         select() {
@@ -142,6 +167,7 @@ async function runPrelude(
     startNamedScopeRevisionRead,
     sealedSendSource,
     quoteSendBuildSource,
+    ownerPriceGate,
   );
   return { status: result.status, body: await result.json(), reads };
 }
@@ -172,7 +198,26 @@ Deno.test("production send-runs fences the MCP scope before pricing while preser
     const accepted = await runPrelude(body, type);
     assertEquals(accepted.status, 200);
     assertEquals(accepted.body.reached_pricing, true);
+    assertEquals(accepted.reads, ["jobs", "feature_flags"]);
   }
+});
+
+Deno.test("production send-runs with no saved revision is refused before pricing while the saved-revision switch is on", async () => {
+  const refused = await runPrelude(
+    { job_id: "fixture-job" },
+    "fencing",
+    true,
+    true,
+  );
+  assertEquals(refused.status, 409);
+  assertEquals(
+    refused.body.code,
+    "owner_price_approval_requires_saved_revision",
+  );
+  assertEquals(refused.reads, ["jobs", "feature_flags"]);
+  const legacy = await runPrelude({ job_id: "fixture-job" }, "fencing");
+  assertEquals(legacy.status, 200);
+  assertEquals(legacy.body.reached_pricing, true);
 });
 
 Deno.test("production type refusal does not expose foreign-tenant job type", async () => {

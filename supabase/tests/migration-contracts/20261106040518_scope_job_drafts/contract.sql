@@ -8,7 +8,7 @@ DECLARE
     "internal":{"labour_lines":[{"line_key":"fixture-labour","description":"Synthetic installation","total":12}]},
     "parties":[{"id":"__client__","ex_gst":15.01,"gst":1.50,"inc_gst":16.51},
                {"id":"fixture-payer","ex_gst":15.02,"gst":1.50,"inc_gst":16.52}]}';
-  a jsonb; b jsonb; wo uuid; refused boolean; n bigint;
+  a jsonb; b jsonb; wo uuid; refused boolean; n bigint; approver uuid;
 BEGIN
   INSERT INTO public.jobs(id,org_id,type,status,job_number) VALUES
     (job,org,'fencing','draft','ZZTEST-SE-FIXTURE-LOCAL'),
@@ -53,11 +53,24 @@ BEGIN
   BEGIN PERFORM public.release_scope_job_drafts(job,gen_random_uuid());
   EXCEPTION WHEN check_violation THEN refused := SQLERRM='scope_drafts_accepted_revision_mismatch'; END;
   ASSERT refused, 'accepted source cannot be replaced with another revision';
+  -- Since 20261109040000: with no owner approval, acceptance is retained and
+  -- nothing is released or issued; the decision that completes the pair
+  -- releases and issues the same work order once.
+  b := public.release_scope_job_drafts(job,revision);
+  ASSERT b->>'held'='true' AND b->>'acceptance_recorded'='true', 'acceptance without approvals is held, not lost';
   PERFORM public.release_scope_job_drafts(job,revision);
+  ASSERT (SELECT released_at IS NULL AND acceptance_recorded_at IS NOT NULL FROM public.scope_job_draft_sets WHERE job_id=job), 'held release keeps acceptance';
+  ASSERT (SELECT status='draft' AND approved_at IS NULL FROM public.work_orders WHERE id=wo), 'acceptance alone never approves';
+  ASSERT (SELECT count(*) FROM public.job_events WHERE job_id=job AND event_type='scope_job_draft_issue_held')=1, 'one held audit';
+  approver := gen_random_uuid();
+  INSERT INTO public.users(id,org_id,role,name) VALUES (approver,org,'admin','ZZTEST Scope Checker');
+  UPDATE public.work_order_settings SET approver_user_ids=approver_user_ids||approver WHERE id=1;
+  PERFORM public.record_scope_price_approval(job,revision,approver,'session',org);
+  PERFORM public.record_job_work_order_approval(wo,approver,'session',(SELECT updated_at FROM public.work_orders WHERE id=wo));
   PERFORM public.release_scope_job_drafts(job,revision);
   b := public.read_scope_job_drafts(job,revision,org);
   ASSERT b#>>'{work_order,status}'='released' AND b#>>'{work_order,id}'=wo::text, 'release the same work order';
-  ASSERT (SELECT status='draft' AND approved_at IS NULL FROM public.work_orders WHERE id=wo), 'release never approves';
+  ASSERT (SELECT status='approved' AND approved_by=approver FROM public.work_orders WHERE id=wo), 'release issues only with both approvals';
   ASSERT (SELECT count(*) FROM public.job_events WHERE job_id=job AND event_type='scope_job_draft_work_order_released')=1, 'one release audit';
   ASSERT b->'invoices'=a->'invoices', 'acceptance must leave local invoices as drafts';
   INSERT INTO public.scope_revisions(id,job_id,revision_number,status,scope_canonical_text,pricing_canonical_text,scope_hash,pricing_hash)

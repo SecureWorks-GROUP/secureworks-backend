@@ -2038,6 +2038,21 @@ export class ApiError extends Error {
   }
 }
 
+// A crew work order on a job built from a saved revision leaves draft only once
+// the job work order is issued on both owner approvals
+// (work_orders_crew_owner_gate, 20261109040000). The database refuses with
+// WO428; a caller gets a plain 409, never a raw fault.
+const CREW_OWNER_APPROVAL_MESSAGE =
+  'This job\'s work order is not issued yet: the owner must approve the price and the work order first. The crew work order stays a draft.'
+function crewWorkOrderOwnerApprovalError(error: any): ApiError | null {
+  if (String(error?.code ?? '') !== 'WO428') return null
+  return new ApiError(CREW_OWNER_APPROVAL_MESSAGE, 409, {
+    ok: false,
+    code: 'owner_approval_required',
+    error: CREW_OWNER_APPROVAL_MESSAGE,
+  })
+}
+
 function tradeInvoiceMoneyApiError(error: unknown): never {
   if (error instanceof TradeInvoiceMoneyError) {
     throw new ApiError(error.message, 422, {
@@ -10131,10 +10146,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           })
         }
         return json(await sendWorkOrder(client, body))
-      // Shaun only: work_order_settings.approver_user_ids, checked here and
-      // again by the database. The approver is the signed-in user. An approver
-      // named only by x-sw-actor `user:<id>` on a server-secret call is refused
-      // until feature flag work_order_terminal_approval_v1 is on.
+      // The owner or an approver named in work_order_settings
+      // (owner_approval_authority), checked here and again by the database.
+      // The approver is the signed-in user. An approver named only by
+      // x-sw-actor `user:<id>` on a server-secret call is refused until
+      // feature flag work_order_terminal_approval_v1 is on. Records the work
+      // order decision; the order is issued only when the owner approval
+      // policy allows (20261109040000).
       case 'approve_work_order':
         return json(await runJobWorkOrder(() => approveJobWorkOrder(client, body, resolveWorkOrderApprover({
           authMode,
@@ -10150,7 +10168,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json(await runJobWorkOrder(() => backfillJobWorkOrders(client, body)))
       }
       // The automatic issue sweep (pg_cron job-work-order-auto-issue, every 2
-      // minutes): fills and issues job work orders with no human approval.
+      // minutes): fills drafts from the accepted quote, and issues only drafts
+      // both owner decisions already allow (it never creates a decision).
       // Writes nothing while feature flag job_work_order_auto_issue_v1 is off.
       case 'auto_issue_job_work_orders': {
         if (authMode !== 'api_key' || !serverSecretPresented) {
@@ -10325,6 +10344,31 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const response = await scopeJobDraftsAction(client, action, req.method, body, {
           staff: _opsApiCallerIsStaffOperator(authMode, authUser),
           orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+          approver: resolveWorkOrderApprover({
+            authMode,
+            authUserId: authUser?.id ?? null,
+            serverSecretPresented,
+            actor: requestActor,
+          }),
+        })
+        return json(await response.json(), response.status)
+      }
+      // Owner approval of the price and of the work order (TK-S28). The
+      // approver is the signed-in user; who may approve is the database's
+      // owner_approval_authority. 20261109040000_scope_owner_approvals.sql.
+      case 'approve_scope_price':
+      case 'approve_scope_work_order':
+      case 'read_scope_owner_approvals': {
+        const { scopeOwnerApprovalsAction } = await import('./scope_owner_approvals.ts')
+        const response = await scopeOwnerApprovalsAction(client, action, req.method, req.method === 'GET' ? { job_id: url.searchParams.get('job_id') } : body, {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+          approver: resolveWorkOrderApprover({
+            authMode,
+            authUserId: authUser?.id ?? null,
+            serverSecretPresented,
+            actor: requestActor,
+          }),
         })
         return json(await response.json(), response.status)
       }
@@ -38038,9 +38082,23 @@ async function updateJobStatus(client: any, body: any) {
         const { data: draftWOs } = await draftWoQuery
         if (draftWOs && draftWOs.length > 0) {
           for (const wo of draftWOs) {
-            await client.from('work_orders')
+            const { error: woApproveError } = await client.from('work_orders')
               .update({ status: 'approved', approved_at: new Date().toISOString() })
               .eq('id', wo.id)
+            if (woApproveError) {
+              // Held until the job work order is issued on both owner
+              // approvals (WO428); the job's status move is unaffected.
+              const held = String(woApproveError?.code ?? '') === 'WO428'
+              console.error(`[ops-api] crew WO ${wo.wo_number} not auto-approved on acceptance:`, woApproveError?.code ?? 'error')
+              if (held) {
+                await client.from('job_events').insert({
+                  job_id: jId,
+                  event_type: 'work_order_approval_held',
+                  detail_json: { wo_number: wo.wo_number, trigger: 'acceptance_auto', reason: 'owner_approval_required' },
+                })
+              }
+              continue
+            }
             await client.from('job_events').insert({
               job_id: jId,
               event_type: 'work_order_approved',
@@ -38642,7 +38700,7 @@ async function updateWorkOrder(client: any, body: any) {
     .select()
     .single()
 
-  if (error) throw error
+  if (error) throw crewWorkOrderOwnerApprovalError(error) ?? error
   return { work_order: data }
 }
 
@@ -38665,9 +38723,10 @@ async function sendWorkOrder(client: any, body: any) {
   )
 
   // Mark as sent
-  await client.from('work_orders')
+  const { error: sentError } = await client.from('work_orders')
     .update({ status: 'sent', sent_at: new Date().toISOString() })
     .eq('id', id)
+  if (sentError) throw crewWorkOrderOwnerApprovalError(sentError) ?? sentError
 
   if (wo.job_id) {
     await client.from('job_events').insert({

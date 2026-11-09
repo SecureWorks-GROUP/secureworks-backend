@@ -85,6 +85,17 @@ through `my_job_work_order` with no human step. Code:
 `supabase/migrations/20261016120000_job_work_order_auto_issue.sql` (contract
 `supabase/tests/migration-contracts/20261016120000_job_work_order_auto_issue/`).
 
+Since `20261109040000_scope_owner_approvals.sql` (captain, 9 Nov 2026: the
+owner always approves the pricing and the work order) the automatic issue only
+carries out decisions already recorded: an order on a saved revision is issued
+only when the owner's price decision on that revision and the owner's work
+order decision on that exact content both exist, and an order with no saved
+revision is never issued automatically. Anything else is refused
+`owner_approval_required` and stays a draft. The sweep lists only orders whose
+decisions exist (`owner_approved_job_work_order_drafts`). The decisions are
+recorded through `approve_scope_price` and `approve_scope_work_order`; see
+AGENTS.md, "Price And Work Order Issue On Two Owner Decisions".
+
 What is issued, and what waits for the approver:
 
 - Only the draft the quote fill wrote that nobody has edited since. The fill

@@ -41,6 +41,7 @@ import {
   type SentQuoteSourceHashes,
 } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
+import { ownerPriceGate, recordUnapprovedLegacySend, type OwnerPriceGate } from '../_shared/scope_freeze/owner_price_approval.ts'
 import {
   currentQuoteForParty,
   QUOTE_PARTY_DOCUMENT_COLUMNS,
@@ -914,6 +915,9 @@ serve(async (req: Request) => {
         const gateErr = quotePricingGateError(doc.jobs?.pricing_json)
         if (gateErr) return jsonResponse({ error: gateErr }, 400, corsHeaders)
       }
+      // TK-S28: the owner-approved price on the named saved revision, read now
+      // and judged with the sealed revision after the claim, before any email.
+      const ownerPrice = await ownerPriceGate(sb, doc.job_id, sealedSource)
 
       // Resolve name: use provided, fall back to job_contact, then job-level
       const client_name = providedName || doc.job_contacts?.client_name || doc.jobs?.client_name || 'there'
@@ -978,6 +982,14 @@ serve(async (req: Request) => {
         const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
         return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
           || jsonResponse(sealedSource.body, sealedSource.status, corsHeaders)
+      }
+      if (ownerPrice.kind === 'refused') {
+        console.log('[send-quote] owner price approval refused', JSON.stringify({
+          document_id, job_id: doc.job_id, code: ownerPrice.body.code,
+        }))
+        const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+          || jsonResponse(ownerPrice.body, ownerPrice.status, corsHeaders)
       }
       {
         const emailHtml = buildQuoteEmail({
@@ -1154,6 +1166,9 @@ serve(async (req: Request) => {
             ? 'Failed to release quote send claim'
             : 'Failed to record quote send publication',
         }, 500, corsHeaders)
+      }
+      if (ownerPrice.kind === 'legacy_unapproved' && doc.job_id) {
+        await recordUnapprovedLegacySend(sb, doc.job_id, { path: 'send', document_ids: [document_id] })
       }
 
       // Update job status to quoted (release moment per ADR 2026-04-27)
@@ -2753,6 +2768,7 @@ serve(async (req: Request) => {
       // the crew packs and the release record from A's frozen scope and
       // pricing, not from the live job. An unprovable named revision refuses
       // here, before any claim or email.
+      let ownerPriceRuns: OwnerPriceGate
       {
         const sealedRuns = sealedSendSource(await sourceScopeRevisionReadRuns, job.id)
         if (sealedRuns.kind === 'refused') {
@@ -2760,6 +2776,15 @@ serve(async (req: Request) => {
             job_id: job.id, code: sealedRuns.body.code, reason: sealedRuns.body.reason,
           }))
           return jsonResponse(sealedRuns.body, sealedRuns.status, corsHeaders)
+        }
+        // TK-S28: no run price reaches a customer without the owner-approved
+        // price on the named saved revision. Before any claim or email.
+        ownerPriceRuns = await ownerPriceGate(sb, job.id, sealedRuns)
+        if (ownerPriceRuns.kind === 'refused') {
+          console.log('[send-quote] send-runs owner price approval refused', JSON.stringify({
+            job_id: job.id, code: ownerPriceRuns.body.code,
+          }))
+          return jsonResponse(ownerPriceRuns.body, ownerPriceRuns.status, corsHeaders)
         }
         const runsSource = quoteSendBuildSource(sealedRuns, job)
         job.scope_json = runsSource.scope_json
@@ -3314,6 +3339,10 @@ serve(async (req: Request) => {
           console.error('[send-quote] send-runs claim revert failed:', released.error.message || String(released.error))
           return jsonResponse({ error: 'Failed to release quote send claims' }, 500, corsHeaders)
         }
+      }
+
+      if (ownerPriceRuns.kind === 'legacy_unapproved' && publishedDocIds.length > 0) {
+        await recordUnapprovedLegacySend(sb, job.id, { path: 'send-runs', document_ids: publishedDocIds })
       }
 
       const sendOutcome = sendRunsSendOutcome({

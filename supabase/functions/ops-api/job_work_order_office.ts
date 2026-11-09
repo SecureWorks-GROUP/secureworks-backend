@@ -7,7 +7,7 @@
 // approver. This module never calls Xero and never sets
 // trade_invoice_lines.job_work_order_id.
 
-import { readFlag } from "./job_work_orders.ts";
+import { readFlag, splitOwnerApprovalResult } from "./job_work_orders.ts";
 import {
   CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG,
   decideOfficeQueue,
@@ -255,6 +255,9 @@ function throwApproveRpc(error: { code?: string; message?: string }): never {
   if (code === "23514") {
     throw new JobWorkOrderOfficeError(409, "work_order_not_ready", message);
   }
+  if (code === "WO428") {
+    throw new JobWorkOrderOfficeError(409, "owner_approval_required", message);
+  }
   throw new JobWorkOrderOfficeError(500, "work_order_approve_failed", message);
 }
 
@@ -277,7 +280,10 @@ export async function approveOfficeJobWorkOrder(
     p_expected_updated_at: expected,
   });
   if (error) throwApproveRpc(error);
-  return { work_order: data };
+  // The decision is recorded; the order is issued only when the owner
+  // approval policy allows (owner_approval.issue says what it waits for).
+  const { workOrder, ownerApproval, issued } = splitOwnerApprovalResult(data);
+  return { work_order: workOrder, issued, owner_approval: ownerApproval };
 }
 
 const REVIEW_DECISIONS: Record<string, "approved" | "queried" | "rejected"> = {

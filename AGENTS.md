@@ -4695,11 +4695,13 @@ fails loudly. Every crew-pay read or write (`my_work_orders`,
 `submit_work_order_invoice`, weekly blocks, the acceptance auto-approve) filters
 `kind = 'crew'` while `retire_crew_work_orders_v1` is off; a new crew-pay door
 must too. With that flag on, `my_work_orders` returns job work orders and hides
-retired crew rows. See the crew-invoice section below. Only the users in
-`work_order_settings.approver_user_ids` (Shaun) approve, never a role (the one
-other seal is the system's own `approved_via 'auto'` issue of an unedited
-quote-filled draft, behind `job_work_order_auto_issue_v1`), and an
-approval seals only the draft that was read: `approve_work_order` requires
+retired crew rows. See the crew-invoice section below. Only the owner
+(`work_order_settings.owner_user_ids`) and the users in `approver_user_ids` /
+`backup_approver_user_ids` approve, never a role (`owner_approval_authority`);
+on a saved revision an order issues only on both owner decisions (next
+section), and the automatic issue (`approved_via 'auto'`, behind
+`job_work_order_auto_issue_v1`) only carries out decisions already recorded.
+An approval seals only the draft that was read: `approve_work_order` requires
 `expected_updated_at`, compared under the row lock in `approve_job_work_order`.
 A recorded variation changes only through the staff door
 `correct_work_order_variation`, never a trade one. Every
@@ -4724,6 +4726,30 @@ draft someone wrote into, and the rates come only from the quote itself and
 the scoping tool's cost table. Filled lines are read by trades, so a line's description must never
 carry a rate, amount, percent or money word. Rules:
 `docs/quote-work-order-lines-v1.md`.
+
+## Price And Work Order Issue On Two Owner Decisions
+
+`20261109040000_scope_owner_approvals.sql` owns the policy. `scope_owner_approvals`
+is append-only: a `price` decision on (job, saved revision) and a `work_order`
+decision on (order, revision, exact content hash), each with approver, time
+and authority (`owner`, `approver_list`, `backup_approver_list`; only
+`owner_approval_authority` decides). A seal, a complete price, a customer
+acceptance or a role is never a decision. `job_work_order_owner_gate` is the one
+rule every issue path reads (`release_scope_job_drafts`,
+`approve_job_work_order`, `auto_issue_job_work_order` and its sweep
+`owner_approved_job_work_order_drafts`, backfill, and the crew trigger
+`work_orders_crew_owner_gate`, which keeps a crew order on a saved-revision job
+in draft until the job order is issued); it refuses `WO428`. A missing decision
+holds the issue and keeps the customer's acceptance; decisions are recorded
+while the order is a draft and the issue validates, releases and seals in one
+transaction. An edit or a new revision needs a fresh decision. Both quote send
+paths refuse a saved revision with no price decision
+(`_shared/scope_freeze/owner_price_approval.ts`); a send naming no revision is
+logged `quote_send_price_unapproved` and refused only while
+`owner_approval_saved_revision_required_v1` is on (seeded off). Staff doors:
+`approve_scope_price`, `approve_scope_work_order`, `read_scope_owner_approvals`
+(`ops-api/scope_owner_approvals.ts`). While an issue is held, the local payment
+stage drafts made at release wait with it.
 
 ## Crew Invoices Sit On The Job Work Order, Behind Flags That Default Off
 

@@ -162,9 +162,11 @@ END $$;
 
 UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_work_order_auto_issue_v1';
 
--- 5. Switched on: the filled, untouched draft is issued with no approver,
--- sealed with its content hash, the job pointed at it, and labour and trade
--- variations already on the job linked, as an approval does.
+-- 5. Switched on, the filled, untouched draft passes every check of this
+-- migration. Since 20261109040000 it is still not issued: a work order with no
+-- owner-approved price and work order is refused, and nothing is sealed. The
+-- approver's approval then seals it, links the job, and links labour and trade
+-- variations already on the job.
 DO $$
 DECLARE
   v_job uuid := gen_random_uuid();
@@ -195,11 +197,20 @@ BEGIN
   EXCEPTION WHEN SQLSTATE 'WO409' THEN NULL;
   END;
 
-  v_row := public.auto_issue_job_work_order(v_wo, (SELECT updated_at FROM public.work_orders WHERE id = v_wo));
-  IF v_row->>'status' <> 'approved' OR v_row->>'approved_via' <> 'auto'
-     OR v_row->>'approved_by' IS NOT NULL OR v_row->>'approved_at' IS NULL
-     OR length(v_row->>'sealed_content_hash') <> 64 THEN
-    RAISE EXCEPTION 'contract: an automatic issue must seal the draft with no approver: %', v_row;
+  BEGIN
+    PERFORM public.auto_issue_job_work_order(v_wo, (SELECT updated_at FROM public.work_orders WHERE id = v_wo));
+    RAISE EXCEPTION 'contract: an automatic issue with no owner approval must be refused';
+  EXCEPTION WHEN SQLSTATE 'WO428' THEN NULL;
+  END;
+  IF (SELECT status FROM public.work_orders WHERE id = v_wo) <> 'draft'
+     OR (SELECT approved_at FROM public.work_orders WHERE id = v_wo) IS NOT NULL THEN
+    RAISE EXCEPTION 'contract: a refused automatic issue must seal nothing';
+  END IF;
+  v_row := to_jsonb(public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session',
+    (SELECT updated_at FROM public.work_orders WHERE id = v_wo)));
+  IF v_row->>'status' <> 'approved' OR v_row->>'approved_via' <> 'session'
+     OR v_row->>'approved_at' IS NULL OR length(v_row->>'sealed_content_hash') <> 64 THEN
+    RAISE EXCEPTION 'contract: the approver''s approval must seal the draft: %', v_row;
   END IF;
   IF (SELECT work_order_id FROM public.jobs WHERE id = v_job) IS DISTINCT FROM v_wo THEN
     RAISE EXCEPTION 'contract: the job must reference its issued work order';
@@ -297,10 +308,13 @@ BEGIN
   UPDATE public.work_orders
     SET scope_items = '[{"description":"Roof","source":"quote"}]', agreed_labour_ex = 700, quote_filled_at = now()
     WHERE id = v_opened_wo;
-  PERFORM public.auto_issue_job_work_order(v_opened_wo, (SELECT updated_at FROM public.work_orders WHERE id = v_opened_wo));
-  IF (SELECT approved_via FROM public.work_orders WHERE id = v_opened_wo) IS DISTINCT FROM 'auto' THEN
-    RAISE EXCEPTION 'contract: an untouched draft opened before this migration, filled from the quote, must be issued automatically';
-  END IF;
+  -- It passes this migration's checks; since 20261109040000 it still waits for
+  -- the owner's approvals.
+  BEGIN
+    PERFORM public.auto_issue_job_work_order(v_opened_wo, (SELECT updated_at FROM public.work_orders WHERE id = v_opened_wo));
+    RAISE EXCEPTION 'contract: an automatic issue with no owner approval must be refused';
+  EXCEPTION WHEN SQLSTATE 'WO428' THEN NULL;
+  END;
 
   -- Both drafts still wait for the approver, whose approval works as before.
   IF (SELECT count(*) FROM public.work_orders WHERE id IN (v_wo, v_plain_wo) AND status = 'draft') <> 2 THEN

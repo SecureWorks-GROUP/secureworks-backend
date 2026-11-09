@@ -40,6 +40,12 @@ BEGIN
   ASSERT result->'stages'='[]'::jsonb AND result->>'prepared'='false','unaccepted stages stay absent';
   UPDATE public.jobs SET status='partially_accepted' WHERE id=job;
   ASSERT NOT EXISTS(SELECT 1 FROM public.scope_payment_plans WHERE job_id=job),'partial acceptance creates no plan';
+  -- Since 20261109040000 release waits for the owner-approved price and work
+  -- order on the same revision; approve both here so acceptance releases.
+  UPDATE public.work_order_settings SET approver_user_ids=approver_user_ids||actor WHERE id=1;
+  PERFORM public.record_scope_price_approval(job,rev,actor,'session',org);
+  PERFORM public.record_job_work_order_approval(w.id,actor,'session',w.updated_at)
+    FROM public.work_orders w WHERE w.job_id=job AND w.kind='job';
   UPDATE public.jobs SET status='accepted' WHERE id=job;
   PERFORM public.release_scope_job_drafts(job,rev);
   result:=public.read_scope_payment_stages(job,rev,org);
@@ -82,6 +88,9 @@ BEGIN
   INSERT INTO public.scope_revisions(id,job_id,revision_number,status,scope_canonical_text,pricing_canonical_text,scope_hash,pricing_hash)
     VALUES(bad_rev,bad_job,1,'frozen','{}',pricing::text,encode(sha256(convert_to('{}','UTF8')),'hex'),encode(sha256(convert_to(pricing::text,'UTF8')),'hex'));
   PERFORM public.prepare_scope_job_drafts(bad_job,bad_rev,org);
+  PERFORM public.record_scope_price_approval(bad_job,bad_rev,actor,'session',org);
+  PERFORM public.record_job_work_order_approval(w.id,actor,'session',w.updated_at)
+    FROM public.work_orders w WHERE w.job_id=bad_job AND w.kind='job';
   UPDATE public.jobs SET status='accepted' WHERE id=bad_job;
   PERFORM public.release_scope_job_drafts(bad_job,bad_rev);
   ASSERT NOT EXISTS(SELECT 1 FROM public.scope_payment_plans WHERE job_id=bad_job),'invalid schedule writes no partial plan';

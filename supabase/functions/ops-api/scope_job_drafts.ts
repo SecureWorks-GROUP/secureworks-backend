@@ -1,6 +1,16 @@
 // Local drafts only. The transaction reads the frozen source itself; this
 // boundary never accepts money, an organisation, or an acceptance claim.
-export type ScopeDraftActor = { staff: boolean; orgId: string | null };
+// The read also carries both owner approval decisions for this revision, the
+// work order's actual state and what the caller may approve (worked out on
+// the server from owner_approval_authority, never from the client).
+import type { WorkOrderApprover } from "./job_work_orders.ts";
+import { ownerApprovalCapabilities } from "./scope_owner_approvals.ts";
+
+export type ScopeDraftActor = {
+  staff: boolean;
+  orgId: string | null;
+  approver?: WorkOrderApprover | null;
+};
 
 // A freeze is durable before this handoff runs. Return a distinct outcome so
 // clients retain the saved revision while showing any unsaved work-order hold.
@@ -74,5 +84,14 @@ export async function scopeJobDraftsAction(
     );
   }
   if (!data) return reply({ code: "scope_drafts_unavailable" }, 503);
+  if (action === "read_scope_job_drafts" && typeof data === "object") {
+    return reply({
+      ...data,
+      capabilities: await ownerApprovalCapabilities(
+        client,
+        actor.approver ?? null,
+      ),
+    });
+  }
   return reply(data);
 }
