@@ -819,10 +819,10 @@ END $$;
 CREATE TEMP TABLE owa_timeout_count AS SELECT count(*) AS n FROM public.job_work_order_owner_unapproved;
 SET statement_timeout = '500ms';
 SELECT public.approve_job_work_order(t.wo, (SELECT id FROM owa_people WHERE role = 'approver'), 'session',
-  pg_temp.wo_stamp(t.wo), (SELECT id FROM owa_people WHERE role = 'org')) FROM owa_timeout t WHERE t.name = 'manual';
+  pg_temp.wo_stamp(t.wo), (SELECT id FROM owa_people WHERE role = 'org')) IS NOT NULL AS issued FROM owa_timeout t WHERE t.name = 'manual';
 UPDATE public.work_orders SET status = 'approved', approved_by = (SELECT id FROM owa_people WHERE role = 'approver'),
   approved_via = 'session' WHERE id = (SELECT wo FROM owa_timeout WHERE name = 'direct');
-SELECT public.auto_issue_job_work_order(t.wo, pg_temp.wo_stamp(t.wo)) FROM owa_timeout t WHERE t.name = 'auto';
+SELECT public.auto_issue_job_work_order(t.wo, pg_temp.wo_stamp(t.wo)) IS NOT NULL AS issued FROM owa_timeout t WHERE t.name = 'auto';
 SELECT public.release_scope_job_drafts(t.job, t.rev) FROM owa_timeout t WHERE t.name = 'release';
 UPDATE public.work_orders SET status = 'sent' WHERE id = (SELECT wo FROM owa_timeout WHERE name = 'crew');
 RESET statement_timeout;
@@ -845,12 +845,138 @@ BEGIN
   UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'job_work_order_auto_issue_v1';
 END $$;
 
--- 15. Switch off, fault injection: a record that cannot be written, or an
--- owner gate that cannot be read, never stops or rolls back a release, an
+-- 15b. Switch off, a user's cancel during the record cancels the action, as
+-- it would without the record. A test-only trigger on the record calls
+-- pg_cancel_backend on its own session (the same signal a person's cancel
+-- sends) and waits. Manual approval, a direct approver write, the automatic
+-- issue, the release and a crew move from draft to sent each end with the
+-- user-request cancel, and nothing of them is kept.
+CREATE FUNCTION public.owa_cancel_record() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN PERFORM pg_cancel_backend(pg_backend_pid()); PERFORM pg_sleep(5); RETURN NEW; END $$;
+DO $$
+DECLARE
+  org uuid := (SELECT id FROM owa_people WHERE role = 'org');
+  v_approver uuid := (SELECT id FROM owa_people WHERE role = 'approver');
+  man record; dir record; auto record; acc record; crewjob record; crew uuid;
+  v_msg text;
+BEGIN
+  ASSERT NOT public.owner_approval_required(), 'section 15b runs with the switch off';
+  UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_work_order_auto_issue_v1';
+  man := pg_temp.filled_job(org); dir := pg_temp.filled_job(org); auto := pg_temp.filled_job(org);
+  acc := pg_temp.scope_job(org, 'accepted'); crewjob := pg_temp.scope_job(org, 'accepted');
+  INSERT INTO public.work_orders(org_id, job_id, kind, status) VALUES (org, crewjob.job, 'crew', 'draft')
+    RETURNING id INTO crew;
+  CREATE TRIGGER owa_cancel BEFORE INSERT ON public.job_work_order_owner_unapproved
+    FOR EACH ROW EXECUTE FUNCTION public.owa_cancel_record();
+
+  v_msg := NULL;
+  BEGIN PERFORM public.approve_job_work_order(man.wo, v_approver, 'session', pg_temp.wo_stamp(man.wo), org);
+  EXCEPTION WHEN query_canceled THEN v_msg := SQLERRM; END;
+  ASSERT v_msg = 'canceling statement due to user request'
+    AND (SELECT status = 'draft' FROM public.work_orders WHERE id = man.wo),
+    format('cancel: the manual approval is cancelled and stays a draft (%s)', v_msg);
+
+  v_msg := NULL;
+  BEGIN UPDATE public.work_orders SET status = 'approved', approved_by = v_approver, approved_via = 'session'
+    WHERE id = dir.wo;
+  EXCEPTION WHEN query_canceled THEN v_msg := SQLERRM; END;
+  ASSERT v_msg = 'canceling statement due to user request'
+    AND (SELECT status = 'draft' FROM public.work_orders WHERE id = dir.wo),
+    format('cancel: the approver write is cancelled and stays a draft (%s)', v_msg);
+
+  v_msg := NULL;
+  BEGIN PERFORM public.auto_issue_job_work_order(auto.wo, pg_temp.wo_stamp(auto.wo));
+  EXCEPTION WHEN query_canceled THEN v_msg := SQLERRM; END;
+  ASSERT v_msg = 'canceling statement due to user request'
+    AND (SELECT status = 'draft' FROM public.work_orders WHERE id = auto.wo),
+    format('cancel: the automatic issue is cancelled and stays a draft (%s)', v_msg);
+
+  v_msg := NULL;
+  BEGIN PERFORM public.release_scope_job_drafts(acc.job, acc.rev);
+  EXCEPTION WHEN query_canceled THEN v_msg := SQLERRM; END;
+  ASSERT v_msg = 'canceling statement due to user request'
+    AND (SELECT released_at IS NULL FROM public.scope_job_draft_sets WHERE job_id = acc.job),
+    format('cancel: the release is cancelled and nothing is released (%s)', v_msg);
+
+  v_msg := NULL;
+  BEGIN UPDATE public.work_orders SET status = 'sent' WHERE id = crew;
+  EXCEPTION WHEN query_canceled THEN v_msg := SQLERRM; END;
+  ASSERT v_msg = 'canceling statement due to user request'
+    AND (SELECT status = 'draft' FROM public.work_orders WHERE id = crew),
+    format('cancel: the crew move is cancelled and stays a draft (%s)', v_msg);
+
+  DROP TRIGGER owa_cancel ON public.job_work_order_owner_unapproved;
+  UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'job_work_order_auto_issue_v1';
+END $$;
+
+-- 15c. Switch off, the action's deadline still holds. The record sleeps 1 s
+-- and a test-only trigger adds 1 s of later staff work to every status
+-- change, all under a 500 ms statement timeout. Without the record the
+-- later work alone passes the deadline and the action is cancelled; with the
+-- record it must be cancelled the same way, never finished late. Manual
+-- approval, a direct approver write, the automatic issue and a crew move from
+-- draft to sent each stay a draft. (The release's work order write is not a
+-- status change, so it is covered by 15a and 15b.)
+CREATE TEMP TABLE owa_deadline(name text PRIMARY KEY, wo uuid);
+CREATE FUNCTION public.owa_later_work() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN PERFORM pg_sleep(1); RETURN NEW; END $$;
+DO $$
+DECLARE
+  org uuid := (SELECT id FROM owa_people WHERE role = 'org');
+  x record; crew uuid;
+BEGIN
+  ASSERT NOT public.owner_approval_required(), 'section 15c runs with the switch off';
+  UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_work_order_auto_issue_v1';
+  x := pg_temp.filled_job(org); INSERT INTO owa_deadline VALUES ('manual', x.wo);
+  x := pg_temp.filled_job(org); INSERT INTO owa_deadline VALUES ('direct', x.wo);
+  x := pg_temp.filled_job(org); INSERT INTO owa_deadline VALUES ('auto', x.wo);
+  x := pg_temp.scope_job(org, 'accepted');
+  INSERT INTO public.work_orders(org_id, job_id, kind, status) VALUES (org, x.job, 'crew', 'draft')
+    RETURNING id INTO crew;
+  INSERT INTO owa_deadline VALUES ('crew', crew);
+  CREATE TRIGGER owa_slow BEFORE INSERT ON public.job_work_order_owner_unapproved
+    FOR EACH ROW EXECUTE FUNCTION public.owa_slow_record();
+  CREATE TRIGGER zzz_owa_later AFTER UPDATE ON public.work_orders
+    FOR EACH ROW WHEN (OLD.status IS DISTINCT FROM NEW.status) EXECUTE FUNCTION public.owa_later_work();
+END $$;
+SET statement_timeout = '500ms';
+DO $$ BEGIN
+  PERFORM public.approve_job_work_order(t.wo, (SELECT id FROM owa_people WHERE role = 'approver'), 'session',
+    pg_temp.wo_stamp(t.wo), (SELECT id FROM owa_people WHERE role = 'org')) FROM owa_deadline t WHERE t.name = 'manual';
+  RAISE EXCEPTION 'contract: the manual approval finished past its deadline';
+EXCEPTION WHEN query_canceled THEN NULL; END $$;
+DO $$ BEGIN
+  UPDATE public.work_orders SET status = 'approved', approved_by = (SELECT id FROM owa_people WHERE role = 'approver'),
+    approved_via = 'session' WHERE id = (SELECT wo FROM owa_deadline WHERE name = 'direct');
+  RAISE EXCEPTION 'contract: the approver write finished past its deadline';
+EXCEPTION WHEN query_canceled THEN NULL; END $$;
+DO $$ BEGIN
+  PERFORM public.auto_issue_job_work_order(t.wo, pg_temp.wo_stamp(t.wo)) FROM owa_deadline t WHERE t.name = 'auto';
+  RAISE EXCEPTION 'contract: the automatic issue finished past its deadline';
+EXCEPTION WHEN query_canceled THEN NULL; END $$;
+DO $$ BEGIN
+  UPDATE public.work_orders SET status = 'sent' WHERE id = (SELECT wo FROM owa_deadline WHERE name = 'crew');
+  RAISE EXCEPTION 'contract: the crew move finished past its deadline';
+EXCEPTION WHEN query_canceled THEN NULL; END $$;
+RESET statement_timeout;
+DO $$
+BEGIN
+  ASSERT (SELECT count(*) FROM public.work_orders w JOIN owa_deadline t ON t.wo = w.id WHERE w.status = 'draft') = 4,
+    'deadline: every action was cancelled at its deadline and stays a draft';
+  DROP TRIGGER zzz_owa_later ON public.work_orders;
+  DROP TRIGGER owa_slow ON public.job_work_order_owner_unapproved;
+  UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'job_work_order_auto_issue_v1';
+END $$;
+
+-- 15. Switch off, fault injection: a record that cannot be written (an
+-- ordinary error, then a raised cancel code), or an owner gate that cannot be
+-- read, never stops or rolls back a release, an
 -- approval, an approver write, the automatic issue, its sweep, a crew move or
 -- the draft read. Each does exactly what it does today.
 CREATE FUNCTION public.owa_injected_failure() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'injected_audit_failure'; END $$;
+CREATE FUNCTION public.owa_injected_cancel_code() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'injected_cancel_code' USING ERRCODE = '57014'; END $$;
 DO $$
 DECLARE
   org uuid := (SELECT id FROM owa_people WHERE role = 'org');
@@ -860,10 +986,14 @@ DECLARE
 BEGIN
   ASSERT NOT public.owner_approval_required(), 'section 15 runs with the switch off';
   UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_work_order_auto_issue_v1';
-  FOR pass IN 1..2 LOOP
+  FOR pass IN 1..3 LOOP
     IF pass = 1 THEN
       CREATE TRIGGER owa_inject BEFORE INSERT ON public.job_work_order_owner_unapproved
         FOR EACH ROW EXECUTE FUNCTION public.owa_injected_failure();
+    ELSIF pass = 2 THEN
+      DROP TRIGGER owa_inject ON public.job_work_order_owner_unapproved;
+      CREATE TRIGGER owa_inject BEFORE INSERT ON public.job_work_order_owner_unapproved
+        FOR EACH ROW EXECUTE FUNCTION public.owa_injected_cancel_code();
     ELSE
       DROP TRIGGER owa_inject ON public.job_work_order_owner_unapproved;
       EXECUTE $f$CREATE OR REPLACE FUNCTION public.job_work_order_owner_gate(w public.work_orders, p_hash text DEFAULT NULL)
@@ -906,9 +1036,9 @@ BEGIN
     ASSERT (SELECT count(*) FROM public.work_orders WHERE job_id = crewjob.job AND kind = 'crew' AND status = 'sent') = 2,
       format('fault %s: crew moves go as today', pass);
 
-    IF pass = 1 THEN
+    IF pass IN (1, 2) THEN
       ASSERT (SELECT count(*) FROM public.job_work_order_owner_unapproved) = n_before,
-        'fault 1: no record was written and nothing else was lost';
+        format('fault %s: no record was written and nothing else was lost', pass);
     END IF;
   END LOOP;
   UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'job_work_order_auto_issue_v1';

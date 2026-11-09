@@ -375,6 +375,10 @@ DROP FUNCTION IF EXISTS public.record_work_order_owner_unapproved(uuid, uuid, te
 DROP TRIGGER IF EXISTS trg_work_orders_crew_owner_gate ON public.work_orders;
 DROP FUNCTION IF EXISTS public.work_orders_crew_owner_gate();
 DROP FUNCTION IF EXISTS public.work_orders_crew_owner_hold(public.work_orders);
+DROP TRIGGER IF EXISTS trg_work_orders_owner_unapproved_flush ON public.work_orders;
+DROP FUNCTION IF EXISTS public.work_orders_owner_unapproved_flush();
+DROP FUNCTION IF EXISTS public.flush_owner_unapproved();
+DROP FUNCTION IF EXISTS public.owner_unapproved_queue(jsonb);
 DROP FUNCTION IF EXISTS public.approve_job_work_order_switch_off(uuid, uuid, text, timestamptz, uuid);
 DROP FUNCTION IF EXISTS public.owner_approved_job_work_order_drafts(integer);
 DROP FUNCTION IF EXISTS public.scope_price_owner_approval(uuid, uuid);

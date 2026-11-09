@@ -4745,14 +4745,22 @@ refusal and every hold below apply only while
 `owner_approval_saved_revision_required_v1` is on: while it is off (as seeded)
 every issue path and crew move runs main's logic (approve through
 `approve_job_work_order_switch_off`, release, sweep and automatic issue never
-read the gate's verdict, and no decision is written) and each case it would
-have held is recorded in `job_work_order_owner_unapproved` (append-only, with
-what was missing, one job event each) by `record_work_order_owner_unapproved`.
-That record is best effort: every write and gate read on the switch-off path
-sits in its own exception block that also catches `query_canceled` by name
-(`OTHERS` excludes it), so a failed record, an unreadable gate or a statement
-timeout spent in either is a warning and never blocks or rolls back an issue,
-release or crew move; the writer caps its own lock waits at 200 ms. The
+read the gate's verdict, the seal stamps no decision ids, and no decision is
+written) and each case it would have held is recorded in
+`job_work_order_owner_unapproved` (append-only, with what was missing, one job
+event each). That record is the LAST thing the action does: the seal and the
+crew gate only queue ids in a transaction-local setting
+(`owner_unapproved_queue`), and `flush_owner_unapproved` re-reads the real
+rows, reads the gate and writes the record at the end of
+`approve_job_work_order`, `auto_issue_job_work_order` and
+`release_scope_job_drafts`, or from the statement trigger
+`trg_work_orders_owner_unapproved_flush` after every row trigger of a plain
+work order write. The flush is best effort: an ordinary error, a raised cancel
+code or a statement timeout spent in it is a warning, and nothing of the
+action runs after it, so the action's deadline still holds; a user's cancel
+(`canceling statement due to user request`) is raised again, as without the
+record. Never move a record write or a gate read back in front of staff work,
+and never catch `query_canceled` around staff work. The
 switch is read only through `owner_approval_required()`. A
 decision is only for a job in the approver's own company
 (`owner_approval_company_ok`; a NULL company never passes): the ops-api doors
