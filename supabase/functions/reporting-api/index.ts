@@ -24,6 +24,7 @@ import { decideReportingStaffAuth, reportingApiCallerSeesStaffDetail } from './r
 import { businessEventTimelineItem, JOB_CONTEXT_EVENT_SELECT, latestCommsAt as latestCustomerCommsAt } from './job_context_timeline.ts'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { jobProfitabilityAction, type JobProfitabilityDetail } from './job_profitability.ts'
+import { buildCommissionSummary, readCommissionProfitRows } from './commission_summary.ts'
 import { loadTeamActivity, teamActivityResponse } from './team_activity.ts'
 import {
   buildCeoTargets,
@@ -4733,15 +4734,6 @@ function qvOf(j: any): number {
   return parseFloat(p.totalIncGST || p.totalExGST || p.total || p.grandTotal || p.subtotal || 0) || 0
 }
 
-// pricing_json.margin_pct is stored as a percentage (e.g. 30.8 means 30.8%).
-// Normalise to decimal. Treat implausible values (>1.5 i.e. >150%) as percentage-form.
-function marginPctDecimal(raw: any): number | null {
-  if (raw === null || raw === undefined || raw === '') return null
-  const n = parseFloat(raw)
-  if (!isFinite(n) || n <= 0) return null
-  return n > 1.5 ? n / 100 : n
-}
-
 async function repQueueAction(sb: any, params: URLSearchParams) {
   // Accept both names so the existing frontend `saleFetch` helper (which sets salesperson_id) just works.
   const repUserId = params.get('rep_user_id') || params.get('salesperson_id') || ''
@@ -4939,9 +4931,10 @@ async function repQueueAction(sb: any, params: URLSearchParams) {
 }
 
 // ════════════════════════════════════════════════════════════
-// SECURESALE V2 — COMMISSION SUMMARY (R1)
-// Earned trigger = deposit paid. Provisional === earned in this model.
-// Formula: rep_rate * (pricing_json.margin_pct || baseline) * totalIncGST
+// SECURESALE V2 — COMMISSION SUMMARY (R1, RQ-19.b)
+// Earned trigger = deposit paid. Commission is the figure saved on the
+// accepted quote, read from Job Profit (commission_summary.ts); never the
+// price times an assumed margin.
 // ════════════════════════════════════════════════════════════
 
 async function commissionSummaryAction(sb: any, params: URLSearchParams) {
@@ -4949,15 +4942,6 @@ async function commissionSummaryAction(sb: any, params: URLSearchParams) {
   const period = params.get('period') || 'month'  // week | month | ytd
   const types = REP_TYPE_MAP[repUserId]
   if (!types) return { error: 'rep_user_id required and must match a sales rep', breakdown: [], earned_total: 0 }
-
-  // Rates via env with sensible defaults. Real rates live in CLAUDE.local.md — env vars keep them private.
-  const KHAIRO_ID = 'be6c2188-2b7b-49c7-b6e4-5b0d0deb6415'
-  const NITHIN_ID = '5862cf1d-0a3b-4836-8fd1-d69f95aa2f73'
-  const repRate = repUserId === KHAIRO_ID
-    ? parseFloat(Deno.env.get('COMMISSION_KHAIRO_RATE') || '0.15')
-    : parseFloat(Deno.env.get('COMMISSION_NITHIN_RATE') || '0.10')
-  const fencingBaseline = parseFloat(Deno.env.get('COMMISSION_FENCING_GP_BASELINE') || '0.35')
-  const patioBaseline = parseFloat(Deno.env.get('COMMISSION_PATIO_GP_BASELINE') || '0.30')
 
   // Period start
   const now = new Date()
@@ -4982,7 +4966,9 @@ async function commissionSummaryAction(sb: any, params: URLSearchParams) {
     .filter((j: any) => types.includes(j.type))
     .filter((j: any) => !isTestRecord(j.client_name))
   const jobIds = mine.map((j: any) => j.id)
-  if (jobIds.length === 0) return { period, rep_user_id: repUserId, earned_total: 0, jobs_count: 0, breakdown: [], formula_snapshot: { rep_rate: repRate, fencing_baseline: fencingBaseline, patio_baseline: patioBaseline } }
+  if (jobIds.length === 0) {
+    return buildCommissionSummary({ period, periodStartIso, repUserId, jobs: [], earnedOn: {}, profitRows: [] })
+  }
 
   // Deposit signal: xero_invoices with amount_paid>0 and fully_paid_on in period, OR job_events.payment_received in period
   const paidInPeriod: Record<string, string> = {}  // job_id -> iso date of earning
@@ -5004,48 +4990,7 @@ async function commissionSummaryAction(sb: any, params: URLSearchParams) {
     if (!paidInPeriod[r.job_id] || d < paidInPeriod[r.job_id]) paidInPeriod[r.job_id] = d
   }
 
-  const breakdown: any[] = []
-  let earnedTotal = 0
-  for (const j of mine) {
-    const earnedOn = paidInPeriod[j.id]
-    if (!earnedOn) continue
-    const value = qvOf(j)
-    if (value <= 0) continue
-    const marginPct = marginPctDecimal(j.pricing_json && j.pricing_json.margin_pct)
-    const marginSource = marginPct != null ? 'pricing_json.margin_pct' : 'type_baseline'
-    const gpPct = marginPct != null ? marginPct : (j.type === 'fencing' ? fencingBaseline : patioBaseline)
-    const gpAmount = value * gpPct
-    const commission = Math.round(gpAmount * repRate * 100) / 100
-    earnedTotal += commission
-    breakdown.push({
-      job_id: j.id,
-      job_number: j.job_number,
-      client_name: j.client_name,
-      type: j.type,
-      value: Math.round(value * 100) / 100,
-      gp_pct: Math.round(gpPct * 1000) / 1000,
-      gp_source: marginSource,
-      gp_amount: Math.round(gpAmount * 100) / 100,
-      commission,
-      earned_on: earnedOn,
-    })
-  }
-
-  breakdown.sort((a, b) => (a.earned_on < b.earned_on ? 1 : -1))
-
-  return {
-    period,
-    period_start: periodStartIso,
-    rep_user_id: repUserId,
-    earned_total: Math.round(earnedTotal * 100) / 100,
-    jobs_count: breakdown.length,
-    breakdown,
-    formula_snapshot: {
-      rep_rate: repRate,
-      fencing_baseline_gp: fencingBaseline,
-      patio_baseline_gp: patioBaseline,
-      earned_trigger: 'deposit_paid',
-      margin_source: 'pricing_json.margin_pct with type-baseline fallback',
-    },
-  }
+  const earnedIds = Object.keys(paidInPeriod)
+  const profitRows = earnedIds.length > 0 ? await readCommissionProfitRows(sb, DEFAULT_ORG_ID, earnedIds) : []
+  return buildCommissionSummary({ period, periodStartIso, repUserId, jobs: mine, earnedOn: paidInPeriod, profitRows })
 }
