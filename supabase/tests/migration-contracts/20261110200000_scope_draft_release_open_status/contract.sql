@@ -100,8 +100,10 @@ BEGIN
 
   -- Acceptance by any open status releases the same order, once.
   UPDATE public.jobs SET status = 'deposit' WHERE id = f.job;
-  r := public.release_scope_job_drafts(f.job, rev2);
-  ASSERT r = '{"released": true, "replayed": false}'::jsonb, 'quoted -> deposit releases the draft';
+  err := pg_temp.tk_refused(format('SELECT public.release_scope_job_drafts(%L, %L)', f.job, rev2));
+  ASSERT err IS NULL, 'quoted -> deposit releases the draft: ' || coalesce(err, '');
+  ASSERT (SELECT released_at IS NOT NULL FROM public.scope_job_draft_sets WHERE job_id = f.job),
+    'quoted -> deposit releases the draft: released_at stamped';
   r := public.release_scope_job_drafts(f.job, rev2);
   ASSERT r = '{"released": true, "replayed": true}'::jsonb, 'a repeated release replays';
   ASSERT (SELECT count(*) FROM public.job_events WHERE job_id = f.job
