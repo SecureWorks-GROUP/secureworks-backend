@@ -1052,7 +1052,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261106163712", "trade_invoice_money_controls"),
                       ("20261106170000", "group_office_removal_wins"),
                       # On-site client sign-off saved once per capture.
-                      ("20261106193000", "group_on_site_signoff_claim")]:
+                      ("20261106193000", "group_on_site_signoff_claim"),
+                      # TK-S28: scope draft release on any open status.
+                      ("20261110200000", "scope_draft_release_open_status")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

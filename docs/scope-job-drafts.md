@@ -76,13 +76,19 @@ Preparation while the released source remains current returns the retained
 record; it cannot replace it with a later source.
 
 Both send-quote acceptance branches and the office's `update_job_status`
-accepted path call the same release helper. It consumes the existing
+call the same release helper. The office writer asks on every move into an
+open status past acceptance (`job_work_order_open_statuses()` less
+`partially_accepted`), not only `accepted`, and the database applies the same
+rule (`20261110200000`, TK-S28): a card moved straight from quoted to Deposit
+or Scheduled is released there, and one whose release was held at acceptance
+is retried when the deposit moves it on (`awaiting_deposit`,
+`order_materials`). An already released draft answers at once. It consumes the existing
 `acceptedRevisionForOrders` decision. A named accepted source must match the
 prepared revision. A legacy acceptance uses the existing accepted-cost pin
 when present, and also requires the prepared revision to remain current.
 Unknown or conflicting acceptance provenance leaves the work order held and
-records a diagnostic. The customer's acceptance is retained. A repeated office
-accepted save can retry a held release. Partial acceptance cannot release.
+records a diagnostic. The customer's acceptance is retained. Any later office move
+into an open status retries a held release. Partial acceptance cannot release.
 
 Release locks the job and stores one release time and one event. It changes
 neither the work-order approval status nor any invoice status. `released` in
@@ -112,3 +118,8 @@ whole-job test round after the build PRs land.
 The saved handoff follow-up changes only the preparation function and the fencing/patio freeze action.
 It makes no automatic backfill.
 Undo its function code first, then apply `supabase/rollbacks/20261106062000_scope_work_order_saved_handoff_down.sql` to restore the earlier draft-content policy while keeping all stored lines, invoice drafts and revision links.
+
+The open-status release (`20261110200000`, TK-S28) changes only the release
+function body and the office status writer. Undo its function code first, then
+apply `supabase/rollbacks/20261110200000_scope_draft_release_open_status_down.sql`;
+a release already recorded stays recorded.

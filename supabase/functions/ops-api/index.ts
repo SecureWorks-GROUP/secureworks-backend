@@ -169,6 +169,7 @@ import {
   type SentQuoteSourceHashes,
 } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
 import { approvedQuotePdf, markUnapprovedLegacySendSent, ownerPriceBeforeSend, quotePdfBase64, unapprovedSendKeyForQuickQuote } from '../_shared/scope_freeze/owner_price_approval.ts'
+import { releaseScopeJobDraftsOnAcceptance, releasesScopeDraftOnStatus } from '../_shared/scope_freeze/release_scope_job_drafts.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
@@ -37920,8 +37921,17 @@ async function updateJobStatus(client: any, body: any) {
     data = written
   }
 
-  if (status === 'accepted') {
-    const { releaseScopeJobDraftsOnAcceptance } = await import('../_shared/scope_freeze/release_scope_job_drafts.ts')
+  // TK-S28: any open status past acceptance releases the scope draft work
+  // order (the database checks the status again), so a card moved straight to
+  // Deposit or Scheduled, or moved on by the deposit after a held release, is
+  // released or retried here. A released draft answers at once and replays.
+  // Scope drafts are made only on fencing and patio jobs; 'accepted' asks
+  // whatever the type, as before.
+  if (
+    status === 'accepted' ||
+    ((data?.type === 'fencing' || data?.type === 'patio') &&
+      releasesScopeDraftOnStatus(status, JOB_WORK_ORDER_OPEN_STATUSES))
+  ) {
     await releaseScopeJobDraftsOnAcceptance(client, jId)
   }
 

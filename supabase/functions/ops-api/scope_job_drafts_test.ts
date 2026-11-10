@@ -3,7 +3,11 @@ import {
   prepareScopeDraftsAfterFreeze,
   scopeJobDraftsAction,
 } from "./scope_job_drafts.ts";
-import { releaseScopeJobDraftsOnAcceptance } from "../_shared/scope_freeze/release_scope_job_drafts.ts";
+import {
+  releaseScopeJobDraftsOnAcceptance,
+  releasesScopeDraftOnStatus,
+} from "../_shared/scope_freeze/release_scope_job_drafts.ts";
+import { JOB_WORK_ORDER_OPEN_STATUSES } from "./job_work_order_quote_fill.ts";
 
 // Generated identifiers and synthetic money only, no operational records.
 const job = crypto.randomUUID();
@@ -330,4 +334,83 @@ Deno.test("scope drafts: acceptance with an owner approval missing is retained a
   assertEquals(client.calls.length, 1);
   // The database writes the held audit; the helper adds no fault event.
   assertEquals(client.events, []);
+});
+
+// TK-S28: acceptance releases the draft whatever open status it left the job
+// in. A card moved straight to Deposit or Scheduled, or moved on by the
+// deposit after a held release, used to keep a draft nobody could approve.
+Deno.test("scope drafts: every open status past acceptance asks for the release; nothing else does", () => {
+  for (const status of JOB_WORK_ORDER_OPEN_STATUSES) {
+    assertEquals(
+      releasesScopeDraftOnStatus(status, JOB_WORK_ORDER_OPEN_STATUSES),
+      status !== "partially_accepted",
+      status,
+    );
+  }
+  for (
+    const status of [
+      "draft",
+      "quoted",
+      "cancelled",
+      "lost",
+      "complete",
+      "invoiced",
+      "get_review",
+      "",
+      null,
+      undefined,
+      42,
+    ]
+  ) {
+    assertEquals(
+      releasesScopeDraftOnStatus(status, JOB_WORK_ORDER_OPEN_STATUSES),
+      false,
+      String(status),
+    );
+  }
+});
+
+Deno.test("scope drafts: the open statuses that release match the database list", async () => {
+  // release_scope_job_drafts (20261110200000) reads job_work_order_open_statuses();
+  // the TypeScript set that decides when to ask must be the same list.
+  const sql = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20261012130000_job_work_orders.sql",
+      import.meta.url,
+    ),
+  );
+  const body = sql.slice(
+    sql.indexOf("FUNCTION public.job_work_order_open_statuses()"),
+  );
+  const list = body.slice(body.indexOf("ARRAY["), body.indexOf("]::text[]"));
+  const database = [...list.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+  assertEquals([...JOB_WORK_ORDER_OPEN_STATUSES].sort(), database);
+  const release = await Deno.readTextFile(
+    new URL(
+      "../../migrations/20261110200000_scope_draft_release_open_status.sql",
+      import.meta.url,
+    ),
+  );
+  assertEquals(
+    release.includes(
+      "j.status = 'partially_accepted'\n    OR NOT (j.status = ANY (public.job_work_order_open_statuses()))",
+    ),
+    true,
+  );
+});
+
+Deno.test("scope drafts: the office status writer asks for the release on every open status, not only accepted", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const start = source.indexOf("async function updateJobStatus(");
+  const writer = source.slice(start, source.indexOf("\nasync function ", start + 10));
+  assertEquals(
+    writer.includes(
+      "status === 'accepted' ||\n    ((data?.type === 'fencing' || data?.type === 'patio') &&\n      releasesScopeDraftOnStatus(status, JOB_WORK_ORDER_OPEN_STATUSES))\n  ) {\n    await releaseScopeJobDraftsOnAcceptance(client, jId)",
+    ),
+    true,
+  );
+  assertEquals(
+    /if \(status === 'accepted'\) \{\s*const \{ releaseScopeJobDraftsOnAcceptance \}/.test(writer),
+    false,
+  );
 });
