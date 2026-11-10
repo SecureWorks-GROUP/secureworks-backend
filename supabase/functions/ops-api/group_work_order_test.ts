@@ -103,6 +103,8 @@ class Memory {
   calls: { table: string; op: string }[] = [];
   hoursClock = Date.parse("2026-11-01T00:00:00.000Z");
   weeklyLockHeld = false;
+  /** A table whose next insert the database refuses (a trigger), by message. */
+  insertFault = new Map<string, string>();
 
   touchHours(groupId: string): string {
     const stamp = new Date(this.hoursClock).toISOString();
@@ -739,6 +741,8 @@ class Query {
   private run(): { data: unknown; error: { message?: string } | null } {
     this.memory.calls.push({ table: this.table, op: this.op });
     const rows = this.memory.rows(this.table);
+    const fault = this.op === "insert" ? this.memory.insertFault.get(this.table) : undefined;
+    if (fault) return { data: null, error: { message: fault } };
     if (this.op === "insert") {
       const created: Row = {
         id: crypto.randomUUID(),
@@ -3241,6 +3245,23 @@ function seedHoursClaim(db: Memory, userId: string, invoiceId: string, invoice: 
     trade_invoices: row,
   });
 }
+
+Deno.test("group setup on a job the customer has not accepted is refused by name (RQ-19.a)", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("group_work_orders").splice(0);
+  db.rows("group_work_order_participants").splice(0);
+  db.rows("users").push({ id: USER_A, name: "Crew A", role: "crew", org_id: ORG });
+  db.insertFault.set(
+    "group_work_orders",
+    "group_job_not_accepted: the job is quoted, so no crew group opens before the customer accepts",
+  );
+  const refused = await createGroupWorkOrder(db.client(), trade(USER_A), { job_id: JOB })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals([refused?.status, refused?.code], [409, "group_job_not_accepted"]);
+  assertStringIncludes(refused?.message || "", "has not accepted this job yet");
+  assertEquals(db.rows("group_work_orders").length, 0);
+});
 
 Deno.test("own saved draft: group setup names the week and how to clear it, and the draft clears it", async () => {
   const db = new Memory();

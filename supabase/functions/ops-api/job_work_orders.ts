@@ -1842,6 +1842,8 @@ const APPROVE_ERRORS: Record<string, [number, string]> = {
   "P0002": [404, "work_order_not_found"],
   "WO409": [409, "stale_review"],
   "WO428": [409, "owner_approval_required"],
+  // RQ-19.a (20261111090000): a fencing or patio job not accepted yet.
+  "WO412": [409, "job_not_accepted"],
 };
 
 /** The database's rule for who may approve (owner_approval_authority,
@@ -2097,6 +2099,7 @@ export type JobWorkOrderAutoIssueReason =
   | "agreed_labour_missing"
   | "draft_changed"
   | "owner_approval_required"
+  | "job_not_accepted"
   | "issue_failed";
 
 export type JobWorkOrderAutoIssue = {
@@ -2117,6 +2120,7 @@ const AUTO_ISSUE_ERRORS: Record<string, [JobWorkOrderAutoIssueReason, string]> =
     "WO409": ["draft_changed", "stale_read"],
     "WO423": ["hand_edited", "not_issuable"],
     "WO428": ["owner_approval_required", "owner_approval_required"],
+    "WO412": ["job_not_accepted", "job_not_accepted"],
     "23514": ["issue_failed", "work_order_not_ready"],
     "P0002": ["no_draft", "work_order_not_found"],
   };

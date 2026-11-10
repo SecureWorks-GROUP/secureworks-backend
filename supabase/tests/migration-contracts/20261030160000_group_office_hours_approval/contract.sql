@@ -19,6 +19,7 @@ BEGIN
   INSERT INTO public.jobs(id,org_id,type,status,job_number) VALUES(job,org,'patio','quoted','SYN-OFFICE-HOURS');
   INSERT INTO public.work_orders(id,org_id,job_id,wo_number,kind,status,agreed_labour_ex,scope_items,special_instructions)
     VALUES(wo,org,job,'SYN-OFFICE-HOURS-WO','job','draft',1000,'[]','Synthetic office hours proof');
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id=wo);
   UPDATE public.work_orders SET status='approved',approved_by=office WHERE id=wo;
   INSERT INTO public.group_work_orders(id,org_id,job_id,work_order_id,share_token,pay_basis,approved_budget_ex,budget_approved_by,budget_approved_at,budget_approval_reason)
     VALUES(grp,org,job,wo,'synthetic-office-hours-token','all_in_12_v2',1000,office,now(),'Synthetic owner budget');

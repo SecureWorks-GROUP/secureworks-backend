@@ -896,6 +896,13 @@ const QUERY_FAULTS: {
     status: 409,
   },
   {
+    // RQ-19.a (20261111090000): no crew group before the customer accepts.
+    needle: "group_job_not_accepted",
+    code: "group_job_not_accepted",
+    message: "The customer has not accepted this job yet, so no crew group can open on it.",
+    status: 409,
+  },
+  {
     needle: "group_actor_required",
     code: "group_actor_required",
     message: "Say who is doing this.",

@@ -378,6 +378,7 @@ BEGIN
     v_org, v_pot_job, 'GWO-POT-1', 'job', 'draft', 482.15, '[]', 'group split fixture'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-POT-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders
   SET status = 'approved', approved_by = v_shaun
   WHERE id = v_wo;
@@ -725,6 +726,7 @@ BEGIN
     v_org, v_job, 'GWO-NORATE-1', 'job', 'draft', 482.15, '[]', 'missing rate'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-NORATE-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders
   SET status = 'approved', approved_by = v_shaun
   WHERE id = v_wo;
@@ -831,6 +833,7 @@ BEGIN
     v_org, v_job, 'GWO-PAY-1', 'job', 'draft', 100, '[]', 'pay types'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-PAY-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
   VALUES (v_group, v_org, v_job, v_wo, 'token-pay-types');
@@ -901,6 +904,7 @@ BEGIN
     v_org, v_pay_job, 'GWO-PAY-2', 'job', 'draft', 100, '[]', 'pay then share'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-PAY-2';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.trade_invoices (
     id, org_id, user_id, status, subtotal_ex, gst, total_inc,
@@ -933,6 +937,7 @@ BEGIN
     v_org, v_open_job, 'GWO-OPEN-1', 'job', 'draft', 100, '[]', 'open blocked'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-OPEN-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.trade_invoices (
     id, org_id, user_id, status, subtotal_ex, gst, total_inc,
@@ -965,6 +970,7 @@ BEGIN
     v_org, v_other_job, 'GWO-OTHER-1', 'job', 'draft', 100, '[]', 'other blocks open'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-OTHER-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.trade_invoices (
     id, org_id, user_id, status, subtotal_ex, gst, total_inc,
@@ -990,6 +996,7 @@ BEGIN
     v_org, v_hours_job, 'GWO-HOURS-1', 'job', 'draft', 482.15, '[]', 'assigned hours'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-HOURS-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   -- v_a and v_b already have a rate from the pot fixture (unique on org, user, effective_from).
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
@@ -1088,6 +1095,7 @@ BEGIN
     v_org, v_sign_job, 'GWO-SIGN-1', 'job', 'draft', 482.15, '[]', 'signoff date'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-SIGN-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
   VALUES (v_sign_group, v_org, v_sign_job, v_wo, 'token-sign');
@@ -1166,6 +1174,7 @@ BEGIN
     v_org, v_strip_job, 'GWO-STRIP-1', 'job', 'draft', 482.15, '[]', 'strip share'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-STRIP-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
   VALUES (v_strip_group, v_org, v_strip_job, v_wo, 'token-strip');
@@ -1356,6 +1365,7 @@ BEGIN
     v_org, v_void_job, 'GWO-VOID-1', 'job', 'draft', 100, '[]', 'void stays'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-VOID-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
   VALUES (v_void_group, v_org, v_void_job, v_wo, 'token-void');
@@ -1420,6 +1430,7 @@ BEGIN
     v_org, v_job, 'GWO-STAMP-1', 'job', 'draft', 100, '[]', 'hours stamp'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-STAMP-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
   VALUES (v_group, v_org, v_job, v_wo, 'token-stamp');
@@ -1536,6 +1547,7 @@ BEGIN
     v_org, v_ded_job, 'GWO-DED-1', 'job', 'draft', 100, '[]', 'deduction refit'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-DED-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
   VALUES (v_ded_group, v_org, v_ded_job, v_wo, 'token-ded');

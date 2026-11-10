@@ -9,7 +9,7 @@ CREATE FUNCTION pg_temp.signoff_job(n int, frozen timestamptz DEFAULT NULL) RETU
 DECLARE j uuid:=gen_random_uuid();
 BEGIN
  INSERT INTO public.jobs(id,org_id,type,status,job_number)
- VALUES(j,'00000000-0000-0000-0000-000000000001','patio','quoted','SYN-CLIENT-CONFIRM-'||n);
+ VALUES(j,'00000000-0000-0000-0000-000000000001','patio','complete','SYN-CLIENT-CONFIRM-'||n);
  INSERT INTO public.group_work_orders(org_id,job_id,work_order_id,share_token,split_frozen_at)
  VALUES('00000000-0000-0000-0000-000000000001',j,gen_random_uuid(),gen_random_uuid()::text,frozen);
  RETURN j;

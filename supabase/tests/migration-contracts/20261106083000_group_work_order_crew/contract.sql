@@ -115,6 +115,7 @@ BEGIN
  RETURNING id INTO wo;
  -- Fixture-only authority, restored with the entire transaction below.
  UPDATE public.work_order_settings SET approver_user_ids=ARRAY[office_installer] WHERE id=1;
+ UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id=wo);
  UPDATE public.work_orders SET status='approved',approved_by=office_installer,approved_via='session' WHERE id=wo;
  INSERT INTO public.group_work_orders(id,org_id,job_id,work_order_id,share_token)
  VALUES(grp,org,job,wo,repeat('f',48));
