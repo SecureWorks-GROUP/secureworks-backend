@@ -140,8 +140,9 @@ export const WORK_ORDER_VARIATION_EMAIL_STALE_SENDING_MS = 10 * 60 * 1000;
 /** Rule near_agreed fires at this share of the agreed labour. */
 export const WORK_ORDER_NEAR_AGREED_RATIO = 0.9;
 
-/** Issues a job work order to the trades as soon as the quote fill writes it,
- *  with no human approval (approved_via 'auto'). Seeded off. */
+/** Issues a job work order to the trades once the quote fill writes it
+ *  (approved_via 'auto'), only when both owner decisions already exist for
+ *  its saved revision and content (20261109040000). Seeded off. */
 export const JOB_WORK_ORDER_AUTO_ISSUE_FLAG = "job_work_order_auto_issue_v1";
 
 /** Open, approved job statuses. Mirrors the database's
@@ -1840,19 +1841,76 @@ const APPROVE_ERRORS: Record<string, [number, string]> = {
   "23514": [422, "work_order_not_ready"],
   "P0002": [404, "work_order_not_found"],
   "WO409": [409, "stale_review"],
+  "WO428": [409, "owner_approval_required"],
 };
 
+/** The database's rule for who may approve (owner_approval_authority,
+ *  20261109040000): owner, approver_list or backup_approver_list, else null.
+ *  Throws when the rule cannot be read, so nobody is let in on a fault. */
+export async function readOwnerApprovalAuthority(
+  client: any,
+  userId: string,
+): Promise<string | null> {
+  const { data, error } = await client.rpc("owner_approval_authority", {
+    p_user: userId,
+  });
+  if (error) {
+    fail(
+      503,
+      "approvers_unreadable",
+      "The work order approver list could not be read",
+    );
+  }
+  return typeof data === "string" && data ? data : null;
+}
+
+/** Splits approve_job_work_order's answer into the work order as it now
+ *  stands and the owner approval result (decision recorded, issued or held). */
+export function splitOwnerApprovalResult(data: any): {
+  workOrder: any;
+  ownerApproval: any;
+  issued: boolean;
+} {
+  if (!data || typeof data !== "object") {
+    return { workOrder: data, ownerApproval: null, issued: false };
+  }
+  const { owner_approval: ownerApproval = null, ...workOrder } = data;
+  const issued = ownerApproval
+    ? ownerApproval?.issue?.issued === true && workOrder?.status === "approved"
+    : workOrder?.status === "approved";
+  return { workOrder, ownerApproval, issued };
+}
+
+/**
+ * Records the approver's work order decision on the draft exactly as read
+ * (expected_updated_at), and issues it only when the database policy allows:
+ * a work order on a saved revision also needs the owner's price approval for
+ * that revision, and a shared-lane order also needs the customer's acceptance.
+ * Otherwise the decision is kept, the draft stays a draft and the answer says
+ * what the issue waits for (owner_approval.issue.missing).
+ */
+/** orgId is the caller's verified company (the signed-in user's, or the
+ *  server's own for a terminal call). A work order in another company is
+ *  answered as not found, and the database checks the company again. */
 export async function approveJobWorkOrder(
   client: any,
   body: any,
   approver: WorkOrderApprover | null,
+  orgId: string | null,
 ) {
   const id = requireUuid(body?.work_order_id, "work_order_id");
+  if (!orgId) {
+    fail(
+      403,
+      "operator_access_required",
+      "Approving needs a signed-in session in this company.",
+    );
+  }
   if (!approver) {
     fail(
       403,
       "approver_identity_missing",
-      "Approving needs Shaun's own signed-in session.",
+      "Approving needs the approver's own signed-in session.",
     );
   }
   if (
@@ -1862,19 +1920,16 @@ export async function approveJobWorkOrder(
     fail(
       403,
       "terminal_approval_switched_off",
-      "Approving from the terminal is switched off (feature flag work_order_terminal_approval_v1). Approve from Shaun's signed-in session.",
+      "Approving from the terminal is switched off (feature flag work_order_terminal_approval_v1). Approve from the approver's signed-in session.",
     );
   }
-  const approvers = await readWorkOrderApprovers(client);
-  if (approvers.length === 0) {
+  const authority = await readOwnerApprovalAuthority(client, approver.userId);
+  if (!authority) {
     fail(
       403,
-      "approver_not_set",
-      "No work order approver is named, so nobody can approve",
+      "approver_required",
+      "Only the owner or an approver named in the work order settings approves job work orders",
     );
-  }
-  if (!approvers.includes(approver.userId.toLowerCase())) {
-    fail(403, "approver_required", "Only Shaun approves job work orders");
   }
   const expected = body?.expected_updated_at;
   if (typeof expected !== "string" || !Number.isFinite(Date.parse(expected))) {
@@ -1885,6 +1940,9 @@ export async function approveJobWorkOrder(
     );
   }
   const wo = await readWorkOrder(client, id);
+  if (wo.org_id !== orgId) {
+    fail(404, "work_order_not_found", "Work order not found");
+  }
   if (wo.kind !== "job") {
     fail(422, "not_a_job_work_order", "Only a job work order is approved");
   }
@@ -1896,21 +1954,38 @@ export async function approveJobWorkOrder(
     p_approver: approver.userId,
     p_via: approver.via,
     p_expected_updated_at: expected,
+    p_org_id: orgId,
   });
   if (error) {
+    if (
+      String(error.code || "") === "42501" &&
+      String(error.message || "").includes("scope_owner_approval_job_forbidden")
+    ) {
+      fail(404, "work_order_not_found", "Work order not found");
+    }
     const mapped = APPROVE_ERRORS[String(error.code || "")];
     if (mapped) {
       fail(mapped[0], mapped[1], String(error.message || "Approval refused"));
     }
     fail(500, "approval_failed", "The work order could not be approved");
   }
-  await logJobEvent(client, wo.job_id, "job_work_order_approved", {
-    work_order_id: id,
-    wo_number: wo.wo_number,
-    approved_by: approver.userId,
-    via: approver.via,
-  }, approver.userId);
-  return { work_order: data };
+  const { workOrder, ownerApproval, issued } = splitOwnerApprovalResult(data);
+  if (issued) {
+    await logJobEvent(client, wo.job_id, "job_work_order_approved", {
+      work_order_id: id,
+      wo_number: wo.wo_number,
+      approved_by: approver.userId,
+      via: approver.via,
+    }, approver.userId);
+  }
+  // Switch off the database answers with the work order alone, as before;
+  // the reply keeps that shape.
+  if (!ownerApproval) return { work_order: workOrder };
+  return {
+    work_order: workOrder,
+    issued,
+    owner_approval: ownerApproval,
+  };
 }
 
 // ── Staff: backfill (switched off) ───────────────────────────────────────────
@@ -2021,6 +2096,7 @@ export type JobWorkOrderAutoIssueReason =
   | "filled_before_auto_issue"
   | "agreed_labour_missing"
   | "draft_changed"
+  | "owner_approval_required"
   | "issue_failed";
 
 export type JobWorkOrderAutoIssue = {
@@ -2040,14 +2116,18 @@ const AUTO_ISSUE_ERRORS: Record<string, [JobWorkOrderAutoIssueReason, string]> =
     "42501": ["switched_off", "auto_issue_switched_off"],
     "WO409": ["draft_changed", "stale_read"],
     "WO423": ["hand_edited", "not_issuable"],
+    "WO428": ["owner_approval_required", "owner_approval_required"],
     "23514": ["issue_failed", "work_order_not_ready"],
     "P0002": ["no_draft", "work_order_not_found"],
   };
 
 /**
  * Fills the job's draft from the accepted quote when nobody has written into
- * it, then issues it to the trades with no human approval (approved_via
- * 'auto'), sealed as an approval seals it. Only while
+ * it, then issues it to the trades (approved_via 'auto'), sealed as an
+ * approval seals it, only when both owner decisions already exist for its
+ * saved revision and its content (owner_approval_required otherwise: the
+ * database refuses before any write). It carries out those decisions and
+ * never stands in for them. Only while
  * JOB_WORK_ORDER_AUTO_ISSUE_FLAG is on, only for an open fencing or patio job,
  * and only for the draft the quote fill wrote that nobody has edited since
  * (the database checks the last two again, under the row lock). Lines the
@@ -2206,17 +2286,13 @@ export async function autoIssueJobWorkOrders(
     : AUTO_ISSUE_SWEEP_DEFAULT_LIMIT;
   const open = [...JOB_WORK_ORDER_OPEN_STATUSES];
   const types = [...JOB_WORK_ORDER_JOB_TYPES];
-  const { data: filled, error: filledError } = await client.from("work_orders")
-    .select(SWEEP_COLUMNS)
-    .eq("kind", "job")
-    .eq("status", "draft")
-    .is("hand_edited_at", null)
-    .not("quote_filled_at", "is", null)
-    .not("agreed_labour_ex", "is", null)
-    .in("jobs.type", types)
-    .in("jobs.status", open)
-    .order("created_at", { ascending: true })
-    .limit(limit);
+  // Filled drafts are read only when both owner decisions exist for their
+  // saved revision and content, so drafts still waiting for the owner never
+  // crowd out ones that are ready (owner_approved_job_work_order_drafts).
+  const { data: filled, error: filledError } = await client.rpc(
+    "owner_approved_job_work_order_drafts",
+    { p_limit: limit },
+  );
   if (filledError) {
     fail(500, "drafts_unreadable", "The draft work orders could not be read");
   }

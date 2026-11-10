@@ -4695,11 +4695,13 @@ fails loudly. Every crew-pay read or write (`my_work_orders`,
 `submit_work_order_invoice`, weekly blocks, the acceptance auto-approve) filters
 `kind = 'crew'` while `retire_crew_work_orders_v1` is off; a new crew-pay door
 must too. With that flag on, `my_work_orders` returns job work orders and hides
-retired crew rows. See the crew-invoice section below. Only the users in
-`work_order_settings.approver_user_ids` (Shaun) approve, never a role (the one
-other seal is the system's own `approved_via 'auto'` issue of an unedited
-quote-filled draft, behind `job_work_order_auto_issue_v1`), and an
-approval seals only the draft that was read: `approve_work_order` requires
+retired crew rows. See the crew-invoice section below. Only the owner
+(`work_order_settings.owner_user_ids`) and the users in `approver_user_ids` /
+`backup_approver_user_ids` approve, never a role (`owner_approval_authority`);
+on a saved revision an order issues only on both owner decisions (next
+section), and the automatic issue (`approved_via 'auto'`, behind
+`job_work_order_auto_issue_v1`) only carries out decisions already recorded.
+An approval seals only the draft that was read: `approve_work_order` requires
 `expected_updated_at`, compared under the row lock in `approve_job_work_order`.
 A recorded variation changes only through the staff door
 `correct_work_order_variation`, never a trade one. Every
@@ -4724,6 +4726,76 @@ draft someone wrote into, and the rates come only from the quote itself and
 the scoping tool's cost table. Filled lines are read by trades, so a line's description must never
 carry a rate, amount, percent or money word. Rules:
 `docs/quote-work-order-lines-v1.md`.
+
+## Price And Work Order Issue On Two Owner Decisions
+
+`20261109040000_scope_owner_approvals.sql` owns the policy. `scope_owner_approvals`
+is append-only: a `price` decision on (job, saved revision) and a `work_order`
+decision on (order, revision, exact content hash), each with approver, time
+and authority (`owner`, `approver_list`, `backup_approver_list`; only
+`owner_approval_authority` decides). A seal, a complete price, a customer
+acceptance or a role is never a decision. `job_work_order_owner_gate` is the one
+rule every issue path reads (`release_scope_job_drafts`,
+`approve_job_work_order`, `auto_issue_job_work_order` and its sweep
+`owner_approved_job_work_order_drafts`, backfill, and the crew trigger
+`work_orders_crew_owner_gate`, which holds a crew order on a saved-revision job
+out of sent, accepted, in progress and complete, from any earlier status
+including cancelled, until the job order is issued); it refuses `WO428`. That
+refusal and every hold below apply only while
+`owner_approval_saved_revision_required_v1` is on: while it is off (as seeded)
+every issue path and crew move runs main's logic (approve through
+`approve_job_work_order_switch_off`, release, sweep and automatic issue never
+read the gate's verdict, the seal stamps no decision ids, and no decision is
+written) and each case it would have held is recorded in
+`job_work_order_owner_unapproved` (append-only, with what was missing, one job
+event each). That record is the LAST thing the action does: the seal and the
+crew gate only queue ids in a transaction-local setting
+(`owner_unapproved_queue`), and `flush_owner_unapproved` re-reads the real
+rows, reads the gate and writes the record at the end of
+`approve_job_work_order`, `auto_issue_job_work_order` and
+`release_scope_job_drafts`, or from the statement trigger
+`trg_work_orders_owner_unapproved_flush` after every row trigger of a plain
+work order write. The flush is best effort: an ordinary error, a raised cancel
+code or a statement timeout spent in it is a warning, and nothing of the
+action runs after it, so the action's deadline still holds; a user's cancel
+(`canceling statement due to user request`) is raised again, as without the
+record. Never move a record write or a gate read back in front of staff work,
+and never catch `query_canceled` around staff work. The
+switch is read only through `owner_approval_required()`. A
+decision is only for a job in the approver's own company
+(`owner_approval_company_ok`; a NULL company never passes): the ops-api doors
+call the five-argument `approve_job_work_order` with the caller's company. The
+office queue's approve follows `owner_approval_authority`, so the owner listed
+only as owner may approve there. A missing decision holds the issue and keeps
+the customer's acceptance, and a deposit stage released later still dates from
+that acceptance. Decisions are recorded while the order is a draft and the
+issue validates, releases and seals in one transaction. An edit or a new
+revision needs a fresh decision. A quote send (send-quote `/send`,
+`/send-runs`, Quick Quote; `_shared/scope_freeze/owner_price_approval.ts`)
+with no price decision, saved revision or not, is refused only while
+`owner_approval_saved_revision_required_v1` is on (seeded off, the owner's
+call, after the owner list is written and the scoping tools store quote PDFs
+before the owner approves); while it is off it goes exactly as before and is
+claimed in `quote_send_price_unapproved_sends` (one row per document or Quick
+Quote call, with the revision it names, forward only, never deleted) before
+the email. That claim is best effort too: a failed write is logged and the
+send goes, and a document claimed by one path (a failed bundle attempt) is
+replayed, not refused, when another path claims it. While the switch is off
+the send gate reads no price decision at all, and a switch it cannot read
+counts as off. A price decision also records
+`quote_document_sha256s`: the revision's `quote_pdf` / `per_contact_pdf`
+`scope_artifacts` hashes when the owner decided (`scope_revision_quote_documents`;
+the approver echoes the list the read showed). On an approved revision a send
+fetches each PDF once (switch on only) and refuses unless its sha256 is on that list
+(`owner_price_pdf_not_approved`), then sends exactly those bytes; a `/send`
+document's stored page price must be a figure of the frozen price
+(`owner_price_document_price_mismatch`). A PDF stored after the decision needs
+a new revision and decision, so the scoping tools store the quote PDFs before
+the owner approves. Staff doors:
+`approve_scope_price`, `approve_scope_work_order`, `read_scope_owner_approvals`
+(`ops-api/scope_owner_approvals.ts`). While an issue is held, the local payment
+stage drafts made at release wait with it. The rollback goes with the
+application code from before this migration.
 
 ## Crew Invoices Sit On The Job Work Order, Behind Flags That Default Off
 

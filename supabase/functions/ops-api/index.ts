@@ -168,6 +168,7 @@ import {
   type NamedScopeRevisionRead,
   type SentQuoteSourceHashes,
 } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
+import { approvedQuotePdf, markUnapprovedLegacySendSent, ownerPriceBeforeSend, quotePdfBase64, unapprovedSendKeyForQuickQuote } from '../_shared/scope_freeze/owner_price_approval.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
@@ -2036,6 +2037,21 @@ export class ApiError extends Error {
     this.status = status
     this.body = body
   }
+}
+
+// A crew work order on a job built from a saved revision leaves draft only once
+// the job work order is issued on both owner approvals
+// (work_orders_crew_owner_gate, 20261109040000). The database refuses with
+// WO428; a caller gets a plain 409, never a raw fault.
+const CREW_OWNER_APPROVAL_MESSAGE =
+  'This job\'s work order is not issued yet: the owner must approve the price and the work order first. The crew work order stays a draft.'
+function crewWorkOrderOwnerApprovalError(error: any): ApiError | null {
+  if (String(error?.code ?? '') !== 'WO428') return null
+  return new ApiError(CREW_OWNER_APPROVAL_MESSAGE, 409, {
+    ok: false,
+    code: 'owner_approval_required',
+    error: CREW_OWNER_APPROVAL_MESSAGE,
+  })
 }
 
 function tradeInvoiceMoneyApiError(error: unknown): never {
@@ -10131,17 +10147,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           })
         }
         return json(await sendWorkOrder(client, body))
-      // Shaun only: work_order_settings.approver_user_ids, checked here and
-      // again by the database. The approver is the signed-in user. An approver
-      // named only by x-sw-actor `user:<id>` on a server-secret call is refused
-      // until feature flag work_order_terminal_approval_v1 is on.
+      // The owner or an approver named in work_order_settings
+      // (owner_approval_authority), checked here and again by the database.
+      // The approver is the signed-in user. An approver named only by
+      // x-sw-actor `user:<id>` on a server-secret call is refused until
+      // feature flag work_order_terminal_approval_v1 is on. Records the work
+      // order decision; the order is issued only when the owner approval
+      // policy allows (20261109040000).
       case 'approve_work_order':
         return json(await runJobWorkOrder(() => approveJobWorkOrder(client, body, resolveWorkOrderApprover({
           authMode,
           authUserId: authUser?.id ?? null,
           serverSecretPresented,
           actor: requestActor,
-        }))))
+        }), authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID)))
       // Dry run unless apply:true AND feature flag job_work_order_backfill_v1.
       case 'backfill_job_work_orders': {
         if (authMode !== 'api_key' || !serverSecretPresented) {
@@ -10150,7 +10169,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json(await runJobWorkOrder(() => backfillJobWorkOrders(client, body)))
       }
       // The automatic issue sweep (pg_cron job-work-order-auto-issue, every 2
-      // minutes): fills and issues job work orders with no human approval.
+      // minutes): fills drafts from the accepted quote, and issues only drafts
+      // both owner decisions already allow (it never creates a decision).
       // Writes nothing while feature flag job_work_order_auto_issue_v1 is off.
       case 'auto_issue_job_work_orders': {
         if (authMode !== 'api_key' || !serverSecretPresented) {
@@ -10325,6 +10345,31 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const response = await scopeJobDraftsAction(client, action, req.method, body, {
           staff: _opsApiCallerIsStaffOperator(authMode, authUser),
           orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+          approver: resolveWorkOrderApprover({
+            authMode,
+            authUserId: authUser?.id ?? null,
+            serverSecretPresented,
+            actor: requestActor,
+          }),
+        })
+        return json(await response.json(), response.status)
+      }
+      // Owner approval of the price and of the work order (TK-S28). The
+      // approver is the signed-in user; who may approve is the database's
+      // owner_approval_authority. 20261109040000_scope_owner_approvals.sql.
+      case 'approve_scope_price':
+      case 'approve_scope_work_order':
+      case 'read_scope_owner_approvals': {
+        const { scopeOwnerApprovalsAction } = await import('./scope_owner_approvals.ts')
+        const response = await scopeOwnerApprovalsAction(client, action, req.method, req.method === 'GET' ? { job_id: url.searchParams.get('job_id') } : body, {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+          approver: resolveWorkOrderApprover({
+            authMode,
+            authUserId: authUser?.id ?? null,
+            serverSecretPresented,
+            actor: requestActor,
+          }),
         })
         return json(await response.json(), response.status)
       }
@@ -17601,14 +17646,16 @@ async function readWorkOrderChargeRows(
 // The module throws JobWorkOrderError; the serve() handler answers ApiError.
 function officeJobWorkOrderActor(
   authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
-  authUser: Pick<TradeAuthContext, 'id' | 'role'> | null,
+  authUser: Pick<TradeAuthContext, 'id' | 'role' | 'orgId'> | null,
 ): {
   staff: boolean
   userId: string | null
+  orgId: string | null
 } {
   return {
     staff: _opsApiCallerIsStaffOperator(authMode, authUser),
     userId: authMode === 'jwt' ? authUser?.id || null : null,
+    orgId: authMode === 'jwt' ? authUser?.orgId || null : null,
   }
 }
 
@@ -38038,9 +38085,23 @@ async function updateJobStatus(client: any, body: any) {
         const { data: draftWOs } = await draftWoQuery
         if (draftWOs && draftWOs.length > 0) {
           for (const wo of draftWOs) {
-            await client.from('work_orders')
+            const { error: woApproveError } = await client.from('work_orders')
               .update({ status: 'approved', approved_at: new Date().toISOString() })
               .eq('id', wo.id)
+            if (woApproveError) {
+              // Held until the job work order is issued on both owner
+              // approvals (WO428); the job's status move is unaffected.
+              const held = String(woApproveError?.code ?? '') === 'WO428'
+              console.error(`[ops-api] crew WO ${wo.wo_number} not auto-approved on acceptance:`, woApproveError?.code ?? 'error')
+              if (held) {
+                await client.from('job_events').insert({
+                  job_id: jId,
+                  event_type: 'work_order_approval_held',
+                  detail_json: { wo_number: wo.wo_number, trigger: 'acceptance_auto', reason: 'owner_approval_required' },
+                })
+              }
+              continue
+            }
             await client.from('job_events').insert({
               job_id: jId,
               event_type: 'work_order_approved',
@@ -38642,7 +38703,7 @@ async function updateWorkOrder(client: any, body: any) {
     .select()
     .single()
 
-  if (error) throw error
+  if (error) throw crewWorkOrderOwnerApprovalError(error) ?? error
   return { work_order: data }
 }
 
@@ -38665,9 +38726,10 @@ async function sendWorkOrder(client: any, body: any) {
   )
 
   // Mark as sent
-  await client.from('work_orders')
+  const { error: sentError } = await client.from('work_orders')
     .update({ status: 'sent', sent_at: new Date().toISOString() })
     .eq('id', id)
+  if (sentError) throw crewWorkOrderOwnerApprovalError(sentError) ?? sentError
 
   if (wo.job_id) {
     await client.from('job_events').insert({
@@ -41300,6 +41362,17 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   if (!(totalIncGST > 0)) {
     throw new Error('Quote total is zero or missing. Set pricing on the job in the scoping tool before sending.')
   }
+  // TK-S28: with no owner price decision the send follows
+  // owner_approval_saved_revision_required_v1 (off: sent as today and
+  // recorded before the email; on: refused). With a decision its PDF must be
+  // one the decision covers (20261109040000). Refused: nothing is sent.
+  const ownerPrice = await ownerPriceBeforeSend(client, {
+    job_id, sealed: sealedSource, path: 'quick-quote',
+    send_key: unapprovedSendKeyForQuickQuote(crypto.randomUUID()), document_id: null,
+  })
+  if (ownerPrice.kind === 'refused') {
+    throw new ApiError(ownerPrice.body.error, ownerPrice.status, { ok: false, ...ownerPrice.body })
+  }
   const paymentTerms = pricing.payment_terms || '50/50 split'
   const validDays = pricing.valid_days || 30
   const validUntil = new Date(Date.now() + validDays * 86400000).toLocaleDateString('en-AU', { day: 'numeric', month: 'long', year: 'numeric' })
@@ -41336,8 +41409,19 @@ async function sendQuickQuoteEmail(client: any, body: any) {
     html: emailHtml,
   }
 
-  // Attach PDF if URL provided
-  if (pdf_url) {
+  // Attach PDF if URL provided. On an approved saved revision the PDF must be
+  // one the owner's price decision covers, and exactly those bytes are
+  // attached; otherwise nothing is sent.
+  if (pdf_url && ownerPrice.approved) {
+    const approvedPdf = await approvedQuotePdf(ownerPrice.approved, String(pdf_url))
+    if (!approvedPdf.ok) {
+      throw new ApiError(approvedPdf.body.error, approvedPdf.status, { ok: false, ...approvedPdf.body })
+    }
+    emailPayload.attachments = [{
+      filename: `${job.job_number || 'Quote'}.pdf`,
+      content: quotePdfBase64(approvedPdf.bytes),
+    }]
+  } else if (pdf_url) {
     try {
       const pdfResp = await fetch(pdf_url)
       if (pdfResp.ok) {
@@ -41364,6 +41448,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   })
   const resendResult = await resendResp.json()
   if (!resendResp.ok) throw new Error('Email send failed: ' + (resendResult.message || JSON.stringify(resendResult)))
+  if (ownerPrice.unapproved) await markUnapprovedLegacySendSent(client, ownerPrice.unapproved)
 
   // ── Cap 0 release-truth: atomic draft → quoted transition + canonical events ──
   // Mirrors /send-quote/send (post-`350e943`) so Quick Quote inherits the same exactly-once

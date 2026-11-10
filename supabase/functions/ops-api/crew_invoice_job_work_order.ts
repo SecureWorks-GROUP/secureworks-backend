@@ -430,6 +430,10 @@ export function decideOfficeWrite(input: {
   backupIds: readonly string[];
   lineAlreadyHeld?: boolean;
   invoiceSubmitterId?: string | null;
+  /** For approve: the database's owner_approval_authority answer for this
+   *  user (owner, approver_list, backup_approver_list or null). When given it
+   *  decides who approves, so the owner listed only as owner is let in. */
+  approveAuthority?: string | null;
 }): OfficeWriteDecision {
   if (!input.staff) {
     return {
@@ -472,13 +476,14 @@ export function decideOfficeWrite(input: {
       error: "Filling and approving blank work orders is switched off.",
     };
   }
-  if (
-    !namedWorkOrderApprover(input.userId, {
+  const approver = input.action === "approve" && input.approveAuthority !== undefined
+    ? Boolean(input.userId) && Boolean(input.approveAuthority)
+    : namedWorkOrderApprover(input.userId, {
       primaryIds: input.primaryIds,
       backupIds: input.backupIds,
       officeFlagOn: input.officeFlagOn,
-    })
-  ) {
+    });
+  if (!approver) {
     return {
       ok: false,
       status: 403,

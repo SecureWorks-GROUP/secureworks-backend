@@ -930,10 +930,29 @@ function autoIssueOn(db: FakeDb) {
 
 /** auto_issue_job_work_order as the database answers it
  *  (20261016120000_job_work_order_auto_issue.sql). */
+/** The automatic issue's database door. A work order counts as carrying both
+ *  owner decisions unless the fixture marks it `owner_decided: false`, which
+ *  stands for the owner policy (20261109040000): never listed by the sweep and
+ *  refused WO428 by the issue. */
 function autoIssueDoor(db: FakeDb) {
   const calls: any[] = [];
   db.rpcImpl = (fn, args) => {
     calls.push({ fn, args });
+    if (fn === "owner_approved_job_work_order_drafts") {
+      const open = ["accepted", "scheduled", "in_progress", "rectification"];
+      return {
+        data: db.tables.work_orders
+          .filter((w) =>
+            w.kind === "job" && w.status === "draft" && !w.hand_edited_at &&
+            w.quote_filled_at && w.agreed_labour_ex != null &&
+            ["fencing", "patio"].includes(w.jobs?.type) &&
+            open.includes(w.jobs?.status) && w.owner_decided !== false
+          )
+          .slice(0, args.p_limit)
+          .map((w) => ({ job_id: w.job_id, work_order_id: w.id })),
+        error: null,
+      };
+    }
     if (fn !== "auto_issue_job_work_order") return { data: null, error: null };
     const on = (db.tables.feature_flags || []).some((f) =>
       f.flag_name === AUTO_FLAG && f.enabled === true
@@ -950,6 +969,12 @@ function autoIssueDoor(db: FakeDb) {
     }
     if (!wo.quote_filled_at || wo.hand_edited_at) {
       return { data: null, error: { code: "WO423", message: "not issuable" } };
+    }
+    if (wo.owner_decided === false) {
+      return {
+        data: null,
+        error: { code: "WO428", message: "owner_approval_required" },
+      };
     }
     Object.assign(wo, {
       status: "approved",
@@ -1236,6 +1261,14 @@ Deno.test("auto issue sweep: switched off writes nothing; on, it issues filled a
     hand_edited_at: "2026-10-02T00:00:00Z",
     created_at: "2026-10-01T00:00:00Z",
   });
+  // Filled, but the owner has not decided: never listed, never issued.
+  const undecidedJob = add(14, {
+    scope_items: [{ description: "Install", source: "quote" }],
+    agreed_labour_ex: 500,
+    quote_filled_at: "2026-10-01T00:00:00Z",
+    created_at: "2026-10-01T00:00:00Z",
+    owner_decided: false,
+  });
   const db = baseDb({
     jobs,
     work_orders,
@@ -1264,10 +1297,33 @@ Deno.test("auto issue sweep: switched off writes nothing; on, it issues filled a
   assertEquals(status(freshJob), "approved");
   assertEquals(status(oldEmptyJob), "draft");
   assertEquals(status(editedJob), "draft");
+  assertEquals(status(undecidedJob), "draft");
   assert(
     !on.results.some((x: any) =>
-      x.job_id === oldEmptyJob || x.job_id === editedJob
+      x.job_id === oldEmptyJob || x.job_id === editedJob ||
+      x.job_id === undecidedJob
     ),
+  );
+});
+
+Deno.test("auto issue: a draft without both owner decisions is refused by the database and stays a draft", async () => {
+  const db = baseDb();
+  autoIssueOn(db);
+  const calls = autoIssueDoor(db);
+  db.tables.work_orders[0].owner_decided = false;
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  assertEquals(r.issued, false);
+  assertEquals(r.reason, "owner_approval_required");
+  assertEquals(db.tables.work_orders[0].status, "draft");
+  assertEquals(
+    calls.filter((c) => c.fn === "auto_issue_job_work_order").length,
+    1,
+  );
+  assertEquals(
+    db.tables.job_events.filter((e) =>
+      e.event_type === "job_work_order_auto_issued"
+    ),
+    [],
   );
 });
 
