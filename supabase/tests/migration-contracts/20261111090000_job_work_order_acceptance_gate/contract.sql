@@ -50,21 +50,7 @@ UPDATE public.work_order_settings
 UPDATE public.feature_flags SET enabled = false
   WHERE flag_name IN ('owner_approval_saved_revision_required_v1', 'job_work_order_auto_issue_v1');
 
--- 1. The rule itself.
-DO $$
-BEGIN
-  ASSERT public.job_not_yet_accepted('fencing', 'quoted') AND public.job_not_yet_accepted('patio', 'draft')
-    AND public.job_not_yet_accepted('fencing', 'partially_accepted') AND public.job_not_yet_accepted('patio', 'lost'),
-    'draft, quoted, partially accepted and lost fencing and patio jobs are not accepted yet';
-  ASSERT NOT public.job_not_yet_accepted('fencing', 'accepted') AND NOT public.job_not_yet_accepted('patio', 'deposit')
-    AND NOT public.job_not_yet_accepted('fencing', 'complete') AND NOT public.job_not_yet_accepted('patio', 'archived'),
-    'accepted and later statuses count as accepted';
-  ASSERT NOT public.job_not_yet_accepted('makesafe', 'quoted') AND NOT public.job_not_yet_accepted('repair', 'draft')
-    AND NOT public.job_not_yet_accepted(NULL, 'quoted'),
-    'other job types are not judged by this rule';
-END $$;
-
--- 2. A quoted fencing job: the office approval is refused and the draft
+-- 1. A quoted fencing job: the office approval is refused and the draft
 -- stays a draft; the job accepted (straight to Deposit) then issues it.
 DO $$
 DECLARE
@@ -91,7 +77,7 @@ BEGIN
   ASSERT (SELECT status = 'approved' FROM public.work_orders WHERE id = f.wo), 'an issued order stays issued';
 END $$;
 
--- 3. Every not-accepted status refuses, for both trades and by every write.
+-- 2. Every not-accepted status refuses, for both trades and by every write.
 DO $$
 DECLARE
   org uuid := (SELECT id FROM rq_people WHERE role = 'org');
@@ -124,7 +110,7 @@ BEGIN
   ASSERT err LIKE 'WO412 job_work_order_job_not_accepted%', 'an approved insert is refused: ' || coalesce(err, 'it went through');
 END $$;
 
--- 4. Accepted and later statuses issue; a late order on a finished job still
+-- 3. Accepted and later statuses issue; a late order on a finished job still
 -- issues, as today.
 DO $$
 DECLARE
@@ -141,7 +127,7 @@ BEGIN
   END LOOP;
 END $$;
 
--- 5. No crew group opens on a job that is not accepted, even on an order
+-- 4. No crew group opens on a job that is not accepted, even on an order
 -- issued while it was; the job accepted again lets it open.
 DO $$
 DECLARE
@@ -167,6 +153,20 @@ BEGIN
     org, f.job, f.wo));
   ASSERT err IS NULL, 'scheduled: the group opens: ' || coalesce(err, '');
   ASSERT (SELECT count(*) FROM public.group_work_orders WHERE job_id = f.job) = 1, 'one group';
+END $$;
+
+-- 5. The rule itself (after the behaviour, so a rolled-back gate fails on what it does).
+DO $$
+BEGIN
+  ASSERT public.job_not_yet_accepted('fencing', 'quoted') AND public.job_not_yet_accepted('patio', 'draft')
+    AND public.job_not_yet_accepted('fencing', 'partially_accepted') AND public.job_not_yet_accepted('patio', 'lost'),
+    'draft, quoted, partially accepted and lost fencing and patio jobs are not accepted yet';
+  ASSERT NOT public.job_not_yet_accepted('fencing', 'accepted') AND NOT public.job_not_yet_accepted('patio', 'deposit')
+    AND NOT public.job_not_yet_accepted('fencing', 'complete') AND NOT public.job_not_yet_accepted('patio', 'archived'),
+    'accepted and later statuses count as accepted';
+  ASSERT NOT public.job_not_yet_accepted('makesafe', 'quoted') AND NOT public.job_not_yet_accepted('repair', 'draft')
+    AND NOT public.job_not_yet_accepted(NULL, 'quoted'),
+    'other job types are not judged by this rule';
 END $$;
 
 -- 6. Grants.
