@@ -70,6 +70,19 @@ secret, so it does not prove the caller is Shaun. Whether that is enough for
 While the flag is off, a terminal approval is refused 403
 `terminal_approval_switched_off` and Shaun approves from his signed-in session.
 
+### Not before the customer accepts (RQ-19.a)
+
+A fencing or patio job is not accepted yet while its status is `draft`,
+`quoted`, `partially_accepted` or `lost` (`job_not_yet_accepted`,
+`20261111090000`). While it is, the database refuses to issue its job work
+order by any path (the office approval, the office queue, the automatic issue,
+a direct write or an approved insert): `WO412`, answered 409
+`job_not_accepted`. No crew group opens on the job either (409
+`group_job_not_accepted`; the automatic group lists it as `job_not_accepted`).
+The draft stays a draft and issues once the job moves to any later status. An
+order already issued stays issued if the job moves back. Other job types are
+untouched, and so is the owner approval rule (`job_work_order_issue_check`).
+
 ## Automatic issue (switch `job_work_order_auto_issue_v1`, OFF)
 
 Captain, 14 Oct 2026: "those work orders should be able to be seen every single

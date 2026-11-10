@@ -50,6 +50,7 @@ BEGIN
     (claim_wo,org,claim_job,'SYN-PAID-HOURS-WO-2','job','draft',1000,'[]','Synthetic paid-by-hours proof'),
     (small_wo,org,small_job,'SYN-PAID-HOURS-WO-3','job','draft',100,'[]','Synthetic paid-by-hours proof');
   UPDATE public.work_order_settings SET approver_user_ids=ARRAY[office] WHERE id=1;
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id IN (wo,claim_wo,small_wo));
   UPDATE public.work_orders SET status='approved',approved_by=office,approved_via='session'
     WHERE id IN (wo,claim_wo,small_wo);
   INSERT INTO public.job_assignments(id,job_id,user_id,scheduled_date,status) VALUES

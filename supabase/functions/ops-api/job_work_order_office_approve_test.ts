@@ -162,6 +162,20 @@ Deno.test("office approve: another company's work order reads as not found", asy
   assertEquals(approveCalls(client)[0].args.p_org_id, ORG);
 });
 
+Deno.test("office approve: a job the customer has not accepted is refused by name (RQ-19.a)", async () => {
+  const client = fakeClient({
+    approveError: {
+      code: "WO412",
+      message: "job_work_order_job_not_accepted: the job is quoted, so its work order is issued once the customer accepts",
+    },
+  });
+  const err = await assertRejects(
+    () => approveOfficeJobWorkOrder(client, body, actor(DELEGATE)),
+    JobWorkOrderOfficeError,
+  ) as JobWorkOrderOfficeError;
+  assertEquals([err.status, err.code], [409, "job_not_accepted"]);
+});
+
 Deno.test("office rule: the database authority decides approve only; fill and review keep their lists", () => {
   const base = {
     staff: true,

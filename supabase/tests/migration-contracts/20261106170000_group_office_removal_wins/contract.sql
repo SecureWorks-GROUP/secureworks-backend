@@ -35,6 +35,7 @@ BEGIN
     VALUES(wo,org,job,'SYN-OFFICE-REMOVAL-WO-1','job','draft',1000,'[]','Synthetic office removal proof');
   -- Fixture-only approver, restored with the whole transaction below.
   UPDATE public.work_order_settings SET approver_user_ids=ARRAY[office] WHERE id=1;
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id=wo);
   UPDATE public.work_orders SET status='approved',approved_by=office,approved_via='session' WHERE id=wo;
   INSERT INTO public.group_work_orders(id,org_id,job_id,work_order_id,share_token,pay_basis)
     VALUES(grp,org,job,wo,'synthetic-office-removal-token-1','gross_v1');

@@ -285,6 +285,13 @@ function throwApproveRpc(error: { code?: string; message?: string }): never {
   if (code === "WO428") {
     throw new JobWorkOrderOfficeError(409, "owner_approval_required", message);
   }
+  if (code === "WO412") {
+    throw new JobWorkOrderOfficeError(
+      409,
+      "job_not_accepted",
+      "The customer has not accepted this job yet, so its work order cannot be approved.",
+    );
+  }
   throw new JobWorkOrderOfficeError(500, "work_order_approve_failed", message);
 }
 

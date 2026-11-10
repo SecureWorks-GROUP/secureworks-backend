@@ -266,6 +266,16 @@ Deno.test("auto group: off switch, and the database fence wins", async () => {
   const out = await autoGroupPatioJobs(fenced.client());
   assertEquals(out.results.find((r) => r.job_id === "a")?.reason, "work_order_claimed_already");
   assertEquals(fenced.rows("group_work_order_participants").length, 0);
+
+  // RQ-19.a: no crew group before the customer accepts (partially accepted is open, not accepted).
+  const notAccepted = patioWorld();
+  notAccepted.failInsert.group_work_orders = {
+    code: "WO412",
+    message: "group_job_not_accepted: the job is partially_accepted, so no crew group opens before the customer accepts",
+  };
+  const held = await autoGroupPatioJobs(notAccepted.client());
+  assertEquals(held.results.find((r) => r.job_id === "a")?.reason, "job_not_accepted");
+  assertEquals(notAccepted.rows("group_work_order_participants").length, 0);
 });
 
 Deno.test("missing work orders: open patio jobs with 2+ crew get a draft", async () => {

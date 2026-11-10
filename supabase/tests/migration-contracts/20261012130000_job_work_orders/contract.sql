@@ -28,6 +28,8 @@ BEGIN
     RAISE EXCEPTION 'contract: a crew work order must not take the approved status';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
+  -- Accepted, so the acceptance gate (20261111090000) is not what refuses it.
+  UPDATE public.jobs SET status = 'accepted' WHERE id = v_job;
   BEGIN
     INSERT INTO public.work_orders (org_id, job_id, wo_number, kind, status, agreed_labour_ex,
       approved_at, approved_by, sealed_content_hash)

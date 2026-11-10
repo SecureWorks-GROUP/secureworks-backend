@@ -58,6 +58,7 @@ INSERT INTO public.work_orders (
 ) VALUES (
   '${ORG}', '${JOB}', 'GWO-RACE-1', 'job', 'draft', 482.15, '[]', 'group split race'
 );
+UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE wo_number = 'GWO-RACE-1');
 UPDATE public.work_orders
 SET status = 'approved', approved_by = '${SHAUN}'
 WHERE wo_number = 'GWO-RACE-1';
@@ -312,6 +313,7 @@ INSERT INTO public.work_orders (
 ) VALUES (
   '${ORG}', '${PAY_JOB}', 'GWO-PAYRACE-1', 'job', 'draft', 100, '[]', 'pay race'
 );
+UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE wo_number = 'GWO-PAYRACE-1');
 UPDATE public.work_orders
 SET status = 'approved', approved_by = '${SHAUN}'
 WHERE wo_number = 'GWO-PAYRACE-1';

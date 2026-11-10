@@ -95,6 +95,7 @@ export type PatioAutoGroupReason =
   | "too_few_crew"
   | "work_order_claimed_already"
   | "hours_claim_unresolved"
+  | "job_not_accepted"
   | "labour_outside_pool"
   | "group_frozen"
   | "group_void"
@@ -271,9 +272,10 @@ async function autoGroupJobs(client: any, kind: AutoGroupKind) {
       if (insertError) {
         const blocked = String(insertError.message || "").includes("group_open_blocked_by_work_order_claim");
         const hoursClaim = String(insertError.message || "").includes("group_open_blocked_by_hours_claim");
+        const notAccepted = String(insertError.message || "").includes("group_job_not_accepted");
         results.push({
           ...base,
-          reason: hoursClaim ? "hours_claim_unresolved" : blocked ? "work_order_claimed_already" : String(insertError.code) === "23505" ? "already_grouped" : "group_failed",
+          reason: notAccepted ? "job_not_accepted" : hoursClaim ? "hours_claim_unresolved" : blocked ? "work_order_claimed_already" : String(insertError.code) === "23505" ? "already_grouped" : "group_failed",
           code: String(insertError.code || ""),
         });
         continue;

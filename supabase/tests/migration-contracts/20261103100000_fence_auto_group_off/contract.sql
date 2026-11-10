@@ -65,6 +65,7 @@ BEGIN
     (wp1,org,p1,'SYN-V8-WOP1','job','draft',2880,'[]','Synthetic V8 proof'),
     (wp2,org,p2,'SYN-V8-WOP2','job','draft',2160,
       '[{"description":"Gutter rework","basis":"quote_labour_line","total":240,"counted":false,"flags":["outside_quote_labour"]}]','Synthetic V8 proof');
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id IN (w1,w2,w3,w4,w5,w6,wp1,wp2));
   UPDATE public.work_orders SET status='approved',approved_by=office WHERE id IN (w1,w2,w3,w4,w5,w6,wp1,wp2);
   -- f7 stays quoted: an open fencing job gets a draft from the open-status
   -- trigger, so only a job that is not open yet has no work order.

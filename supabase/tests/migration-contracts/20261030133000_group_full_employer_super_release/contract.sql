@@ -39,6 +39,7 @@ BEGIN
   INSERT INTO public.jobs(id,org_id,type,status,job_number) VALUES(job,org,'patio','quoted','SYN-ZOO-RELEASE');
   INSERT INTO public.work_orders(id,org_id,job_id,wo_number,kind,status,agreed_labour_ex,scope_items,special_instructions)
     VALUES(wo,org,job,'SYN-ZOO-WO','job','draft',2160,'[]','Synthetic release proof');
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id=wo);
   UPDATE public.work_orders SET status='approved',approved_by=office WHERE id=wo;
   INSERT INTO public.group_work_orders(id,org_id,job_id,work_order_id,share_token,pay_basis,approved_budget_ex,budget_approved_by,budget_approved_at,budget_approval_reason)
     VALUES(grp,org,job,wo,'synthetic-zoo-release-token','all_in_12_6_v1',2720,office,now(),'Synthetic owner budget');

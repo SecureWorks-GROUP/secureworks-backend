@@ -32,6 +32,7 @@ BEGIN
   INSERT INTO public.work_orders(id,org_id,job_id,wo_number,kind,status,agreed_labour_ex,scope_items,special_instructions) VALUES
     (w1,org,j1,'SYN-WO6-WO1','job','draft',2160,'[]','Synthetic WO-6 proof'),
     (w2,org,j2,'SYN-WO6-WO2','job','draft',2880,'[]','Synthetic WO-6 proof');
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id IN (w1,w2));
   UPDATE public.work_orders SET status='approved',approved_by=office WHERE id IN (w1,w2);
   INSERT INTO public.job_assignments(id,job_id,user_id,scheduled_date,status) VALUES
     (gen_random_uuid(),j1,isaac,'2026-11-17','scheduled'),(gen_random_uuid(),j1,ryan,'2026-11-18','scheduled'),

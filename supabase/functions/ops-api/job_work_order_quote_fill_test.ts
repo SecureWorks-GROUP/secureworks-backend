@@ -976,6 +976,13 @@ function autoIssueDoor(db: FakeDb) {
         error: { code: "WO428", message: "owner_approval_required" },
       };
     }
+    if (wo.job_not_accepted === true) {
+      // RQ-19.a (20261111090000): a partially accepted job is open, not accepted.
+      return {
+        data: null,
+        error: { code: "WO412", message: "job_work_order_job_not_accepted" },
+      };
+    }
     Object.assign(wo, {
       status: "approved",
       approved_by: null,
@@ -1325,6 +1332,16 @@ Deno.test("auto issue: a draft without both owner decisions is refused by the da
     ),
     [],
   );
+});
+
+Deno.test("auto issue: a job the customer has not accepted is refused by name and stays a draft (RQ-19.a)", async () => {
+  const db = baseDb();
+  autoIssueOn(db);
+  autoIssueDoor(db);
+  db.tables.work_orders[0].job_not_accepted = true;
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  assertEquals([r.issued, r.reason], [false, "job_not_accepted"]);
+  assertEquals(db.tables.work_orders[0].status, "draft");
 });
 
 Deno.test("backfill: while automatic issue is on, every draft it fills goes to the trades", async () => {

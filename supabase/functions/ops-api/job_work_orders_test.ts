@@ -829,6 +829,25 @@ Deno.test("approve: the owner approves without a role, and a decision the policy
     JobWorkOrderError,
   ) as JobWorkOrderError;
   assertEquals([err.status, err.code], [409, "owner_approval_required"]);
+
+  // RQ-19.a: the job not accepted yet is its own refusal, never a 500.
+  const notAccepted = draftDb();
+  notAccepted.rpcImpl = () => ({
+    data: null,
+    error: {
+      code: "WO412",
+      message: "job_work_order_job_not_accepted: the job is quoted, so its work order is issued once the customer accepts",
+    },
+  });
+  const refused = await assertRejects(
+    () =>
+      approveJobWorkOrder(notAccepted, {
+        work_order_id: DRAFT,
+        expected_updated_at: READ_AT,
+      }, { userId: SHAUN, via: "session" }, ORG),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals([refused.status, refused.code], [409, "job_not_accepted"]);
 });
 
 Deno.test("approve: a header-named terminal approver is refused until its flag is on", async () => {
