@@ -1170,6 +1170,10 @@ ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|constraint|
 ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|trigger|group_work_orders.trg_group_reopen_client_confirmation
 
 ops-api|supabase/migrations/20261106062000_scope_work_order_saved_handoff.sql|function|prepare_scope_job_drafts
+# TK-S28: the office status writer asks for the scope draft release on every
+# open status; the release accepts them from 20261110200000. Ahead of it a move
+# to Deposit or Scheduled would only log a held release, so wait for it.
+ops-api|supabase/migrations/20261110200000_scope_draft_release_open_status.sql|function|release_scope_job_drafts
 ops-api|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|table|trade_invoice_events
 ops-api|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|table|trade_invoice_extra_rate_rules
 ops-api|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|index|trade_invoices_invoice_number_key

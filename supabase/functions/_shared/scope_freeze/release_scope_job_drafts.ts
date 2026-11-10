@@ -7,6 +7,19 @@ export type ScopeDraftReleaseOutcome =
   | { state: "held_for_owner_approval"; missing: string[] }
   | { state: "release_unavailable" };
 
+/** TK-S28: a job status write that should release (or retry releasing) the
+ * scope draft work order. Every open status past acceptance counts, the rule
+ * the job work order already follows (job_work_order_open_statuses); partial
+ * acceptance never releases. release_scope_job_drafts applies the same rule
+ * (20261110200000), so this only decides when to ask. */
+export function releasesScopeDraftOnStatus(
+  status: unknown,
+  openStatuses: ReadonlySet<string>,
+): boolean {
+  return typeof status === "string" && status !== "partially_accepted" &&
+    openStatuses.has(status);
+}
+
 /** No acceptance decision here. Both /accept branches and the office status
  * writer call this only after their existing full-job decision. The RPC checks
  * that persisted status again, locks the job, retains the acceptance and
