@@ -65,8 +65,10 @@ export type TradeInvoiceMoney = {
   trade_payable: number;
   total_inc: number;
   company_total_out: number;
-  // Group shares only (owner, 30 Oct 2026): the company pays all 12% super
-  // inside the share, so nothing is withheld and net pay equals gross.
+  // The company pays all 12% super on top, so nothing is withheld and net pay
+  // equals gross. Two sources only: a full-employer-super group share (owner,
+  // 30 Oct 2026) and a trade the office set to super on top (owner, 11 Nov
+  // 2026, trade_invoice_super_basis.ts). Never chosen by the trade.
   super_basis?: TradeInvoiceSuperBasis | null;
   // Absent or null on every invoice that carries no recurring deduction.
   recurring_deduction?: TradeInvoiceRecurringDeduction | null;
@@ -733,7 +735,7 @@ export function formatTradeInvoiceSuperWithheldDescription(
       `Superannuation Guarantee ${rateLabel(money.super_rate)} of submitted total`,
       `Submitted total ${moneyLabel(money.gross_earned)}. Super remittance ${
         moneyLabel(money.super_amount)
-      } paid by the company on top, inside the group share. Nothing withheld. Amount payable ${
+      } paid by the company on top. Nothing withheld. Amount payable ${
         moneyLabel(money.net_pay)
       }.`,
       `Paid to the super fund separately. Not part of the amount payable to ${name}`,

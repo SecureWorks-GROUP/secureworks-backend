@@ -672,6 +672,16 @@ import {
   type TradeRecurringDeductionWeekless,
   withTradeRecurringDeductionOfficeNote,
 } from './trade_invoice_recurring_deduction.ts'
+// <trade-super-on-top>
+import {
+  listOpenTradeSuperBases,
+  loadTradeInvoiceSuperBasis,
+  ORDINARY_TRADE_SUPER_BASIS,
+  setTradeSuperOnTop,
+  type TradeInvoiceSuperBasisDecision,
+  TradeSuperBasisError,
+  tradeSuperBasisInvoiceFields,
+} from './trade_invoice_super_basis.ts'
 import {
   attachPdfToXeroInvoiceUntilAttached,
   attachTradeInvoicePdfIfPresent,
@@ -2074,6 +2084,19 @@ function tradeInvoiceMoneyApiError(error: unknown): never {
   throw error
 }
 
+// <trade-super-on-top> One trade's office super setting (trade_invoice_super_basis.ts).
+function tradeSuperBasisApiError(error: unknown): never {
+  if (error instanceof TradeSuperBasisError) {
+    throw new ApiError(error.message, error.status, {
+      ok: false,
+      code: error.code,
+      error: error.message,
+      userMessage: error.message,
+    })
+  }
+  throw error
+}
+
 function runningDraftApiError(error: unknown): never {
   if (error instanceof RunningDraftError) {
     throw new ApiError(error.message, error.status, {
@@ -2276,7 +2299,8 @@ function tradeInvoiceMoneyFields(money: TradeInvoiceMoney) {
     super_amount: money.super_amount,
     gross_earned: money.gross_earned,
     net_pay: money.net_pay,
-    // Only an employer-super group share carries the column, so ordinary
+    // Only an employer-super invoice carries the column (a full-employer
+    // group share, or a trade the office set to super on top), so ordinary
     // invoices insert exactly as before.
     ...(money.super_basis ? { super_basis: money.super_basis } : {}),
   }
@@ -11072,6 +11096,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'list_trade_invoices': return json(await listTradeInvoices(client, url.searchParams))
       case 'labour_reconciliation': return json(await labourReconciliation(client, url.searchParams))
       case 'set_trade_rate_ops': return json(await setTradeRate(client, null, body))
+      // <trade-super-on-top> Office only: this switch is the office action
+      // list, and the trade portal's action list does not carry it.
+      case 'set_trade_super_on_top_ops': return json(await setTradeSuperOnTop(client, {
+        userId: body?.user_id,
+        on: body?.on,
+        effectiveFrom: body?.effective_from,
+        actor: reviewActorLabel(authUser),
+        today: getAWSTDate(),
+      }).catch((error) => tradeSuperBasisApiError(error)))
       case 'approve_trade_invoice': {
         // Ops (Shaun) approves a pending_ops_review trade invoice after verifying
         // manual hours against the schedule. Moves it to 'approved' so the Xero
@@ -13498,9 +13531,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const draftSubtotal = weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)
             // Recurring deduction: a dated draft shows what the submitted
             // invoice will carry, so the trade sees it before submitting.
+            // <trade-super-on-top> Same rule as submit, so the draft shows what
+            // the submitted invoice will pay. A draft with a group share keeps
+            // the ordinary split it always had.
+            const draftSuperBasis = await loadTradeInvoiceSuperBasis(client, {
+              userId: tradeUser.id,
+              earningsDay: draftWeekEnd || new Date().toISOString().slice(0, 10),
+              hasGroupShare: resolvedShares.length > 0,
+              groupSuperBasis: null,
+            }).catch((error) => tradeSuperBasisApiError(error))
             const { money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(
               client,
-              tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd),
+              tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd, draftSuperBasis.superBasis),
               { userId: tradeUser.id, weekStart: draftWeekStart || null },
             )
 
@@ -13607,6 +13649,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               gst: draftMoney.gst_amount,
               total_inc: draftMoney.total_inc,
               ...tradeInvoiceMoneyFields(draftMoney),
+              ...tradeSuperBasisInvoiceFields(draftSuperBasis),
               ...tradeRecurringDeductionInvoiceFields(draftRecurringDeduction),
               invoice_source: 'hourly',
               job_grand_total_ex: null,
@@ -13629,6 +13672,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   gst: draftMoney.gst_amount,
                   total_inc: draftMoney.total_inc,
                   ...tradeInvoiceMoneyFields(draftMoney),
+                  ...tradeSuperBasisInvoiceFields(draftSuperBasis),
                   ...tradeRecurringDeductionInvoiceFields(draftRecurringDeduction),
                   invoice_source: 'weekly_work_order',
                   job_grand_total_ex: weeklyInvoice.grand_total,
@@ -14627,9 +14671,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // subtotal, super and GST below are untouched by it. An invoice
             // with no week carries none; it is marked for the office when the
             // trade has a deduction that week.
+            // <trade-super-on-top> A group share keeps its group's pay basis;
+            // any other invoice uses this trade's office super setting.
+            const invoiceSuperBasis = await loadTradeInvoiceSuperBasis(client, {
+              userId: tradeUser.id,
+              earningsDay: invoiceEarningsDate,
+              hasGroupShare: extraLineItems.some((line: any) => isGroupShareInvoiceItem(line) || Boolean(line?.group_share_id)),
+              groupSuperBasis: groupInvoiceBasis.superBasis,
+            }).catch((error) => tradeSuperBasisApiError(error))
             const { money, decision: recurringDeduction } = await applyTradeRecurringDeduction(
               client,
-              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, groupInvoiceBasis.superBasis),
+              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, invoiceSuperBasis.superBasis),
               {
                 userId: tradeUser.id,
                 weekStart: week_start || null,
@@ -14781,6 +14833,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               gst,
               total_inc: totalInc,
               ...tradeInvoiceMoneyFields(money),
+              ...tradeSuperBasisInvoiceFields(invoiceSuperBasis),
               ...tradeRecurringDeductionInvoiceFields(recurringDeduction),
               invoice_source: weeklyInvoice ? 'weekly_work_order' : 'hourly',
               job_grand_total_ex: weeklyInvoice?.grand_total ?? null,
@@ -15646,7 +15699,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               })
             }
 
-            const groupCrewRelease = officeReviewHold && money.super_basis
+            // <trade-super-on-top> The group's basis, not the invoice's: a
+            // trade on super on top is not a group release.
+            const groupCrewRelease = officeReviewHold && groupInvoiceBasis.superBasis
               ? await releaseGroupCrewBills(client, String(invoice.id), `user:${tradeUser.id}`)
               : null
             if (officeReviewHold) {
@@ -56675,7 +56730,19 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   // submitting. It is taken off this preview only when the preview covers it.
   // A failed rule read is logged and shows no deduction; it never fails the
   // hours view. The submit path does not share that leniency.
-  let previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding)
+  // <trade-super-on-top> The preview uses the trade's office super setting,
+  // as submit does. Like the deduction below, an unreadable setting is logged
+  // and previews the ordinary split; it never fails the hours view. Submit
+  // does not share that leniency.
+  let previewSuperBasis: TradeInvoiceSuperBasisDecision = ORDINARY_TRADE_SUPER_BASIS
+  try {
+    previewSuperBasis = await loadTradeInvoiceSuperBasis(client, {
+      userId, earningsDay: weekEnding, hasGroupShare: false,
+    })
+  } catch (superBasisErr) {
+    console.error('[ops-api] my_hours: super setting unreadable:', (superBasisErr as Error)?.message)
+  }
+  let previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding, previewSuperBasis.superBasis)
   let previewRecurringDeduction: TradeRecurringDeductionDecision | null = null
   try {
     const previewed = await applyTradeRecurringDeduction(client, previewMoney, { userId, weekStart })
@@ -57003,9 +57070,13 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
   // ── END M0 LEGACY GUARD ──
   // Recurring deduction (for example Ute hire): taken off the amount payable
   // of this weekly invoice, after super and GST.
+  // <trade-super-on-top> This path bills hours only, never a group share.
+  const stSuperBasis = await loadTradeInvoiceSuperBasis(client, {
+    userId, earningsDay: week_ending, hasGroupShare: false,
+  }).catch((error) => tradeSuperBasisApiError(error))
   const { money: stMoney, decision: stRecurringDeduction } = await applyTradeRecurringDeduction(
     client,
-    tradeInvoiceMoney(subtotal, stGstOn, week_ending),
+    tradeInvoiceMoney(subtotal, stGstOn, week_ending, stSuperBasis.superBasis),
     { userId, weekStart },
   )
   const gst = stMoney.gst_amount
@@ -57069,6 +57140,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
     gst: stMoney.gst_amount,
     total_inc: stMoney.total_inc,
     ...tradeInvoiceMoneyFields(stMoney),
+    ...tradeSuperBasisInvoiceFields(stSuperBasis),
     ...tradeRecurringDeductionInvoiceFields(stRecurringDeduction),
     notes: notes || null,
     invoice_source: isPerMetre ? 'per_metre' : 'hourly',
@@ -57510,10 +57582,27 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
     .is('effective_to', null)
     .order('effective_from', { ascending: false })
 
+  // <trade-super-on-top> Which trades the office has on super on top. An
+  // unreadable setting shows no control (super_on_top null), never "off".
+  let superOnTopByUser: Map<string, { effective_from: string; set_by: string | null }> | null = null
+  try {
+    superOnTopByUser = new Map((await listOpenTradeSuperBases(client)).map((row) => [
+      String(row.user_id),
+      { effective_from: row.effective_from, set_by: row.created_by ?? null },
+    ]))
+  } catch (superBasisErr) {
+    console.error('[ops-api] list_trade_invoices: super settings unreadable:', (superBasisErr as Error)?.message)
+  }
+
   return {
     invoices: mergeTradeBillRows(weekly.data || [], noWeek.data || [], stuckRows.slice(0, STUCK_TRADE_BILLS_CAP))
       .map((invoice: any) => presentTradeInvoiceSafe(invoice)),
-    rates: rates || [],
+    rates: (rates || []).map((rate: any) => ({
+      ...rate,
+      super_on_top: superOnTopByUser ? superOnTopByUser.has(String(rate.user_id)) : null,
+      super_on_top_from: superOnTopByUser?.get(String(rate.user_id))?.effective_from ?? null,
+      super_on_top_set_by: superOnTopByUser?.get(String(rate.user_id))?.set_by ?? null,
+    })),
     ...(stuckCapHit
       ? { stuck_note: `More than ${STUCK_TRADE_BILLS_CAP} invoices are stuck with no Xero bill; only the newest ${STUCK_TRADE_BILLS_CAP} are listed.` }
       : {}),

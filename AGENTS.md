@@ -4631,7 +4631,15 @@ external Xero identity blocks reject/delete. Draft replacement uses
 `replace_trade_invoice_draft_v1` to transfer/release assignment locks and delete
 the guarded prior draft in one transaction. The same module presents server
 cash payable on every invoice read/list surface. Never derive this split in a UI
-or add super on top of gross. New rows must carry `gst_on`,
+or add super on top of gross. The one exception is server-decided (owner, 11 Nov
+2026): a trade the office set to super on top in `trade_super_bases` has their
+own invoices priced on `employer_12_v2` (paid in full, company pays the whole
+12%) by `ops-api/trade_invoice_super_basis.ts`, and the invoice records the
+setting row in `super_basis_setting_id`. A group share always keeps its group's
+pay basis; the stand-alone work-order invoice stays on the ordinary split. A
+new place that prices a trade's own invoice must ask that module, and
+`20261111173000_trade_super_on_top.sql` must be applied before the matching
+`ops-api`. New rows must carry `gst_on`,
 `super_rate`, `super_amount`, `gross_earned`, and `net_pay`; legacy NULL rows
 must fail closed on Xero retry rather than inventing history. Apply
 `20260918120000_trade_invoice_super_payable_split.sql` before the matching
