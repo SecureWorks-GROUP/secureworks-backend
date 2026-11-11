@@ -114,7 +114,7 @@ async function judgeDepositGate(client: any, jobId: string): Promise<GateVerdict
         reasons: [`job_not_accepted:${String(job.status ?? "")}`],
       };
     }
-    const [invoices, parties, payerDrafts] = await Promise.all([
+    const [invoices, parties, payerDrafts, draftSet] = await Promise.all([
       readRows(
         client,
         "xero_invoices",
@@ -127,13 +127,31 @@ async function judgeDepositGate(client: any, jobId: string): Promise<GateVerdict
         "id, contact_label, is_primary, share_percentage, removed_at, status, xero_contact_id",
         jobId,
       ),
-      readRows(client, "scope_job_draft_invoices", "id, payer_id, inc_cents", jobId),
+      readRows(
+        client,
+        "scope_job_draft_invoices",
+        "id, payer_id, scope_revision_id, inc_cents",
+        jobId,
+      ),
+      client.from("scope_job_draft_sets").select("scope_revision_id")
+        .eq("job_id", jobId).maybeSingle().then((r: any) => {
+          if (r.error) throw new Error("payer drafts unreadable");
+          return r.data ?? null;
+        }),
     ]);
     // The sealed quote's payer drafts name who pays. A payer with no party row
     // here has no deposit the gate can see, so the job cannot be judged paid
     // on the parties it does have (a shared fence with no neighbour row would
     // otherwise pass on the owner's deposit alone). A known 0 share pays nothing.
-    const quotedPayers = payerDrafts.filter((d: any) => d.inc_cents === null || d.inc_cents === undefined || Number(d.inc_cents) !== 0).length;
+    // Only the current draft set's revision counts: a payer row kept from an
+    // older quote revision (a neighbour since dropped) is not owed a party.
+    // No draft set: no sealed payers, the one-owner roster decides as before.
+    const currentRevision = draftSet?.scope_revision_id ?? null;
+    const quotedPayers = payerDrafts.filter((d: any) =>
+      currentRevision !== null && d.scope_revision_id === currentRevision &&
+      (d.inc_cents === null || d.inc_cents === undefined ||
+        Number(d.inc_cents) !== 0)
+    ).length;
     const knownPayers = Math.max(1, payingParties(parties).length);
     if (quotedPayers > knownPayers) {
       return {

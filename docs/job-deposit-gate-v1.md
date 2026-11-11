@@ -13,7 +13,7 @@ recorded.
 |---|---|
 | Job not a deposit-advance type (`isDepositAdvanceJobType`), or a repair / report-only make-safe | open, `not_gated` |
 | `job_not_yet_accepted(job)` true | held, `job_not_accepted` |
-| The sealed quote's payer drafts (`scope_job_draft_invoices`, a known 0 share excluded) name more payers than the job's paying parties (at least one) | held, `job_deposits_unpaid`, `payer_without_party:<n>` |
+| The sealed quote's payer drafts (`scope_job_draft_invoices` on the current draft set's revision, `scope_job_draft_sets.scope_revision_id`; a known 0 share excluded; rows kept from an older revision and rows with no draft set never count) name more payers than the job's paying parties (at least one) | held, `job_deposits_unpaid`, `payer_without_party:<n>` |
 | Every paying party (`job_contacts`) has a live deposit invoice of its own, PAID | open, `paid` |
 | Otherwise | held, `job_deposits_unpaid` with the reasons |
 | Any read fails | held, `job_deposits_unreadable` |

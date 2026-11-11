@@ -65,10 +65,16 @@ function fixture(extra: any = {}) {
     rpc(name: string, args: any) {
       rpcs.push({ name, args });
       if (errors.has(`rpc:${name}`)) {
-        return Promise.resolve({ data: null, error: { message: "rpc failed" } });
+        return Promise.resolve({
+          data: null,
+          error: { message: "rpc failed" },
+        });
       }
       if (name !== "job_not_yet_accepted") {
-        return Promise.resolve({ data: null, error: { message: "unknown rpc" } });
+        return Promise.resolve({
+          data: null,
+          error: { message: "unknown rpc" },
+        });
       }
       return Promise.resolve({
         data: ["fencing", "patio"].includes(args.p_type ?? "") &&
@@ -173,6 +179,7 @@ for (
     "xero_invoices",
     "makesafe_job_details",
     "scope_job_draft_invoices",
+    "scope_job_draft_sets",
   ]
 ) {
   Deno.test(`unreadable ${table} fails closed before work`, async () => {
@@ -572,23 +579,46 @@ const liveOverride = {
 
 Deno.test("a job not accepted by every party holds work even with both deposits paid", async () => {
   for (const status of ["draft", "quoted", "partially_accepted", "lost"]) {
-    const f = fixture({ jobs: [{ id: "job", type: "patio", status, deposit_invoice_id: null }] });
+    const f = fixture({
+      jobs: [{ id: "job", type: "patio", status, deposit_invoice_id: null }],
+    });
     const err = await assertRejects(
       () => assertJobDepositsBeforeWork(f.client, "job"),
       JobStartDepositError,
     );
-    assertEquals([err.code, err.reasons], ["job_not_accepted", [`job_not_accepted:${status}`]]);
-    assertEquals(err.message.startsWith("Work cannot start until every party has accepted"), true);
-    assertEquals(f.rpcs, [{ name: "job_not_yet_accepted", args: { p_type: "patio", p_status: status } }]);
+    assertEquals([err.code, err.reasons], ["job_not_accepted", [
+      `job_not_accepted:${status}`,
+    ]]);
+    assertEquals(
+      err.message.startsWith(
+        "Work cannot start until every party has accepted",
+      ),
+      true,
+    );
+    assertEquals(f.rpcs, [{
+      name: "job_not_yet_accepted",
+      args: { p_type: "patio", p_status: status },
+    }]);
   }
-  for (const status of ["accepted", "deposit", "order_materials", "scheduled"]) {
-    const f = fixture({ jobs: [{ id: "job", type: "fencing", status, deposit_invoice_id: null }] });
+  for (
+    const status of ["accepted", "deposit", "order_materials", "scheduled"]
+  ) {
+    const f = fixture({
+      jobs: [{ id: "job", type: "fencing", status, deposit_invoice_id: null }],
+    });
     await assertJobDepositsBeforeWork(f.client, "job");
   }
 });
 
 Deno.test("an unreadable acceptance never counts as accepted", async () => {
-  const f = fixture({ jobs: [{ id: "job", type: "fencing", status: "accepted", deposit_invoice_id: null }] });
+  const f = fixture({
+    jobs: [{
+      id: "job",
+      type: "fencing",
+      status: "accepted",
+      deposit_invoice_id: null,
+    }],
+  });
   f.errors.add("rpc:job_not_yet_accepted");
   const err = await assertRejects(
     () => assertJobDepositsBeforeWork(f.client, "job"),
@@ -605,7 +635,11 @@ Deno.test("the materials gate says materials, holds the same jobs and passes the
     () => assertJobDepositsBeforeWork(f.client, "job", "materials"),
     JobStartDepositError,
   );
-  assertEquals([err.code, err.purpose, err.status], ["job_deposits_unpaid", "materials", 409]);
+  assertEquals([err.code, err.purpose, err.status], [
+    "job_deposits_unpaid",
+    "materials",
+    409,
+  ]);
   assertEquals(
     err.message,
     "Materials cannot be ordered until every paying party's deposit is paid. Ask the office to check the deposits.",
@@ -619,7 +653,12 @@ Deno.test("a recorded override lets an unpaid, unaccepted or unreadable job thro
   await assertJobDepositsBeforeWork(unpaid.client, "job", "materials");
 
   const unaccepted = fixture({
-    jobs: [{ id: "job", type: "fencing", status: "partially_accepted", deposit_invoice_id: null }],
+    jobs: [{
+      id: "job",
+      type: "fencing",
+      status: "partially_accepted",
+      deposit_invoice_id: null,
+    }],
     job_deposit_gate_overrides: [liveOverride],
   });
   await assertJobDepositsBeforeWork(unaccepted.client, "job", "materials");
@@ -648,13 +687,21 @@ Deno.test("an override that cannot be read never opens the gate", async () => {
 Deno.test("the override also lets a crew start through every start door", async () => {
   const f = fixture({ job_deposit_gate_overrides: [liveOverride] });
   f.tables.xero_invoices.pop();
-  await updateMyAssignment(f.client, { id: "assignment", status: "in_progress" }, "crew");
+  await updateMyAssignment(f.client, {
+    id: "assignment",
+    status: "in_progress",
+  }, "crew");
   assertEquals(f.writes[0].value.status, "in_progress");
 });
 
 Deno.test("the gate read says open, held, overridden or unreadable, and why", async () => {
   const open = await readDepositGate(fixture().client, "job");
-  assertEquals([open.gate, open.reason, open.reasons, open.override], ["open", "paid", [], null]);
+  assertEquals([open.gate, open.reason, open.reasons, open.override], [
+    "open",
+    "paid",
+    [],
+    null,
+  ]);
 
   const heldFixture = fixture();
   heldFixture.tables.xero_invoices.pop();
@@ -665,13 +712,19 @@ Deno.test("the gate read says open, held, overridden or unreadable, and why", as
   const over = fixture({ job_deposit_gate_overrides: [liveOverride] });
   over.tables.xero_invoices.pop();
   const overridden = await readDepositGate(over.client, "job");
-  assertEquals([overridden.gate, overridden.override?.id], ["overridden", "override-1"]);
+  assertEquals([overridden.gate, overridden.override?.id], [
+    "overridden",
+    "override-1",
+  ]);
 
   const broken = fixture();
   broken.tables.xero_invoices.pop();
   broken.errors.add("job_deposit_gate_overrides");
   const unreadable = await readDepositGate(broken.client, "job");
-  assertEquals([unreadable.gate, unreadable.override_readable], ["unreadable", false]);
+  assertEquals([unreadable.gate, unreadable.override_readable], [
+    "unreadable",
+    false,
+  ]);
 
   const makesafe = await readDepositGate(
     fixture({ jobs: [{ id: "job", type: "makesafe" }] }).client,
@@ -681,20 +734,33 @@ Deno.test("the gate read says open, held, overridden or unreadable, and why", as
 });
 
 Deno.test("email_po checks the materials gate before Xero emails the supplier", async () => {
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const start = source.indexOf("async function emailPO(client: any, body: any)");
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
+  const start = source.indexOf(
+    "async function emailPO(client: any, body: any)",
+  );
   const end = source.indexOf("\nasync function ", start + 10);
   const body = source.slice(start, end);
-  const gateAt = body.indexOf("await assertJobDepositsBeforeWork(client, po.job_id, 'materials')");
+  const gateAt = body.indexOf(
+    "await assertJobDepositsBeforeWork(client, po.job_id, 'materials')",
+  );
   const sendAt = body.indexOf("/PurchaseOrders/${po.xero_po_id}/Email");
   assertEquals(start > 0 && gateAt > 0 && sendAt > gateAt, true);
 });
 
-const payerDraft = (payer_id: string, inc_cents: number | null = 110000) => ({
-  id: payer_id,
+const payerDraft = (
+  payer_id: string,
+  inc_cents: number | null = 110000,
+  scope_revision_id = "rev-current",
+) => ({
+  id: `${payer_id}:${scope_revision_id}`,
   payer_id,
+  scope_revision_id,
   inc_cents,
 });
+// The authoritative draft set names the revision the current drafts belong to.
+const currentDraftSet = [{ job_id: "job", scope_revision_id: "rev-current" }];
 
 Deno.test("a quoted payer with no party row holds work even when every known party has paid", async () => {
   // The sealed quote names the client and a neighbour, but only the legacy
@@ -702,10 +768,16 @@ Deno.test("a quoted payer with no party row holds work even when every known par
   const f = fixture({
     job_contacts: [],
     xero_invoices: [deposit("legacy", { job_contact_id: null })],
+    scope_job_draft_sets: currentDraftSet,
     scope_job_draft_invoices: [payerDraft("__client__"), payerDraft("nb-1")],
   });
   const err = await assertRejects(
-    () => updateMyAssignment(f.client, { id: "assignment", status: "in_progress" }, "crew"),
+    () =>
+      updateMyAssignment(
+        f.client,
+        { id: "assignment", status: "in_progress" },
+        "crew",
+      ),
     JobStartDepositError,
   );
   assertEquals(err.code, "job_deposits_unpaid");
@@ -720,6 +792,7 @@ Deno.test("a quoted payer with no party row holds work even when every known par
 
 Deno.test("quoted payers that each have a party row are judged on their deposits as before", async () => {
   const f = fixture({
+    scope_job_draft_sets: currentDraftSet,
     scope_job_draft_invoices: [payerDraft("__client__"), payerDraft("nb-1")],
   });
   await assertJobDepositsBeforeWork(f.client, "job");
@@ -735,13 +808,18 @@ Deno.test("a quoted payer with a known zero share is not owed a party; an unknow
   const zero = fixture({
     job_contacts: [],
     xero_invoices: [deposit("legacy", { job_contact_id: null })],
+    scope_job_draft_sets: currentDraftSet,
     scope_job_draft_invoices: [payerDraft("__client__"), payerDraft("nb-1", 0)],
   });
   await assertJobDepositsBeforeWork(zero.client, "job");
   const unknown = fixture({
     job_contacts: [],
     xero_invoices: [deposit("legacy", { job_contact_id: null })],
-    scope_job_draft_invoices: [payerDraft("__client__"), payerDraft("nb-1", null)],
+    scope_job_draft_sets: currentDraftSet,
+    scope_job_draft_invoices: [
+      payerDraft("__client__"),
+      payerDraft("nb-1", null),
+    ],
   });
   const err = await assertRejects(
     () => assertJobDepositsBeforeWork(unknown.client, "job"),
@@ -754,7 +832,54 @@ Deno.test("a single-payer quote keeps the one-owner roster as before", async () 
   const f = fixture({
     job_contacts: [],
     xero_invoices: [deposit("legacy", { job_contact_id: null })],
+    scope_job_draft_sets: currentDraftSet,
     scope_job_draft_invoices: [payerDraft("__client__")],
+  });
+  await assertJobDepositsBeforeWork(f.client, "job");
+});
+
+Deno.test("a payer kept from an older quote revision does not hold a current single-payer job", async () => {
+  // Revised from owner plus neighbour to the owner paying it all: the old
+  // neighbour row stays stored on the old revision, as designed.
+  const f = fixture({
+    job_contacts: [],
+    xero_invoices: [deposit("legacy", { job_contact_id: null })],
+    scope_job_draft_sets: currentDraftSet,
+    scope_job_draft_invoices: [
+      payerDraft("__client__", 110000, "rev-old"),
+      payerDraft("old-neighbour", 110000, "rev-old"),
+      payerDraft("__client__"),
+    ],
+  });
+  await assertJobDepositsBeforeWork(f.client, "job");
+  await assertJobDepositsBeforeWork(f.client, "job", "materials");
+});
+
+Deno.test("a current missing payer still holds when older revisions are stored beside it", async () => {
+  const f = fixture({
+    job_contacts: [],
+    xero_invoices: [deposit("legacy", { job_contact_id: null })],
+    scope_job_draft_sets: currentDraftSet,
+    scope_job_draft_invoices: [
+      payerDraft("__client__", 110000, "rev-old"),
+      payerDraft("__client__"),
+      payerDraft("nb-2"),
+    ],
+  });
+  for (const purpose of ["start", "materials"] as const) {
+    const err = await assertRejects(
+      () => assertJobDepositsBeforeWork(f.client, "job", purpose),
+      JobStartDepositError,
+    );
+    assertEquals(err.reasons, ["payer_without_party:1"]);
+  }
+});
+
+Deno.test("payer rows with no draft set do not count as sealed payers", async () => {
+  const f = fixture({
+    job_contacts: [],
+    xero_invoices: [deposit("legacy", { job_contact_id: null })],
+    scope_job_draft_invoices: [payerDraft("__client__"), payerDraft("nb-1")],
   });
   await assertJobDepositsBeforeWork(f.client, "job");
 });
