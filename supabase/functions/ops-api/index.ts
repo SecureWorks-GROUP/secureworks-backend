@@ -812,6 +812,7 @@ import {
 } from './job_work_order_office.ts'
 import { releaseVoidedTradeInvoice, VoidedTradeInvoiceReleaseError } from './trade_invoice_voided_release.ts'
 import { presentTradeInvoiceBillOutcome } from './trade_invoice_bill_outcome.ts'
+import { readTradeInvoiceAgentMark, stampTradeInvoiceAgentMark } from './trade_invoice_agent_mark.ts'
 import { ExtraRateRuleError, extraLineRateHold, listExtraRateRules, loadExtraRateRules, setExtraRateRule, type ExtraRateHold } from './trade_invoice_extra_rate_rule.ts'
 import { findNoWeekClaimConflict, isNoWeekClaimRefusal, NO_WEEK_CLAIM_MESSAGE, NO_WEEK_CLAIM_REFUSAL } from './trade_invoice_no_week_claim.ts'
 import { isTradeInvoiceNumberCollision, nextTradeInvoiceNumber, tradeInvoiceDay, tradeInvoiceInitials } from './trade_invoice_number.ts'
@@ -14770,6 +14771,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               }
             }
 
+            // Owner 11 Nov 2026: an invoice an agent helped draft says so
+            // after it is sent. Submit inserts a new row and replaces the
+            // draft, so the draft's agent mark is read here, before the
+            // persist, and stamped on the new invoice after it. A label only;
+            // never blocks the submit. [trade_invoice_agent_mark.ts]
+            const priorDraftAgentMark = await readTradeInvoiceAgentMark(client, priorDraftId, tradeUser.id)
+
             const invoicePayload = {
               ...(weeklyInvoice ? { org_id: tradeUser.orgId } : {}),
               user_id: tradeUser.id,
@@ -15056,6 +15064,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 ),
               }, priorDraftId))
             const invoice = { id: invoiceId }
+            await stampTradeInvoiceAgentMark(client, invoiceId, tradeUser.id, priorDraftAgentMark)
 
             // B14: one audit event per held typed rate. No amounts in the
             // reason; the line itself carries them.
@@ -57329,7 +57338,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
 // xero_bill_total / xero_adjustments_ex / xero_adjustment_lines: what Xero pays
 // and the office's changes to the bill in Xero (Group WO V10, migration
 // 20261103140000; apply it before deploying this).
-const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, xero_bill_status, amount_paid, paid_at, status, submitted_at, created_at, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines'
+const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, xero_bill_status, amount_paid, paid_at, status, submitted_at, created_at, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, created_by_agent, agent_label'
 
 // presentTradeInvoice throws MONEY_SPLIT_INVALID on a legacy row whose split
 // does not reconcile. One such row is live; it used to 500 the whole list.
@@ -57524,7 +57533,7 @@ export const _listTradeInvoicesForTest = listTradeInvoices
 /** Most stuck invoices (no Xero bill) one Trade Bills read adds. */
 export const STUCK_TRADE_BILLS_CAP = 200
 
-const TRADE_BILLS_COLUMNS = 'id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, xero_bill_status, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)'
+const TRADE_BILLS_COLUMNS = 'id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, xero_bill_status, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, submitted_at, created_at, notes, invoice_number, created_by_agent, agent_label, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)'
 
 /** Weekly and no-week invoices in one list, newest first by week, else by day made. */
 export function mergeTradeBillRows(weekly: any[], noWeek: any[], stuck: any[] = []): any[] {
