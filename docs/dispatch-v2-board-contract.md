@@ -1254,6 +1254,9 @@ order named) is saved to the job (`dispatch_v2_order_documents.ts`).
    content_sha256)`: the same file is saved to a job once, however many
    replies carry it. A claim is made first and given back on any failure; a
    claim older than ten minutes (a run that died) may be taken over.
+   The office may delete a saved file from the job (Shaun, 11 Nov 2026):
+   the row stays `saved` with `job_document_id` NULL, so the sweep never
+   saves that file again (migration 20261111150000).
 5. **Named for what it is**, from the file name, then the subject, then the
    email's first words (the earliest kind word in each wins):
    `Stratco order confirmation`, `B&D invoice`, `R&R quote`, else
