@@ -22,6 +22,7 @@
 // PostgREST returns errors, it does not throw: every read and write below
 // reads `error`. A failed read is never "nothing there".
 
+import { assertJobDepositsBeforeWork } from "./job_start_deposits.ts";
 import {
   type DispatchMaterialsActor,
   DispatchMaterialsError,
@@ -151,6 +152,10 @@ export type DispatchV2Context = {
   extractMaterialsFromScope: (scopeJson: unknown, pricingJson: null) => any[];
   sender: DispatchV2Sender;
   now?: () => string;
+  // RQ-19.e: no supplier order goes out until every paying party has
+  // accepted and paid (or the owner or office recorded an override). Tests
+  // may replace it; production always runs the real gate.
+  depositGate?: (client: any, jobId: string, purpose: "materials") => Promise<void>;
 };
 
 export const DISPATCH_V2_READ_ACTIONS = [
@@ -2746,6 +2751,14 @@ export async function sendDispatchV2Email(
   const realTo: string[] = email.to_emails || [];
   const realCc: string[] = email.cc_emails || [];
 
+  // A test goes only to admin@, never the supplier, so it is not an order.
+  if (!test) {
+    await (ctx.depositGate ?? assertJobDepositsBeforeWork)(
+      client,
+      String(job.id),
+      "materials",
+    );
+  }
   if (test) {
     const marked = dispatchV2TestEmail({
       subject: email.subject,

@@ -71,6 +71,7 @@ import {
   runDispatchSend,
 } from "./dispatch_order_send.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
+import { assertJobDepositsBeforeWork } from "./job_start_deposits.ts";
 
 export type DispatchOrdersContext = {
   orgId: string;
@@ -80,6 +81,10 @@ export type DispatchOrdersContext = {
   transport: DispatchMailTransport;
   renderPdf?: (input: DispatchOrderPdfInput) => Promise<DispatchOrderPdf>;
   now?: () => string;
+  // RQ-19.e: no supplier order goes out until every paying party has
+  // accepted and paid (or the owner or office recorded an override). Tests
+  // may replace it; production always runs the real gate.
+  depositGate?: (client: any, jobId: string, purpose: "materials") => Promise<void>;
 };
 
 export const DISPATCH_ORDERS_READ_ACTIONS = [
@@ -1506,6 +1511,11 @@ export async function sendDispatchOrderDraft(
   if (draft.status !== "draft" && !retryable) {
     refuse(409, "draft_not_sendable", "This draft is not waiting to be sent");
   }
+  await (ctx.depositGate ?? assertJobDepositsBeforeWork)(
+    client,
+    String(job.id),
+    "materials",
+  );
   const contact = await readContact(client, String(draft.supplier_id), ctx);
   const projected = await projectDispatchDraft({
     draft,

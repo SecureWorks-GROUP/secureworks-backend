@@ -24,6 +24,7 @@ import {
   runDispatchV2Action,
 } from "./dispatch_v2_store.ts";
 import { DispatchMaterialsError } from "./dispatch_materials_store.ts";
+import { JobStartDepositError } from "./job_start_deposits.ts";
 import { canonicalJsonAndHash } from "../_shared/release_packet/canonicalize.ts";
 
 // index.ts reads SUPABASE_URL and the service key into module constants, so
@@ -937,6 +938,8 @@ function ctx(
     sender,
     // Every call moves the clock one second on, as real stamps would.
     now: () => new Date(clockMs += 1000).toISOString(),
+    // Every fixture job has its deposits paid unless a test says otherwise.
+    depositGate: () => Promise.resolve(),
     ...over,
   };
 }
@@ -2894,6 +2897,40 @@ Deno.test("send: a test copy is optional, so the first real send goes without on
   assertEquals(sent[0].to, ["tradewa@stratcowa.com.au"]);
   assert(!sent[0].subject.startsWith("TEST ONLY: "));
   assertEquals(real.email.status, "sent");
+});
+
+Deno.test("send: a job held by the deposit gate sends no order; a test copy to admin@ still goes (RQ-19.e)", async () => {
+  const db = await fencingJob();
+  const { sent, sender } = fakeSender();
+  const gateCalls: unknown[][] = [];
+  const c = ctx(sender, {
+    depositGate: (_client, jobId, purpose) => {
+      gateCalls.push([jobId, purpose]);
+      return Promise.reject(
+        new JobStartDepositError("job_not_accepted", ["job_not_accepted:partially_accepted"], purpose),
+      );
+    },
+  });
+  const email = (await makeEmail(db, JOB.fence, SUP.stratco)).email;
+  const test = await call(db, "dispatch_v2_send_email", {
+    email_id: email.id,
+    expected_updated_at: email.updated_at,
+    test: true,
+  }, c);
+  assertEquals([test.success, test.test, sent.length, gateCalls.length], [true, true, 1, 0]);
+  const err = await assertRejects(
+    () =>
+      call(db, "dispatch_v2_send_email", {
+        email_id: email.id,
+        expected_updated_at: email.updated_at,
+      }, c),
+    JobStartDepositError,
+  );
+  assertEquals([err.code, err.status], ["job_not_accepted", 409]);
+  assert(err.message.startsWith("Materials cannot be ordered until every party has accepted"));
+  assertEquals(gateCalls, [[JOB.fence, "materials"]]);
+  assertEquals(sent.length, 1);
+  assertEquals(db.tables.dispatch_supplier_order_emails[0].status, "draft");
 });
 
 Deno.test("send: test copy to admin@ only, then the real send from admin@ records the ids and locks the lines", async () => {

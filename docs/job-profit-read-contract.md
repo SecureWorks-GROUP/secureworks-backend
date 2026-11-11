@@ -65,6 +65,8 @@ Legacy jobs have no row.
 | `quoted_source` | Which quote: `sent_quote:...` | No quote was sent |
 | `expected_cost_ex`, `expected_labour_ex`, `expected_materials_ex`, `expected_commission_ex` | Cost fixed at the quote | No cost was fixed at a quote, including a quote sent with no cost figures. Never 0 for that, never a live estimate |
 | `expected_source` | `frozen_at_acceptance`, `accepted_quote_revision` or `sent_quote_revision` | No cost was fixed at a quote |
+| `office_variations_ex`, `office_variation_labour_ex` | The approved office variations on the job work order (`work_order_customer_variations`): their customer price and their trade allocation, ex GST. The price is also in `variations_listed_ex`, so the margin is held (`variation_not_invoiced`) until the invoices cover it. A draft or cancelled one is in neither | Never null (0). Absent before migration 20261111100000 |
+| `expected_labour_with_variations_ex`, `expected_cost_with_variations_ex` | The quote's expected labour and expected cost plus that trade allocation. The quote's own figures (`expected_labour_ex`, `expected_cost_ex`, `quoted_ex`) stay the quote's | No cost was fixed at a quote (as `expected_cost_ex`). Absent before migration 20261111100000 |
 | `actual_cost_ex`, `actual_labour_ex`, `actual_materials_ex`, `actual_commission_ex`, `actual_other_ex` | Costs linked to the job line by line: trade charges, supplier bills, materials facts | Never null |
 | `cost_basis`, `line_level_cost_ex` | Always `line_level`; the same figure as `actual_cost_ex` | Never null |
 | `xero_project_expenses_ex` | Expenses on record against the job's Xero Project. Evidence only, not the job's full cost. Trade labour may sit outside it | No project is named after the job |

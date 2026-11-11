@@ -318,6 +318,8 @@ import {
   rescheduleJobBookings,
 } from './job_bookings.ts'
 import { fencingExecutionEvidenceFromPipelineRows } from './fencing_stage_evidence.ts'
+import { assertJobDepositsBeforeWork, isInstallationAssignment, JobStartDepositError } from './job_start_deposits.ts'
+import { DepositGateOverrideError, overrideJobDepositGate, readJobDepositGate, revokeJobDepositGateOverride } from './job_deposit_gate_override.ts'
 import {
   deriveFencingStageV1,
   fencingStageTruthFields,
@@ -362,7 +364,12 @@ import {
 import { resendDispatchTransport } from './dispatch_order_send.ts'
 import { runDispatchDeliveriesAction } from './dispatch_deliveries_store.ts'
 import { runDispatchV2RepliesAction } from './dispatch_v2_replies.ts'
-import { postgrestOutlookOrderStore } from './dispatch_v2_outlook_order.ts'
+import { postgrestOnSendStore } from './dispatch_v2_outlook_on_send.ts'
+import {
+  CatchUpRefused,
+  postgrestCatchUpStore,
+  runDispatchV2OutlookCatchUp,
+} from './dispatch_v2_outlook_catch_up.ts'
 import { postgrestReplyPdfReader } from './dispatch_v2_reply_pdf.ts'
 import { postgrestRepliesStore } from './dispatch_v2_replies_store.ts'
 import { postgrestDispatchRepliesSources } from './dispatch_v2_replies_sources.ts'
@@ -7834,10 +7841,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             via: 'terminal',
             store: postgrestRepliesStore(client),
             sources: postgrestDispatchRepliesSources(client),
-            // Tweak 2 (contract section 3f.1): a reply matched by job number
-            // alone to a job with no Dispatch order for that supplier records
-            // the order Shaun sent from Outlook (never sends anything).
-            outlook: postgrestOutlookOrderStore(client),
+            // Contract section 3g (6 Nov): an order sent from admin@ in Outlook
+            // becomes that supplier's Dispatch order when it is sent (never
+            // sends anything, never moves a job's status).
+            onSend: postgrestOnSendStore(client),
             // Tweak 2 (contract section 3f.2): an email its words cannot place
             // is matched by the one job number in its stored PDFs (read only).
             pdfs: postgrestReplyPdfReader(client),
@@ -7851,6 +7858,37 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ ...scanned, order_documents: orderDocuments })
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      case 'dispatch_v2_outlook_catch_up': {
+        // Contract section 3g.2: the one-off catch-up of orders sent from
+        // Outlook since 5 Oct. A dry run by default (changes nothing, open
+        // to staff); the real run needs dry_run false and the owner (Shaun),
+        // signed in, or named as operator_email with the ops server key.
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: 'forbidden: dispatch_v2_outlook_catch_up requires the privileged ops key or a staff session', code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'dispatch_v2_outlook_catch_up is POST only', code: 'method_not_allowed' }, 405)
+        }
+        const catchUpReplies = postgrestRepliesStore(client)
+        const catchUpEmail = authMode === 'jwt'
+          ? (authUser?.email || null)
+          : (serverSecretPresented ? cleanReviewedString(body?.operator_email) || null : null)
+        let catchUpUserId: string | null = authMode === 'jwt' ? (authUser?.id || null) : null
+        if (!catchUpUserId && catchUpEmail && body?.dry_run === false) {
+          catchUpUserId = (await catchUpReplies.userByEmail(DEFAULT_ORG_ID, catchUpEmail))?.id || null
+        }
+        try {
+          return json(await runDispatchV2OutlookCatchUp(body, {
+            orgId: DEFAULT_ORG_ID,
+            store: postgrestCatchUpStore(client, postgrestOnSendStore(client)),
+            replies: catchUpReplies,
+            operator: { email: catchUpEmail, userId: catchUpUserId },
+          }))
+        } catch (e) {
+          if (e instanceof CatchUpRefused) return json(e.body, e.status)
           throw e
         }
       }
@@ -10062,6 +10100,36 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json(await setDispatchInstallConfirmed(client, body, installActor, DEFAULT_ORG_ID, _perthTodayYmd()))
         } catch (e) {
           if (e instanceof DispatchStageWriteError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // RQ-19.e deposit gate (job_deposit_gate_override.ts). The read is for
+      // staff sessions and the ops key; an override or its revoke is a
+      // person's act, so only a signed-in admin, owner or ops manager, never
+      // the ops key, an agent or a routine. Absent from ROUTINE_ALLOWED_ACTIONS
+      // and AGENT_READ_ALLOWED_ACTIONS.
+      case 'job_deposit_gate':
+      case 'override_job_deposit_gate':
+      case 'revoke_job_deposit_gate_override': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires a staff session`, code: 'operator_access_required' }, 403)
+        }
+        const gatePerson = {
+          session: authMode === 'jwt',
+          userId: authMode === 'jwt' ? authUser?.id || null : null,
+          role: authMode === 'jwt' ? authUser?.role || null : null,
+        }
+        try {
+          if (action === 'job_deposit_gate') {
+            if (req.method !== 'GET') throw new ApiError(`${action} requires GET`, 405)
+            return json(await readJobDepositGate(client, url.searchParams))
+          }
+          if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+          return json(action === 'override_job_deposit_gate'
+            ? await overrideJobDepositGate(client, body, gatePerson)
+            : await revokeJobDepositGateOverride(client, body, gatePerson))
+        } catch (e) {
+          if (e instanceof DepositGateOverrideError) throw new ApiError(e.message, e.status, e.body)
           throw e
         }
       }
@@ -15692,6 +15760,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               assignment_id,
               tradeUser.id,
               idempotency_key,
+              event,
             )
             if (duplicate) {
               return json({ success: true, assignment, duplicate: true })
@@ -15986,6 +16055,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     if (err instanceof ApiError) {
       return json(err.body || { error: err.message }, err.status)
     }
+    if (err instanceof JobStartDepositError) {
+      return json({ success: false, error: err.message, code: err.code, reasons: err.reasons }, err.status)
+    }
     console.error('[ops-api] ERROR:', err)
     // A trade invoice door never shows the trade a raw database or server
     // sentence: a guard refusal is a plain 409, anything else a plain 500.
@@ -16004,6 +16076,7 @@ export async function prepareClockEventAssignment(
   assignmentId: string,
   tradeUserId: string,
   idempotencyKey?: string | null,
+  event?: string,
 ): Promise<{ assignment: any; duplicate: boolean }> {
   const { data: assignment, error: assignmentError } = await client.from('job_assignments')
     .select('*')
@@ -16019,6 +16092,10 @@ export async function prepareClockEventAssignment(
       .eq('detail_json->>idempotency_key', idempotencyKey)
       .limit(1)
     if (existing && existing.length > 0) return { assignment, duplicate: true }
+  }
+
+  if (event && ['clock_on', 'start_travel', 'arrived', 'resume'].includes(event) && isInstallationAssignment(assignment)) {
+    await assertJobDepositsBeforeWork(client, assignment.job_id)
   }
 
   return { assignment, duplicate: false }
@@ -37127,6 +37204,10 @@ export async function updateAssignment(client: any, body: any) {
     if (body[bodyKey] !== undefined) update[dbKey] = body[bodyKey]
   }
 
+  if ((update.status === 'in_progress' || (update.assignment_type !== undefined && oldAssignment?.status === 'in_progress')) && isInstallationAssignment({ ...oldAssignment, ...update })) {
+    await assertJobDepositsBeforeWork(client, oldAssignment?.job_id)
+  }
+
   if (oldAssignment?.job_id) {
     const { data: makesafeDetail, error: makesafeDetailErr } = await client.from('makesafe_job_details')
       .select('cycle_number').eq('job_id', oldAssignment.job_id).maybeSingle()
@@ -37743,7 +37824,7 @@ async function setJobLead(client: any, body: any) {
   }
 }
 
-async function updateJobStatus(client: any, body: any) {
+export async function updateJobStatus(client: any, body: any) {
   const jId = body.jobId || body.job_id
   const status = body.status
   if (!jId || !status) throw new Error('jobId and status required')
@@ -37752,6 +37833,10 @@ async function updateJobStatus(client: any, body: any) {
   // redeploy. Preserve that behaviour here and let database constraints /
   // stage-gate shadow observations catch invalid transitions downstream.
   if (!status || typeof status !== 'string' || status.length > 50) throw new Error('Invalid status')
+
+  // Shared fences must not bypass either party's deposit by a manual move or
+  // the scheduled-day sweep, which also calls this writer.
+  if (status === 'in_progress') await assertJobDepositsBeforeWork(client, jId)
 
   // Capture old status + job data for business_events dual-write
   const { data: jobBefore } = await client.from('jobs')
@@ -38496,6 +38581,9 @@ async function emailPO(client: any, body: any) {
     throw new ApiError(refusal.message, refusal.status, refusal.body)
   }
   if (!po.xero_po_id) throw new Error('PO has not been synced to Xero yet. Call sw_push_po_to_xero first, then sw_email_po.')
+  // RQ-19.e: no order reaches a supplier before every paying party has
+  // accepted and paid, or the owner or office recorded an override.
+  if (po.job_id) await assertJobDepositsBeforeWork(client, po.job_id, 'materials')
 
   const { accessToken, tenantId } = await getToken(client)
   await xeroPost(`/PurchaseOrders/${po.xero_po_id}/Email`, accessToken, tenantId, {}, 'POST')
@@ -56071,7 +56159,7 @@ export const _tradeLogMyJobHoursForTest = tradeLogMyJobHours
 export const _pickHoursAssignmentForTest = pickHoursAssignment
 export const _assertFencingCompletionEvidenceForTest = assertFencingCompletionEvidence
 
-async function updateMyAssignment(client: any, body: any, userId: string) {
+export async function updateMyAssignment(client: any, body: any, userId: string) {
   const id = body.assignmentId || body.id
 
   // ── Acknowledge-only path (no status change) ──
@@ -56104,13 +56192,17 @@ async function updateMyAssignment(client: any, body: any, userId: string) {
   // Verify this assignment belongs to the authenticated user
   const { data: assignment, error: findErr } = await client
     .from('job_assignments')
-    .select('id, job_id, user_id, status, started_at, completed_at, acknowledged_at')
+    .select('id, job_id, user_id, status, started_at, completed_at, acknowledged_at, assignment_type, role, is_ghost')
     .eq('id', id)
     .maybeSingle()
 
   if (findErr) throw findErr
   if (!assignment) throw new Error('Assignment not found')
   if (assignment.user_id !== userId) throw new Error('Not your assignment')
+
+  if (newStatus === 'in_progress' && isInstallationAssignment(assignment)) {
+    await assertJobDepositsBeforeWork(client, assignment.job_id)
+  }
 
   // Record timestamps for time tracking
   const updateFields: any = { status: newStatus }
@@ -56158,7 +56250,7 @@ async function updateMyAssignment(client: any, body: any, userId: string) {
 
 const VALID_PHASES = ['assigned','acknowledged','travelling','arrived','materials_check','working','wrap_up','complete'] as const
 
-async function updateJobPhase(client: any, body: any, userId: string) {
+export async function updateJobPhase(client: any, body: any, userId: string) {
   const assignmentId = body.assignmentId || body.id
   const newPhase = body.phase
   if (!assignmentId || !newPhase) throw new Error('assignmentId and phase required')
@@ -56167,7 +56259,7 @@ async function updateJobPhase(client: any, body: any, userId: string) {
   // Verify ownership
   const { data: asgn, error: findErr } = await client
     .from('job_assignments')
-    .select('id, job_id, user_id, job_phase, status, started_at, completed_at')
+    .select('id, job_id, user_id, job_phase, status, started_at, completed_at, assignment_type, role, is_ghost')
     .eq('id', assignmentId)
     .maybeSingle()
   if (findErr) throw findErr
@@ -56177,6 +56269,10 @@ async function updateJobPhase(client: any, body: any, userId: string) {
   const oldPhase = asgn.job_phase || 'assigned'
   // Skip if already at this phase
   if (oldPhase === newPhase) return { assignment: asgn, changed: false }
+
+  if (['arrived', 'materials_check', 'working'].includes(newPhase) && isInstallationAssignment(asgn)) {
+    await assertJobDepositsBeforeWork(client, asgn.job_id)
+  }
 
   // Build update
   const now = new Date().toISOString()

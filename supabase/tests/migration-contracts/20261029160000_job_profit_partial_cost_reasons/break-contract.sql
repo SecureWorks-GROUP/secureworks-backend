@@ -5,6 +5,12 @@
 -- runs first.
 SELECT md5(pg_get_functiondef('public.job_profit_line_evidence_many(uuid[])'::regprocedure))='b9114d87ccc74b6171bbb51d92be69b4' AS a2c_break_20261029160000 \gset
 \if :a2c_break_20261029160000
+-- 20261111100000 (RQ-15.g office variations) sits on v_job_profit and v_job_revenue_events: when the stack has it,
+-- its down runs first.
+SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.v_job_profit'::regclass AND attname = 'office_variations_ex' AND NOT attisdropped) AS rq15g_unwind_20261029160000 \gset
+\if :rq15g_unwind_20261029160000
+\ir ../../../rollbacks/20261111100000_job_profit_office_variations_down.sql
+\endif
 \ir ../../../rollbacks/20261104200500_job_profit_credits_follow_their_documents_down.sql
 \endif
 SELECT to_regclass('public.v_job_profit_patio_scope_binding') IS NOT NULL AS a6p_break_20261029160000 \gset

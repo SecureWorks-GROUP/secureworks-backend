@@ -2,7 +2,7 @@
   "_about": "Recorded answer for ops-api job_trace (INT-34). SIMULATED: the trace run on a copy of the rows DSP-10's hand trace of SWF-26979 recorded on 19 Oct 2026 (secureworks-projects dispatch/verify/evidence/20261019-chain-trace-SWF-26979.md), with made-up row ids. Not a production read. Regenerate only when the contract changes, and say why in the PR.",
   "swf_26979_figure_free": {
     "ok": true,
-    "version": "job-trace-v1",
+    "version": "job-trace-v2",
     "view": "figure_free",
     "job": {
       "id": "a7100000-0000-4000-8000-000000000001",
@@ -171,6 +171,34 @@
         ]
       }
     ],
+    "revisions": {
+      "state": "partial",
+      "reason": "revision_not_named",
+      "notes": [
+        "revision_not_named"
+      ],
+      "accepted": {
+        "row_id": "a7100000-0000-4000-8000-0000000000a1",
+        "revision_number": 1,
+        "source": "accepted_revision"
+      },
+      "items": [
+        {
+          "kind": "job_costs",
+          "row_id": "a7100000-0000-4000-8000-000000000001",
+          "scope_revision_id": "a7100000-0000-4000-8000-0000000000a1",
+          "revision_number": 1,
+          "state": "agrees"
+        },
+        {
+          "kind": "sent_quote",
+          "row_id": "a7100000-0000-4000-8000-0000000000a2",
+          "scope_revision_id": null,
+          "revision_number": null,
+          "state": "not_named"
+        }
+      ]
+    },
     "reasons": {
       "read_failed": "A read behind this link failed, so its state is not known. Never read as missing.",
       "job_not_accepted": "The job has no acceptance and is not in an open (past quoted) status.",
@@ -197,6 +225,10 @@
       "invoice_draft_only": "The job's customer invoices are all drafts in Xero.",
       "party_not_invoiced": "A paying party on the job has no customer invoice of its own.",
       "no_live_card_reading": "The job card has no live reading (no live ledger generation).",
+      "revision_differs": "A record names a scope revision that is not the accepted one (or, with none accepted, the records name different revisions).",
+      "revision_not_on_job": "A record names a scope revision that is not one of this job's revisions.",
+      "revision_not_named": "A record that should name a scope revision names none (made before it kept the revision).",
+      "no_accepted_revision": "No accepted scope revision is on record, so the named revisions cannot be checked against it.",
       "h7_not_released": "The H7 bill outcome reader is not on main (backend drafts #1129 and #1141), so the card shows no bill outcome yet."
     }
   }

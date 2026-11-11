@@ -1047,6 +1047,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261106054912", "client_signoff_copies"),
                       ("20261106062000", "scope_work_order_saved_handoff"),
                       ("20261106083000", "group_work_order_crew"),
+                      # Dispatch v2 section 3g: an order sent from Outlook is
+                      # recorded when it is sent (dispatch_v2_outlook_on_send.ts).
+                      ("20261106120000", "dispatch_v2_outlook_order_on_send"),
                       ("20261106160000", "group_paid_by_hours_member"),
                       # Trade invoice money controls: events, extras limits, number index.
                       ("20261106163712", "trade_invoice_money_controls"),
@@ -1055,6 +1058,8 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261106193000", "group_on_site_signoff_claim"),
                       # TK-S28: scope draft release on any open status.
                       ("20261110200000", "scope_draft_release_open_status"),
+                      # RQ-19.e: the deposit gate override record.
+                      ("20261111110000", "job_deposit_gate_overrides"),
                       # RQ-17.c: sealed payers registered as job parties.
                       ("20261111120000", "scope_payer_parties")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()

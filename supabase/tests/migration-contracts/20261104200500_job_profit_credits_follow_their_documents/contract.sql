@@ -171,12 +171,13 @@ BEGIN
   END IF;
 END $$;
 
--- and the objects are this migration's exact definitions
+-- and the objects are this migration's exact definitions (v_job_profit, or 20261111100000's, which adds the
+-- approved office variations and keeps this migration's text unchanged)
 DO $$
 BEGIN
   IF md5(pg_get_functiondef('public.job_profit_line_evidence_many(uuid[])'::regprocedure)) <> 'b9114d87ccc74b6171bbb51d92be69b4'
      OR md5(pg_get_functiondef('public.job_profit_line_evidence_score(date,date)'::regprocedure)) <> '26beb477a6461e70160c39b493f98c7f'
-     OR md5(pg_get_viewdef('public.v_job_profit'::regclass, true)) <> '1ac286e983426f43c67f94fd84268e07' THEN
+     OR md5(pg_get_viewdef('public.v_job_profit'::regclass, true)) NOT IN ('1ac286e983426f43c67f94fd84268e07', 'ef8c3682ff4da148ffe42635eb404abe') THEN
     RAISE EXCEPTION 'A2 credits contract: an object is not the 20261104200500 definition';
   END IF;
 END $$;

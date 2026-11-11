@@ -1125,8 +1125,15 @@ ops-api|supabase/migrations/20261105161000_dispatch_v2_order_documents.sql|index
 # sent order (dispatch_v2_outlook_order.ts; dispatch_v2_store.ts selects origin).
 ops-api|supabase/migrations/20261105170000_dispatch_v2_outlook_orders.sql|column|dispatch_supplier_order_emails.origin
 ops-api|supabase/migrations/20261105170000_dispatch_v2_outlook_orders.sql|column|dispatch_supplier_order_emails.source_business_event_id
-ops-api|supabase/migrations/20261105170000_dispatch_v2_outlook_orders.sql|index|dispatch_supplier_order_emails_source_event_idx
 ops-api|supabase/migrations/20261105170000_dispatch_v2_outlook_orders.sql|function|dispatch_v2_record_outlook_order
+# Dispatch v2 section 3g (6 Nov 2026): an order sent from Outlook is recorded
+# when it is sent (dispatch_v2_outlook_on_send.ts), and the one-off catch-up
+# (dispatch_v2_outlook_catch_up.ts). The scan reads and writes the send rule's
+# start time and calls the new function; one sent email can now be one order
+# per supplier, so the 5 Nov one-order-per-email index is replaced.
+ops-api|supabase/migrations/20261106120000_dispatch_v2_outlook_order_on_send.sql|column|dispatch_v2_reply_scan_state.sent_orders_since
+ops-api|supabase/migrations/20261106120000_dispatch_v2_outlook_order_on_send.sql|index|dispatch_supplier_order_emails_source_event_supplier_idx
+ops-api|supabase/migrations/20261106120000_dispatch_v2_outlook_order_on_send.sql|function|dispatch_v2_record_outlook_order_on_send
 #
 # Dispatch v2 Tweak 2 piece 2: the job number in a supplier's stored PDF, saved
 # with the rung pdf_job_number (dispatch_v2_replies.ts, dispatch_v2_reply_pdf.ts).
@@ -1194,3 +1201,13 @@ ops-api|supabase/migrations/20261106160000_group_paid_by_hours_member.sql|functi
 ops-api|supabase/migrations/20261106170000_group_office_removal_wins.sql|table|group_work_order_crew_removals
 ops-api|supabase/migrations/20261106170000_group_office_removal_wins.sql|function|restore_group_work_order_participant
 ops-api|supabase/migrations/20261106193000_group_on_site_signoff_claim.sql|function|record_on_site_client_signoff
+
+# RQ-19.e deposit gate override record: ops-api reads it on every held start
+# and supplier send, and grants or revokes through its two functions;
+# send-po-email reads it on a held send. Neither may deploy ahead of it, or a
+# recorded override is unreadable and the gate stays shut.
+ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|table|job_deposit_gate_overrides
+ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|function|grant_job_deposit_gate_override
+ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|function|revoke_job_deposit_gate_override
+send-po-email|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|table|job_deposit_gate_overrides
+send-po-email|supabase/migrations/20261106040518_scope_job_drafts.sql|table|scope_job_draft_invoices

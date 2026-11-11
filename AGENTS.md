@@ -4875,6 +4875,20 @@ columns or it shows the undeducted figure. The Xero line is found by its
 description prefix. Contract, the screen changes still owed and how the office
 ends one: `docs/trade-recurring-deductions-2026-10-13.md`.
 
+## Crew Start And Supplier Orders Share One Deposit Gate
+
+`assertJobDepositsBeforeWork` (`ops-api/job_start_deposits.ts`) is the only
+check that every paying party has accepted and paid its deposit: purpose
+`start` before installation work starts, `materials` at every supplier order
+SEND (`email_po`, `dispatch_order_send`, the Dispatch v2 order email,
+`send-po-email`), never at a draft or a Xero push. The one way past it is a
+recorded override in `job_deposit_gate_overrides` (`20261111110000`), granted
+or revoked only by a signed-in owner or office person with a reason, never the
+ops key; an unreadable override never opens the gate. Add a new start or order
+door through that function, never a second rule. `send-po-email` imports it,
+so a change to that file alone does not redeploy `send-po-email`. Contract:
+`docs/job-deposit-gate-v1.md`.
+
 ## Paid Fencing And Patio Jobs Go To Get Review
 
 Captain 13 Oct 2026: a paid fencing or patio job moves to `get_review` (not
