@@ -334,6 +334,14 @@ jobs:
             supabase/functions/ops-api/scope_owner_approvals_test.ts \
             supabase/functions/ops-api/job_work_order_office_approve_test.ts
 
+      # A scope draft prepare registers each sealed payer as a job party and
+      # never loses the saved drafts when that registration is refused
+      # (RQ-17.c, 20261111120000).
+      - name: Test scope job drafts and payer party registration
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/scope_job_drafts_test.ts
+
       # A service-role key committed in 2026-03 stayed live for six months.
       # Refuse any tracked service_role JWT or sb_secret_ key, whatever path
       # it sits under.

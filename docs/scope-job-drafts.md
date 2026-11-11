@@ -123,3 +123,35 @@ The open-status release (`20261110200000`, TK-S28) changes only the release
 function body and the office status writer. Undo its function code first, then
 apply `supabase/rollbacks/20261110200000_scope_draft_release_open_status_down.sql`;
 a release already recorded stays recorded.
+
+## Each payer is a party on the job (RQ-17.c)
+
+A shared fence has one quote and one invoice per payer. After a prepare saves
+the drafts, ops-api calls `register_scope_payer_parties` (`20261111120000`,
+service role only) with the same job, revision and organisation. It reads only
+the `parties` of the revision the drafts were prepared from and writes each
+payer through the one party writer, `upsert_job_party`, keyed by its payer id:
+the client is the owner party (`primary`, whose name and ids still follow the
+job), each other payer keeps its id (`nb-1`, ...) with its own name, contact
+details, role and share of the quote. A quote with one payer writes nothing.
+So each payer's deposit, its own invoice and the deposit gate read one party
+row per payer.
+
+An older party row with no key is adopted, never doubled: the owner by
+`is_primary`, a neighbour only by an equal phone or email. An older neighbour
+row it cannot match refuses the whole call
+(`scope_payer_parties_legacy_unmatched`) rather than leave two parties for one
+share; match it by hand and prepare again. Every refusal rolls the call back.
+
+The prepare response carries `payer_parties`: the function's answer
+(`outcome` `registered` with one `{payer_id, job_contact_id, label,
+source_party_key, outcome}` per payer, or `single_payer`), or
+`{outcome: "refused", code}`. A refusal never undoes the saved drafts, and the
+deposit gate (`docs/job-deposit-gate-v1.md`, `payer_without_party`) keeps the
+job held while the quote names a payer the job has no party for. Nothing is
+sent, no Xero contact or invoice is made, and no job is backfilled: a job
+prepared before this change registers its payers on its next prepare.
+
+Undo: revert this change's function code first, then apply
+`supabase/rollbacks/20261111120000_scope_payer_parties_down.sql`. Party rows
+already written stay; they are ordinary parties with their receipts.
