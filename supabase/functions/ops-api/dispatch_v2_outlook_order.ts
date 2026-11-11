@@ -288,24 +288,47 @@ const SIGN_OFF_RE =
 const MATERIALS_RE = /^\s*materials\s+needed\s*:?\s*$/i;
 const ITEM_RE = /^\s*(\d{1,2})[.)]\s+(\S.*)$/;
 const MAX_LINES = 60;
+// The send rule (3g) also reads a list written as quantities ("1 x 2400H SHS
+// posts") or as bullets, not only numbered lines: Shaun's own order emails
+// often mix them. A quantity line is kept whole; a bullet loses its mark.
+const QTY_ITEM_RE = /^\s*\d+(?:\.\d+)?\s*[x×]\s+\S/i;
+const BULLET_ITEM_RE = /^\s*[-*•]\s+(\S.*)$/;
+
+/** The items under "Materials Needed:" read the send rule's way: a numbered,
+ * quantity or bullet line starts an item, any other line belongs to the item
+ * above it. Null when words come before the first item, or there is none. */
+function looseItemsOf(
+  lines: string[],
+  heading: number,
+  confirmAt: number,
+): string[][] | null {
+  const end = confirmAt >= 0 ? confirmAt : lines.length;
+  const items: string[][] = [];
+  for (const raw of lines.slice(heading + 1, end)) {
+    if (raw.trim() === "" || /^\s*\[cid:[^\]]*\]\s*$/i.test(raw)) continue;
+    const numbered = ITEM_RE.exec(raw);
+    const bullet = BULLET_ITEM_RE.exec(raw);
+    if (numbered) items.push([numbered[2].trim()]);
+    else if (QTY_ITEM_RE.test(raw)) items.push([raw.trim()]);
+    else if (bullet) items.push([bullet[1].trim()]);
+    else if (items.length > 0) items[items.length - 1].push(raw.trim());
+    else return null;
+  }
+  return items.length > 0 && items.length <= MAX_LINES ? items : null;
+}
 
 function standingText(text: string): string {
   return text.trim().replace(/\s+/g, " ").toLowerCase();
 }
 const STANDING = new Set(DISPATCH_V2_STANDING_LINES.map(standingText));
 
-/** Read an order email Shaun wrote in Outlook. Null when it is not one we
- * can read for certain: no "Materials Needed" heading, no numbered line, or
- * words before the first numbered line. */
-export function parseOutlookOrderBody(
-  body: string,
-  sentAt: string | null,
-): ParsedOutlookOrder | null {
+/** The order part of an email body: from the top (the reader's "Subject:"
+ * line removed) to "Please confirm..." (kept) or to the sign-off (not kept),
+ * so the signature is never part of the order. */
+function orderTextOf(body: string): { lines: string[]; confirmAt: number } {
   const all = String(body ?? "").replace(/\r\n?/g, "\n")
     .replace(/^\s*Subject:[^\n]*\n+/i, "")
     .split("\n");
-
-  // The order ends at "Please confirm..." (kept) or at the sign-off (not).
   let end = all.length;
   let confirmAt = -1;
   for (let i = 0; i < all.length; i++) {
@@ -319,7 +342,44 @@ export function parseOutlookOrderBody(
       break;
     }
   }
-  const lines = all.slice(0, end);
+  return { lines: all.slice(0, end), confirmAt };
+}
+
+/** The Date, Address, delivery or pickup and branch, read from the lines
+ * above the list (or from the whole order when there is no list). */
+function orderHeadOf(
+  head: string[],
+  bodyText: string,
+  sentAt: string | null,
+): Omit<ParsedOutlookOrder, "lines" | "body_text"> {
+  const field = (label: string): string | null => {
+    const re = new RegExp(`^\s*${label}\s*:[ \t]*(.*)$`, "i");
+    for (const l of head) {
+      const m = re.exec(l);
+      if (m) return m[1].trim() || null;
+    }
+    return null;
+  };
+  const dateText = field("Date");
+  const asap = !!dateText && /^asap\b/i.test(dateText);
+  return {
+    fulfilment: dispatchV2FulfilmentOf(bodyText),
+    pickup_branch: dispatchOrderBranchOf(bodyText),
+    date_text: dateText,
+    date_mode: asap ? "asap" : "date",
+    delivery_date: asap || !dateText ? null : readOrderDate(dateText, sentAt),
+    address: field("Address"),
+  };
+}
+
+/** Read an order email Shaun wrote in Outlook. Null when it is not one we
+ * can read for certain: no "Materials Needed" heading, no numbered line, or
+ * words before the first numbered line. */
+export function parseOutlookOrderBody(
+  body: string,
+  sentAt: string | null,
+): ParsedOutlookOrder | null {
+  const { lines, confirmAt } = orderTextOf(body);
   const heading = lines.findIndex((l) => MATERIALS_RE.test(l));
   if (heading < 0) return null;
 
@@ -340,17 +400,6 @@ export function parseOutlookOrderBody(
   }
   if (items.length === 0 || items.length > MAX_LINES) return null;
 
-  const head = lines.slice(0, heading);
-  const field = (label: string): string | null => {
-    const re = new RegExp(`^\\s*${label}\\s*:[ \\t]*(.*)$`, "i");
-    for (const l of head) {
-      const m = re.exec(l);
-      if (m) return m[1].trim() || null;
-    }
-    return null;
-  };
-  const dateText = field("Date");
-  const asap = !!dateText && /^asap\b/i.test(dateText);
   const bodyText = lines.join("\n").trim();
   if (!bodyText) return null;
   const orderLines: OutlookOrderLine[] = items.map((parts) => {
@@ -363,14 +412,67 @@ export function parseOutlookOrderBody(
     };
   });
   return {
-    fulfilment: dispatchV2FulfilmentOf(bodyText),
-    pickup_branch: dispatchOrderBranchOf(bodyText),
-    date_text: dateText,
-    date_mode: asap ? "asap" : "date",
-    delivery_date: asap || !dateText ? null : readOrderDate(dateText, sentAt),
-    address: field("Address"),
+    ...orderHeadOf(lines.slice(0, heading), bodyText, sentAt),
     lines: orderLines,
     body_text: bodyText,
+  };
+}
+
+// The longest order text a Dispatch order row may keep (its body check).
+export const OUTLOOK_ORDER_BODY_MAX = 20000;
+
+/** Read an order email for the send rule (contract section 3g, Shaun 6 Nov
+ * 2026). When the list can be read, the same answer as parseOutlookOrderBody
+ * with `list_read` true; a list of quantity or bullet lines ("1 x 2400H SHS
+ * posts") is read too. When it cannot, the email's own words are kept as
+ * the order with no lines (`list_read` false); the Date, Address and
+ * delivery or pickup are still read from them. Null only when the email has
+ * no words at all. */
+export function readOutlookOrderBody(
+  body: string,
+  sentAt: string | null,
+): (ParsedOutlookOrder & { list_read: boolean }) | null {
+  const strict = parseOutlookOrderBody(body, sentAt);
+  if (strict && strict.body_text.length <= OUTLOOK_ORDER_BODY_MAX) {
+    return { ...strict, list_read: true };
+  }
+  const { lines, confirmAt } = orderTextOf(body);
+  const heading = lines.findIndex((l) => MATERIALS_RE.test(l));
+  const loose = heading < 0 ? null : looseItemsOf(lines, heading, confirmAt);
+  const looseText = lines.join("\n").trim();
+  if (loose && looseText && looseText.length <= OUTLOOK_ORDER_BODY_MAX) {
+    return {
+      ...orderHeadOf(lines.slice(0, heading), looseText, sentAt),
+      lines: loose.map((parts) => {
+        const text = parts.join("\n");
+        return {
+          line_id: null,
+          updated_at: null,
+          text,
+          standing: STANDING.has(standingText(text)),
+        };
+      }),
+      body_text: looseText,
+      list_read: true,
+    };
+  }
+  let bodyText = lines.join("\n").trim();
+  if (!bodyText) {
+    // Nothing above the sign-off: keep the whole email rather than nothing.
+    bodyText = String(body ?? "").replace(/\r\n?/g, "\n")
+      .replace(/^\s*Subject:[^\n]*\n+/i, "").trim();
+  }
+  if (!bodyText) return null;
+  bodyText = bodyText.slice(0, OUTLOOK_ORDER_BODY_MAX);
+  return {
+    ...orderHeadOf(
+      heading < 0 ? lines : lines.slice(0, heading),
+      bodyText,
+      sentAt,
+    ),
+    lines: [],
+    body_text: bodyText,
+    list_read: false,
   };
 }
 

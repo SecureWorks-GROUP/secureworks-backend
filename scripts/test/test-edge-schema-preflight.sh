@@ -1047,6 +1047,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261106054912", "client_signoff_copies"),
                       ("20261106062000", "scope_work_order_saved_handoff"),
                       ("20261106083000", "group_work_order_crew"),
+                      # Dispatch v2 section 3g: an order sent from Outlook is
+                      # recorded when it is sent (dispatch_v2_outlook_on_send.ts).
+                      ("20261106120000", "dispatch_v2_outlook_order_on_send"),
                       ("20261106160000", "group_paid_by_hours_member"),
                       # Trade invoice money controls: events, extras limits, number index.
                       ("20261106163712", "trade_invoice_money_controls"),

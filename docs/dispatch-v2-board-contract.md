@@ -1378,6 +1378,10 @@ calls Outlook. No backfill: replies stored before this ships stay as they are.
 
 ### 3f.1 An order Shaun sent from Outlook becomes a Dispatch order
 
+**Replaced on 6 Nov 2026 by section 3g:** the order is now recorded when it
+is sent, not when the supplier replies. Rules 2 to 9 below still describe how
+the email is read and what is written.
+
 Automatic, no tap (Shaun's ruling, 5 Nov 2026). Rules in
 `dispatch_v2_outlook_order.ts`; the one write is the database function
 `dispatch_v2_record_outlook_order` (migration
@@ -1533,6 +1537,151 @@ against a job alone).
    number never ties a Xero bill. A number now kept on two orders on two
    jobs makes a bill quoting it `several_order_numbers` (left for a person),
    never a guess.
+
+## 3g. An order sent from Outlook is a Dispatch order when it is sent (approved by Shaun 6 Nov 2026)
+
+This replaces the "when" of 3f.1. On 5 Nov an Outlook order was recorded only
+once the supplier replied; from 6 Nov the send itself makes the order, so the
+box shows Sent to supplier straight away and the supplier's reply moves it on
+the normal way. The 5 Nov step inside the reply scan is gone (its rules file
+stays, unused). Everything else in 3f.1 still holds for these orders: they are
+`origin 'outlook'`, always sent, never a draft, shown with `from_outlook:
+true`, and the fencing fill stays off on the job (3f.1 rule 9).
+
+Rules in `dispatch_v2_outlook_on_send.ts`; the one write is the database
+function `dispatch_v2_record_outlook_order_on_send` (migration
+`20261106120000_dispatch_v2_outlook_order_on_send.sql`, rollback in
+`supabase/rollbacks/`).
+
+### 3g.1 The rule, from now on
+
+1. **What is an order.** An email sent from admin@secureworkswa.com.au (the
+   capture: `business_events`, source `outlook-mail-capture`,
+   `payload.folder_kind 'sent'`, admin@ mailbox only) whose subject starts
+   `Material Order Ref <job number>`. Words after the number are fine
+   (`Material Order Ref SWP-261283 2nd order`), and so is a colon after `Ref`.
+2. **Never an order.** A subject starting `Re:`, `Fw:` or `Fwd:`; a
+   `Material Order Quote Ref` (a request for a price); and an email Dispatch
+   sent itself (its copy lands in admin@ Sent too), matched on the Outlook
+   message id or the conversation of any Dispatch send.
+3. **The job comes from the subject only.** A number that is not one of our
+   job numbers (`MLB-27836`), a job number with no job, or a job that is not
+   on the Dispatch board (the board's own rule: fencing, patio or decking at
+   Order Materials to Rectification, a repair at Materials or Scheduled; never
+   a legacy job or a test record) never makes an order. The email waits under
+   **Emails to sort** (the Unmatched tray's default view) with a plain reason,
+   for example `Order sent from Outlook to Metroll for SWP-26348, which is not
+   on the Dispatch board (Complete). Sort it by hand.`
+4. **The supplier comes from the To addresses** (never CC): an address on a
+   supplier's approved order list, or an address at that supplier's own
+   company domain (never a shared mail domain such as bigpond.com, never a
+   domain two suppliers share). An email to two suppliers makes two orders. An
+   email to no approved supplier is not an order and is left alone.
+5. **The supplier needs a Xero contact.** A box is a Xero supplier contact, so
+   an approved supplier with no linked contact cannot show one: that email
+   waits under Emails to sort (`... which has no Xero supplier contact linked,
+   so Dispatch cannot show its box`). Which contact, when a supplier has
+   several: 3f.1 rule 4.
+6. **What the box shows.** Stage Sent to supplier, worked out on read from the
+   real sent time (3b). The lines read from `Materials Needed:`, delivery or
+   pickup, the date or ASAP and the address, all read exactly as 3f.1 rule 3
+   reads them; under the heading a quantity line (`1 x 2400H SHS posts`) or
+   a bullet starts a line too, not only a numbered one (Shaun's own emails
+   often mix them; on 6 Nov this read 5 more of the 41 caught-up orders).
+   **With no readable list** (no heading, or words such as `60mm Cutback`
+   under a picture before the first line) the
+   email's own words are kept as the order (opening line to `Please confirm`
+   or the sign-off) and the lines are left empty; the date, address and
+   delivery or pickup are still read from those words. An email with no words
+   at all waits under Emails to sort.
+7. **A second order to the same supplier on the same job** reuses the box: it
+   is the box's newest order, as a second Dispatch send would be.
+8. **Replies tie in the normal way:** the same thread, or that supplier with
+   the job number (the reply scan's own rungs, 3c and 3f). The one-step move
+   follows: on account goes to Quote received, pay first to Awaiting payment.
+   A reply the scan had already stored against the job alone (matched by the
+   job number before its order was recorded) is tied to the new order: the
+   one in the reply's own thread, else the newest that supplier's order sent
+   before the reply. Its match reason gains `Tied to the order sent from
+   Outlook on Tue 3 Nov`.
+9. **When it runs.** Inside the existing five-minute reply scan
+   (`dispatch_v2_replies_scan`, only while `dispatch_v2_replies_v1` is on),
+   first, so an order is on Dispatch before its reply is read. It reads sent
+   emails at least two minutes old and at most seven days old. **The first
+   run records nothing**: it only notes the time
+   (`dispatch_v2_reply_scan_state.sent_orders_since`), so switching it on never
+   back-records older orders by itself (that is the catch-up, 3g.2). Only an
+   email sent after that time counts: the capture is read by when it stored
+   an email, and a re-run of the capture stores old mail again, so an old
+   email stored again is counted as ignored, never made an order. A failed
+   read or write is counted and the reply scan carries on; the next run tries
+   again.
+10. **Once only.** One order per sent email and supplier (a unique key on the
+    sent email and the Xero contact, and a per-job lock in the function), and
+    an email already under Emails to sort is not looked at again.
+11. **Our own email under Emails to sort** is marked `sender_via
+    'our_sent_order'`. A person who places it on a job by hand ties it to the
+    job only, never to an order, and it makes no date suggestion: our own
+    email can never move a box as if the supplier had replied.
+12. **Never.** It sends nothing, never moves a job's stage or status, never
+    adds lines to the job's list, and never writes GHL, Xero or the
+    `suppliers` table.
+13. **The scan's answer** gains `sent`: `sent_read`, `sent_orders`,
+    `sent_already`, `sent_ignored`, `sent_to_sort`, `sent_replies_tied`,
+    `sent_failed` (and `first_run` on the first run). The 5 Nov counts
+    `outlook_orders` and `outlook_tied` are gone.
+
+### 3g.2 The one-off catch-up (`dispatch_v2_outlook_catch_up`, POST)
+
+For the orders sent from Outlook before the rule was switched on. Rules in
+`dispatch_v2_outlook_catch_up.ts`, using the rule above.
+
+1. **Scope.** Every captured order email sent from admin@ since 5 Oct 2026
+   (midnight Perth; `since` may name another time), by the rule in 3g.1, on
+   jobs still on the Dispatch board. Finished jobs are skipped and listed.
+   The day it was sent decides, not the day the capture stored it: mail sent
+   before 5 Oct that the capture stored again later is counted as
+   `sent_before_since`, never recorded (on 6 Nov 2026, 219 of the 447
+   order-subject emails stored since 5 Oct were sent before it, back to May).
+2. **A dry run by default** (`dry_run` anything but `false`): it changes
+   nothing and answers with every order it would make: job and client, the
+   job's stage, the supplier, the day sent, the lines read or no list, the
+   replies it would tie, and the stage each box would end at. Also every email
+   it refuses, with the reason, and the count of emails it ignores, by reason.
+   Open to staff (a signed-in staff session or the ops key).
+3. **The real run** needs `dry_run: false` and the owner: Shaun
+   (`shaun@secureworkswa.com.au`), signed in, or named as `operator_email` with
+   the ops server key and found in users. Anyone else is refused `403
+   owner_only`. It:
+   - records the orders and boxes (`trigger 'catch_up'` on the job_events
+     row);
+   - ties the supplier replies already stored for them (3g.1 rule 8), so the
+     normal one-step move applies on read;
+   - **on a job whose status is In Progress**, sets every caught-up box
+     straight to Delivered (the materials are on site), as a stage set by
+     Shaun with a `dispatch_v2_material_stage_set` job_events row (`via
+     'outlook_catch_up'`). A box whose stage a person set after the newest
+     caught-up order was sent keeps it;
+   - puts the emails with a wrong or unknown job number, or to a supplier with
+     no Xero contact, under Emails to sort. A finished job, or one not on the
+     board, is only listed.
+4. **Never the order-confirmed step.** It never runs 3e (no crew pickup
+   lines, no supplier PDFs saved to the job, no order sheet), never presses a
+   stage, never sends, never moves a job's status, never writes GHL, Xero or
+   suppliers.
+5. **Run it twice and nothing changes the second time:** each email is once
+   per supplier, a reply is tied only while it has no order, a box is set to
+   Delivered only while nobody has set it since, and an email is put under
+   Emails to sort once. The dry run after a real run shows the orders as
+   already recorded.
+
+### 3g.3 Westline Fencing on the approved order list
+
+Migration `20261106120100_dispatch_v2_westline_supplier.sql` adds Westline
+Fencing (`info@westlinefencing.com.au`, pay first, fencing, approved by Shaun
+6 Nov 2026). On 6 Nov there is no Westline contact in Xero (no `suppliers`
+row), so it is not linked: its orders wait under Emails to sort until a
+Westline supplier contact exists in Xero and is linked to the entry.
 
 ## Tweak 4: the approved supplier names on the board (5 Nov 2026)
 

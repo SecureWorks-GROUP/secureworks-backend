@@ -362,7 +362,12 @@ import {
 import { resendDispatchTransport } from './dispatch_order_send.ts'
 import { runDispatchDeliveriesAction } from './dispatch_deliveries_store.ts'
 import { runDispatchV2RepliesAction } from './dispatch_v2_replies.ts'
-import { postgrestOutlookOrderStore } from './dispatch_v2_outlook_order.ts'
+import { postgrestOnSendStore } from './dispatch_v2_outlook_on_send.ts'
+import {
+  CatchUpRefused,
+  postgrestCatchUpStore,
+  runDispatchV2OutlookCatchUp,
+} from './dispatch_v2_outlook_catch_up.ts'
 import { postgrestReplyPdfReader } from './dispatch_v2_reply_pdf.ts'
 import { postgrestRepliesStore } from './dispatch_v2_replies_store.ts'
 import { postgrestDispatchRepliesSources } from './dispatch_v2_replies_sources.ts'
@@ -7834,10 +7839,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             via: 'terminal',
             store: postgrestRepliesStore(client),
             sources: postgrestDispatchRepliesSources(client),
-            // Tweak 2 (contract section 3f.1): a reply matched by job number
-            // alone to a job with no Dispatch order for that supplier records
-            // the order Shaun sent from Outlook (never sends anything).
-            outlook: postgrestOutlookOrderStore(client),
+            // Contract section 3g (6 Nov): an order sent from admin@ in Outlook
+            // becomes that supplier's Dispatch order when it is sent (never
+            // sends anything, never moves a job's status).
+            onSend: postgrestOnSendStore(client),
             // Tweak 2 (contract section 3f.2): an email its words cannot place
             // is matched by the one job number in its stored PDFs (read only).
             pdfs: postgrestReplyPdfReader(client),
@@ -7851,6 +7856,37 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ ...scanned, order_documents: orderDocuments })
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      case 'dispatch_v2_outlook_catch_up': {
+        // Contract section 3g.2: the one-off catch-up of orders sent from
+        // Outlook since 5 Oct. A dry run by default (changes nothing, open
+        // to staff); the real run needs dry_run false and the owner (Shaun),
+        // signed in, or named as operator_email with the ops server key.
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: 'forbidden: dispatch_v2_outlook_catch_up requires the privileged ops key or a staff session', code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'dispatch_v2_outlook_catch_up is POST only', code: 'method_not_allowed' }, 405)
+        }
+        const catchUpReplies = postgrestRepliesStore(client)
+        const catchUpEmail = authMode === 'jwt'
+          ? (authUser?.email || null)
+          : (serverSecretPresented ? cleanReviewedString(body?.operator_email) || null : null)
+        let catchUpUserId: string | null = authMode === 'jwt' ? (authUser?.id || null) : null
+        if (!catchUpUserId && catchUpEmail && body?.dry_run === false) {
+          catchUpUserId = (await catchUpReplies.userByEmail(DEFAULT_ORG_ID, catchUpEmail))?.id || null
+        }
+        try {
+          return json(await runDispatchV2OutlookCatchUp(body, {
+            orgId: DEFAULT_ORG_ID,
+            store: postgrestCatchUpStore(client, postgrestOnSendStore(client)),
+            replies: catchUpReplies,
+            operator: { email: catchUpEmail, userId: catchUpUserId },
+          }))
+        } catch (e) {
+          if (e instanceof CatchUpRefused) return json(e.body, e.status)
           throw e
         }
       }
