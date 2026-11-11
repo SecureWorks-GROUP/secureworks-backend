@@ -172,6 +172,7 @@ for (
     "job_contacts",
     "xero_invoices",
     "makesafe_job_details",
+    "scope_job_draft_invoices",
   ]
 ) {
   Deno.test(`unreadable ${table} fails closed before work`, async () => {
@@ -687,4 +688,73 @@ Deno.test("email_po checks the materials gate before Xero emails the supplier", 
   const gateAt = body.indexOf("await assertJobDepositsBeforeWork(client, po.job_id, 'materials')");
   const sendAt = body.indexOf("/PurchaseOrders/${po.xero_po_id}/Email");
   assertEquals(start > 0 && gateAt > 0 && sendAt > gateAt, true);
+});
+
+const payerDraft = (payer_id: string, inc_cents: number | null = 110000) => ({
+  id: payer_id,
+  payer_id,
+  inc_cents,
+});
+
+Deno.test("a quoted payer with no party row holds work even when every known party has paid", async () => {
+  // The sealed quote names the client and a neighbour, but only the legacy
+  // one-owner roster exists: the owner's deposit alone must not let crew start.
+  const f = fixture({
+    job_contacts: [],
+    xero_invoices: [deposit("legacy", { job_contact_id: null })],
+    scope_job_draft_invoices: [payerDraft("__client__"), payerDraft("nb-1")],
+  });
+  const err = await assertRejects(
+    () => updateMyAssignment(f.client, { id: "assignment", status: "in_progress" }, "crew"),
+    JobStartDepositError,
+  );
+  assertEquals(err.code, "job_deposits_unpaid");
+  assertEquals(err.reasons, ["payer_without_party:1"]);
+  assertEquals(f.writes, []);
+  const materials = await assertRejects(
+    () => assertJobDepositsBeforeWork(f.client, "job", "materials"),
+    JobStartDepositError,
+  );
+  assertEquals(materials.reasons, ["payer_without_party:1"]);
+});
+
+Deno.test("quoted payers that each have a party row are judged on their deposits as before", async () => {
+  const f = fixture({
+    scope_job_draft_invoices: [payerDraft("__client__"), payerDraft("nb-1")],
+  });
+  await assertJobDepositsBeforeWork(f.client, "job");
+  f.tables.xero_invoices.pop();
+  const err = await assertRejects(
+    () => assertJobDepositsBeforeWork(f.client, "job"),
+    JobStartDepositError,
+  );
+  assertEquals(err.reasons, ["party_without_deposit:B"]);
+});
+
+Deno.test("a quoted payer with a known zero share is not owed a party; an unknown share is", async () => {
+  const zero = fixture({
+    job_contacts: [],
+    xero_invoices: [deposit("legacy", { job_contact_id: null })],
+    scope_job_draft_invoices: [payerDraft("__client__"), payerDraft("nb-1", 0)],
+  });
+  await assertJobDepositsBeforeWork(zero.client, "job");
+  const unknown = fixture({
+    job_contacts: [],
+    xero_invoices: [deposit("legacy", { job_contact_id: null })],
+    scope_job_draft_invoices: [payerDraft("__client__"), payerDraft("nb-1", null)],
+  });
+  const err = await assertRejects(
+    () => assertJobDepositsBeforeWork(unknown.client, "job"),
+    JobStartDepositError,
+  );
+  assertEquals(err.reasons, ["payer_without_party:1"]);
+});
+
+Deno.test("a single-payer quote keeps the one-owner roster as before", async () => {
+  const f = fixture({
+    job_contacts: [],
+    xero_invoices: [deposit("legacy", { job_contact_id: null })],
+    scope_job_draft_invoices: [payerDraft("__client__")],
+  });
+  await assertJobDepositsBeforeWork(f.client, "job");
 });

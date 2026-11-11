@@ -114,7 +114,7 @@ async function judgeDepositGate(client: any, jobId: string): Promise<GateVerdict
         reasons: [`job_not_accepted:${String(job.status ?? "")}`],
       };
     }
-    const [invoices, parties] = await Promise.all([
+    const [invoices, parties, payerDrafts] = await Promise.all([
       readRows(
         client,
         "xero_invoices",
@@ -127,7 +127,21 @@ async function judgeDepositGate(client: any, jobId: string): Promise<GateVerdict
         "id, contact_label, is_primary, share_percentage, removed_at, status, xero_contact_id",
         jobId,
       ),
+      readRows(client, "scope_job_draft_invoices", "id, payer_id, inc_cents", jobId),
     ]);
+    // The sealed quote's payer drafts name who pays. A payer with no party row
+    // here has no deposit the gate can see, so the job cannot be judged paid
+    // on the parties it does have (a shared fence with no neighbour row would
+    // otherwise pass on the owner's deposit alone). A known 0 share pays nothing.
+    const quotedPayers = payerDrafts.filter((d: any) => d.inc_cents === null || d.inc_cents === undefined || Number(d.inc_cents) !== 0).length;
+    const knownPayers = Math.max(1, payingParties(parties).length);
+    if (quotedPayers > knownPayers) {
+      return {
+        open: false,
+        code: "job_deposits_unpaid",
+        reasons: [`payer_without_party:${quotedPayers - knownPayers}`],
+      };
+    }
     // A partial shared-boundary roster must not turn its lone neighbour into
     // the owner through the legacy invoice matching fallback. An explicitly
     // removed/zero-share owner is different: that decision remains recorded.

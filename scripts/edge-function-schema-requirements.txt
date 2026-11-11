@@ -1199,3 +1199,4 @@ ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|table|
 ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|function|grant_job_deposit_gate_override
 ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|function|revoke_job_deposit_gate_override
 send-po-email|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|table|job_deposit_gate_overrides
+send-po-email|supabase/migrations/20261106040518_scope_job_drafts.sql|table|scope_job_draft_invoices
