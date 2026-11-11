@@ -49,6 +49,7 @@ import {
   userRepliedDoorbell,
 } from "./capture.ts";
 import { GHL_RECORD_EVENT_TYPES } from "../_shared/evidence/ghl_message.ts";
+import { routeHugoLine, routerMode } from "./hugo_line_router.ts";
 import {
   type AuthDecision,
   type AuthMode,
@@ -515,6 +516,29 @@ export async function handleGhlWebhook(
     }
 
     const { type, contactId, phone, email, conversationId } = body;
+
+    // Hugo's line router (hugo_line_router.ts): an authenticated inbound text
+    // may route its contact to Hugo's Insurance pipeline. It runs beside the
+    // delivery and never changes this response, its receipts or the evidence.
+    if (
+      (type === "InboundMessage" || type === "CustomerReplied") &&
+      decision.auth !== "missing" &&
+      routerMode(deps.env("HUGO_LINE_ROUTER_MODE")) !== "off"
+    ) {
+      const routed = routeHugoLine(body, { env: deps.env, fetch: fetchImpl })
+        .then((r) => {
+          console.log(
+            `[ghl-webhook-receiver] Hugo line: mode=${r.mode} outcome=${r.outcome} reason=${
+              r.reason ?? "none"
+            } contact_assigned=${r.contactAssigned} opportunity=${
+              r.opportunity ?? "none"
+            } opportunity_id=${r.opportunityId ?? "none"}`,
+          );
+          return r;
+        });
+      if (deps.waitUntil) deps.waitUntil(routed);
+      else await routed;
+    }
 
     supabase = deps.createSupabase();
 
