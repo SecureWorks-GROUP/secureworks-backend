@@ -5039,7 +5039,8 @@ ids-only `job_party_events` receipt. The four legacy writers (scope sync,
 directly until S-M2 moves them; do not add a fifth. Scope payer drafts
 register each sealed payer through `upsert_job_party`
 (`register_scope_payer_parties`, `20261111120000`, keyed by payer id; an older
-neighbour row it cannot match refuses): `docs/scope-job-drafts.md`. The table is RLS-on with
+neighbour row it cannot match refuses; a blank detail is never sent, and a
+payer it registered that the quote drops is soft-removed): `docs/scope-job-drafts.md`. The table is RLS-on with
 no policy and revoked from anon and authenticated (the live read found both
 held TRUNCATE, which RLS does not cover); view `run_summary`, which read
 its names past RLS, is revoked the same way and `security_invoker`. Placement reconsideration after a
