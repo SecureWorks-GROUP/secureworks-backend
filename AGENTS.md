@@ -4638,6 +4638,20 @@ must fail closed on Xero retry rather than inventing history. Apply
 `ops-api`. API fields, formulas, UI handoff, source, and deploy order:
 `docs/trade-invoice-super-gst-contract-2026-08-27.md`.
 
+## A Sent Trade Invoice Keeps Its Agent Mark
+
+Owner 2026-11-11: an agent (for example Grokbot) may help draft a trade's weekly
+invoice, and the invoice must say so after it is sent. A running draft carries
+`created_by_agent` / `agent_label` / `draft_origin`, but `generate_trade_invoice`
+inserts a NEW row and replaces the draft, so
+`supabase/functions/ops-api/trade_invoice_agent_mark.ts` reads the mark off the
+prior draft before the persist and stamps it on the new invoice after it. It is
+a label only: it fails open with one log line, touches no money, status or Xero
+field, and grants nothing (the agent path stays `agent_draft_only`; only the
+trade's own login submits). `MY_TRADE_INVOICE_COLUMNS` and `TRADE_BILLS_COLUMNS`
+return both fields; the dashboard words them. Test:
+`trade_invoice_agent_mark_test.ts`.
+
 ## Debt Workshop Sends Are Switched, Owner-Only, And Claimed First
 
 The Debt tab's backend is `ops-api/debt_ws_*.ts` (contract: wiki
