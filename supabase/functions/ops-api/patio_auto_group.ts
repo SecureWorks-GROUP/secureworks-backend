@@ -15,8 +15,14 @@
 //      Pay comes from the work order's labour; nothing is frozen, invoiced,
 //      sent or paid. A job already paid by hours is left alone (the
 //      double-pay fence), and so is a job whose group is frozen or void.
-// Crew = live allocations (no ghost, observer or cancelled row) of anyone who
-// is not office admin. Never throws: every job comes back with a reason.
+// Crew = live allocations (no ghost, observer or cancelled row) of installers:
+// people whose role is crew or lead_installer (20261111173000; before that,
+// anyone who was not office admin). An ops manager or estimator who works on
+// site joins the group themselves. Never throws: every job comes back with a
+// reason.
+//
+// A third step, closeGroupsOnCancelledJobs, closes the open group of a
+// cancelled or lost job when nothing on it could be owed.
 //
 // V8 (job-profit INBOX, 3 Nov 2026): the same two steps for fencing jobs,
 // behind their own flag GROUP_WORK_ORDER_AUTO_FENCE_FLAG, added off. The pay
@@ -305,6 +311,34 @@ async function autoGroupJobs(client: any, kind: AutoGroupKind) {
     crew_added: results.filter((r) => r.reason === "crew_added").length,
     results,
   };
+}
+
+/**
+ * Step 3: an open group on a cancelled or lost job is closed (void) when
+ * nothing on it could be owed: not frozen, no sign-off, hours, shares or
+ * release, nobody booked on a day that has come, and the job untouched for 7
+ * days. The database owns the rule and the write
+ * (close_group_work_orders_on_cancelled_jobs, 20261111173000); archived and
+ * complete jobs keep their group. No invoice or amount is touched. Never
+ * throws.
+ */
+export async function closeGroupsOnCancelledJobs(client: any) {
+  const results: { group_id: string; job_id: string }[] = [];
+  try {
+    if (!(await groupFeatureOn(client))) return { switched_on: false, closed: 0, results };
+    const { data, error } = await client.rpc("close_group_work_orders_on_cancelled_jobs");
+    if (error) throw new Error(String(error.message || error.code || "close failed"));
+    const closed = data && typeof data === "object" ? (data as Record<string, unknown>).closed : null;
+    for (const row of Array.isArray(closed) ? closed : []) {
+      if (!row || typeof row !== "object") continue;
+      const groupId = String((row as Record<string, unknown>).group_id || "");
+      const jobId = String((row as Record<string, unknown>).job_id || "");
+      if (groupId && jobId) results.push({ group_id: groupId, job_id: jobId });
+    }
+  } catch (e) {
+    console.error("[group-cancelled-close]", "sweep failed:", (e as Error)?.message);
+  }
+  return { switched_on: true, closed: results.length, results };
 }
 
 /** People a group's remove_participant events took off it (left or removed). */

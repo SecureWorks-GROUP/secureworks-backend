@@ -1059,7 +1059,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # TK-S28: scope draft release on any open status.
                       ("20261110200000", "scope_draft_release_open_status"),
                       # RQ-19.e: the deposit gate override record.
-                      ("20261111110000", "job_deposit_gate_overrides")]:
+                      ("20261111110000", "job_deposit_gate_overrides"),
+                      # Group crew follows installers; a cancelled job's
+                      # untouched group is closed (patio_auto_group.ts).
+                      ("20261111173000", "group_crew_installers_cancelled_close")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
