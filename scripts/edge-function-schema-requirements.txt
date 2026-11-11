@@ -1197,3 +1197,13 @@ ops-api|supabase/migrations/20261106160000_group_paid_by_hours_member.sql|functi
 ops-api|supabase/migrations/20261106170000_group_office_removal_wins.sql|table|group_work_order_crew_removals
 ops-api|supabase/migrations/20261106170000_group_office_removal_wins.sql|function|restore_group_work_order_participant
 ops-api|supabase/migrations/20261106193000_group_on_site_signoff_claim.sql|function|record_on_site_client_signoff
+
+# RQ-19.e deposit gate override record: ops-api reads it on every held start
+# and supplier send, and grants or revokes through its two functions;
+# send-po-email reads it on a held send. Neither may deploy ahead of it, or a
+# recorded override is unreadable and the gate stays shut.
+ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|table|job_deposit_gate_overrides
+ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|function|grant_job_deposit_gate_override
+ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|function|revoke_job_deposit_gate_override
+send-po-email|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|table|job_deposit_gate_overrides
+send-po-email|supabase/migrations/20261106040518_scope_job_drafts.sql|table|scope_job_draft_invoices

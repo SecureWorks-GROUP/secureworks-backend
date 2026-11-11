@@ -391,11 +391,19 @@ Deno.test("offline dry run: accepted fence through the real send, a sighted deli
       currentGeneratedSha: null,
     })).draft_hash;
 
+    // The deposit gate (RQ-19.e) reads tables this store does not hold; its
+    // own tests prove it. Here it must be asked once, for materials, before
+    // the send.
+    const gateCalls: unknown[][] = [];
     const sent = await sendDispatchOrderDraft(memory, {
       draft_id: DRAFT_ID,
       expected_draft_hash: expectedHash,
     }, {
       orgId,
+      depositGate: (_client, jobId, purpose) => {
+        gateCalls.push([jobId, purpose, transportCalls.length]);
+        return Promise.resolve();
+      },
       actor: {
         userId: PERSON,
         email: "office@example.test",
@@ -416,6 +424,7 @@ Deno.test("offline dry run: accepted fence through the real send, a sighted deli
       sent_by_email: "office@example.test",
     });
     assertEquals(sent.order.status, "sent");
+    assertEquals(gateCalls, [[JOB_ID, "materials", 0]]);
     assertEquals(transportCalls.length, 1);
     const carried = transportCalls[0] as {
       payload: { to: string[]; subject: string; attachments?: Array<{ filename: string; content: string }> };
