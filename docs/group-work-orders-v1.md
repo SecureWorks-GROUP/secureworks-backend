@@ -5,7 +5,7 @@ Owner: "just let them log their own hours" and "just let them sign their own". M
 - A crew member logs their own hours for any day on the job; a booked day is no longer required (a multi-day booking used to refuse day two on). Hours from someone neither on the crew nor booked that day are refused, `group_hours_not_member`.
 - Every logged hour counts in the split. `loadShareView` is the TypeScript twin of the split's rules; change both together.
 - Logging your own hours is your confirmation. Nobody approves anyone else's: the freeze and the share invoice no longer wait for crew approval on a full-super group, `crew_approval_required` is always false, `needs_approval` is always empty and a crew member with hours reads as approved. The office's own approval mark is kept and still shown, but nothing waits for it.
-- Who still owes hours is the one crew population (`group_work_order_crew`, see `docs/group-work-order-crew.md`): an office admin booked to watch is not crew; a booked installer who has not joined still owes hours.
+- Who still owes hours is the one crew population (`group_work_order_crew`, see `docs/group-work-order-crew.md`): an office admin booked to watch is not crew; a booked installer who has not joined still owes hours. Since `20261111173000` only a booked person whose role is `crew` or `lead_installer` is added by the booking; office roles join themselves.
 - The automatic group sweep never adds back someone a `remove_participant` event took off the group.
 
 Client sign-off is unchanged.
@@ -394,3 +394,33 @@ bookings on the job who were not named must not hold the split. Migration
 - A void group's removals hold nobody off a later group.
 - `group_work_order_office` lists standing removals as `removed` (person,
   who removed them, when).
+
+## Bookings add installers only; a cancelled job's group is closed, 11 November 2026
+
+Owner: the group work order has to be "really simple, works". Migration
+`20261111173000_group_crew_installers_cancelled_close.sql`.
+
+- A booking puts a person on a group, and makes them owe hours, only when
+  their role is `crew` or `lead_installer`. An ops manager or estimator
+  booked on the job is not added by the sweep and does not hold the split.
+  If they work on site they tap Join (`join_group_work_order`, which still
+  needs a booking on the job unless they are staff) or the office adds them.
+- Nobody already on a group is taken off: a member of any role still counts
+  and still owes hours until the office removes them. An office removal
+  still wins over a booking and is not undone.
+- The `auto_issue_job_work_orders` sweep calls
+  `close_group_work_orders_on_cancelled_jobs` on every run (reply key
+  `groups_closed`). It voids an open group on a `cancelled` or `lost` job
+  only when nothing on it could be owed: not frozen, no client sign-off or
+  crew signature, no hours, no shares, nothing released, nobody booked on a
+  day up to today (Perth), and the job untouched for 7 days, so a job
+  cancelled by mistake and put back keeps its group. It logs a `void_group`
+  event with no actor and `automatic: true`. It touches no invoice and no
+  amount. Void is permanent, as for `void_group_work_order`.
+- Archived, complete and invoiced jobs keep their group: crew are still paid
+  from it after the job is filed.
+- Not changed: how a group gets opened. It still needs an approved, sealed,
+  priced job work order. A work order whose amount was typed in by hand is
+  never issued by the sweep; it waits for the named approver
+  (`approve_work_order`), and until then the patio job has no group and
+  ordinary hours on it are refused (`patio_pay_group_only_v1`).

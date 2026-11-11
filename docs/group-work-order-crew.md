@@ -6,9 +6,14 @@ person and refuses an unavailable or malformed read. It has no fallback
 which could silently call a group ready with an incomplete crew.
 
 The population contains distinct genuine allocations in the job's
-organisation, excluding cancelled rows, observers, ghosts and office admin
-watching allocations. A null legacy allocation status still counts. An
-office manager who is genuinely allocated remains eligible to install.
+organisation, excluding cancelled rows, observers and ghosts. A null legacy
+allocation status still counts. Since `20261111173000` a booking adds
+installers only: people whose role is `crew` or `lead_installer`. Before
+that any booked person who was not office admin was added, so an ops manager
+booked on a patio job was put on its group and the split then waited on
+hours they never log. An ops manager or estimator who works on site is still
+eligible: they tap Join on the job (or the office adds them), and from then
+on they are a member and count like anyone else.
 Since `20261106160000`, anyone already paid by the hour on the job is not
 crew either (see "Crew already paid by the hour" in
 `group-work-orders-v1.md`). Since `20261106170000`, an office removal from

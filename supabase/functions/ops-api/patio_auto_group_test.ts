@@ -3,6 +3,7 @@ import { findFenceProblem, isNormalWorkOrderPayLine, isOfficeFeeLine, isBilledHo
 import {
   autoGroupFenceJobs,
   autoGroupPatioJobs,
+  closeGroupsOnCancelledJobs,
   GROUP_WORK_ORDER_AUTO_FENCE_FLAG,
   GROUP_WORK_ORDER_AUTO_PATIO_FLAG,
   labourOutsidePool,
@@ -518,4 +519,38 @@ Deno.test("patio pay only through the group: what the crew are told", async () =
   assertEquals((await withAsk(hours("p-new")))?.code, "patio_pay_group_only");
   assertEquals((await withAsk(hours("p-grouped")))?.code, "patio_pay_group_only");
   assertEquals(asked, ["p-new"]);
+});
+
+Deno.test("cancelled jobs: the sweep asks the database to close their untouched groups, and never throws", async () => {
+  // The rule and the write live in close_group_work_orders_on_cancelled_jobs
+  // (PostgreSQL contract 20261111173000); this proves the call and the reply.
+  const world = (on: boolean, reply: { data: unknown; error: unknown } | Error) => {
+    const calls: { fn: string; args: unknown }[] = [];
+    const client = {
+      from: (_table: string) => ({
+        select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: { enabled: on }, error: null }) }) }),
+      }),
+      rpc: (fn: string, args?: unknown) => {
+        calls.push({ fn, args });
+        return reply instanceof Error ? Promise.reject(reply) : Promise.resolve(reply);
+      },
+    };
+    return { client, calls };
+  };
+  const closedOne = world(true, { data: { closed: [{ group_id: "g1", job_id: "j1" }, { group_id: "", job_id: "j2" }, null] }, error: null });
+  assertEquals(await closeGroupsOnCancelledJobs(closedOne.client), {
+    switched_on: true,
+    closed: 1,
+    results: [{ group_id: "g1", job_id: "j1" }],
+  });
+  assertEquals(closedOne.calls, [{ fn: "close_group_work_orders_on_cancelled_jobs", args: undefined }]);
+
+  const off = world(false, { data: { closed: [{ group_id: "g1", job_id: "j1" }] }, error: null });
+  assertEquals(await closeGroupsOnCancelledJobs(off.client), { switched_on: false, closed: 0, results: [] });
+  assertEquals(off.calls, []);
+
+  const missing = world(true, { data: null, error: { code: "42883", message: "no rpc" } });
+  assertEquals(await closeGroupsOnCancelledJobs(missing.client), { switched_on: true, closed: 0, results: [] });
+  const down = world(true, new Error("database down"));
+  assertEquals(await closeGroupsOnCancelledJobs(down.client), { switched_on: true, closed: 0, results: [] });
 });

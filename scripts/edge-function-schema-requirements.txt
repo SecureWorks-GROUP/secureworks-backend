@@ -1207,3 +1207,9 @@ ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|functi
 ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|function|revoke_job_deposit_gate_override
 send-po-email|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|table|job_deposit_gate_overrides
 send-po-email|supabase/migrations/20261106040518_scope_job_drafts.sql|table|scope_job_draft_invoices
+
+# Group crew follows installers, and a cancelled job's untouched group is
+# closed: the ops-api sweep calls the close on every run. Deployed ahead of
+# the migration the sweep only logs the missing function, but office roles
+# would still be added to groups by their bookings.
+ops-api|supabase/migrations/20261111173000_group_crew_installers_cancelled_close.sql|function|close_group_work_orders_on_cancelled_jobs

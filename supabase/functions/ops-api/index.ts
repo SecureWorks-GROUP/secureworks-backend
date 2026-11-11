@@ -822,7 +822,7 @@ import { markTradeInvoiceReadyForXero, resolveStuckTradeInvoice, STUCK_TRADE_INV
 import { TRADE_INVOICE_ROUTE_ACTIONS, TradeInvoiceStoreError, tradeInvoiceRefusal } from './trade_invoice_refusal.ts'
 import { officeSentBackNote, tradeInvoiceOfficeNote } from './trade_invoice_office_note.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
-import { autoGroupFenceJobs, autoGroupPatioJobs, openMissingFenceWorkOrders, openMissingPatioWorkOrders } from './patio_auto_group.ts'
+import { autoGroupFenceJobs, autoGroupPatioJobs, closeGroupsOnCancelledJobs, openMissingFenceWorkOrders, openMissingPatioWorkOrders } from './patio_auto_group.ts'
 import {
   assertAllInGroupInvoiceStandalone,
   assertGroupClientConfirmationBeforeCompletion,
@@ -10263,6 +10263,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const patioGroups = await autoGroupPatioJobs(client)
         // V8: fencing groups, same fence flag; never throws.
         const fenceGroups = await autoGroupFenceJobs(client)
+        // A cancelled or lost job's open group is closed when nothing on it
+        // could be owed (20261111173000). Touches no invoice; never throws.
+        const groupsClosed = await closeGroupsOnCancelledJobs(client)
         // Ready full-super groups go to Xero as drafts with no office click
         // (owner, 30 Oct 2026). A failure here never stops the work order sweep.
         const groupReleases: unknown[] = []
@@ -10275,7 +10278,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           groupReleases.push({ error: 'group release sweep failed' })
         }
         if (issueError) throw issueError
-        return json({ ...issued, group_releases: groupReleases, patio_drafts: patioDrafts, patio_groups: patioGroups, fence_drafts: fenceDrafts, fence_groups: fenceGroups })
+        return json({ ...issued, group_releases: groupReleases, patio_drafts: patioDrafts, patio_groups: patioGroups, fence_drafts: fenceDrafts, fence_groups: fenceGroups, groups_closed: groupsClosed })
       }
       // Blank and draft job work orders for the office. The queue is a read.
       // Fill and approve stay named-approver writes. Line review is any
