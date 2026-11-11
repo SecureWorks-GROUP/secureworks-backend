@@ -4,7 +4,6 @@
 -- recorded. This table is that record and nothing else: the gate itself is
 -- ops-api/job_start_deposits.ts. One live override per job; a revoke is the
 -- only change a row ever takes, and it is one way.
-BEGIN;
 
 CREATE TABLE IF NOT EXISTS public.job_deposit_gate_overrides (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -148,5 +147,3 @@ REVOKE ALL ON FUNCTION public.revoke_job_deposit_gate_override(uuid, uuid, text)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.grant_job_deposit_gate_override(uuid, uuid, text, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.revoke_job_deposit_gate_override(uuid, uuid, text) TO service_role;
-
-COMMIT;
