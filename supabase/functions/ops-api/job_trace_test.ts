@@ -9,6 +9,7 @@ import {
   buildCrewLinesLink,
   buildInvoicesLink,
   buildOrdersLink,
+  buildRevisionAgreement,
   buildSupplierBillsLink,
   buildWorkOrderLink,
   figureFree,
@@ -308,7 +309,14 @@ Deno.test("SWF-26979 (DSP-10 hand trace, simulated): every link matches, and the
   );
   assertEquals(out.status, 200);
   const body: any = out.body;
-  assertEquals(body.version, "job-trace-v1");
+  assertEquals(body.version, "job-trace-v2");
+  // The costs name the accepted revision; the sent quote predates the column.
+  assertEquals(body.revisions.state, "partial");
+  assertEquals(body.revisions.reason, "revision_not_named");
+  assertEquals(
+    body.revisions.items.map((i: any) => [i.kind, i.state]),
+    [["job_costs", "agrees"], ["sent_quote", "not_named"]],
+  );
   assertEquals(body.first_gap, {
     link: "L2",
     name: "material_lines",
@@ -427,6 +435,7 @@ Deno.test("the trace only reads, and reads only the tables it names", async () =
   assertEquals(tables, [
     "context_ledger_generations",
     "context_ledger_items",
+    "dispatch_v2_scope_fills",
     "job_contacts",
     "job_material_lines",
     "job_materials_facts",
@@ -436,6 +445,7 @@ Deno.test("the trace only reads, and reads only the tables it names", async () =
     "purchase_orders",
     "quote_builder_versions",
     "quote_revisions",
+    "scope_job_draft_sets",
     "scope_revisions",
     "trade_invoice_lines",
     "trade_invoices",
@@ -659,4 +669,171 @@ Deno.test("figureFree drops amounts at any depth and nothing else", () => {
     }),
     { a: 1, items: [{ k: "v" }] },
   );
+});
+
+// ── Revision agreement (RQ-19.d) ────────────────────────────────────────
+
+const REV2 = "a7100000-0000-4000-8000-0000000000a3";
+const OTHER_JOB_REV = "a7100000-0000-4000-8000-0000000000a9";
+const WO = "a7100000-0000-4000-8000-0000000000f1";
+
+function revRow(id: string, n: number, status: string, frozenAt: string) {
+  return { id, revision_number: n, status, frozen_at: frozenAt };
+}
+
+const TWO_REVISIONS = [
+  revRow(REV, 1, "superseded", "2026-09-01T02:40:00+00:00"),
+  revRow(REV2, 2, "frozen", "2026-09-03T02:40:00+00:00"),
+];
+
+const ACCEPTED_JOB = {
+  id: JOB,
+  status: "accepted",
+  accepted_at: "2026-09-04T00:00:00+00:00",
+  accepted_scope_revision_id: REV2,
+};
+
+function allOn(rev: string): any {
+  return {
+    quotes: [
+      {
+        id: "q1",
+        sent_at: "2026-09-02T00:00:00+00:00",
+        scope_revision_id: REV,
+      },
+      {
+        id: "q2",
+        sent_at: "2026-09-03T05:00:00+00:00",
+        scope_revision_id: rev,
+      },
+    ],
+    workOrders: [{ id: WO, quote_filled_scope_revision_id: rev }],
+    materialLines: [
+      { id: "l1", source_kind: "fence_scope_revision", source_version_id: rev },
+      { id: "l2", source_kind: "fence_scope_revision", source_version_id: rev },
+      { id: "l3", source_kind: "manual", source_version_id: null },
+    ],
+    fills: [{ job_id: JOB, scope_revision_id: rev }],
+    draftSets: [{
+      job_id: JOB,
+      scope_revision_id: rev,
+      acceptance_scope_revision_id: rev,
+    }],
+  };
+}
+
+Deno.test("revisions: every record names the accepted revision, and only the newest sent quote counts", () => {
+  const out: any = buildRevisionAgreement(
+    ACCEPTED_JOB,
+    TWO_REVISIONS,
+    allOn(REV2),
+  );
+  assertEquals(out.state, "agree");
+  assertEquals(out.reason, null);
+  assertEquals(out.accepted, {
+    row_id: REV2,
+    revision_number: 2,
+    source: "accepted_revision",
+  });
+  assertEquals(out.items.map((i: any) => [i.kind, i.state]), [
+    ["job_costs", "agrees"],
+    ["sent_quote", "agrees"],
+    ["job_work_order", "agrees"],
+    ["dispatch_fill", "agrees"],
+    ["material_lines", "agrees"],
+    ["scope_job_drafts", "agrees"],
+    ["scope_job_drafts_acceptance", "agrees"],
+  ]);
+  // The older quote (revision 1) is not listed; the hand-added line is not.
+  assertEquals(out.items[1].row_id, "q2");
+  assertEquals(out.items[4].line_count, 2);
+});
+
+Deno.test("revisions: a work order filled from an older revision differs", () => {
+  const sources = allOn(REV2);
+  sources.workOrders = [{ id: WO, quote_filled_scope_revision_id: REV }];
+  const out: any = buildRevisionAgreement(ACCEPTED_JOB, TWO_REVISIONS, sources);
+  assertEquals(out.state, "differs");
+  assertEquals(out.reason, "revision_differs");
+  const wo = out.items.find((i: any) => i.kind === "job_work_order");
+  assertEquals([wo.state, wo.revision_number], ["differs", 1]);
+});
+
+Deno.test("revisions: a record naming another job's revision is not on this job", () => {
+  const sources = allOn(REV2);
+  sources.materialLines.push({
+    id: "l4",
+    source_kind: "patio_scope_revision",
+    source_version_id: OTHER_JOB_REV,
+  });
+  const out: any = buildRevisionAgreement(ACCEPTED_JOB, TWO_REVISIONS, sources);
+  assertEquals(out.state, "differs");
+  assertEquals(out.reason, "revision_not_on_job");
+  const lines = out.items.filter((i: any) => i.kind === "material_lines");
+  assertEquals(lines.map((i: any) => [i.state, i.line_count]), [
+    ["agrees", 2],
+    ["not_on_job", 1],
+  ]);
+});
+
+Deno.test("revisions: a record made before it kept the revision is not named, and the answer is partial", () => {
+  const sources = allOn(REV2);
+  sources.fills = [{ job_id: JOB, scope_revision_id: null }];
+  const out: any = buildRevisionAgreement(ACCEPTED_JOB, TWO_REVISIONS, sources);
+  assertEquals(out.state, "partial");
+  assertEquals(out.reason, "revision_not_named");
+  assertEquals(
+    out.items.find((i: any) => i.kind === "dispatch_fill").state,
+    "not_named",
+  );
+});
+
+Deno.test("revisions: with none accepted, records naming two revisions differ; one revision is only unchecked", () => {
+  const job = { id: JOB, status: "quoted", accepted_at: null };
+  const revs = [revRow(REV, 1, "superseded", "2026-09-01T00:00:00+00:00")];
+  const one: any = buildRevisionAgreement(job, revs, {
+    quotes: [{
+      id: "q1",
+      sent_at: "2026-09-01T01:00:00+00:00",
+      scope_revision_id: REV,
+    }],
+    workOrders: [],
+    materialLines: [],
+    fills: [],
+    draftSets: [],
+  });
+  assertEquals(one.state, "no_accepted_revision");
+  assertEquals(one.accepted, null);
+  assertEquals(one.items.map((i: any) => i.state), ["not_named", "named"]);
+  const two: any = buildRevisionAgreement(job, TWO_REVISIONS, {
+    quotes: [{
+      id: "q1",
+      sent_at: "2026-09-01T01:00:00+00:00",
+      scope_revision_id: REV,
+    }],
+    workOrders: [{ id: WO, quote_filled_scope_revision_id: REV2 }],
+    materialLines: [],
+    fills: [],
+    draftSets: [],
+  });
+  assertEquals(two.state, "differs");
+  assertEquals(two.notes, ["revision_differs", "no_accepted_revision"]);
+});
+
+Deno.test("revisions: a failed revision read makes the block unknown and leaves every link as it was", async () => {
+  const ok: any = (await jobTraceAction(
+    fakeClient(swf26979Tables()),
+    new URLSearchParams("job_number=SWF-26979"),
+    "staff",
+  )).body;
+  const failed: any = (await jobTraceAction(
+    fakeClient(swf26979Tables(), { dispatch_v2_scope_fills: "timeout" }),
+    new URLSearchParams("job_number=SWF-26979"),
+    "staff",
+  )).body;
+  assertEquals(failed.revisions.state, "unknown");
+  assertEquals(failed.revisions.reason, "read_failed");
+  assert(String(failed.revisions.error).includes("timeout"));
+  assertEquals(failed.links, ok.links);
+  assertEquals(failed.first_gap, ok.first_gap);
 });

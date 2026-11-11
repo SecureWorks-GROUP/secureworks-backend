@@ -177,7 +177,7 @@ fi
 # or job_id is refused before any read.
 if [[ "$action" == "job_trace" ]]; then
   if printf '%s' "$url" | grep -qE '[?&](job_id|job_number)='; then
-    printf '%s\n' '{"ok":true,"version":"job-trace-v1","links":[]}'
+    printf '%s\n' '{"ok":true,"version":"job-trace-v2","links":[]}'
   else
     printf '%s\n' '{"error":"job_number or job_id required"}'
   fi

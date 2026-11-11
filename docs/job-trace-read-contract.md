@@ -1,4 +1,4 @@
-# Job trace read contract (`job-trace-v1`)
+# Job trace read contract (`job-trace-v2`)
 
 ops-api `job_trace` (Integrated Job Framework INT-34, requirement R-24) is the one read every integration acceptance is checked with. It takes one job and returns its chain link by link, with each link's key, row ids and state, and names the **first missing link** with a reason code. Code: `supabase/functions/ops-api/job_trace.ts`. Tests: `job_trace_test.ts`. Recorded answer: `docs/job-trace-recorded-answers.json`.
 
@@ -33,13 +33,28 @@ The trace never computes a figure. The scope revision is read without its canoni
 
 Item states: L3 `sent`, `not_sent`, `send_unknown`, `legacy`; L4 `placed`, `not_placed`, `linked_no_fact`, `assigned`; L6 `billed`, `held`, `not_in_xero`; L7 `draft`, `owing`, `paid`. A bill's `found_via` says how the trace found it (`materials_fact`, `xero_copy_job_link`, `named_by_po_reference`, `queue_suggestion`): a bill named only by a PO's reference is a lead the trace reports, never a placement. A crew bill mirror (`trade_invoices.xero_bill_id`) is never read as a supplier bill.
 
+## Revision agreement (RQ-19.d, since `job-trace-v2`)
+
+Beside the links, `revisions` says whether every record that keeps a scope revision names the accepted one (found by the L1 rule) and one of this job's own. It reads each record's own revision column in reads of its own, so a missing column makes only this block `unknown`, never a link:
+
+| Item `kind` | Read from |
+|---|---|
+| `job_costs` | `jobs.expected_costs->>scope_revision_id` (the Job Profit baseline) |
+| `sent_quote` | `quote_revisions.scope_revision_id`, the newest sent quote only (an older one may rightly name an older revision) |
+| `job_work_order` | `work_orders.quote_filled_scope_revision_id`, kind `job` |
+| `dispatch_fill` | `dispatch_v2_scope_fills.scope_revision_id` |
+| `material_lines` | `job_material_lines.source_version_id` on lines whose `source_kind` is `fence_scope_revision` or `patio_scope_revision`, one item per revision with `line_count` |
+| `scope_job_drafts`, `scope_job_drafts_acceptance` | `scope_job_draft_sets.scope_revision_id`, `.acceptance_scope_revision_id` |
+
+Item states: `agrees`, `differs`, `not_on_job` (a revision of another job), `not_named` (the record was made before it kept the revision), `named` (no accepted revision to check against). Block `state`: `agree`; `partial` (`revision_not_named`); `differs` (`revision_not_on_job`, `revision_differs`; with none accepted, records naming two revisions differ); `no_accepted_revision`; `unknown` (`read_failed`). Ids and revision numbers only, never a figure. It does not move `first_gap`.
+
 ## The first gap
 
 `first_gap` is the first link that is `missing`, or `unknown` if a link before it could not be read (a failed read is `unknown` with `reason: read_failed` and an `error`, never `missing`). A `partial` link is reported but does not break the chain. Every code and its meaning is in the answer's `reasons`.
 
 ## Limits
 
-Each read takes at most 500 rows (a link that hits it says `truncated: true`). The trace makes two rounds of parallel reads and at most one more (the queue rows for bills a PO names). Not measured against the edge time limit on production: that is an acceptance step after deploy.
+Each read takes at most 500 rows (a link that hits it says `truncated: true`). The trace makes two rounds of parallel reads (round 1 also holds the five revision reads) and at most one more (the queue rows for bills a PO names). Not measured against the edge time limit on production: that is an acceptance step after deploy.
 
 ## Changing it
 

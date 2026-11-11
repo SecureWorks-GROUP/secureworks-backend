@@ -10,6 +10,10 @@
 //   L6 crew_lines      crew pay lines and their Xero bills
 //   L7 invoices        customer invoices and payments, per paying party
 //   L8 card            the job card's live reading and the H7 bill outcome
+// Beside the links, `revisions` (RQ-19.d) says whether every record that
+// names a scope revision (the job's costs, the newest sent quote, the job
+// work order, the Dispatch fill and its material lines, the scope job drafts)
+// names the accepted revision, and one of this job's own.
 // Each link carries its key, its row ids and its state, and the answer names
 // the first missing link with a reason code. It is the one read every
 // integration acceptance is checked with, so it never computes a money
@@ -21,7 +25,7 @@
 
 import { JOB_WORK_ORDER_OPEN_STATUSES } from "./job_work_order_quote_fill.ts";
 
-export const JOB_TRACE_VERSION = "job-trace-v1";
+export const JOB_TRACE_VERSION = "job-trace-v2";
 
 export type LinkState =
   | "present"
@@ -86,6 +90,14 @@ export const JOB_TRACE_REASONS = {
     "A paying party on the job has no customer invoice of its own.",
   no_live_card_reading:
     "The job card has no live reading (no live ledger generation).",
+  revision_differs:
+    "A record names a scope revision that is not the accepted one (or, with none accepted, the records name different revisions).",
+  revision_not_on_job:
+    "A record names a scope revision that is not one of this job's revisions.",
+  revision_not_named:
+    "A record that should name a scope revision names none (made before it kept the revision).",
+  no_accepted_revision:
+    "No accepted scope revision is on record, so the named revisions cannot be checked against it.",
   h7_not_released:
     "The H7 bill outcome reader is not on main (backend drafts #1129 and #1141), so the card shows no bill outcome yet.",
 } as const;
@@ -182,12 +194,10 @@ function uniq(values: unknown[]): string[] {
 // accepted_at, else (an open job with no acceptance stamp) the newest still
 // frozen. Only ids, statuses and hashes are read, never the canonical text.
 
-export function buildQuoteLink(
+export function acceptedScopeRevision(
   job: any,
   revisions: any[],
-  sentQuotes: any[],
-  builderQuotes: any[],
-): TraceLink {
+): { row: any; source: string } | null {
   const accepted = typeof job.accepted_at === "string" && job.accepted_at
     ? job.accepted_at
     : null;
@@ -217,6 +227,25 @@ export function buildQuoteLink(
       null;
     if (chosen) source = "latest_frozen_revision";
   }
+  return chosen && source ? { row: chosen, source } : null;
+}
+
+export function buildQuoteLink(
+  job: any,
+  revisions: any[],
+  sentQuotes: any[],
+  builderQuotes: any[],
+): TraceLink {
+  const accepted = typeof job.accepted_at === "string" && job.accepted_at
+    ? job.accepted_at
+    : null;
+  const recorded = typeof job.accepted_scope_revision_id === "string"
+    ? job.accepted_scope_revision_id
+    : null;
+  const open = JOB_WORK_ORDER_OPEN_STATUSES.has(String(job.status || ""));
+  const pick = acceptedScopeRevision(job, revisions);
+  const chosen = pick?.row ?? null;
+  const source = pick?.source ?? null;
 
   const sent = sentQuotes.filter((q) => q.sent_at);
   const issued = builderQuotes.filter((q) => q.status === "issued");
@@ -266,6 +295,188 @@ export function buildQuoteLink(
     );
   }
   return link("L1", "quote", "missing", "no_accepted_quote", items);
+}
+
+// ── Revision agreement (RQ-19.d) ────────────────────────────────────────
+//
+// Every record that keeps the scope revision it was made from, read by its
+// own column, set beside the accepted revision (the same rule as L1). Only
+// the newest sent quote counts: an older one may rightly name an older
+// revision. A record with no revision is listed as not named: it breaks no
+// agreement but makes it partial. Ids only, never a figure. States: agree,
+// partial, differs, no_accepted_revision, unknown (a read failed).
+
+export const MATERIAL_LINE_REVISION_KINDS = new Set([
+  "fence_scope_revision",
+  "patio_scope_revision",
+]);
+
+export type RevisionSources = {
+  quotes: any[];
+  workOrders: any[];
+  materialLines: any[];
+  fills: any[];
+  draftSets: any[];
+};
+
+type Named = {
+  kind: string;
+  row_id: string | null;
+  id: unknown;
+  count?: number;
+};
+
+export function buildRevisionAgreement(
+  job: any,
+  revisions: any[],
+  sources: RevisionSources,
+): Record<string, unknown> {
+  const pick = acceptedScopeRevision(job, revisions);
+  const byId = new Map(revisions.map((r) => [r.id, r]));
+  const named: Named[] = [];
+
+  named.push({
+    kind: "job_costs",
+    row_id: job.id,
+    id: job.accepted_scope_revision_id,
+  });
+  const newestSent = sources.quotes.filter((q) => q.sent_at)
+    .sort((a, b) => String(b.sent_at).localeCompare(String(a.sent_at)))[0];
+  if (newestSent) {
+    named.push({
+      kind: "sent_quote",
+      row_id: newestSent.id,
+      id: newestSent.scope_revision_id,
+    });
+  }
+  for (const w of sources.workOrders) {
+    named.push({
+      kind: "job_work_order",
+      row_id: w.id,
+      id: w.quote_filled_scope_revision_id,
+    });
+  }
+  for (const f of sources.fills) {
+    named.push({
+      kind: "dispatch_fill",
+      row_id: f.job_id,
+      id: f.scope_revision_id,
+    });
+  }
+  const lineGroups = new Map<string, number>();
+  for (const l of sources.materialLines) {
+    if (!MATERIAL_LINE_REVISION_KINDS.has(String(l.source_kind || ""))) {
+      continue;
+    }
+    const key = typeof l.source_version_id === "string"
+      ? l.source_version_id
+      : "";
+    lineGroups.set(key, (lineGroups.get(key) ?? 0) + 1);
+  }
+  for (
+    const [key, count] of [...lineGroups].sort(([a], [b]) => a.localeCompare(b))
+  ) {
+    named.push({
+      kind: "material_lines",
+      row_id: null,
+      id: key || null,
+      count,
+    });
+  }
+  for (const d of sources.draftSets) {
+    named.push({
+      kind: "scope_job_drafts",
+      row_id: d.job_id,
+      id: d.scope_revision_id,
+    });
+    if (d.acceptance_scope_revision_id != null) {
+      named.push({
+        kind: "scope_job_drafts_acceptance",
+        row_id: d.job_id,
+        id: d.acceptance_scope_revision_id,
+      });
+    }
+  }
+
+  const accepted = pick?.row ?? null;
+  const notes = new Set<string>();
+  const items = named.map((n) => {
+    const id = typeof n.id === "string" && n.id ? n.id : null;
+    const rev = id ? byId.get(id) : undefined;
+    let state: string;
+    if (!id) {
+      state = "not_named";
+      if (n.kind !== "job_costs" || accepted) notes.add("revision_not_named");
+    } else if (!rev) {
+      state = "not_on_job";
+      notes.add("revision_not_on_job");
+    } else if (accepted) {
+      state = id === accepted.id ? "agrees" : "differs";
+      if (state === "differs") notes.add("revision_differs");
+    } else {
+      state = "named";
+    }
+    const item: Record<string, unknown> = {
+      kind: n.kind,
+      row_id: n.row_id,
+      scope_revision_id: id,
+      revision_number: rev?.revision_number ?? null,
+      state,
+    };
+    if (n.count !== undefined) item.line_count = n.count;
+    return item;
+  });
+
+  if (!accepted) {
+    const ids = new Set(
+      items.filter((i) => i.state === "named").map((i) => i.scope_revision_id),
+    );
+    if (ids.size > 1) {
+      notes.add("revision_differs");
+      for (const i of items) if (i.state === "named") i.state = "differs";
+    }
+    notes.add("no_accepted_revision");
+  }
+
+  const order = [
+    "revision_not_on_job",
+    "revision_differs",
+    "no_accepted_revision",
+    "revision_not_named",
+  ];
+  const codes = order.filter((c) => notes.has(c));
+  const state = codes.includes("revision_not_on_job") ||
+      codes.includes("revision_differs")
+    ? "differs"
+    : !accepted
+    ? "no_accepted_revision"
+    : codes.length
+    ? "partial"
+    : "agree";
+  return {
+    state,
+    reason: state === "agree" ? null : codes[0],
+    notes: codes,
+    accepted: accepted
+      ? {
+        row_id: accepted.id,
+        revision_number: accepted.revision_number ?? null,
+        source: pick!.source,
+      }
+      : null,
+    items,
+  };
+}
+
+function unknownRevisionAgreement(errors: string[]): Record<string, unknown> {
+  return {
+    state: "unknown",
+    reason: "read_failed",
+    notes: [],
+    accepted: null,
+    items: [],
+    error: errors.join("; "),
+  };
 }
 
 // ── L2 · material lines ─────────────────────────────────────────────────
@@ -739,6 +950,11 @@ export async function jobTraceAction(
     invoices,
     parties,
     generations,
+    revQuotes,
+    revWorkOrders,
+    revLines,
+    revFills,
+    revDraftSets,
   ] = await Promise.all([
     read(
       client.from("scope_revisions")
@@ -837,6 +1053,34 @@ export async function jobTraceAction(
         .select("id, status, reader, promoted_at, evidence_until")
         .eq("job_id", jobId).eq("status", "live").limit(2),
       "context_ledger_generations",
+    ),
+    // Revision agreement: own reads, so a missing column touches no link.
+    read(
+      client.from("quote_revisions").select("id, sent_at, scope_revision_id")
+        .eq("job_id", jobId).limit(ROW_LIMIT),
+      "quote_revisions (revision)",
+    ),
+    read(
+      client.from("work_orders").select("id, quote_filled_scope_revision_id")
+        .eq("job_id", jobId).eq("kind", "job").limit(ROW_LIMIT),
+      "work_orders (revision)",
+    ),
+    read(
+      client.from("job_material_lines")
+        .select("id, source_kind, source_version_id")
+        .eq("job_id", jobId).limit(ROW_LIMIT),
+      "job_material_lines (revision)",
+    ),
+    read(
+      client.from("dispatch_v2_scope_fills").select("job_id, scope_revision_id")
+        .eq("job_id", jobId).limit(ROW_LIMIT),
+      "dispatch_v2_scope_fills",
+    ),
+    read(
+      client.from("scope_job_draft_sets")
+        .select("job_id, scope_revision_id, acceptance_scope_revision_id")
+        .eq("job_id", jobId).limit(ROW_LIMIT),
+      "scope_job_draft_sets",
     ),
   ]);
 
@@ -1000,6 +1244,28 @@ export async function jobTraceAction(
     ),
   ];
 
+  const revisionReads = [
+    revisions,
+    revQuotes,
+    revWorkOrders,
+    revLines,
+    revFills,
+    revDraftSets,
+  ];
+  const revisionErrors = errs(...revisionReads);
+  const revisionAgreement = revisionErrors.length
+    ? unknownRevisionAgreement(revisionErrors)
+    : buildRevisionAgreement(job, revisions.rows, {
+      quotes: revQuotes.rows,
+      workOrders: revWorkOrders.rows,
+      materialLines: revLines.rows,
+      fills: revFills.rows,
+      draftSets: revDraftSets.rows,
+    });
+  if (revisionReads.some((r) => r.truncated)) {
+    revisionAgreement.truncated = true;
+  }
+
   const body: Record<string, unknown> = {
     ok: true,
     version: JOB_TRACE_VERSION,
@@ -1013,6 +1279,7 @@ export async function jobTraceAction(
     },
     first_gap: firstGap(links),
     links,
+    revisions: revisionAgreement,
     reasons: JOB_TRACE_REASONS,
   };
   return { status: 200, body: view === "staff" ? body : figureFree(body) };
