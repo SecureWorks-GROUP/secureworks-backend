@@ -8,7 +8,8 @@
 //   supabase/functions/send-po-email/send_po_email_test.ts
 // ════════════════════════════════════════════════════════════
 
-import { _verifyPoEmailRecipient } from "./index.ts"
+import { _holdPoEmailForDeposits, _verifyPoEmailRecipient } from "./index.ts"
+import { JobStartDepositError } from "../ops-api/job_start_deposits.ts"
 
 interface StubFixtures {
   po?: any | null;
@@ -206,4 +207,41 @@ Deno.test("PO.12b: an order with no source still sends as before", async () => {
   const { client } = makeStubClient({ po: { ...SAMPLE_PO, source: null }, supplier: SAMPLE_SUPPLIER })
   const r = await _verifyPoEmailRecipient({ client }, { po_id: "po1" })
   if (!r.ok) throw new Error(`expected ok, got ${r.response.status}`)
+})
+
+// ── RQ-19.e: the deposit gate holds a real send ──────────────────────────
+
+Deno.test("deposit gate: a held job sends nothing and answers 409 with the reason", async () => {
+  const calls: unknown[][] = []
+  const held = await _holdPoEmailForDeposits({}, "job-1", false, (_c: any, jobId: string, purpose?: any) => {
+    calls.push([jobId, purpose])
+    return Promise.reject(new JobStartDepositError("job_deposits_unpaid", ["party_without_deposit:B"], purpose))
+  })
+  if (!held) throw new Error("a held job was not refused")
+  const body = await held.json()
+  if (held.status !== 409 || body.code !== "job_deposits_unpaid" || body.success !== false) {
+    throw new Error(`unexpected refusal: ${held.status} ${JSON.stringify(body)}`)
+  }
+  if (!String(body.error).startsWith("Materials cannot be ordered")) throw new Error(body.error)
+  if (JSON.stringify(calls) !== JSON.stringify([["job-1", "materials"]])) throw new Error(JSON.stringify(calls))
+})
+
+Deno.test("deposit gate: a paid job, a dry run and a PO with no job go on", async () => {
+  let called = 0
+  const open = () => { called++; return Promise.resolve() }
+  if (await _holdPoEmailForDeposits({}, "job-1", false, open) !== null) throw new Error("paid job held")
+  if (await _holdPoEmailForDeposits({}, "job-1", true, open) !== null) throw new Error("dry run held")
+  if (await _holdPoEmailForDeposits({}, null, false, open) !== null) throw new Error("no-job PO held")
+  if (called !== 1) throw new Error(`gate called ${called} times`)
+})
+
+Deno.test("deposit gate: the serve path checks the gate before the PDF fetch and the Resend send", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url))
+  const serveAt = source.indexOf("if (import.meta.main) serve(")
+  const gateAt = source.indexOf("await _holdPoEmailForDeposits(", serveAt)
+  const resendAt = source.indexOf("https://api.resend.com/emails", serveAt)
+  const verifyAt = source.indexOf("await _verifyPoEmailRecipient(", serveAt)
+  if (!(serveAt > 0 && verifyAt > serveAt && gateAt > verifyAt && resendAt > gateAt)) {
+    throw new Error(`gate out of order: serve ${serveAt} verify ${verifyAt} gate ${gateAt} resend ${resendAt}`)
+  }
 })

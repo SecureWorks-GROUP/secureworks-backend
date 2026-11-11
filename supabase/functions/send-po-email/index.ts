@@ -52,6 +52,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { canonicalJobRef, poEmailReferenceBanner } from '../_shared/po_reference.ts'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { dispatchPoRefusal, isDispatchPurchaseOrder } from '../_shared/dispatch_po_guard.ts'
+import { assertJobDepositsBeforeWork, JobStartDepositError } from '../ops-api/job_start_deposits.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -212,6 +213,29 @@ export async function _verifyPoEmailRecipient(
 }
 
 // Only start the HTTP server when this module is the entry point — lets the
+// RQ-19.e: no order reaches a supplier before every paying party has accepted
+// and paid, or the owner or office recorded an override (ops-api
+// job_start_deposits.ts, the one gate). A dry run sends nothing and is not
+// held; a purchase order with no job has no deposits to wait for. Returns the
+// refusal to send back, or null to go on.
+export async function _holdPoEmailForDeposits(
+  client: any,
+  jobId: string | null,
+  dryRun: boolean,
+  gate: typeof assertJobDepositsBeforeWork = assertJobDepositsBeforeWork,
+): Promise<Response | null> {
+  if (dryRun || !jobId) return null
+  try {
+    await gate(client, jobId, 'materials')
+    return null
+  } catch (err) {
+    if (err instanceof JobStartDepositError) {
+      return json({ success: false, error: err.message, code: err.code, reasons: err.reasons }, err.status)
+    }
+    throw err
+  }
+}
+
 // test file import `_verifyPoEmailRecipient` without spinning up the server
 // (mirrors the ops-api `if (import.meta.main) serve(...)` pattern).
 if (import.meta.main) serve(async (req: Request) => {
@@ -267,6 +291,11 @@ if (import.meta.main) serve(async (req: Request) => {
     const po = verify.poRow
     // Inherit PO's job_id if caller omitted it
     if (!job_id) job_id = verify.verifiedJobId
+    // RQ-19.e: no order reaches a supplier before every paying party has
+    // accepted and paid, or the owner or office recorded an override. A dry
+    // run sends nothing, so it is not held.
+    const held = await _holdPoEmailForDeposits(sb, verify.verifiedJobId || job_id || null, !!dry_run)
+    if (held) return held
     // Use the canonical supplier email; reject silently overrides any caller value
     // because verify() already enforced equality (or accepted absence).
     const verifiedToEmail = verify.finalToEmail

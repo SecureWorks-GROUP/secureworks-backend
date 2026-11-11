@@ -319,6 +319,7 @@ import {
 } from './job_bookings.ts'
 import { fencingExecutionEvidenceFromPipelineRows } from './fencing_stage_evidence.ts'
 import { assertJobDepositsBeforeWork, isInstallationAssignment, JobStartDepositError } from './job_start_deposits.ts'
+import { DepositGateOverrideError, overrideJobDepositGate, readJobDepositGate, revokeJobDepositGateOverride } from './job_deposit_gate_override.ts'
 import {
   deriveFencingStageV1,
   fencingStageTruthFields,
@@ -10063,6 +10064,36 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json(await setDispatchInstallConfirmed(client, body, installActor, DEFAULT_ORG_ID, _perthTodayYmd()))
         } catch (e) {
           if (e instanceof DispatchStageWriteError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // RQ-19.e deposit gate (job_deposit_gate_override.ts). The read is for
+      // staff sessions and the ops key; an override or its revoke is a
+      // person's act, so only a signed-in admin, owner or ops manager, never
+      // the ops key, an agent or a routine. Absent from ROUTINE_ALLOWED_ACTIONS
+      // and AGENT_READ_ALLOWED_ACTIONS.
+      case 'job_deposit_gate':
+      case 'override_job_deposit_gate':
+      case 'revoke_job_deposit_gate_override': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires a staff session`, code: 'operator_access_required' }, 403)
+        }
+        const gatePerson = {
+          session: authMode === 'jwt',
+          userId: authMode === 'jwt' ? authUser?.id || null : null,
+          role: authMode === 'jwt' ? authUser?.role || null : null,
+        }
+        try {
+          if (action === 'job_deposit_gate') {
+            if (req.method !== 'GET') throw new ApiError(`${action} requires GET`, 405)
+            return json(await readJobDepositGate(client, url.searchParams))
+          }
+          if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+          return json(action === 'override_job_deposit_gate'
+            ? await overrideJobDepositGate(client, body, gatePerson)
+            : await revokeJobDepositGateOverride(client, body, gatePerson))
+        } catch (e) {
+          if (e instanceof DepositGateOverrideError) throw new ApiError(e.message, e.status, e.body)
           throw e
         }
       }
@@ -38514,6 +38545,9 @@ async function emailPO(client: any, body: any) {
     throw new ApiError(refusal.message, refusal.status, refusal.body)
   }
   if (!po.xero_po_id) throw new Error('PO has not been synced to Xero yet. Call sw_push_po_to_xero first, then sw_email_po.')
+  // RQ-19.e: no order reaches a supplier before every paying party has
+  // accepted and paid, or the owner or office recorded an override.
+  if (po.job_id) await assertJobDepositsBeforeWork(client, po.job_id, 'materials')
 
   const { accessToken, tenantId } = await getToken(client)
   await xeroPost(`/PurchaseOrders/${po.xero_po_id}/Email`, accessToken, tenantId, {}, 'POST')

@@ -24,6 +24,7 @@ import {
 import type { DispatchTransportAnswer } from "./dispatch_order_send.ts";
 import type { DispatchOrderPdfInput } from "./dispatch_order_pdf.ts";
 import { sha256Hex } from "./dispatch_orders.ts";
+import { JobStartDepositError } from "./job_start_deposits.ts";
 
 // index.ts reads SUPABASE_URL and the service key into module constants, so
 // they are set before it is imported (a closed local port) and restored.
@@ -1139,6 +1140,8 @@ function ctx(
     transport: t.fn,
     renderPdf: fakePdf,
     now: () => db.tick(),
+    // Every fixture job has its deposits paid unless a test says otherwise.
+    depositGate: () => Promise.resolve(),
     ...over,
   };
 }
@@ -1975,6 +1978,36 @@ Deno.test("send: a press sends exactly the draft shown, once, then files it on t
     "order_sent",
   );
   assertOnlyAllowedTouches(db);
+});
+
+Deno.test("send: a job held by the deposit gate sends nothing and claims nothing (RQ-19.e)", async () => {
+  const db = withLines();
+  const draft = await readyDraft(db);
+  const t = transport();
+  const gateCalls: unknown[][] = [];
+  const held = ctx(db, t, {
+    depositGate: (_client, jobId, purpose) => {
+      gateCalls.push([jobId, purpose]);
+      return Promise.reject(
+        new JobStartDepositError("job_deposits_unpaid", ["party_without_deposit:B"], purpose),
+      );
+    },
+  });
+  const err = await assertRejects(
+    () =>
+      call(db, "dispatch_order_send", {
+        draft_id: draft.id,
+        expected_draft_hash: draft.draft_hash,
+      }, held),
+    JobStartDepositError,
+  );
+  assertEquals([err.code, err.status, err.reasons], ["job_deposits_unpaid", 409, ["party_without_deposit:B"]]);
+  assert(err.message.startsWith("Materials cannot be ordered"));
+  assertEquals(gateCalls, [[db.tables.job_order_emails[0].job_id, "materials"]]);
+  assertEquals(t.calls.length, 0);
+  assertEquals(db.tables.job_order_emails[0].status, "draft");
+  assertEquals(orderRow(db, "PO-1000001").status === "sent", false);
+  assertEquals(db.tables.po_communications?.length ?? 0, 0);
 });
 
 Deno.test("send: a stale hash, an edited draft or a changed contact address sends nothing", async () => {
