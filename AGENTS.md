@@ -4638,7 +4638,7 @@ own invoices priced on `employer_12_v2` (paid in full, company pays the whole
 setting row in `super_basis_setting_id`. A group share always keeps its group's
 pay basis; the stand-alone work-order invoice stays on the ordinary split. A
 new place that prices a trade's own invoice must ask that module, and
-`20261111173000_trade_super_on_top.sql` must be applied before the matching
+`20261111203000_trade_super_on_top.sql` must be applied before the matching
 `ops-api`. New rows must carry `gst_on`,
 `super_rate`, `super_amount`, `gross_earned`, and `net_pay`; legacy NULL rows
 must fail closed on Xero retry rather than inventing history. Apply

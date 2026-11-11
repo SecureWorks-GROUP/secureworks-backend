@@ -1,4 +1,4 @@
--- Down for 20261111173000_trade_super_on_top.sql.
+-- Down for 20261111203000_trade_super_on_top.sql.
 --
 -- Refuses while any invoice was priced by an office super-on-top setting:
 -- those invoices store net pay equal to gross with ordinary lines, which the
@@ -25,7 +25,7 @@ DECLARE
   before_columns text := $old$    invoice_number, submitted_at, status
   ) VALUES ($old$;
   after_columns text := $new$    invoice_number, submitted_at, status,
-    super_basis, super_basis_setting_id -- (20261111173000)
+    super_basis, super_basis_setting_id -- (20261111203000)
   ) VALUES ($new$;
   before_values text := $old$    NULLIF(p_invoice->>'submitted_at', '')::timestamptz,
     v_status
@@ -38,9 +38,9 @@ DECLARE
   )
   RETURNING id INTO v_invoice_id;$new$;
 BEGIN
-  IF strpos(body, '(20261111173000)') > 0 THEN
+  IF strpos(body, '(20261111203000)') > 0 THEN
     IF strpos(body, after_columns) = 0 OR strpos(body, after_values) = 0 THEN
-      RAISE EXCEPTION 'persist_weekly_trade_invoice_v1 changed; review before rolling back 20261111173000';
+      RAISE EXCEPTION 'persist_weekly_trade_invoice_v1 changed; review before rolling back 20261111203000';
     END IF;
     EXECUTE replace(replace(body, after_columns, before_columns), after_values, before_values);
   END IF;
@@ -54,16 +54,16 @@ DECLARE
   IF NEW.trade_invoice_id IS NOT NULL AND EXISTS (
     SELECT 1 FROM public.trade_invoices i WHERE i.id = NEW.trade_invoice_id AND i.super_basis IS NOT NULL
   ) THEN$old$;
-  after_text text := $new$  -- (20261111173000) An employer-super invoice carries its group share and
+  after_text text := $new$  -- (20261111203000) An employer-super invoice carries its group share and
   -- nothing else, unless the office set this trade's own invoices to super
   -- on top (trade_super_bases).
   IF NEW.trade_invoice_id IS NOT NULL AND EXISTS (
     SELECT 1 FROM public.trade_invoices i WHERE i.id = NEW.trade_invoice_id AND i.super_basis IS NOT NULL AND i.super_basis_setting_id IS NULL
   ) THEN$new$;
 BEGIN
-  IF strpos(body, '(20261111173000)') > 0 THEN
+  IF strpos(body, '(20261111203000)') > 0 THEN
     IF strpos(body, after_text) = 0 THEN
-      RAISE EXCEPTION 'trade_invoice_lines_group_share_snapshot changed; review before rolling back 20261111173000';
+      RAISE EXCEPTION 'trade_invoice_lines_group_share_snapshot changed; review before rolling back 20261111203000';
     END IF;
     EXECUTE replace(body, after_text, before_text);
   END IF;

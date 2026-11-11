@@ -6,7 +6,7 @@ BEGIN
   ASSERT NOT EXISTS (SELECT 1 FROM information_schema.columns
     WHERE table_schema = 'public' AND table_name = 'trade_invoices' AND column_name = 'super_basis_setting_id'),
     'invoice column dropped';
-  ASSERT strpos(pg_get_functiondef('public.trade_invoice_lines_group_share_snapshot()'::regprocedure), '20261111173000') = 0
+  ASSERT strpos(pg_get_functiondef('public.trade_invoice_lines_group_share_snapshot()'::regprocedure), '20261111203000') = 0
     AND strpos(pg_get_functiondef('public.trade_invoice_lines_group_share_snapshot()'::regprocedure),
       'An employer-super invoice carries its group share and nothing else.') > 0, 'line guard restored';
   ASSERT strpos(pg_get_functiondef('public.persist_weekly_trade_invoice_v1(jsonb, jsonb, uuid)'::regprocedure), 'super_basis') = 0,

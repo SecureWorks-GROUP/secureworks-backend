@@ -17,7 +17,7 @@
  *     database accept ordinary lines on an employer-super invoice.
  *
  * With no setting row every path returns the ordinary split, unchanged.
- * Migration: 20261111173000_trade_super_on_top.sql.
+ * Migration: 20261111203000_trade_super_on_top.sql.
  */
 // deno-lint-ignore-file no-explicit-any
 import {

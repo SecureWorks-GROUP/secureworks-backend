@@ -106,16 +106,16 @@ DECLARE
   IF NEW.trade_invoice_id IS NOT NULL AND EXISTS (
     SELECT 1 FROM public.trade_invoices i WHERE i.id = NEW.trade_invoice_id AND i.super_basis IS NOT NULL
   ) THEN$old$;
-  after_text text := $new$  -- (20261111173000) An employer-super invoice carries its group share and
+  after_text text := $new$  -- (20261111203000) An employer-super invoice carries its group share and
   -- nothing else, unless the office set this trade's own invoices to super
   -- on top (trade_super_bases).
   IF NEW.trade_invoice_id IS NOT NULL AND EXISTS (
     SELECT 1 FROM public.trade_invoices i WHERE i.id = NEW.trade_invoice_id AND i.super_basis IS NOT NULL AND i.super_basis_setting_id IS NULL
   ) THEN$new$;
 BEGIN
-  IF strpos(body, '(20261111173000)') = 0 THEN
+  IF strpos(body, '(20261111203000)') = 0 THEN
     IF length(body) - length(replace(body, before_text, '')) <> length(before_text) THEN
-      RAISE EXCEPTION 'trade_invoice_lines_group_share_snapshot changed; review before applying 20261111173000';
+      RAISE EXCEPTION 'trade_invoice_lines_group_share_snapshot changed; review before applying 20261111203000';
     END IF;
     EXECUTE replace(body, before_text, after_text);
   END IF;
@@ -128,7 +128,7 @@ DECLARE
   before_columns text := $old$    invoice_number, submitted_at, status
   ) VALUES ($old$;
   after_columns text := $new$    invoice_number, submitted_at, status,
-    super_basis, super_basis_setting_id -- (20261111173000)
+    super_basis, super_basis_setting_id -- (20261111203000)
   ) VALUES ($new$;
   before_values text := $old$    NULLIF(p_invoice->>'submitted_at', '')::timestamptz,
     v_status
@@ -141,10 +141,10 @@ DECLARE
   )
   RETURNING id INTO v_invoice_id;$new$;
 BEGIN
-  IF strpos(body, '(20261111173000)') = 0 THEN
+  IF strpos(body, '(20261111203000)') = 0 THEN
     IF length(body) - length(replace(body, before_columns, '')) <> length(before_columns)
        OR length(body) - length(replace(body, before_values, '')) <> length(before_values) THEN
-      RAISE EXCEPTION 'persist_weekly_trade_invoice_v1 changed; review before applying 20261111173000';
+      RAISE EXCEPTION 'persist_weekly_trade_invoice_v1 changed; review before applying 20261111203000';
     END IF;
     EXECUTE replace(replace(body, before_columns, after_columns), before_values, after_values);
   END IF;

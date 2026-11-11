@@ -13,9 +13,9 @@ BEGIN
     'a signed-in trade cannot read or write the setting';
   ASSERT has_table_privilege('service_role', 'public.trade_super_bases', 'INSERT'),
     'the service role writes the setting';
-  ASSERT strpos(pg_get_functiondef('public.trade_invoice_lines_group_share_snapshot()'::regprocedure), '(20261111173000)') > 0,
+  ASSERT strpos(pg_get_functiondef('public.trade_invoice_lines_group_share_snapshot()'::regprocedure), '(20261111203000)') > 0,
     'line guard patched';
-  ASSERT strpos(pg_get_functiondef('public.persist_weekly_trade_invoice_v1(jsonb, jsonb, uuid)'::regprocedure), '(20261111173000)') > 0,
+  ASSERT strpos(pg_get_functiondef('public.persist_weekly_trade_invoice_v1(jsonb, jsonb, uuid)'::regprocedure), '(20261111203000)') > 0,
     'weekly persist patched';
 END $$;
 

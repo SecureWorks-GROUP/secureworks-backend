@@ -462,7 +462,7 @@ const RUNNING_SRC = await Deno.readTextFile(
 );
 const MIGRATION_SRC = await Deno.readTextFile(
   new URL(
-    "../../migrations/20261111173000_trade_super_on_top.sql",
+    "../../migrations/20261111203000_trade_super_on_top.sql",
     HERE,
   ),
 );
