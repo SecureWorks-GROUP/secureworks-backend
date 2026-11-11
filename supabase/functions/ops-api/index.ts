@@ -1,5 +1,6 @@
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
+import { SelfAllocationRefusal, selfAllocateForInvoice } from './trade_self_allocation.ts'
 import {
   assertTradeMayBillExtraJobs,
   ExtraJobBillingRefusal,
@@ -12556,6 +12557,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'complete_my_job':
       case 'waive_neighbour_signoff':
       case 'log_my_job_hours':
+      case 'self_allocate_for_invoice':
       case 'create_group_work_order':
       case 'join_group_work_order':
       case 'sign_group_work_order':
@@ -12703,6 +12705,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           case 'complete_my_job': return json(await tradeCompleteMyJob(client, body, tradeUser, tradeJobAccess))
           case 'waive_neighbour_signoff': return json(await tradeWaiveNeighbourSignoff(client, body, tradeUser, tradeJobAccess))
           case 'log_my_job_hours': return json(await tradeLogMyJobHours(client, body, tradeUser, tradeJobAccess))
+          // Marnin, 11 Nov 2026: a trade invoicing a job they are not on adds
+          // themselves to it for that day (trade_self_allocation.ts). Only ever
+          // the caller, one day, a job in their company; never texts anyone.
+          case 'self_allocate_for_invoice': {
+            if (req.method !== 'POST') return json({ error: 'self_allocate_for_invoice requires POST' }, 405)
+            try {
+              return json(await selfAllocateForInvoice(client, {
+                body,
+                trade: { id: tradeUser.id, orgId: tradeUser.orgId, name: await tradeDisplayName(client, tradeUser) },
+              }, {
+                findExisting: (jobId, userId, day) => findActiveAssignmentForUserDate(client, jobId, userId, day),
+                createAssignment: (assignmentBody) => createAssignment(client, assignmentBody),
+                isUserDateConflict: isAssignmentUserDateConflict,
+              }))
+            } catch (error) {
+              if (error instanceof SelfAllocationRefusal) {
+                return json({ ok: false, error: error.message, code: error.code }, error.status)
+              }
+              throw error
+            }
+          }
           case 'create_group_work_order':
           case 'join_group_work_order':
           case 'sign_group_work_order':

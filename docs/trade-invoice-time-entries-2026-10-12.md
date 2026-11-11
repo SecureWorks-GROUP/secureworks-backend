@@ -190,6 +190,9 @@ hours?, assignment_id? }`.
 - They are a record of their own, never an invoice line's entry. The server
   does not copy them onto a line on any lane: the Weekly Invoice card can open
   on them, and the trade confirms and submits them as that line's entry.
+- Since 11 Nov 2026 the trade app also saves them at clock off (`source:
+  clock_off`), after asking the trade about a break and showing the start and
+  finish for them to confirm, and the Weekly Invoice card opens on them.
 - They are listed against the job straight away: see "Stamped against the
   job".
 

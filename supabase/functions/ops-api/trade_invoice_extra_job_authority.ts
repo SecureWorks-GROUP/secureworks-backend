@@ -133,7 +133,7 @@ export function extraJobNotAllowedRefusal(refs: string[]): ExtraJobBillingRefusa
     "extra_job_not_allowed",
     unique,
     `This invoice was not saved. You are not booked on ${jobList(unique)}. ` +
-      "Ask the office to add you to the job, then submit again.",
+      "Add yourself to the job on your invoice (pick the job again), or ask the office, then submit again.",
   );
 }
 

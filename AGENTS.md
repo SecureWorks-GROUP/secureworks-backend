@@ -4853,6 +4853,19 @@ Write paths, refusal codes, reads and the per-job list
 `job_trade_time_entries`:
 `docs/trade-invoice-time-entries-2026-10-12.md`.
 
+## A Trade May Book Only Themselves, Only To Invoice
+
+`self_allocate_for_invoice` (`ops-api/trade_self_allocation.ts`, Marnin
+11 Nov 2026) is the one door through which a plain trade writes a
+`job_assignments` row, and it is the exception to `_resolveAllocationAuthz`.
+It books only the caller, one day not after today, on a live job in their
+company, through `createAssignment` with no text, plus a
+`trade_self_allocated` job event. Being booked is what passes the invoice's
+`booked_on_job` rule; it also grants the allocated Trade App tier on that job.
+Never widen it to book anyone else or to reassign. The app calls it only after
+`generate_trade_invoice` refuses with `extra_job_not_allowed`. Contract:
+`docs/trade-self-allocation-v1.md`.
+
 ## A Recurring Deduction Comes Off The Payable, Never The Gross
 
 A trade's weekly deduction (first use: one trade's ute hire, owner 13 Oct 2026)
