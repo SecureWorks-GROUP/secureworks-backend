@@ -22,6 +22,13 @@ import {
 } from "./trade_invoice_money.ts";
 import { draftTradeInvoiceTimeEntry } from "./trade_invoice_time_entry.ts";
 import {
+  loadTradeInvoiceSuperBasis,
+  ORDINARY_TRADE_SUPER_BASIS,
+  type TradeInvoiceSuperBasisDecision,
+  TradeSuperBasisError,
+  tradeSuperBasisInvoiceFields,
+} from "./trade_invoice_super_basis.ts";
+import {
   weeklyWorkOrderBusinessDate,
   WORK_ORDER_INVOICE_LIST_STATUSES,
   workOrderIsInvoiceReady,
@@ -569,6 +576,8 @@ function headerFor(
   notes: unknown,
   gstOn: boolean,
   lines: Array<Record<string, unknown>>,
+  // <trade-super-on-top> The trade's office super setting for this week.
+  superBasis: TradeInvoiceSuperBasisDecision = ORDINARY_TRADE_SUPER_BASIS,
 ) {
   const sum = roundMoney(
     lines.reduce((total, line) => total + Number(line.line_total_ex || 0), 0),
@@ -586,6 +595,7 @@ function headerFor(
       grossEarned: sum,
       gstOn,
       earningsDate: weekEnd,
+      superBasis: superBasis.superBasis,
     });
   } catch (error) {
     if (error instanceof TradeInvoiceMoneyError) {
@@ -608,6 +618,8 @@ function headerFor(
     gst_on: money.gst_on,
     super_rate: money.super_rate,
     super_amount: money.super_amount,
+    ...(money.super_basis ? { super_basis: money.super_basis } : {}),
+    ...tradeSuperBasisInvoiceFields(superBasis),
     total_hours: hours,
     total_breaks_minutes: breaks,
     notes: notes ? String(notes) : null,
@@ -922,8 +934,27 @@ export async function saveRunningInvoiceDraft(
   const agentLabel = mode === "agent"
     ? String(body?.agent_label || prior?.agent_label || "agent").slice(0, 80)
     : (prior?.agent_label || null);
+  // <trade-super-on-top> Same rule as submit, so the running draft shows what
+  // the submitted invoice will pay. A draft carrying a group share keeps the
+  // ordinary split it always had.
+  let superBasis: TradeInvoiceSuperBasisDecision;
+  try {
+    superBasis = await loadTradeInvoiceSuperBasis(client, {
+      userId: user.id,
+      earningsDay: weekEnd,
+      hasGroupShare: lines.some((line) =>
+        String(line.line_type || "").toLowerCase() === "group share" ||
+        Boolean(line.group_share_id)
+      ),
+    });
+  } catch (error) {
+    if (error instanceof TradeSuperBasisError) {
+      throw new RunningDraftError(error.message, error.status, error.code);
+    }
+    throw error;
+  }
   const payload = {
-    p_invoice: headerFor(user, weekStart, weekEnd, notes, gstOn, lines),
+    p_invoice: headerFor(user, weekStart, weekEnd, notes, gstOn, lines, superBasis),
     p_lines: lines,
     p_requested_prior_draft_id: prior?.id || null,
     p_builder: builder,

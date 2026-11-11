@@ -440,6 +440,7 @@ jobs:
         run: |
           deno test --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/trade_invoice_recurring_deduction_test.ts \
+            supabase/functions/ops-api/trade_invoice_super_basis_test.ts \
             supabase/functions/ops-api/trade_invoice_money_test.ts \
             supabase/functions/ops-api/trade_invoice_money_audit_test.ts \
             supabase/functions/ops-api/trade_invoice_pdf_test.ts \
