@@ -8,6 +8,12 @@ SELECT md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true))='b48997c5
 \endif
 SELECT md5(pg_get_viewdef('public.v_job_cost_events'::regclass, true))='abdc05a69d139d79aebbb8a3cebfae03' AS test_has_a3_division \gset
 \if :test_has_a3_division
+-- 20261111100000 (RQ-15.g office variations) sits on v_job_profit and v_job_revenue_events: when the stack has it,
+-- its down runs first.
+SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.v_job_profit'::regclass AND attname = 'office_variations_ex' AND NOT attisdropped) AS rq15g_unwind_20261031020000 \gset
+\if :rq15g_unwind_20261031020000
+\ir ../../../rollbacks/20261111100000_job_profit_office_variations_down.sql
+\endif
 \ir ../../../rollbacks/20261104091000_job_revenue_credit_division_down.sql
 \ir ../../../rollbacks/20261104090000_job_cost_crew_and_placement_division_down.sql
 \endif

@@ -1,2 +1,8 @@
+-- 20261111100000 (RQ-15.g office variations) sits on v_job_profit and v_job_revenue_events: when the stack has it,
+-- its down runs first.
+SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.v_job_profit'::regclass AND attname = 'office_variations_ex' AND NOT attisdropped) AS rq15g_unwind_20261104091000 \gset
+\if :rq15g_unwind_20261104091000
+\ir ../../../rollbacks/20261111100000_job_profit_office_variations_down.sql
+\endif
 -- Break: the revenue view goes back to holding no division on a credit applied (this migration's down).
 \ir ../../../rollbacks/20261104091000_job_revenue_credit_division_down.sql
