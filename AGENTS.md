@@ -4638,6 +4638,37 @@ must fail closed on Xero retry rather than inventing history. Apply
 `ops-api`. API fields, formulas, UI handoff, source, and deploy order:
 `docs/trade-invoice-super-gst-contract-2026-08-27.md`.
 
+## A Refused Trade Invoice Submit Leaves A Record (2026-11-11)
+
+A `generate_trade_invoice` or `submit_trade_invoice` call that ops-api refuses
+(a 4xx it returns or an error it throws) or that fails (a 5xx) writes one
+`trade_invoice_events` row with `event_type = 'submit_refused'`, through the
+one writer in `ops-api/trade_invoice_events.ts`. Before this a turned-away
+trade left nothing: no invoice and no event.
+
+- The row holds who (`actor` `trade:<user id>`, `detail.user_id`), which door
+  (`detail.action`), the week and draft id the trade sent, the HTTP status, and
+  the refusal `code` and message the trade was shown (dollar amounts taken out
+  of the message). `trade_invoice_id` is the week's existing invoice when the
+  refusal named one, otherwise empty.
+- It never holds what the trade posted (lines, hours, extras, notes) or any
+  money figure a refusal carries: `tradeSubmitRefusedEvent` copies named fields
+  only, and the table's `trade_invoice_events_submit_refused_detail` check
+  refuses bank and pay keys.
+- The record is written where every answer leaves the handler
+  (`_opsApiRequestHandlerForTest` wraps `opsApiRequest`) and never changes the
+  answer. If the insert fails it is logged and dropped.
+- Migration `20261111194500_trade_invoice_submit_refused_event.sql` adds the
+  type and lets `trade_invoice_id` be empty for this type only. Its down
+  migration removes the `submit_refused` rows.
+- A request refused before sign-in (401) is not recorded: there is no one to
+  name. Draft saves and work-order invoices are not covered.
+- Tests: `ops-api/trade_invoice_submit_refused_test.ts`, the "rule cannot be
+  read" case in `trade_invoice_recurring_deduction_test.ts`, and
+  `supabase/tests/migration-contracts/20261111194500_trade_invoice_submit_refused_event/`.
+- Read the last week of them:
+  `select created_at, actor, reason, detail from trade_invoice_events where event_type = 'submit_refused' and created_at > now() - interval '7 days' order by created_at desc;`
+
 ## Debt Workshop Sends Are Switched, Owner-Only, And Claimed First
 
 The Debt tab's backend is `ops-api/debt_ws_*.ts` (contract: wiki

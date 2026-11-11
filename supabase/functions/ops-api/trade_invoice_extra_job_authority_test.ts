@@ -109,6 +109,9 @@ async function submit(extra_items: any[], world: World = {}, body: Record<string
       return Promise.resolve(Response.json("5e1f0a52-0000-4000-8000-00000000d001"));
     }
     const table = url.pathname.match(/^\/rest\/v1\/(.+)$/)?.[1] || "";
+    // The record a refused or failed submit leaves (trade_invoice_events,
+    // submit_refused) is not an invoice write: `writes` stays what it was.
+    if (table === "trade_invoice_events" && method === "POST") return reply([]);
     if (method !== "GET" && method !== "HEAD") writes.push(`${method} ${table}`);
     if (table === "trade_invoice_lines" && method === "POST") {
       const raw = typeof init?.body === "string" ? JSON.parse(init.body) : [];

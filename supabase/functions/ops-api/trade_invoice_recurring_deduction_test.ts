@@ -772,6 +772,9 @@ type Captured = {
   rpcCalls: Array<{ name: string; args: any }>;
   writes: string[];
   reads: string[];
+  // every trade_invoice_events row a refused or failed submit left, as sent.
+  // It is not an invoice write, so it is kept out of `writes`.
+  refusalEvents: any[];
 };
 
 const CARD = {
@@ -806,6 +809,7 @@ async function callTradeAction(
   const rpcCalls: Array<{ name: string; args: any }> = [];
   const writes: string[] = [];
   const reads: string[] = [];
+  const refusalEvents: any[] = [];
   // The invoice this request writes, so a later read of it answers what was
   // written (the note merge reads query_note back).
   let written: any = null;
@@ -849,6 +853,11 @@ async function callTradeAction(
       return Promise.resolve(Response.json(NEW_INVOICE));
     }
     const table = url.pathname.match(/^\/rest\/v1\/(.+)$/)?.[1] || "";
+    if (table === "trade_invoice_events" && method === "POST") {
+      const sent = payload();
+      refusalEvents.push(...(Array.isArray(sent) ? sent : [sent]));
+      return Promise.resolve(Response.json([], { status: 201 }));
+    }
     if (method === "GET" || method === "HEAD") reads.push(table);
     else writes.push(`${method} ${table}`);
     if (stub.fail?.[table]) {
@@ -959,6 +968,7 @@ async function callTradeAction(
       rpcCalls,
       writes,
       reads,
+      refusalEvents,
     };
   } finally {
     globalThis.fetch = originalFetch;
@@ -1393,6 +1403,37 @@ handlerTest(
     assert(out.status >= 500, String(out.status));
     assertEquals(out.invoiceInserts, []);
     assertEquals(out.writes, []);
+    // The failed submit leaves one record (trade_invoice_events,
+    // submit_refused): who, which door, which week and what he was told.
+    // Nothing he posted and no figure is copied into it.
+    assertEquals(out.refusalEvents.length, 1);
+    const event = out.refusalEvents[0];
+    assertEquals(event.event_type, "submit_refused");
+    assertEquals(event.trade_invoice_id, null);
+    assertEquals(event.actor, `trade:${UTE_TRADE}`);
+    assertEquals(event.detail.user_id, UTE_TRADE);
+    assertEquals(event.detail.action, "generate_trade_invoice");
+    assertEquals(event.detail.week_start, THIS_WEEK);
+    assertEquals(event.detail.http_status, out.status);
+    assertEquals(event.reason, event.detail.code);
+    assertEquals(
+      Object.keys(event.detail).sort().filter((key) => key !== "message"),
+      ["action", "code", "http_status", "user_id", "week_start"],
+    );
+  },
+);
+
+handlerTest(
+  "generate_trade_invoice: a submit that goes through leaves no refused-submit record",
+  async () => {
+    const out = await callTradeAction(
+      "generate_trade_invoice",
+      submit(THIS_WEEK, 8),
+      { user: UTE_TRADE },
+    );
+    assertEquals(out.body.success, true, JSON.stringify(out.body));
+    assert(out.status < 400, String(out.status));
+    assertEquals(out.refusalEvents, []);
   },
 );
 

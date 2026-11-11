@@ -628,6 +628,11 @@ async function callTradeAction(
       return Promise.resolve(Response.json(NEW_INVOICE));
     }
     const table = url.pathname.match(/^\/rest\/v1\/(.+)$/)?.[1] || "";
+    // The record a refused or failed submit leaves (trade_invoice_events,
+    // submit_refused) is not an invoice write: `writes` stays what it was.
+    if (table === "trade_invoice_events" && method === "POST") {
+      return Promise.resolve(Response.json([], { status: 201 }));
+    }
     if (method !== "GET" && method !== "HEAD") {
       writes.push(`${method} ${table}`);
     }
