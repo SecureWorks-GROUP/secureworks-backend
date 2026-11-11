@@ -283,6 +283,13 @@ jobs:
         run: |
           deno test --allow-read --allow-env supabase/functions/transcribe-call/vocabulary_test.ts
 
+      # The welcome email a new trade gets straight after their invite: its
+      # wording, its links and the one send through send-outlook-email. Pure
+      # builder and a stubbed fetch, so no network and no env.
+      - name: Test the trade welcome email
+        run: |
+          deno test supabase/functions/invite-trade-user/welcome_email_test.ts
+
       # The read-only close-out block the Ops board and job view read (staff only,
       # fencing and patio, one batched read). It imports index.ts, so it runs with
       # the flags of the other index-importing steps (same --no-check reason).
