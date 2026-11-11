@@ -22,6 +22,9 @@ backfill: `supabase/migrations/20261012130000_job_work_orders.sql` (contract
 - Status `draft` (editable, counts for nothing) or `approved` (sealed). There
   is no cancelled state. One work order per job: a draft, then that same row
   approved, enforced by unique index `uq_work_orders_job_current`.
+- A make-safe job never gets a job work order
+  (`20261111193000_makesafe_no_job_work_order.sql`; see
+  `docs/job-work-order-crew-invoices-v1.md`, "One work order per job").
 - The `job_events` rows this module writes (draft opened or updated, approved,
   variation reported or corrected) carry ids only: never the agreed labour, a variation
   amount or the sealed hash. `job_events` is readable by any signed-in user of

@@ -4829,6 +4829,19 @@ line is approved. The hard rule, when on, refuses an open job only, and
 Travel is exempt. With `retire_crew_work_orders_v1` on, `my_work_orders`
 returns approved job work orders with the money stripped and drops drafts.
 
+A make-safe job never gets a job work order (owner decision 11 Nov 2026,
+`20261111193000_makesafe_no_job_work_order.sql`). The rule is
+`job_type_never_gets_job_work_order` in SQL and
+`jobTypeNeverGetsJobWorkOrder` in `crew_invoice_job_work_order.ts`, and it
+sits ahead of `job_work_order_all_types_v1` at every door: the writer
+refuses, the job trigger skips, the 30-day preview and apply leave it out,
+and the hard rule exempts it. Change both twins together, and never add a
+door that opens a job work order without asking the rule. A job work order
+has no cancelled state, so a blank draft that must go is copied whole into
+`job_work_order_retired_drafts` and then deleted
+(`retire_blank_makesafe_job_work_orders`, no API role may run it); anything
+touched or referred to stays.
+
 ## A Trade's Time Line Says When It Was Worked, And One Module Owns The Rule
 
 `trade_invoice_time_entry.ts` is the one owner of `work_date` / `start_time` /

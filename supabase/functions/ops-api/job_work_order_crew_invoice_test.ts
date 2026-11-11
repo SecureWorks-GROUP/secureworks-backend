@@ -24,7 +24,9 @@ import {
   stripJobWorkOrderCardMoney,
   filledApprovedJobWorkOrder,
   jobTypeFillsFromQuote,
+  jobTypeNeverGetsJobWorkOrder,
   jobTypeOpensWorkOrder,
+  loadCrewInvoiceJobWorkOrderRefusal,
   MARNIN_BACKUP_APPROVER_USER_ID,
   namedWorkOrderApprover,
   planCrewWorkOrderRetirement,
@@ -507,6 +509,156 @@ Deno.test("hard rule is off by default and, on, refuses an open job line with no
       jobs: { "job-1": "unreadable" },
     })?.code,
     "job_work_order_unreadable",
+  );
+});
+
+Deno.test("a make-safe never gets a job work order, so the hard rule never asks it for one", () => {
+  assertEquals(jobTypeNeverGetsJobWorkOrder("makesafe"), true);
+  assertEquals(jobTypeNeverGetsJobWorkOrder(" MakeSafe "), true);
+  for (const type of ["repair", "miscellaneous", "fencing", "patio", "", null, undefined]) {
+    assertEquals(jobTypeNeverGetsJobWorkOrder(type), false);
+  }
+  const labour = [{ job_id: "job-ms", line_type: "labour" }];
+  // An open make-safe with no job work order: invoiced as before.
+  assertEquals(
+    hardRuleRefusal({
+      flagOn: true,
+      lines: labour,
+      jobs: {
+        "job-ms": { hasWorkOrder: false, open: true, neverGetsWorkOrder: true },
+      },
+    }),
+    null,
+  );
+  // The exemption is the job's own. Another open job on the same invoice
+  // with no work order is still refused, and named.
+  assertEquals(
+    hardRuleRefusal({
+      flagOn: true,
+      lines: [...labour, { job_id: "job-repair", line_type: "labour" }],
+      jobs: {
+        "job-ms": { hasWorkOrder: false, open: true, neverGetsWorkOrder: true },
+        "job-repair": {
+          hasWorkOrder: false,
+          open: true,
+          neverGetsWorkOrder: false,
+        },
+      },
+    }),
+    {
+      code: "job_work_order_required",
+      error: "This job has no work order, so it cannot be invoiced yet.",
+      job_id: "job-repair",
+    },
+  );
+  // A make-safe that cannot be read is still refused: its type is not known.
+  assertEquals(
+    hardRuleRefusal({
+      flagOn: true,
+      lines: labour,
+      jobs: { "job-ms": "unreadable" },
+    })?.code,
+    "job_work_order_unreadable",
+  );
+});
+
+function hardRuleClient(input: {
+  flagOn: boolean;
+  workOrderJobIds: string[];
+  jobs: Array<{ id: string; status: string; type: string }>;
+}): { client: any; selects: Record<string, string[]> } {
+  const selects: Record<string, string[]> = {};
+  const rowsFor = (table: string): any[] => {
+    if (table === "feature_flags") return [{ enabled: input.flagOn }];
+    if (table === "work_orders") {
+      return input.workOrderJobIds.map((job_id) => ({ job_id }));
+    }
+    if (table === "jobs") return input.jobs;
+    return [];
+  };
+  const client = {
+    from(table: string) {
+      let rows = rowsFor(table);
+      const query: any = {
+        select(columns: string) {
+          (selects[table] ||= []).push(columns);
+          return query;
+        },
+        eq: () => query,
+        in(column: string, values: string[]) {
+          if (table === "jobs" && column === "id") {
+            rows = rows.filter((row) => values.includes(row.id));
+          }
+          if (table === "work_orders" && column === "job_id") {
+            rows = rows.filter((row) => values.includes(row.job_id));
+          }
+          return query;
+        },
+        limit: () => query,
+        maybeSingle: () =>
+          Promise.resolve({ data: rows[0] ?? null, error: null }),
+        single: () => Promise.resolve({ data: rows[0] ?? null, error: null }),
+        then: (resolve: (value: unknown) => unknown) =>
+          Promise.resolve({ data: rows, error: null }).then(resolve),
+      };
+      return query;
+    },
+  };
+  return { client, selects };
+}
+
+Deno.test("hard rule on: an open make-safe with no job work order is invoiced, an open repair is not", async () => {
+  const jobs = [
+    { id: "job-ms", status: "scheduled", type: "makesafe" },
+    { id: "job-repair", status: "scheduled", type: "repair" },
+  ];
+  const makesafeOnly = hardRuleClient({
+    flagOn: true,
+    workOrderJobIds: [],
+    jobs,
+  });
+  assertEquals(
+    await loadCrewInvoiceJobWorkOrderRefusal(makesafeOnly.client, [
+      { job_id: "job-ms", line_type: "labour" },
+      { job_id: "job-ms", line_type: "Travel" },
+    ]),
+    null,
+  );
+  // The loader reads the job's type itself; nothing is taken from the line.
+  assertEquals(makesafeOnly.selects.jobs, ["id, status, type"]);
+
+  const mixed = hardRuleClient({ flagOn: true, workOrderJobIds: [], jobs });
+  assertEquals(
+    await loadCrewInvoiceJobWorkOrderRefusal(mixed.client, [
+      { job_id: "job-ms", line_type: "labour" },
+      { job_id: "job-repair", line_type: "labour" },
+    ]),
+    {
+      code: "job_work_order_required",
+      error: "This job has no work order, so it cannot be invoiced yet.",
+      job_id: "job-repair",
+    },
+  );
+
+  const covered = hardRuleClient({
+    flagOn: true,
+    workOrderJobIds: ["job-repair"],
+    jobs,
+  });
+  assertEquals(
+    await loadCrewInvoiceJobWorkOrderRefusal(covered.client, [
+      { job_id: "job-ms", line_type: "labour" },
+      { job_id: "job-repair", line_type: "labour" },
+    ]),
+    null,
+  );
+
+  const off = hardRuleClient({ flagOn: false, workOrderJobIds: [], jobs });
+  assertEquals(
+    await loadCrewInvoiceJobWorkOrderRefusal(off.client, [
+      { job_id: "job-repair", line_type: "labour" },
+    ]),
+    null,
   );
 });
 

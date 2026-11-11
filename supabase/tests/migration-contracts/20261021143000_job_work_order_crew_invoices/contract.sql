@@ -1,10 +1,13 @@
 -- Contract for 20261021143000_job_work_order_crew_invoices.sql.
--- Every switch ships off. A make-safe job opens a blank work order only while
+-- Every switch ships off. A repair job opens a blank work order only while
 -- job_work_order_all_types_v1 is on. The 30-day preview selects open jobs by
 -- real activity (an assignment, a time entry, an invoice line, or a status
 -- change), never by jobs.updated_at alone. Draft work orders
 -- stamp a crew line only while crew_invoice_on_job_work_order_v1 is on.
 -- Office review starts only on insert, and only while its switch is on.
+-- Repair stands for every type other than fencing, patio and make-safe: since
+-- 20261111193000 a make-safe job never gets a job work order, whatever the
+-- switch says, and that migration's own contract proves it.
 
 -- This statement stays outside the transaction so the break proof, which
 -- commits the switch on, fails here and nowhere else.
@@ -54,7 +57,7 @@ INSERT INTO public.users (id, org_id, name, role) VALUES
   ('aaaaaaaa-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000001', 'Crew', 'crew')
 ON CONFLICT (id) DO NOTHING;
 
--- 1. Flag off: a make-safe still cannot open a work order. Turning the flag
+-- 1. Flag off: a repair job still cannot open a work order. Turning the flag
 -- on does not go back and open one that is already open.
 DO $$
 DECLARE
@@ -67,13 +70,13 @@ BEGIN
   END;
 
   INSERT INTO public.jobs (id, org_id, type, status, job_number, updated_at)
-  VALUES (v_safe, '00000000-0000-0000-0000-000000000001', 'makesafe', 'scheduled', 'JWOCI-OFF-1', now());
+  VALUES (v_safe, '00000000-0000-0000-0000-000000000001', 'repair', 'scheduled', 'JWOCI-OFF-1', now());
   IF EXISTS (SELECT 1 FROM public.work_orders WHERE job_id = v_safe AND kind = 'job') THEN
-    RAISE EXCEPTION 'contract: a make-safe job must not open a work order while the switch is off';
+    RAISE EXCEPTION 'contract: a repair job must not open a work order while the switch is off';
   END IF;
   BEGIN
     PERFORM public.ensure_job_work_order_draft(v_safe, 'manual');
-    RAISE EXCEPTION 'contract: ensure must still refuse a make-safe job while the switch is off';
+    RAISE EXCEPTION 'contract: ensure must still refuse a repair job while the switch is off';
   EXCEPTION WHEN check_violation THEN
     IF SQLERRM NOT LIKE '%fencing%' OR SQLERRM NOT LIKE '%patio%' THEN
       RAISE EXCEPTION 'contract: the refusal must still name fencing and patio (%).', SQLERRM;
@@ -114,14 +117,14 @@ DECLARE
   v_type_check text;
 BEGIN
   INSERT INTO public.jobs (id, org_id, type, status, job_number, updated_at) VALUES
-    (v_now, v_org, 'makesafe', 'scheduled', 'JWOCI-MS-NOW', now() - interval '40 days'),
-    (v_edge, v_org, 'makesafe', 'scheduled', 'JWOCI-MS-EDGE', now() - interval '40 days'),
-    (v_stale, v_org, 'makesafe', 'scheduled', 'JWOCI-STALE', now()),
-    (v_done, v_org, 'makesafe', 'complete', 'JWOCI-DONE', now()),
-    (v_draft, v_org, 'makesafe', 'draft', 'JWOCI-DRAFT', now()),
-    (v_quoted, v_org, 'makesafe', 'quoted', 'JWOCI-QUOTED', now()),
+    (v_now, v_org, 'repair', 'scheduled', 'JWOCI-MS-NOW', now() - interval '40 days'),
+    (v_edge, v_org, 'repair', 'scheduled', 'JWOCI-MS-EDGE', now() - interval '40 days'),
+    (v_stale, v_org, 'repair', 'scheduled', 'JWOCI-STALE', now()),
+    (v_done, v_org, 'repair', 'complete', 'JWOCI-DONE', now()),
+    (v_draft, v_org, 'repair', 'draft', 'JWOCI-DRAFT', now()),
+    (v_quoted, v_org, 'repair', 'quoted', 'JWOCI-QUOTED', now()),
     (v_fence, v_org, 'fencing', 'accepted', 'JWOCI-FENCE', now()),
-    (v_inv, v_org, 'makesafe', 'scheduled', 'JWOCI-INV', now() - interval '40 days');
+    (v_inv, v_org, 'repair', 'scheduled', 'JWOCI-INV', now() - interval '40 days');
 
   -- Scheduled today, created long ago: the date is the only signal.
   INSERT INTO public.job_assignments (id, job_id, user_id, role, scheduled_date, created_at) VALUES
@@ -142,8 +145,8 @@ BEGIN
 
   BEGIN
     INSERT INTO public.jobs (id, org_id, type, status, job_number, updated_at) VALUES
-      (v_processing, v_org, 'makesafe', 'processing', 'JWOCI-PROC', now() - interval '40 days'),
-      (v_processing_stale, v_org, 'makesafe', 'processing', 'JWOCI-PROC-STALE', now() - interval '40 days');
+      (v_processing, v_org, 'repair', 'processing', 'JWOCI-PROC', now() - interval '40 days'),
+      (v_processing_stale, v_org, 'repair', 'processing', 'JWOCI-PROC-STALE', now() - interval '40 days');
     INSERT INTO public.job_assignments (id, job_id, user_id, role, scheduled_date, created_at) VALUES
       (v_asg_proc, v_processing, v_crew, 'lead_installer', current_date - 40, now() - interval '40 days'),
       (v_asg_proc_stale, v_processing_stale, v_crew, 'lead_installer', current_date - 40, now() - interval '40 days');
@@ -179,7 +182,7 @@ BEGIN
   IF v_processing_ok THEN
     IF NOT EXISTS (SELECT 1 FROM public.preview_active_job_work_orders() WHERE job_number = 'JWOCI-PROC')
        OR EXISTS (SELECT 1 FROM public.preview_active_job_work_orders() WHERE job_number = 'JWOCI-PROC-STALE') THEN
-      RAISE EXCEPTION 'contract: a processing make-safe is previewed only from activity inside 30 days';
+      RAISE EXCEPTION 'contract: a processing repair job is previewed only from activity inside 30 days';
     END IF;
   END IF;
 
@@ -274,7 +277,7 @@ BEGIN
   WHERE flag_name IN ('job_work_order_all_types_v1', 'job_work_order_active_backfill_v1');
   -- The type goes back only after the all-types switch is off. Restoring it
   -- while that switch is on would open a work order for this blank row.
-  UPDATE public.jobs SET type = 'makesafe' WHERE id = v_blank;
+  UPDATE public.jobs SET type = 'repair' WHERE id = v_blank;
   EXECUTE 'ALTER TABLE public.jobs ADD CONSTRAINT jobs_type_check ' || v_type_check;
 END $$;
 
@@ -295,7 +298,7 @@ BEGIN
 
   INSERT INTO public.jobs (id, org_id, type, status, job_number) VALUES
     (v_fence, v_org, 'fencing', 'accepted', 'JWOCI-SCOPE-F'),
-    (v_safe, v_org, 'makesafe', 'scheduled', 'JWOCI-SCOPE-M'),
+    (v_safe, v_org, 'repair', 'scheduled', 'JWOCI-SCOPE-M'),
     (v_backup, v_org, 'repair', 'scheduled', 'JWOCI-SCOPE-R');
 
   SELECT id INTO v_wo FROM public.work_orders WHERE job_id = v_fence AND kind = 'job';
@@ -312,13 +315,13 @@ BEGIN
 
   SELECT id INTO v_wo FROM public.work_orders WHERE job_id = v_safe AND kind = 'job' AND origin = 'job_approved';
   IF v_wo IS NULL OR (SELECT agreed_labour_ex FROM public.work_orders WHERE id = v_wo) IS NOT NULL THEN
-    RAISE EXCEPTION 'contract: the switch must open one blank make-safe draft';
+    RAISE EXCEPTION 'contract: the switch must open one blank repair draft';
   END IF;
   UPDATE public.work_orders SET agreed_labour_ex = 250 WHERE id = v_wo;
   SELECT updated_at INTO v_seen FROM public.work_orders WHERE id = v_wo;
   PERFORM public.approve_job_work_order(v_wo, v_shaun, 'session', v_seen);
   IF (SELECT status FROM public.work_orders WHERE id = v_wo) <> 'approved' THEN
-    RAISE EXCEPTION 'contract: Shaun must be able to approve a make-safe draft on its labour allowance';
+    RAISE EXCEPTION 'contract: Shaun must be able to approve a repair draft on its labour allowance';
   END IF;
 
   SELECT id INTO v_wo FROM public.work_orders WHERE job_id = v_backup AND kind = 'job';
@@ -366,7 +369,7 @@ DECLARE
 BEGIN
   UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_work_order_all_types_v1';
   INSERT INTO public.jobs (id, org_id, type, status, job_number)
-  VALUES (v_job, v_org, 'makesafe', 'scheduled', 'JWOCI-LINE-1');
+  VALUES (v_job, v_org, 'repair', 'scheduled', 'JWOCI-LINE-1');
   SELECT id INTO v_wo FROM public.work_orders WHERE job_id = v_job AND kind = 'job' AND status = 'draft';
   IF v_wo IS NULL THEN
     RAISE EXCEPTION 'contract: the line fixture needs its blank draft';

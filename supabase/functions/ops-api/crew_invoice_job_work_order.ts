@@ -46,6 +46,11 @@ export const ACTIVE_JOB_WORK_ORDER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 const QUOTE_FILL_TYPES = new Set(["fencing", "patio"]);
 
+/**
+ * Routes the office create only. The database has the last word: it refuses
+ * a make-safe by name (jobTypeNeverGetsJobWorkOrder), and a make-safe is
+ * still routed to that refusal.
+ */
 export function jobTypeOpensWorkOrder(
   type: string | null | undefined,
   flagOn: boolean,
@@ -53,6 +58,18 @@ export function jobTypeOpensWorkOrder(
   const name = String(type ?? "").trim();
   if (name === "fencing" || name === "patio") return true;
   return flagOn && name !== "";
+}
+
+/**
+ * A make-safe job never gets a job work order, whatever
+ * job_work_order_all_types_v1 says (owner decision 11 Nov 2026). The same
+ * rule as public.job_type_never_gets_job_work_order
+ * (20261111193000_makesafe_no_job_work_order.sql): change both together.
+ */
+export function jobTypeNeverGetsJobWorkOrder(
+  type: string | null | undefined,
+): boolean {
+  return String(type ?? "").trim().toLowerCase() === "makesafe";
 }
 
 /** Accepted fence and patio quotes still fill the draft. Nothing else does. */
@@ -183,7 +200,7 @@ export interface HardRuleRefusal {
 }
 
 export type JobWorkOrderPresence =
-  | { hasWorkOrder: boolean; open?: boolean }
+  | { hasWorkOrder: boolean; open?: boolean; neverGetsWorkOrder?: boolean }
   | "unreadable";
 
 function isTravelLine(line: HardRuleLine): boolean {
@@ -197,6 +214,8 @@ function isTravelLine(line: HardRuleLine): boolean {
  * exempt, including when that job cannot be read, unless the same job also
  * has a non-travel line. A missing `open` is treated as open. A line with
  * no job is not refused. An unreadable job refuses a non-travel line.
+ * A job whose type never gets a job work order (a make-safe) is exempt, open
+ * or closed: there is no work order it could have.
  */
 export function hardRuleRefusal(input: {
   flagOn: boolean;
@@ -222,6 +241,7 @@ export function hardRuleRefusal(input: {
       };
     }
     if (presence.open === false) continue;
+    if (presence.neverGetsWorkOrder === true) continue;
     if (!presence.hasWorkOrder) {
       return {
         code: "job_work_order_required",
@@ -268,13 +288,15 @@ export async function loadCrewInvoiceJobWorkOrderRefusal(
       (data || []).map((row: { job_id?: string | null }) => String(row.job_id)),
     );
     const statusByJob = new Map<string, string>();
+    const typeByJob = new Map<string, string>();
     if (nonTravelJobIds.length > 0) {
       const { data: jobRows, error: jobErr } = await client.from("jobs")
-        .select("id, status")
+        .select("id, status, type")
         .in("id", nonTravelJobIds);
       if (jobErr) return unreadable;
       for (const row of jobRows || []) {
         statusByJob.set(String(row.id), String(row.status || ""));
+        typeByJob.set(String(row.id), String(row.type || ""));
       }
     }
     const jobs: Record<string, JobWorkOrderPresence> = {};
@@ -290,6 +312,7 @@ export async function loadCrewInvoiceJobWorkOrderRefusal(
       jobs[jobId] = {
         hasWorkOrder: covered.has(jobId),
         open: JOB_WORK_ORDER_OPEN_STATUSES.has(statusByJob.get(jobId) || ""),
+        neverGetsWorkOrder: jobTypeNeverGetsJobWorkOrder(typeByJob.get(jobId)),
       };
     }
     return hardRuleRefusal({ flagOn: true, lines, jobs });

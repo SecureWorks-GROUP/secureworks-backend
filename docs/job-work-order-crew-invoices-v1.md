@@ -15,12 +15,12 @@ All seven are `feature_flags` rows. A missing row means off. An unreadable read 
 
 | Flag | Default | What it does |
 | --- | --- | --- |
-| `job_work_order_all_types_v1` | off | A job of any non-blank type gets a blank job work order when it enters an open status. Fencing and patio are unchanged either way. |
+| `job_work_order_all_types_v1` | off | A job of any non-blank type except make-safe gets a blank job work order when it enters an open status. Fencing and patio are unchanged either way. A make-safe never gets one, whatever this flag says. |
 | `job_work_order_active_backfill_v1` | off | Lets `apply_active_job_work_orders(uuid[])` open the reviewed ids. The dry-run preview does not need it. Apply also needs the all-types flag. Preview is open jobs with real activity in 30 days, not `jobs.updated_at`. |
 | `job_work_order_office_fill_v1` | off | Office queue, fill and approve. Also lets the backup approver list seal a work order. Off: Shaun only, through the existing `approve_work_order` door, and the new writes refuse everyone including Shaun. |
 | `crew_invoice_on_job_work_order_v1` | off | The line trigger stamps `trade_invoice_lines.job_work_order_id` from a draft or an approved job work order. Off: only an approved one is stamped, as today. |
 | `crew_invoice_line_office_review_v1` | off | A new crew invoice line starts `office_review_status = awaiting`. Awaiting, queried and rejected hold the whole invoice out of Xero. A historical NULL still syncs. While on, `submit_trade_invoice` is 410. Lines already awaiting stay held if the switch is later turned off. A missing flag row leaves the line unmarked. If the switch cannot be read when the line is saved, the line is held `awaiting`. |
-| `crew_invoice_requires_job_work_order_v1` | off | Separate hard rule. DEFAULT, owner to confirm: an open job's non-travel line with no job work order is refused before the invoice is saved. Closed jobs and Travel are exempt. A line with no job is not. |
+| `crew_invoice_requires_job_work_order_v1` | off | Separate hard rule. DEFAULT, owner to confirm: an open job's non-travel line with no job work order is refused before the invoice is saved. Closed jobs and Travel are exempt, and so is a make-safe job, which never has a job work order. A line with no job is not. |
 | `retire_crew_work_orders_v1` | off | `create_work_order` refuses any call that is not `kind: 'job'`, except a per-metre assignee's crew work order. Lists hide legacy `kind = 'crew'` rows that have no `quote_builder_version_id`, except that per-metre weekly row. `my_work_orders` returns approved job work orders with the money stripped and drafts left out. Off: today's crew insert and today's lists. |
 
 Turn the review flag on before, or in the same step as, the stamp flag. A
@@ -34,6 +34,20 @@ still raises and the trigger still swallows that raise. With it on, any
 non-blank type opens a blank draft (`origin = 'job_approved'` from the
 trigger, `origin = 'manual'` from `create_work_order`, `origin = 'backfill'`
 from the script). A null or blank type never opens one.
+
+A make-safe job never gets a job work order (owner decision, 11 Nov 2026:
+a make-safe is invoiced on its hours). `20261111193000` puts one rule,
+`job_type_never_gets_job_work_order`, ahead of the flag at every door:
+`ensure_job_work_order_draft` refuses a make-safe with 23514 (the office
+`create_work_order` returns 422 `job_type_not_eligible`), the job trigger
+skips it, the 30-day preview leaves it out, and apply skips a reviewed
+make-safe id as `job_type_not_eligible`. The TypeScript twin is
+`jobTypeNeverGetsJobWorkOrder`; change both together. A job work order has
+no cancelled state, so the blank drafts make-safes already held were
+removed by that migration, each copied whole into
+`job_work_order_retired_drafts` first and `jobs.work_order_id` cleared. Only
+a draft nobody had touched and nothing referred to went. A make-safe's crew
+work order (`kind = 'crew'`) is a different row and was not touched.
 
 Quote fill and automatic issue stay fencing and patio only. A blank draft
 has no `quote_filled_at`, and filling its allowance stamps `hand_edited_at`,
@@ -121,8 +135,10 @@ While the hard-rule flag is on, `generate_trade_invoice` and
 `submit_trade_invoice` refuse before they save when a non-travel line names
 an open job with no job work order (409 `job_work_order_required`). A closed
 job is exempt. Travel is exempt. An unreadable job on a non-travel line is
-503 `job_work_order_unreadable`. While the flag is off, every line works
-with no work order. DEFAULT, owner to confirm: the open-job and Travel
+503 `job_work_order_unreadable`. A make-safe job is exempt, open or closed:
+it never has a job work order, so its hours are invoiced as before. Another
+job on the same invoice is still checked. While the flag is off, every line
+works with no work order. DEFAULT, owner to confirm: the open-job and Travel
 exemptions.
 
 ## Office review before Xero
@@ -255,7 +271,8 @@ work order, and has real activity inside 30 days: an assignment
 `logged_at`), an invoice line (`created_at` or `line_date`), or a status
 change (`job_events` `status_changed`, `status_change` or
 `job.status_changed`). A recent `jobs.updated_at` with none of those does
-not qualify. A processing make-safe with that activity is in the preview.
+not qualify. A processing repair job with that activity is in the preview.
+A make-safe is never in it.
 
 `--apply` needs `--file`, the reviewed dry-run JSON. It does not select
 again. It exits 2 without that file, or when the file has no valid ids,
@@ -355,7 +372,12 @@ Marnin okays each of these. None of them is this pull request.
   `wo_count` still excludes `kind = 'job'`, so a job-only card stays 0 there.
 - `trade_job_detail` does not carry the staff job-work-order object.
 - Customer variations are not widened to the backup approver.
-- The auto-issue cron is on. It does not select a blank make-safe draft.
+- The auto-issue cron is on. It does not select a blank draft of any type,
+  and a make-safe has no job work order to select.
+- Readiness "Work order exists" is still listed as a warning on a make-safe
+  job, and with the all-types flag on nothing can clear it. It blocks
+  nothing. Dropping that rule for make-safes is a change to
+  `computeReadiness` in `ops-api/index.ts` and is not made here.
 - An in-flight group-work-order agent (`bc-e920fe91`) also edits ops-api,
   keyed on `(job_id, work_order_id)` with the pot as `agreed_labour_ex` and
   a client sign-off. This change does not build groups. A blank unfilled
