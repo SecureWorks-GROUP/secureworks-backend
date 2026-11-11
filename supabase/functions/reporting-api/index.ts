@@ -24,7 +24,7 @@ import { decideReportingStaffAuth, reportingApiCallerSeesStaffDetail } from './r
 import { businessEventTimelineItem, JOB_CONTEXT_EVENT_SELECT, latestCommsAt as latestCustomerCommsAt } from './job_context_timeline.ts'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { jobProfitabilityAction, type JobProfitabilityDetail } from './job_profitability.ts'
-import { buildCommissionSummary, readCommissionProfitRows } from './commission_summary.ts'
+import { buildCommissionSummary, readAcceptedRevisionCommissions, readCommissionProfitRows } from './commission_summary.ts'
 import { loadTeamActivity, teamActivityResponse } from './team_activity.ts'
 import {
   buildCeoTargets,
@@ -4992,5 +4992,9 @@ async function commissionSummaryAction(sb: any, params: URLSearchParams) {
 
   const earnedIds = Object.keys(paidInPeriod)
   const profitRows = earnedIds.length > 0 ? await readCommissionProfitRows(sb, DEFAULT_ORG_ID, earnedIds) : []
-  return buildCommissionSummary({ period, periodStartIso, repUserId, jobs: mine, earnedOn: paidInPeriod, profitRows })
+  const revisionIds = profitRows
+    .filter((r) => r.expected_source === 'accepted_quote_revision')
+    .map((r) => r.job_id)
+  const acceptedRevisions = revisionIds.length > 0 ? await readAcceptedRevisionCommissions(sb, revisionIds) : []
+  return buildCommissionSummary({ period, periodStartIso, repUserId, jobs: mine, earnedOn: paidInPeriod, profitRows, acceptedRevisions })
 }
