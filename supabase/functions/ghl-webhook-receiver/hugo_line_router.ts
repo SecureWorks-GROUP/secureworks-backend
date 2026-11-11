@@ -2,7 +2,7 @@
 // Hugo's line router (owner ruling 11 Nov 2026).
 //
 // Anyone who texts or calls Hugo's line, +61 489 267 776 (GHL "SecureWorks
-// Insurance"), goes into the SECUREWORKS INSURANCE PIPELINE assigned to Hugo
+// Insurance"), or is texted from it, goes into the SECUREWORKS INSURANCE PIPELINE assigned to Hugo
 // Graetz: the contact's owner becomes Hugo, and the contact gets an open
 // opportunity in that pipeline (SCOPE JOB) owned by Hugo, or its existing open
 // one there is given to Hugo. Every contact, make-safe homeowners included
@@ -10,12 +10,16 @@
 //
 // Calls are also handled inside GHL by the workflow "INSURANCE - Calls to
 // Hugo line > Insurance pipeline + assign Hugo" (Start IVR trigger on that
-// number). GHL's own text triggers cannot tell which of our numbers a customer
-// texted, so texts are routed here: the receiver hands an authenticated
-// InboundMessage or CustomerReplied delivery to this module, which reads the
-// contact's newest conversation and acts only when the newest inbound item was
-// sent TO Hugo's line within the last 30 minutes. Running it twice for one
-// message does nothing new.
+// number). GHL's own text triggers cannot tell which of our numbers a text
+// used, so texts are routed here. The receiver hands an authenticated delivery
+// to this module, which reads the contact's newest conversation:
+//   InboundMessage / CustomerReplied: acts when the newest inbound item was
+//     sent TO Hugo's line within the last 30 minutes;
+//   OutboundMessage / UserReplied (owner, 11 Nov 2026: Hugo usually makes
+//     first contact): acts when the newest outbound item was sent FROM Hugo's
+//     line within the last 30 minutes. Automated texts from that line (the
+//     make-safe notices) count too, by the owner's choice.
+// Running it twice for one message does nothing new.
 //
 // Switch: env HUGO_LINE_ROUTER_MODE. Missing or anything else = off (nothing
 // is read or written); "dry_run" reads and logs what it would do; "live"
@@ -30,7 +34,16 @@ export const INSURANCE_PIPELINE_ID = "7m3FY70V8HXqwI5ZFCYS";
 /** SCOPE JOB, the first stage of the Insurance pipeline. */
 export const INSURANCE_FIRST_STAGE_ID = "ab01d9e3-5051-4acc-8996-5d7ca72e8327";
 export const ROUTER_FRESH_MS = 30 * 60 * 1000;
-export const ROUTER_SOURCE = "Hugo line (inbound text)";
+export const ROUTER_SOURCE = "Hugo line (text)";
+
+export type RouterDirection = "inbound" | "outbound";
+
+/** Which side of a text a delivery type is about; null = not routed. */
+export function routerDirection(type: unknown): RouterDirection | null {
+  if (type === "InboundMessage" || type === "CustomerReplied") return "inbound";
+  if (type === "OutboundMessage" || type === "UserReplied") return "outbound";
+  return null;
+}
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
 
@@ -66,14 +79,17 @@ export function isHugoLine(raw: unknown): boolean {
   return digits.length >= 9 && digits.slice(-9) === HUGO_LINE_LAST9;
 }
 
-/** The newest inbound text or call in a GHL message list (newest first or not). */
-export function newestInbound(messages: unknown[]): Json | null {
+/** The newest item of one direction in a GHL message list (any order). */
+export function newestOf(
+  messages: unknown[],
+  direction: RouterDirection,
+): Json | null {
   let best: Json | null = null;
   let bestMs = -Infinity;
   for (const m of messages) {
     if (!m || typeof m !== "object") continue;
     const row = m as Json;
-    if (String(row.direction ?? "").toLowerCase() !== "inbound") continue;
+    if (String(row.direction ?? "").toLowerCase() !== direction) continue;
     const ms = Date.parse(String(row.dateAdded ?? ""));
     const at = Number.isFinite(ms) ? ms : -Infinity;
     if (best === null || at > bestMs) {
@@ -147,12 +163,16 @@ export async function routeHugoLine(
     const token = deps.env("GHL_API_TOKEN") ?? "";
     const locationId = (deps.env("GHL_LOCATION_ID") ?? "").trim();
     if (!token || !locationId) return skip("provider_not_configured");
+    const direction = routerDirection(body.type) ?? "inbound";
+    const ourSide = direction === "inbound" ? "to" : "from";
     const contactId = idOf(body.contactId ?? body.contact_id);
     if (!contactId) return skip("no_contact");
 
-    // An app InboundMessage names the number it was sent to; one that names
-    // another of our lines is not Hugo's, so nothing is read.
-    if (body.to != null && !isHugoLine(body.to)) return skip("not_hugo_line");
+    // An app message delivery names our number (to on inbound, from on
+    // outbound); one naming another of our lines is not Hugo's: nothing read.
+    if (body[ourSide] != null && !isHugoLine(body[ourSide])) {
+      return skip("not_hugo_line");
+    }
 
     const conv = await ghl(
       deps.fetch,
@@ -181,13 +201,13 @@ export async function routeHugoLine(
       : Array.isArray((inner as Json | undefined)?.messages)
       ? (inner as Json).messages as unknown[]
       : [];
-    const inbound = newestInbound(list);
-    if (!inbound) return skip("no_inbound");
-    if (!isHugoLine(inbound.to)) return skip("not_hugo_line");
-    const at = Date.parse(String(inbound.dateAdded ?? ""));
+    const item = newestOf(list, direction);
+    if (!item) return skip(`no_${direction}`);
+    if (!isHugoLine(item[ourSide])) return skip("not_hugo_line");
+    const at = Date.parse(String(item.dateAdded ?? ""));
     const now = (deps.now ?? Date.now)();
     if (!Number.isFinite(at) || now - at > ROUTER_FRESH_MS) {
-      return skip("inbound_not_fresh");
+      return skip(`${direction}_not_fresh`);
     }
 
     const contactRead = await ghl(

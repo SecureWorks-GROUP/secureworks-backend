@@ -49,7 +49,11 @@ import {
   userRepliedDoorbell,
 } from "./capture.ts";
 import { GHL_RECORD_EVENT_TYPES } from "../_shared/evidence/ghl_message.ts";
-import { routeHugoLine, routerMode } from "./hugo_line_router.ts";
+import {
+  routeHugoLine,
+  routerDirection,
+  routerMode,
+} from "./hugo_line_router.ts";
 import {
   type AuthDecision,
   type AuthMode,
@@ -517,11 +521,12 @@ export async function handleGhlWebhook(
 
     const { type, contactId, phone, email, conversationId } = body;
 
-    // Hugo's line router (hugo_line_router.ts): an authenticated inbound text
-    // may route its contact to Hugo's Insurance pipeline. It runs beside the
-    // delivery and never changes this response, its receipts or the evidence.
+    // Hugo's line router (hugo_line_router.ts): an authenticated text to or
+    // from Hugo's line may route its contact to Hugo's Insurance pipeline. It
+    // runs beside the delivery and never changes this response, its receipts
+    // or the evidence.
     if (
-      (type === "InboundMessage" || type === "CustomerReplied") &&
+      routerDirection(type) !== null &&
       decision.auth !== "missing" &&
       routerMode(deps.env("HUGO_LINE_ROUTER_MODE")) !== "off"
     ) {

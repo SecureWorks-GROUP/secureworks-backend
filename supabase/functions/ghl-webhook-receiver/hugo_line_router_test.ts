@@ -23,6 +23,7 @@ interface Call {
 function fakeGhl(opts: {
   inboundTo?: string;
   inboundAt?: string;
+  outboundFrom?: string;
   contactOwner?: string | null;
   openOpp?: { id: string; assignedTo: string } | null;
   failPath?: string;
@@ -49,6 +50,7 @@ function fakeGhl(opts: {
               {
                 id: "msgOUT1",
                 direction: "outbound",
+                from: opts.outboundFrom ?? "+61489267771",
                 to: "+61400000000",
                 dateAdded: "2026-11-11T02:59:00.000Z",
               },
@@ -249,4 +251,44 @@ Deno.test("hugo line: a GHL failure is an error code, never a throw", async () =
   assertEquals(r.outcome, "error");
   assertEquals(r.reason, "ghl_get_500");
   assertEquals(writes(g.calls).length, 0);
+});
+
+Deno.test("hugo line: Hugo texting first from his line routes the contact", async () => {
+  const g = fakeGhl({
+    outboundFrom: "+61489267776",
+    inboundTo: "+61489267772",
+    contactOwner: "someoneElse1",
+  });
+  const r = await routeHugoLine(
+    { type: "OutboundMessage", contactId: CONTACT },
+    {
+      env: env("live"),
+      fetch: g.fetchFn,
+      now: () => NOW,
+    },
+  );
+  assertEquals(r.outcome, "routed");
+  assertEquals(r.contactAssigned, true);
+  assertEquals(r.opportunity, "created");
+});
+
+Deno.test("hugo line: a text sent from another of our lines is left alone", async () => {
+  const g = fakeGhl({ outboundFrom: "+61489267771" });
+  const r = await routeHugoLine({ type: "UserReplied", contactId: CONTACT }, {
+    env: env("live"),
+    fetch: g.fetchFn,
+    now: () => NOW,
+  });
+  assertEquals(r.reason, "not_hugo_line");
+  assertEquals(writes(g.calls).length, 0);
+});
+
+Deno.test("hugo line: an app outbound delivery naming another line reads nothing", async () => {
+  const g = fakeGhl({});
+  const r = await routeHugoLine(
+    { type: "OutboundMessage", contactId: CONTACT, from: "+61489267774" },
+    { env: env("live"), fetch: g.fetchFn, now: () => NOW },
+  );
+  assertEquals(r.reason, "not_hugo_line");
+  assertEquals(g.calls.length, 0);
 });
