@@ -137,5 +137,60 @@ BEGIN
   PERFORM pg_temp.prove('once invoiced, the hold clears and profit is invoiced less actual cost',
     NOT ('variation_not_invoiced' = ANY (r.completeness)) AND r.margin_ok AND r.invoiced_ex = 1500 AND r.profit_ex = 400 AND r.office_variations_ex = 300);
 END $test$;
+-- The saved job story notices it (Codex review of 1373): the real story sweep, context_job_story_enqueue_changed,
+-- leaves a current story alone while an office variation is a draft or cancelled, and queues it once one is
+-- approved, because the approval moves context_job_story_money_sig. A job with none keeps its signature.
+DO $story$
+DECLARE
+  approver constant uuid := 'd15a0000-0000-4000-8000-000000000001';
+  org constant uuid := '00000000-0000-0000-0000-000000000001';
+  j constant uuid := 'd15b0000-0000-4000-8000-000000000004';
+  g uuid := gen_random_uuid(); wo uuid; w jsonb; r jsonb; edit jsonb; s0 text; v_draft uuid; v_cancel uuid;
+  control_before text := context_job_story_money_sig('d15b0000-0000-4000-8000-000000000002');
+BEGIN
+  UPDATE automation_switches SET all_stop = false, extraction = true WHERE id = 1;
+  UPDATE feature_flags SET enabled = true WHERE flag_name = 'context_job_story_text_v1';
+  INSERT INTO jobs (id, org_id, status, type, job_number, client_name, metadata, created_at)
+  VALUES (j, org, 'in_progress', 'fencing', 'ZZTEST-SE-20261111-04', 'ZZTEST Scope Checker', '{}', now() - interval '20 days');
+  wo := (SELECT id FROM public.work_orders WHERE job_id = j AND kind = 'job');
+  IF wo IS NULL THEN wo := public.ensure_job_work_order_draft(j, 'manual'); END IF;
+  UPDATE public.work_orders SET agreed_labour_ex = 500,
+      scope_items = '[{"description":"Synthetic crew labour","qty":1,"unit":"job","price":500}]' WHERE id = wo;
+  PERFORM public.approve_job_work_order(wo, approver, 'session', (SELECT updated_at FROM public.work_orders WHERE id = wo), org);
+  INSERT INTO context_ledger_generations (id, job_id, kind, status, reader, promoted_at, evidence_until, checks)
+  VALUES (g, j, 'backfill', 'live', 'luna-ledger:v8-finance1', now() - interval '2 hours', now() - interval '2 hours', '{}');
+  edit := context_ledger_person_edit(j, approver, 'add', NULL, 'Call before arriving.',
+    '{"item_type":"request","status":"open","from_role":"customer","to_role":"us","what":"Call before arriving","about_key":"access:call-ahead"}');
+  UPDATE context_ledger_items SET created_at = now() - interval '2 hours', updated_at = now() - interval '2 hours' WHERE generation_id = g;
+  w := context_job_story_writer_input(j);
+  INSERT INTO context_job_story_texts (job_id, checked_at, job_status, card_hash, record_sig, generation_id, evidence_until, model, sections, checks, written_at)
+  VALUES (j, now() - interval '1 hour', 'in_progress', w->>'card_hash', context_job_story_record_sig(j), g, now() - interval '2 hours', 'fixture-model',
+    '{"headline":"Fixture job.","the_job":"Fixture fence.","how_we_got_here":"Fixture.","where_it_is_at":"Awaiting work.","watch_out":"None."}',
+    jsonb_build_object('writer', 'fixture-rq15g', 'money_sig', context_job_story_money_sig(j), 'ledger_sig', context_job_story_ledger_sig(j)),
+    now() - interval '1 hour');
+  s0 := context_job_story_money_sig(j);
+  r := context_job_story_enqueue_changed(5);
+  PERFORM pg_temp.prove('story: a current story is not queued', NOT (r->'job_ids' @> jsonb_build_array(j)));
+
+  INSERT INTO public.work_order_customer_variations (org_id, job_id, description, tasks, trade_allocation_ex, customer_price_ex, created_by)
+  VALUES (org, j, 'Extra gate', '[{"description":"Extra works","hours":2}]'::jsonb, 120, 300, 'user:' || approver) RETURNING id INTO v_draft;
+  INSERT INTO public.work_order_customer_variations (org_id, job_id, description, tasks, trade_allocation_ex, customer_price_ex, created_by)
+  VALUES (org, j, 'Extra panel', '[{"description":"Extra works","hours":1}]'::jsonb, 40, 100, 'user:' || approver) RETURNING id INTO v_cancel;
+  UPDATE public.work_order_customer_variations SET status = 'cancelled', cancelled_by = 'user:' || approver WHERE id = v_cancel;
+  PERFORM pg_temp.prove('story: a draft or cancelled office variation leaves the money signature', context_job_story_money_sig(j) = s0);
+  r := context_job_story_enqueue_changed(5);
+  PERFORM pg_temp.prove('story: a draft or cancelled office variation queues nothing', NOT (r->'job_ids' @> jsonb_build_array(j)));
+
+  PERFORM public.approve_work_order_customer_variation(v_draft, approver, 'session',
+    (SELECT updated_at FROM public.work_order_customer_variations WHERE id = v_draft));
+  PERFORM pg_temp.prove('story: approval moves the money signature', context_job_story_money_sig(j) IS DISTINCT FROM s0);
+  r := context_job_story_enqueue_changed(5);
+  PERFORM pg_temp.prove('story: approval queues the saved story', r->'job_ids' @> jsonb_build_array(j));
+  PERFORM pg_temp.prove('story: one open request',
+    (SELECT count(*) FROM context_job_story_requests WHERE job_id = j AND done_at IS NULL) = 1);
+  PERFORM pg_temp.prove('story: a job with no office variation keeps its signature',
+    context_job_story_money_sig('d15b0000-0000-4000-8000-000000000002') = control_before);
+END $story$;
+
 SELECT jsonb_build_object('checks', count(*), 'passed', count(*) FILTER (WHERE passed)) AS result FROM rq15g_checks;
 ROLLBACK;

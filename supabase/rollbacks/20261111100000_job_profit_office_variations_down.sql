@@ -7,9 +7,37 @@
 -- A view column cannot be removed in place and job_profit(uuid) returns the view's row type, so (as the
 -- 20261104080000 rollback does) both are dropped and made again, with their comments, column comments and grants
 -- read first and put back exactly. Nothing else depends on either view (read 11 Nov 2026). No row changes.
+-- context_job_story_money_sig goes back first: 7a7798901a26351b8e910da3f1392509 -> 9632fde0aa3621c876d4b21bc8e7a55d.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 SET LOCAL TimeZone = 'UTC';
+
+DO $sig_down$
+DECLARE
+  f text; h text;
+  n constant text := $n$   FROM public.job_variations jv WHERE jv.job_id = p_job_id),
+  -- RQ-15.g (20261111100000): approved office variations, which Job Profit lists as agreed variations and
+  -- costs at their trade allocation. NULL for a job with none, so its signature is unchanged.
+  (SELECT string_agg(concat_ws(',', 'ov', cv.id::text, cv.customer_price_ex::text, cv.trade_allocation_ex::text,
+          to_char(cv.approved_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')), ';' ORDER BY cv.id)
+   FROM public.work_order_customer_variations cv WHERE cv.job_id = p_job_id AND cv.status = 'approved'),$n$;
+  o constant text := $o$   FROM public.job_variations jv WHERE jv.job_id = p_job_id),$o$;
+BEGIN
+  SELECT pg_get_functiondef(oid), md5(prosrc) INTO f, h FROM pg_proc
+   WHERE oid = to_regprocedure('public.context_job_story_money_sig(uuid)');
+  IF h = '9632fde0aa3621c876d4b21bc8e7a55d' THEN
+    RETURN;
+  END IF;
+  IF h IS DISTINCT FROM '7a7798901a26351b8e910da3f1392509' THEN
+    RAISE EXCEPTION 'context_job_story_money_sig is not the body 20261111100000 wrote (md5 %); refusing', h;
+  END IF;
+  EXECUTE replace(f, n, o);
+  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.context_job_story_money_sig(uuid)'::regprocedure)
+     <> '9632fde0aa3621c876d4b21bc8e7a55d' THEN
+    RAISE EXCEPTION 'context_job_story_money_sig did not return to its earlier body';
+  END IF;
+END
+$sig_down$;
 
 DO $down$
 DECLARE

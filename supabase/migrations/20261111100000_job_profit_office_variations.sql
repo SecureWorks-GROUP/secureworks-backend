@@ -134,3 +134,42 @@ BEGIN
   END IF;
 END
 $mig$;
+
+-- 3. The saved job story notices the change (Codex review of 1373). The story
+-- sweep wakes a job when context_job_story_money_sig moves; approving an office
+-- variation changes the book, so its approved office variations join that
+-- signature. A job with none adds NULL, which concat_ws skips, so its
+-- signature is unchanged. Draft and cancelled ones are not listed.
+DO $sig$
+DECLARE
+  f text; h text;
+  v_before constant text := '9632fde0aa3621c876d4b21bc8e7a55d';
+  v_after constant text := '7a7798901a26351b8e910da3f1392509';
+  o constant text := $o$   FROM public.job_variations jv WHERE jv.job_id = p_job_id),$o$;
+  n constant text := $n$   FROM public.job_variations jv WHERE jv.job_id = p_job_id),
+  -- RQ-15.g (20261111100000): approved office variations, which Job Profit lists as agreed variations and
+  -- costs at their trade allocation. NULL for a job with none, so its signature is unchanged.
+  (SELECT string_agg(concat_ws(',', 'ov', cv.id::text, cv.customer_price_ex::text, cv.trade_allocation_ex::text,
+          to_char(cv.approved_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')), ';' ORDER BY cv.id)
+   FROM public.work_order_customer_variations cv WHERE cv.job_id = p_job_id AND cv.status = 'approved'),$n$;
+BEGIN
+  PERFORM set_config('lock_timeout', '5s', true);
+  SELECT pg_get_functiondef(oid), md5(prosrc) INTO f, h FROM pg_proc
+   WHERE oid = to_regprocedure('public.context_job_story_money_sig(uuid)');
+  IF h = v_after THEN
+    RAISE NOTICE 'context_job_story_money_sig already covers office variations';
+    RETURN;
+  END IF;
+  IF h IS DISTINCT FROM v_before THEN
+    RAISE EXCEPTION 'context_job_story_money_sig is not the body this migration was written against (md5 %)', h;
+  END IF;
+  IF (length(f) - length(replace(f, o, ''))) / length(o) <> 1 THEN
+    RAISE EXCEPTION 'context_job_story_money_sig: the replaced fragment is not there exactly once';
+  END IF;
+  EXECUTE replace(f, o, n);
+  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.context_job_story_money_sig(uuid)'::regprocedure) <> v_after THEN
+    RAISE EXCEPTION 'context_job_story_money_sig after the change is not the rehearsed body (md5 %)',
+      (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.context_job_story_money_sig(uuid)'::regprocedure);
+  END IF;
+END
+$sig$;
