@@ -1,0 +1,1628 @@
+-- Owner approval of the price and of the work order (TK-S28).
+--
+-- Two explicit decisions, each a row in scope_owner_approvals:
+--   price       the job's frozen scope and pricing revision, as frozen.
+--   work_order  one job work order's exact content, on the same revision.
+-- Each names the signed-in approver, the time, and the authority it was
+-- given: owner (work_order_settings.owner_user_ids), approver_list or
+-- backup_approver_list (the existing named lists). A seal, a complete price,
+-- a customer acceptance or an office role is never one of these decisions.
+--
+-- One policy, enforced by the seal trigger (work_orders_job_kind_guard): a
+-- job work order bound to a saved revision is approved only when both
+-- decisions exist for that revision and its current content, whichever path
+-- seals it (release on acceptance, the manual approval RPCs, the automatic
+-- issue, a backfill, a direct write). The automatic issue may carry out an
+-- issue both decisions already allow; it never creates a decision.
+--
+-- A crew work order on such a job reaches an issued state only after the job
+-- work order is issued on both decisions (work_orders_crew_owner_gate).
+--
+-- A customer acceptance with an approval missing is retained on the draft set
+-- and the issue waits. The decision that completes the pair issues it in the
+-- same transaction (release then seal, so the existing release guard holds).
+-- The local deposit keeps the retained acceptance time as its event and due
+-- date base, however late the owner approves.
+--
+-- Every decision is recorded in the job's own company: the caller's verified
+-- company, else the approver's own (owner_approval_company_ok). NULL never
+-- passes.
+--
+-- Deploying this changes nothing staff can do: every refusal above applies
+-- only while owner_approval_saved_revision_required_v1 is on (seeded off, the
+-- owner's call, after the scoping tools record the quote PDFs and the owner
+-- list is written). While it is off, quote sends, work order issues (manual,
+-- automatic and on acceptance) and crew order moves go exactly as before, and
+-- each one the switch would have refused or held is recorded: sends in
+-- quote_send_price_unapproved_sends, work orders in
+-- job_work_order_owner_unapproved. Decisions are still recorded and used
+-- whenever someone makes them.
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
+
+-- ── 1. settings and switch ───────────────────────────────────────────────────
+
+ALTER TABLE public.work_order_settings
+  ADD COLUMN IF NOT EXISTS owner_user_ids uuid[] NOT NULL DEFAULT '{}';
+COMMENT ON COLUMN public.work_order_settings.owner_user_ids IS
+  'Users whose price and work order approvals are recorded with authority owner. Written by the owner''s go-live settings step, never by a migration. Empty means no approval is labelled owner; the named lists still approve.';
+
+INSERT INTO public.feature_flags (flag_name, enabled, description)
+VALUES
+  ('owner_approval_saved_revision_required_v1', false,
+   'When on, the owner''s decisions are required: a quote send is refused without the price decision on its saved revision (or when it names none), a job work order is issued only on both decisions for its saved revision (manual, automatic and on acceptance; one with no saved revision is refused), and a crew work order on a saved-quote job leaves draft only once the job work order is issued on both. Off until the scoping tools store quote PDFs before price approval and the owner list is written; the owner says when. While off, all of these go as before and each one this switch would have refused or held is recorded.')
+ON CONFLICT (flag_name) DO NOTHING;
+
+-- The switch. Missing or unreadable reads as off: today's behaviour.
+CREATE OR REPLACE FUNCTION public.owner_approval_required()
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT COALESCE((SELECT f.enabled FROM public.feature_flags f
+    WHERE f.flag_name = 'owner_approval_saved_revision_required_v1' LIMIT 1), false);
+$$;
+
+-- While the switch is off: every work order step it would have refused or
+-- held, written in the same transaction as the step (ids and codes only).
+-- event issued: a job work order sealed without both decisions; released: an
+-- acceptance released without them; crew_status: a crew work order moved out
+-- of draft before its job work order was issued on both.
+CREATE TABLE IF NOT EXISTS public.job_work_order_owner_unapproved (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_id uuid NOT NULL,
+  work_order_id uuid NOT NULL,
+  work_order_kind text NOT NULL CHECK (work_order_kind IN ('job', 'crew')),
+  event text NOT NULL CHECK (event IN ('issued', 'released', 'crew_status')),
+  path text,
+  scope_revision_id uuid,
+  missing text[] NOT NULL DEFAULT '{}',
+  recorded_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS job_work_order_owner_unapproved_job_idx
+  ON public.job_work_order_owner_unapproved (job_id, recorded_at);
+ALTER TABLE public.job_work_order_owner_unapproved ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.job_work_order_owner_unapproved FROM PUBLIC, anon, authenticated;
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.job_work_order_owner_unapproved FROM service_role;
+GRANT SELECT ON TABLE public.job_work_order_owner_unapproved TO service_role;
+DROP POLICY IF EXISTS job_work_order_owner_unapproved_service_role_read ON public.job_work_order_owner_unapproved;
+CREATE POLICY job_work_order_owner_unapproved_service_role_read ON public.job_work_order_owner_unapproved
+  FOR SELECT TO service_role USING (true);
+
+CREATE OR REPLACE FUNCTION public.job_work_order_owner_unapproved_append_only()
+RETURNS trigger LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+BEGIN
+  RAISE EXCEPTION 'unapproved work order records are append only' USING ERRCODE = '23514';
+END $$;
+DROP TRIGGER IF EXISTS trg_job_work_order_owner_unapproved_append_only ON public.job_work_order_owner_unapproved;
+CREATE TRIGGER trg_job_work_order_owner_unapproved_append_only
+  BEFORE UPDATE OR DELETE ON public.job_work_order_owner_unapproved
+  FOR EACH ROW EXECUTE FUNCTION public.job_work_order_owner_unapproved_append_only();
+DROP TRIGGER IF EXISTS trg_job_work_order_owner_unapproved_no_truncate ON public.job_work_order_owner_unapproved;
+CREATE TRIGGER trg_job_work_order_owner_unapproved_no_truncate
+  BEFORE TRUNCATE ON public.job_work_order_owner_unapproved
+  FOR EACH STATEMENT EXECUTE FUNCTION public.job_work_order_owner_unapproved_append_only();
+
+-- The one writer, called only by flush_owner_unapproved below. An ordinary
+-- error is a warning. A cancel (query_canceled) is left to the flush, which
+-- tells a user's cancel from a timeout. A lock wait is capped at 200 ms so the
+-- record cannot hold anything; the cap is put back before returning, and an
+-- error rolls it back with the block.
+CREATE OR REPLACE FUNCTION public.record_work_order_owner_unapproved(
+  p_job_id uuid, p_work_order_id uuid, p_kind text, p_event text, p_path text,
+  p_scope_revision_id uuid, p_missing text[]
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_lock_timeout text := current_setting('lock_timeout');
+BEGIN
+  PERFORM set_config('lock_timeout', '200ms', true);
+  INSERT INTO public.job_work_order_owner_unapproved(job_id, work_order_id, work_order_kind,
+      event, path, scope_revision_id, missing)
+    VALUES (p_job_id, p_work_order_id, p_kind, p_event, p_path, p_scope_revision_id,
+      COALESCE(p_missing, '{}'));
+  INSERT INTO public.job_events(job_id, event_type, detail_json) VALUES
+    (p_job_id, 'work_order_owner_unapproved', jsonb_build_object(
+      'work_order_id', p_work_order_id, 'kind', p_kind, 'event', p_event, 'path', p_path,
+      'scope_revision_id', p_scope_revision_id, 'missing', to_jsonb(COALESCE(p_missing, '{}'))));
+  PERFORM set_config('lock_timeout', v_lock_timeout, true);
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'work_order_owner_unapproved not recorded (%): %', SQLSTATE, SQLERRM;
+END $$;
+
+-- Switch off, the record is the LAST thing an action does, so a slow or
+-- failed record never delays, stops or rolls back staff work, and never
+-- leaves staff work running past its deadline. The seal and the crew gate
+-- only queue what happened (ids, in a transaction-local setting; a failed
+-- rollback of the action drops its entry with it). flush_owner_unapproved
+-- then re-reads the real rows, works out what the switch would have wanted
+-- and writes the record: at the end of approve_job_work_order,
+-- auto_issue_job_work_order and release_scope_job_drafts, and otherwise from
+-- a statement trigger after every row trigger of the work order write.
+CREATE OR REPLACE FUNCTION public.owner_unapproved_queue(p_entry jsonb)
+RETURNS void LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+BEGIN
+  PERFORM set_config('secureworks.owner_unapproved_pending',
+    (COALESCE(NULLIF(current_setting('secureworks.owner_unapproved_pending', true), '')::jsonb, '[]'::jsonb)
+      || jsonb_build_array(p_entry))::text, true);
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'work_order_owner_unapproved not queued (%): %', SQLSTATE, SQLERRM;
+END $$;
+
+-- Writes the queued records. Best effort, and never re-reads the switch's
+-- verdict into the action: an ordinary error, a raised cancel code or a
+-- statement timeout spent here is a warning (nothing of the action runs
+-- after it). A user's cancel (pg_cancel_backend) is raised again, so the
+-- action is cancelled exactly as it would be without the record.
+CREATE OR REPLACE FUNCTION public.flush_owner_unapproved()
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_pending jsonb;
+  e jsonb;
+  w public.work_orders%ROWTYPE;
+  v_gate jsonb;
+  v_missing text[];
+  s public.scope_job_draft_sets%ROWTYPE;
+BEGIN
+  BEGIN
+    v_pending := NULLIF(current_setting('secureworks.owner_unapproved_pending', true), '')::jsonb;
+  EXCEPTION WHEN OTHERS THEN
+    v_pending := NULL;
+  END;
+  PERFORM set_config('secureworks.owner_unapproved_pending', '', true);
+  IF v_pending IS NULL OR jsonb_typeof(v_pending) <> 'array' THEN
+    RETURN;
+  END IF;
+  BEGIN
+    FOR e IN SELECT x FROM jsonb_array_elements(v_pending) x LOOP
+      IF e->>'kind' = 'issued' THEN
+        SELECT * INTO w FROM public.work_orders WHERE id = (e->>'id')::uuid;
+        CONTINUE WHEN NOT FOUND OR w.kind <> 'job' OR w.status <> 'approved';
+        v_gate := public.job_work_order_owner_gate(w, w.sealed_content_hash);
+        v_missing := ARRAY(SELECT jsonb_array_elements_text(COALESCE(v_gate->'missing', '[]'::jsonb)));
+        IF (v_gate->>'bound')::boolean AND cardinality(v_missing) = 0
+           AND w.approved_via IS DISTINCT FROM 'auto'
+           AND w.approved_by IS DISTINCT FROM (v_gate->>'work_order_approver')::uuid THEN
+          v_missing := ARRAY['work_order_approver'];
+        END IF;
+        IF NOT COALESCE((v_gate->>'bound')::boolean, false) OR cardinality(v_missing) > 0 THEN
+          PERFORM public.record_work_order_owner_unapproved(w.job_id, w.id, 'job', 'issued',
+            w.approved_via, (v_gate->>'revision_id')::uuid, v_missing);
+        END IF;
+      ELSIF e->>'kind' = 'crew' THEN
+        SELECT * INTO w FROM public.work_orders WHERE id = (e->>'id')::uuid;
+        CONTINUE WHEN NOT FOUND OR w.kind <> 'crew'
+          OR w.status NOT IN ('sent', 'accepted', 'in_progress', 'complete');
+        IF public.work_orders_crew_owner_hold(w) THEN
+          PERFORM public.record_work_order_owner_unapproved(w.job_id, w.id, 'crew', 'crew_status',
+            w.status, w.scope_revision_id, ARRAY['job_work_order_not_issued_on_owner_approvals']);
+        END IF;
+      ELSIF e->>'kind' = 'released' THEN
+        SELECT * INTO s FROM public.scope_job_draft_sets WHERE job_id = (e->>'job_id')::uuid;
+        CONTINUE WHEN NOT FOUND OR s.released_at IS NULL;
+        -- The acceptance time, kept so a stage released later still dates
+        -- from the customer's acceptance.
+        UPDATE public.scope_job_draft_sets
+          SET acceptance_recorded_at = COALESCE(acceptance_recorded_at, now()),
+              acceptance_scope_revision_id = COALESCE(acceptance_scope_revision_id, s.scope_revision_id),
+              acceptance_legacy = COALESCE((e->>'legacy')::boolean, false)
+          WHERE job_id = s.job_id AND acceptance_recorded_at IS NULL;
+        SELECT * INTO w FROM public.work_orders WHERE id = s.work_order_id;
+        CONTINUE WHEN NOT FOUND;
+        v_gate := public.job_work_order_issue_check(w);
+        IF jsonb_array_length(COALESCE(v_gate->'missing', '[]'::jsonb)) > 0 THEN
+          PERFORM public.record_work_order_owner_unapproved(s.job_id, s.work_order_id, 'job', 'released',
+            'acceptance', s.scope_revision_id,
+            ARRAY(SELECT jsonb_array_elements_text(v_gate->'missing')));
+        END IF;
+      END IF;
+    END LOOP;
+  EXCEPTION WHEN OTHERS OR query_canceled THEN
+    IF SQLSTATE = '57014' AND SQLERRM = 'canceling statement due to user request' THEN
+      RAISE;
+    END IF;
+    RAISE WARNING 'work_order_owner_unapproved not recorded (%): %', SQLSTATE, SQLERRM;
+  END;
+END $$;
+
+-- The statement trigger: writes what a plain work order write queued, after
+-- every row trigger of that write. approve_job_work_order and
+-- auto_issue_job_work_order write it themselves, after the job pointer, so
+-- they hold it back here.
+CREATE OR REPLACE FUNCTION public.work_orders_owner_unapproved_flush()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+  IF current_setting('secureworks.owner_unapproved_hold', true) IS DISTINCT FROM 'on' THEN
+    PERFORM public.flush_owner_unapproved();
+  END IF;
+  RETURN NULL;
+END $$;
+
+-- Only the flush writes a record, and only the actions and the statement
+-- trigger call the flush; no API role. The queue only sets a setting of the
+-- caller's own transaction, and the flush re-reads real rows, so it is left
+-- callable by the roles whose writes fire the seal and the crew gate.
+REVOKE EXECUTE ON FUNCTION
+  public.record_work_order_owner_unapproved(uuid, uuid, text, text, text, uuid, text[]),
+  public.flush_owner_unapproved(),
+  public.work_orders_owner_unapproved_flush()
+  FROM PUBLIC, anon, authenticated, service_role;
+
+-- ── 2. the decisions ─────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.scope_owner_approvals (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind text NOT NULL CHECK (kind IN ('price', 'work_order')),
+  -- No foreign key on the job or the work order: a decision outlives the
+  -- draft it was made on and never blocks removing one.
+  job_id uuid NOT NULL,
+  org_id uuid,
+  scope_revision_id uuid REFERENCES public.scope_revisions(id),
+  scope_hash text,
+  pricing_hash text,
+  work_order_id uuid,
+  work_order_content_hash text,
+  work_order_updated_at timestamptz,
+  -- Price only: the sha256 of every quote PDF the revision held when the
+  -- owner decided (scope_revision_quote_documents). A send may carry only
+  -- these bytes.
+  quote_document_sha256s text[],
+  approver_user_id uuid NOT NULL,
+  authority text NOT NULL
+    CHECK (authority IN ('owner', 'approver_list', 'backup_approver_list')),
+  via text NOT NULL CHECK (via IN ('session', 'terminal')),
+  decided_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT scope_owner_approvals_shape_check CHECK (
+    (kind = 'price' AND scope_revision_id IS NOT NULL AND scope_hash IS NOT NULL
+      AND pricing_hash IS NOT NULL AND work_order_id IS NULL
+      AND work_order_content_hash IS NULL AND quote_document_sha256s IS NOT NULL)
+    OR (kind = 'work_order' AND work_order_id IS NOT NULL
+      AND work_order_content_hash ~ '^[0-9a-f]{64}$' AND quote_document_sha256s IS NULL)
+  ),
+  CONSTRAINT scope_owner_approvals_documents_check CHECK (
+    quote_document_sha256s IS NULL
+    OR array_to_string(quote_document_sha256s, ',') ~ '^([0-9a-f]{64}(,[0-9a-f]{64})*)?$'
+  )
+);
+COMMENT ON TABLE public.scope_owner_approvals IS
+  'Owner approval decisions (20261109040000): price on a frozen scope revision, work order on its exact content and revision. Append only; written only by record_scope_price_approval and record_job_work_order_approval.';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_scope_owner_approvals_price
+  ON public.scope_owner_approvals (job_id, scope_revision_id)
+  WHERE kind = 'price';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_scope_owner_approvals_work_order
+  ON public.scope_owner_approvals (
+    work_order_id, work_order_content_hash,
+    COALESCE(scope_revision_id, '00000000-0000-0000-0000-000000000000'::uuid))
+  WHERE kind = 'work_order';
+CREATE INDEX IF NOT EXISTS idx_scope_owner_approvals_job
+  ON public.scope_owner_approvals (job_id, decided_at DESC);
+
+ALTER TABLE public.scope_owner_approvals ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.scope_owner_approvals FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT ON public.scope_owner_approvals TO service_role;
+DROP POLICY IF EXISTS scope_owner_approvals_service_role_read ON public.scope_owner_approvals;
+CREATE POLICY scope_owner_approvals_service_role_read ON public.scope_owner_approvals
+  FOR SELECT TO service_role USING (true);
+
+CREATE OR REPLACE FUNCTION public.scope_owner_approvals_append_only()
+RETURNS trigger LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+BEGIN
+  RAISE EXCEPTION 'owner approval decisions are append only' USING ERRCODE = '23514';
+END $$;
+DROP TRIGGER IF EXISTS trg_scope_owner_approvals_append_only ON public.scope_owner_approvals;
+CREATE TRIGGER trg_scope_owner_approvals_append_only
+  BEFORE UPDATE OR DELETE ON public.scope_owner_approvals
+  FOR EACH ROW EXECUTE FUNCTION public.scope_owner_approvals_append_only();
+DROP TRIGGER IF EXISTS trg_scope_owner_approvals_no_truncate ON public.scope_owner_approvals;
+CREATE TRIGGER trg_scope_owner_approvals_no_truncate
+  BEFORE TRUNCATE ON public.scope_owner_approvals
+  FOR EACH STATEMENT EXECUTE FUNCTION public.scope_owner_approvals_append_only();
+
+ALTER TABLE public.work_orders
+  ADD COLUMN IF NOT EXISTS price_approval_id uuid REFERENCES public.scope_owner_approvals(id),
+  ADD COLUMN IF NOT EXISTS work_order_approval_id uuid REFERENCES public.scope_owner_approvals(id);
+COMMENT ON COLUMN public.work_orders.price_approval_id IS
+  'The price decision the seal checked (20261109040000). Stamped only by the seal trigger.';
+COMMENT ON COLUMN public.work_orders.work_order_approval_id IS
+  'The work order decision the seal checked (20261109040000). Stamped only by the seal trigger.';
+
+ALTER TABLE public.scope_job_draft_sets
+  ADD COLUMN IF NOT EXISTS acceptance_recorded_at timestamptz,
+  ADD COLUMN IF NOT EXISTS acceptance_scope_revision_id uuid REFERENCES public.scope_revisions(id),
+  ADD COLUMN IF NOT EXISTS acceptance_legacy boolean NOT NULL DEFAULT false;
+COMMENT ON COLUMN public.scope_job_draft_sets.acceptance_recorded_at IS
+  'When release_scope_job_drafts retained the customer''s acceptance. The issue then waits for both owner approvals; released_at is set only when the work order is sealed.';
+
+-- ── 3. shared rules ──────────────────────────────────────────────────────────
+
+-- Who may decide. Owner first, then the named lists. Backup approvers count
+-- only while job_work_order_office_fill_v1 is on, as in the seal.
+CREATE OR REPLACE FUNCTION public.owner_approval_authority(p_user uuid)
+RETURNS text LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE s public.work_order_settings%ROWTYPE;
+BEGIN
+  IF p_user IS NULL THEN RETURN NULL; END IF;
+  SELECT * INTO s FROM public.work_order_settings WHERE id = 1;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  IF p_user = ANY (COALESCE(s.owner_user_ids, '{}'::uuid[])) THEN RETURN 'owner'; END IF;
+  IF p_user = ANY (COALESCE(s.approver_user_ids, '{}'::uuid[])) THEN RETURN 'approver_list'; END IF;
+  IF p_user = ANY (COALESCE(s.backup_approver_user_ids, '{}'::uuid[]))
+     AND COALESCE((SELECT f.enabled FROM public.feature_flags f
+                   WHERE f.flag_name = 'job_work_order_office_fill_v1' LIMIT 1), false) THEN
+    RETURN 'backup_approver_list';
+  END IF;
+  RETURN NULL;
+END $$;
+
+-- The same digest the seal stores in sealed_content_hash.
+CREATE OR REPLACE FUNCTION public.job_work_order_content_hash(w public.work_orders)
+RETURNS text LANGUAGE sql IMMUTABLE SET search_path = public, pg_temp AS $$
+  SELECT encode(sha256(convert_to(jsonb_build_object(
+    'work_order_id', w.id,
+    'job_id', w.job_id,
+    'wo_number', w.wo_number,
+    'scope_items', COALESCE(w.scope_items, '[]'::jsonb),
+    'special_instructions', w.special_instructions,
+    'site_address', w.site_address,
+    'scheduled_date', w.scheduled_date,
+    'agreed_labour_ex', w.agreed_labour_ex
+  )::text, 'UTF8')), 'hex');
+$$;
+
+-- What the seal would refuse for content, or NULL when it is ready.
+CREATE OR REPLACE FUNCTION public.job_work_order_not_ready(w public.work_orders)
+RETURNS text LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE v_type text;
+BEGIN
+  IF w.job_id IS NULL THEN RETURN 'a job work order needs its job'; END IF;
+  IF w.agreed_labour_ex IS NULL THEN RETURN 'set the agreed labour amount before approving'; END IF;
+  IF COALESCE(jsonb_array_length(CASE WHEN jsonb_typeof(w.scope_items) = 'array' THEN w.scope_items END), 0) = 0
+     AND COALESCE(btrim(w.special_instructions), '') = '' THEN
+    SELECT j.type INTO v_type FROM public.jobs j WHERE j.id = w.job_id;
+    IF COALESCE(btrim(v_type), '') IN ('fencing', 'patio', '') THEN
+      RETURN 'add the scope before approving';
+    END IF;
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.scope_owner_approval_json(a public.scope_owner_approvals)
+RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path = public, pg_temp AS $$
+  SELECT CASE WHEN a.id IS NULL THEN NULL ELSE jsonb_strip_nulls(jsonb_build_object(
+    'id', a.id, 'kind', a.kind, 'job_id', a.job_id,
+    'scope_revision_id', a.scope_revision_id,
+    'work_order_id', a.work_order_id,
+    'work_order_content_hash', a.work_order_content_hash,
+    'quote_document_sha256s', to_jsonb(a.quote_document_sha256s),
+    'approver_user_id', a.approver_user_id,
+    'authority', a.authority, 'via', a.via, 'decided_at', a.decided_at)) END;
+$$;
+
+-- The policy, read without locks. bound: the order names a saved revision
+-- (its prepared revision or its quote fill revision; two different ones are a
+-- conflict and never issue). For a bound order, missing names each absent
+-- decision for that revision and the order's current content.
+CREATE OR REPLACE FUNCTION public.job_work_order_owner_gate(w public.work_orders, p_hash text DEFAULT NULL)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_rev uuid := COALESCE(w.scope_revision_id, w.quote_filled_scope_revision_id);
+  v_hash text := COALESCE(p_hash, public.job_work_order_content_hash(w));
+  v_price public.scope_owner_approvals%ROWTYPE;
+  v_order public.scope_owner_approvals%ROWTYPE;
+  v_missing text[] := '{}';
+BEGIN
+  IF w.scope_revision_id IS NOT NULL AND w.quote_filled_scope_revision_id IS NOT NULL
+     AND w.scope_revision_id <> w.quote_filled_scope_revision_id THEN
+    RETURN jsonb_build_object('bound', true, 'revision_id', NULL, 'content_hash', v_hash,
+      'missing', jsonb_build_array('work_order_revision_conflict'));
+  END IF;
+  IF v_rev IS NULL THEN
+    RETURN jsonb_build_object('bound', false, 'revision_id', NULL, 'content_hash', v_hash,
+      'missing', jsonb_build_array('saved_revision'));
+  END IF;
+  SELECT * INTO v_price FROM public.scope_owner_approvals a
+    WHERE a.kind = 'price' AND a.job_id = w.job_id AND a.scope_revision_id = v_rev;
+  IF NOT FOUND THEN v_missing := v_missing || 'price_approval'::text; END IF;
+  SELECT * INTO v_order FROM public.scope_owner_approvals a
+    WHERE a.kind = 'work_order' AND a.work_order_id = w.id
+      AND a.scope_revision_id = v_rev AND a.work_order_content_hash = v_hash;
+  IF NOT FOUND THEN v_missing := v_missing || 'work_order_approval'::text; END IF;
+  RETURN jsonb_build_object('bound', true, 'revision_id', v_rev, 'content_hash', v_hash,
+    'price_approval_id', v_price.id, 'work_order_approval_id', v_order.id,
+    'work_order_approver', v_order.approver_user_id, 'work_order_via', v_order.via,
+    'price_approval', public.scope_owner_approval_json(v_price),
+    'work_order_approval', public.scope_owner_approval_json(v_order),
+    'missing', to_jsonb(v_missing));
+END $$;
+
+-- Everything an issue still waits for, for a bound order. A shared-lane order
+-- not yet released also needs the retained customer acceptance of the same
+-- revision, an open job and its prepared source unchanged.
+CREATE OR REPLACE FUNCTION public.job_work_order_issue_check(w public.work_orders)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  g jsonb := public.job_work_order_owner_gate(w);
+  v_missing jsonb := g->'missing';
+  s public.scope_job_draft_sets%ROWTYPE;
+  v_status text;
+  v_not_ready text := public.job_work_order_not_ready(w);
+BEGIN
+  SELECT * INTO s FROM public.scope_job_draft_sets d WHERE d.work_order_id = w.id;
+  IF FOUND AND s.released_at IS NULL THEN
+    SELECT j.status INTO v_status FROM public.jobs j WHERE j.id = w.job_id;
+    IF s.acceptance_recorded_at IS NULL OR s.acceptance_scope_revision_id IS DISTINCT FROM s.scope_revision_id THEN
+      v_missing := v_missing || '"customer_acceptance"'::jsonb;
+    ELSIF NOT (v_status = ANY (public.job_work_order_open_statuses())) THEN
+      v_missing := v_missing || '"job_not_open"'::jsonb;
+    ELSIF NOT EXISTS (SELECT 1 FROM public.scope_revisions r
+      WHERE r.id = s.scope_revision_id AND r.job_id = w.job_id AND r.status IN ('frozen', 'superseded')
+        AND w.scope_revision_id = r.id AND w.scope_items = s.labour_lines
+        AND w.agreed_labour_ex IS NOT DISTINCT FROM s.labour_total_cents / 100.0
+        AND (NOT s.acceptance_legacy OR r.status = 'frozen' AND NOT EXISTS (
+          SELECT 1 FROM public.scope_revisions n WHERE n.job_id = w.job_id AND n.revision_number > r.revision_number))) THEN
+      v_missing := v_missing || '"source_changed"'::jsonb;
+    END IF;
+  END IF;
+  IF v_not_ready IS NOT NULL THEN v_missing := v_missing || '"work_order_incomplete"'::jsonb; END IF;
+  RETURN g || jsonb_build_object('missing', v_missing, 'shared_lane', s.job_id IS NOT NULL);
+END $$;
+
+-- Links that follow every issue: the job's live work order, labour invoiced
+-- before it, and variations raised before it.
+CREATE OR REPLACE FUNCTION public.link_issued_job_work_order(p_work_order_id uuid)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE w public.work_orders%ROWTYPE;
+BEGIN
+  SELECT * INTO w FROM public.work_orders WHERE id = p_work_order_id;
+  IF NOT FOUND OR w.kind <> 'job' OR w.status <> 'approved' THEN RETURN; END IF;
+  UPDATE public.jobs SET work_order_id = w.id WHERE id = w.job_id;
+  UPDATE public.trade_invoice_lines til
+    SET job_work_order_id = w.id
+    FROM public.trade_invoices ti
+    WHERE ti.id = til.trade_invoice_id
+      AND til.job_id = w.job_id
+      AND til.job_work_order_id IS NULL
+      AND ti.status = ANY (public.job_work_order_billed_invoice_statuses());
+  UPDATE public.work_order_variations
+    SET work_order_id = w.id
+    WHERE job_id = w.job_id AND work_order_id IS NULL;
+END $$;
+
+-- ── 4. the seal: one policy for every path ───────────────────────────────────
+
+-- The seal digest keys moved, unchanged, into job_work_order_content_hash;
+-- the trigger returns a row, never these keys.
+-- output-key-guard: drop public.work_orders_job_kind_guard agreed_labour_ex
+-- output-key-guard: drop public.work_orders_job_kind_guard job_id
+-- output-key-guard: drop public.work_orders_job_kind_guard scheduled_date
+-- output-key-guard: drop public.work_orders_job_kind_guard scope_items
+-- output-key-guard: drop public.work_orders_job_kind_guard site_address
+-- output-key-guard: drop public.work_orders_job_kind_guard special_instructions
+-- output-key-guard: drop public.work_orders_job_kind_guard wo_number
+-- output-key-guard: drop public.work_orders_job_kind_guard work_order_id
+CREATE OR REPLACE FUNCTION public.work_orders_job_kind_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_mutable text[] := ARRAY['viewed_at', 'updated_at'];
+  v_approvers uuid[];
+  v_backup uuid[];
+  v_content_changed boolean;
+  v_old_untouched boolean;
+  v_job_type text;
+  v_hash text;
+  v_gate jsonb;
+  v_required boolean;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF OLD.kind = 'job' AND OLD.status = 'approved' THEN
+      RAISE EXCEPTION 'an approved job work order is sealed and cannot be deleted'
+        USING ERRCODE = '23514';
+    END IF;
+    RETURN OLD;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    NEW.price_approval_id := NULL;
+    NEW.work_order_approval_id := NULL;
+    IF NEW.kind = 'job' AND NEW.status = 'approved' THEN
+      RAISE EXCEPTION 'a job work order is created as a draft and approved afterwards'
+        USING ERRCODE = '23514';
+    END IF;
+    IF NEW.kind = 'job' THEN
+      NEW.quote_filled_at := NULL;
+      NEW.hand_edited_at := CASE
+        WHEN COALESCE(jsonb_array_length(CASE WHEN jsonb_typeof(NEW.scope_items) = 'array' THEN NEW.scope_items END), 0) > 0
+          OR NEW.agreed_labour_ex IS NOT NULL
+          OR COALESCE(btrim(NEW.special_instructions), '') <> ''
+        THEN clock_timestamp()
+      END;
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.kind IS DISTINCT FROM OLD.kind THEN
+    RAISE EXCEPTION 'work_orders.kind cannot change' USING ERRCODE = '23514';
+  END IF;
+
+  IF OLD.kind = 'job' AND OLD.status = 'approved' THEN
+    IF (to_jsonb(NEW) - v_mutable) IS DISTINCT FROM (to_jsonb(OLD) - v_mutable) THEN
+      RAISE EXCEPTION 'an approved job work order is sealed: later change is recorded as a variation'
+        USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  -- (added) Only the seal below stamps the decision ids.
+  NEW.price_approval_id := OLD.price_approval_id;
+  NEW.work_order_approval_id := OLD.work_order_approval_id;
+
+  IF NEW.kind = 'job' THEN
+    NEW.updated_at := clock_timestamp();
+
+    NEW.hand_edited_at := OLD.hand_edited_at;
+    v_content_changed :=
+      NEW.scope_items IS DISTINCT FROM OLD.scope_items
+      OR NEW.agreed_labour_ex IS DISTINCT FROM OLD.agreed_labour_ex
+      OR NEW.special_instructions IS DISTINCT FROM OLD.special_instructions
+      OR NEW.scheduled_date IS DISTINCT FROM OLD.scheduled_date
+      OR NEW.site_address IS DISTINCT FROM OLD.site_address;
+    v_old_untouched :=
+      COALESCE(jsonb_array_length(CASE WHEN jsonb_typeof(OLD.scope_items) = 'array' THEN OLD.scope_items END), 0) = 0
+      AND OLD.agreed_labour_ex IS NULL;
+    IF NEW.quote_filled_at IS DISTINCT FROM OLD.quote_filled_at THEN
+      IF OLD.quote_filled_at IS NOT NULL OR NEW.quote_filled_at IS NULL
+         OR OLD.status IS DISTINCT FROM 'draft' OR OLD.hand_edited_at IS NOT NULL
+         OR NOT (
+           v_old_untouched
+           OR (NOT v_content_changed
+               AND current_setting('secureworks.job_work_order_fill_stamp', true) = 'prior_fill')
+         ) THEN
+        RAISE EXCEPTION 'quote_filled_at is stamped only by the quote fill of an untouched draft'
+          USING ERRCODE = '23514';
+      END IF;
+    ELSIF v_content_changed THEN
+      NEW.hand_edited_at := clock_timestamp();
+    END IF;
+  END IF;
+
+  IF NEW.kind = 'job' AND NEW.status = 'approved' THEN
+    IF OLD.status IS DISTINCT FROM 'draft' THEN
+      RAISE EXCEPTION 'only a draft job work order can be approved' USING ERRCODE = '23514';
+    END IF;
+    v_hash := public.job_work_order_content_hash(NEW);
+    v_required := public.owner_approval_required();
+    -- (added) Switch on: the gate decides here. Switch off: the gate is not
+    -- read here at all; the issue goes as before and what the switch would
+    -- have wanted is worked out and recorded last, after the staff action
+    -- (owner_unapproved_queue / flush_owner_unapproved).
+    IF v_required THEN
+      v_gate := public.job_work_order_owner_gate(NEW, v_hash);
+    END IF;
+    IF NEW.approved_via = 'auto' THEN
+      IF current_setting('secureworks.job_work_order_auto_issue', true) IS DISTINCT FROM 'on'
+         OR NOT COALESCE((SELECT f.enabled FROM public.feature_flags f
+                          WHERE f.flag_name = 'job_work_order_auto_issue_v1' LIMIT 1), false) THEN
+        RAISE EXCEPTION 'a job work order is issued automatically only by auto_issue_job_work_order while job_work_order_auto_issue_v1 is on'
+          USING ERRCODE = '42501';
+      END IF;
+      IF NEW.approved_by IS NOT NULL THEN
+        RAISE EXCEPTION 'an automatic issue names no approver' USING ERRCODE = '23514';
+      END IF;
+      IF OLD.quote_filled_at IS NULL OR OLD.hand_edited_at IS NOT NULL THEN
+        RAISE EXCEPTION 'only a draft filled from the quote and not edited by hand is issued automatically'
+          USING ERRCODE = '23514';
+      END IF;
+      -- (added) With the switch on, the automatic issue carries out both owner
+      -- decisions and never stands in for them.
+      IF v_required AND (NOT (v_gate->>'bound')::boolean OR jsonb_array_length(v_gate->'missing') > 0) THEN
+        RAISE EXCEPTION 'owner_approval_required: % (an automatic issue needs both owner approvals for the work order''s saved revision)',
+          (SELECT string_agg(m, ', ') FROM jsonb_array_elements_text(v_gate->'missing') m)
+          USING ERRCODE = 'WO428';
+      END IF;
+    ELSE
+      -- (added) Backup approvers join the list only while the office switch is on.
+      SELECT s.approver_user_ids, s.backup_approver_user_ids
+        INTO v_approvers, v_backup
+        FROM public.work_order_settings s WHERE s.id = 1;
+      IF COALESCE((SELECT f.enabled FROM public.feature_flags f
+                   WHERE f.flag_name = 'job_work_order_office_fill_v1' LIMIT 1), false) THEN
+        v_approvers := COALESCE(v_approvers, '{}'::uuid[]) || COALESCE(v_backup, '{}'::uuid[]);
+      END IF;
+      v_approvers := COALESCE(v_approvers, '{}'::uuid[])
+        || COALESCE((SELECT s.owner_user_ids FROM public.work_order_settings s WHERE s.id = 1), '{}'::uuid[]);
+      IF NEW.approved_by IS NULL OR NOT (NEW.approved_by = ANY (v_approvers)) THEN
+        RAISE EXCEPTION 'only an approver named in work_order_settings can approve a job work order'
+          USING ERRCODE = '42501';
+      END IF;
+      IF v_required THEN
+        IF NOT (v_gate->>'bound')::boolean THEN
+          RAISE EXCEPTION 'owner_approval_required: saved_revision (a work order with no saved revision cannot be approved while owner_approval_saved_revision_required_v1 is on)'
+            USING ERRCODE = 'WO428';
+        ELSIF jsonb_array_length(v_gate->'missing') > 0 THEN
+          RAISE EXCEPTION 'owner_approval_required: % (a work order on a saved revision is approved only with both owner approvals for that revision)',
+            (SELECT string_agg(m, ', ') FROM jsonb_array_elements_text(v_gate->'missing') m)
+            USING ERRCODE = 'WO428';
+        ELSIF NEW.approved_by IS DISTINCT FROM (v_gate->>'work_order_approver')::uuid THEN
+          RAISE EXCEPTION 'the seal names the person who approved the work order'
+            USING ERRCODE = '42501';
+        END IF;
+      END IF;
+    END IF;
+    IF NEW.job_id IS NULL THEN
+      RAISE EXCEPTION 'a job work order needs its job' USING ERRCODE = '23514';
+    END IF;
+    IF NEW.agreed_labour_ex IS NULL THEN
+      RAISE EXCEPTION 'set the agreed labour amount before approving' USING ERRCODE = '23514';
+    END IF;
+    IF COALESCE(jsonb_array_length(CASE WHEN jsonb_typeof(NEW.scope_items) = 'array' THEN NEW.scope_items END), 0) = 0
+       AND COALESCE(btrim(NEW.special_instructions), '') = '' THEN
+      -- (added) Fencing, patio, and a job with no type still need a scope.
+      -- Any other type may be approved on the labour allowance alone.
+      SELECT j.type INTO v_job_type FROM public.jobs j WHERE j.id = NEW.job_id;
+      IF COALESCE(btrim(v_job_type), '') IN ('fencing', 'patio', '') THEN
+        RAISE EXCEPTION 'add the scope before approving' USING ERRCODE = '23514';
+      END IF;
+    END IF;
+    NEW.approved_at := COALESCE(NEW.approved_at, now());
+    NEW.sealed_content_hash := v_hash;
+    IF v_required THEN
+      NEW.price_approval_id := (v_gate->>'price_approval_id')::uuid;
+      NEW.work_order_approval_id := (v_gate->>'work_order_approval_id')::uuid;
+    ELSE
+      -- (added) Switch off: sealed as before, with no decision ids. Whether
+      -- the switch would have refused it is worked out after the action.
+      PERFORM public.owner_unapproved_queue(jsonb_build_object('kind', 'issued', 'id', NEW.id));
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+-- A crew work order on a job whose work comes from a saved revision reaches
+-- an issued state (sent, accepted, in progress, complete) only once that
+-- job's work order is issued on both owner decisions. Every way in is
+-- checked: an insert, a draft, and a cancelled order brought back. Only an
+-- order that was already issued before this rule stays editable as it was.
+CREATE OR REPLACE FUNCTION public.work_orders_crew_owner_gate()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+  IF NEW.kind IS DISTINCT FROM 'crew' OR NEW.job_id IS NULL
+     OR NEW.status IN ('draft', 'cancelled') THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'UPDATE' AND OLD.kind = 'crew' AND OLD.job_id IS NOT DISTINCT FROM NEW.job_id
+     AND OLD.status IN ('sent', 'accepted', 'in_progress', 'complete') THEN
+    RETURN NEW;
+  END IF;
+  -- Switch off: the move goes as before. Whether the switch would have held
+  -- it is worked out and recorded after the move (flush_owner_unapproved).
+  IF NOT public.owner_approval_required() THEN
+    PERFORM public.owner_unapproved_queue(jsonb_build_object('kind', 'crew', 'id', NEW.id));
+    RETURN NEW;
+  END IF;
+  IF public.work_orders_crew_owner_hold(NEW) THEN
+    RAISE EXCEPTION 'owner_approval_required: a crew work order on a job built from a saved revision leaves draft only after the job work order is issued on both owner approvals'
+      USING ERRCODE = 'WO428';
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- True when a crew order on a saved-quote job would leave draft before that
+-- job's work order is issued on both owner decisions.
+CREATE OR REPLACE FUNCTION public.work_orders_crew_owner_hold(p_new public.work_orders)
+RETURNS boolean LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+  IF NOT (
+    p_new.scope_revision_id IS NOT NULL
+    OR EXISTS (SELECT 1 FROM public.scope_job_draft_sets d WHERE d.job_id = p_new.job_id)
+    OR EXISTS (SELECT 1 FROM public.work_orders j
+               WHERE j.job_id = p_new.job_id AND j.kind = 'job'
+                 AND COALESCE(j.scope_revision_id, j.quote_filled_scope_revision_id) IS NOT NULL)
+  ) THEN
+    RETURN false;
+  END IF;
+  RETURN NOT EXISTS (
+    SELECT 1 FROM public.work_orders j
+    WHERE j.job_id = p_new.job_id AND j.kind = 'job' AND j.status = 'approved'
+      AND j.price_approval_id IS NOT NULL AND j.work_order_approval_id IS NOT NULL
+      AND (p_new.scope_revision_id IS NULL
+        OR COALESCE(j.scope_revision_id, j.quote_filled_scope_revision_id) = p_new.scope_revision_id)
+  );
+END $$;
+DROP TRIGGER IF EXISTS trg_work_orders_crew_owner_gate ON public.work_orders;
+CREATE TRIGGER trg_work_orders_crew_owner_gate
+  BEFORE INSERT OR UPDATE ON public.work_orders
+  FOR EACH ROW EXECUTE FUNCTION public.work_orders_crew_owner_gate();
+-- Statement level, so it fires after every row trigger of the write.
+DROP TRIGGER IF EXISTS trg_work_orders_owner_unapproved_flush ON public.work_orders;
+CREATE TRIGGER trg_work_orders_owner_unapproved_flush
+  AFTER INSERT OR UPDATE ON public.work_orders
+  FOR EACH STATEMENT EXECUTE FUNCTION public.work_orders_owner_unapproved_flush();
+
+-- ── 5. carrying out an issue both decisions allow ────────────────────────────
+
+-- Issues one bound job work order when nothing is missing: for a shared-lane
+-- order, release first and then seal, in this transaction. Never raises for a
+-- missing decision; it reports what the issue waits for. An unbound order is
+-- never issued here.
+CREATE OR REPLACE FUNCTION public.issue_owner_approved_job_work_order(p_work_order_id uuid)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  w public.work_orders%ROWTYPE;
+  v_out public.work_orders%ROWTYPE;
+  s public.scope_job_draft_sets%ROWTYPE;
+  v_check jsonb;
+  v_state text;
+  v_error text;
+BEGIN
+  SELECT * INTO w FROM public.work_orders WHERE id = p_work_order_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'work order not found' USING ERRCODE = 'P0002'; END IF;
+  IF w.kind <> 'job' THEN RAISE EXCEPTION 'only a job work order is issued' USING ERRCODE = '23514'; END IF;
+  IF w.status = 'approved' THEN
+    RETURN jsonb_build_object('issued', true, 'replayed', true, 'work_order_id', w.id,
+      'price_approval_id', w.price_approval_id, 'work_order_approval_id', w.work_order_approval_id,
+      'missing', '[]'::jsonb);
+  END IF;
+  v_check := public.job_work_order_issue_check(w);
+  IF NOT (v_check->>'bound')::boolean OR jsonb_array_length(v_check->'missing') > 0 THEN
+    RETURN jsonb_build_object('issued', false, 'held', true, 'work_order_id', w.id,
+      'scope_revision_id', v_check->'revision_id', 'missing', v_check->'missing');
+  END IF;
+  SELECT * INTO s FROM public.scope_job_draft_sets d WHERE d.work_order_id = w.id FOR UPDATE;
+  BEGIN
+    IF FOUND AND s.released_at IS NULL THEN
+      UPDATE public.scope_job_draft_sets SET released_at = now() WHERE job_id = s.job_id;
+      INSERT INTO public.job_events(job_id, event_type, detail_json) VALUES
+        (s.job_id, 'scope_job_draft_work_order_released', jsonb_build_object(
+          'work_order_id', w.id, 'scope_revision_id', s.scope_revision_id,
+          'price_approval_id', v_check->'price_approval_id',
+          'work_order_approval_id', v_check->'work_order_approval_id'));
+    END IF;
+    UPDATE public.work_orders
+      SET status = 'approved',
+          approved_by = (v_check->>'work_order_approver')::uuid,
+          approved_at = now(),
+          approved_via = v_check->>'work_order_via'
+      WHERE id = w.id
+      RETURNING * INTO v_out;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE, v_error = MESSAGE_TEXT;
+    RETURN jsonb_build_object('issued', false, 'held', true, 'work_order_id', w.id,
+      'scope_revision_id', v_check->'revision_id', 'missing', jsonb_build_array('issue_refused'),
+      'sqlstate', v_state, 'error', v_error);
+  END;
+  PERFORM public.link_issued_job_work_order(v_out.id);
+  INSERT INTO public.job_events(job_id, event_type, detail_json) VALUES
+    (v_out.job_id, 'job_work_order_issued_on_owner_approval', jsonb_build_object(
+      'work_order_id', v_out.id, 'scope_revision_id', v_check->'revision_id',
+      'price_approval_id', v_out.price_approval_id,
+      'work_order_approval_id', v_out.work_order_approval_id));
+  RETURN jsonb_build_object('issued', true, 'replayed', false, 'work_order_id', v_out.id,
+    'scope_revision_id', v_check->'revision_id',
+    'price_approval_id', v_out.price_approval_id,
+    'work_order_approval_id', v_out.work_order_approval_id, 'missing', '[]'::jsonb);
+END $$;
+
+-- ── 6. recording the decisions ───────────────────────────────────────────────
+
+-- The company a decision is recorded in. The caller's verified company when
+-- the door passes one, else the approver's own company; it must be the job's,
+-- and an approver whose own company is another one is refused either way.
+-- NULL is never a way past the check.
+CREATE OR REPLACE FUNCTION public.owner_approval_company_ok(p_approver uuid, p_org_id uuid, p_job_org uuid)
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT p_job_org IS NOT NULL
+     AND COALESCE(p_org_id, u.org_id) IS NOT DISTINCT FROM p_job_org
+     AND (u.org_id IS NULL OR u.org_id = p_job_org)
+  FROM (SELECT (SELECT x.org_id FROM public.users x WHERE x.id = p_approver) AS org_id) u;
+$$;
+
+-- The quote PDFs a frozen revision holds: the sha256 of each quote_pdf and
+-- per_contact_pdf artifact, distinct, in C order. The server hashed each one
+-- itself when it was stored (record_scope_artifact) and the table is append
+-- only, so this is the server's own record of the customer documents.
+CREATE OR REPLACE FUNCTION public.scope_revision_quote_documents(p_scope_revision_id uuid)
+RETURNS text[] LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT COALESCE(array_agg(DISTINCT a.sha256 COLLATE "C" ORDER BY a.sha256 COLLATE "C"), '{}'::text[])
+  FROM public.scope_artifacts a
+  WHERE a.scope_revision_id = p_scope_revision_id
+    AND a.artifact_type IN ('quote_pdf', 'per_contact_pdf');
+$$;
+
+-- The decision covers the revision's frozen price and the quote PDFs it holds
+-- now. p_expected_documents is the list the approver was shown
+-- (read_job_owner_approval_state); when given it must equal what the server
+-- reads, or an existing decision's own list on a replay.
+CREATE OR REPLACE FUNCTION public.record_scope_price_approval(
+  p_job_id uuid, p_scope_revision_id uuid, p_approver uuid, p_via text, p_org_id uuid,
+  p_expected_documents text[] DEFAULT NULL
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_documents text[];
+  v_expected text[];
+  j public.jobs%ROWTYPE;
+  r public.scope_revisions%ROWTYPE;
+  a public.scope_owner_approvals%ROWTYPE;
+  v_authority text;
+  v_replayed boolean := false;
+  v_issues jsonb := '[]'::jsonb;
+  v_wo uuid;
+BEGIN
+  SELECT * INTO j FROM public.jobs WHERE id = p_job_id FOR UPDATE;
+  IF NOT FOUND OR p_org_id IS NULL OR j.org_id IS DISTINCT FROM p_org_id
+     OR NOT public.owner_approval_company_ok(p_approver, p_org_id, j.org_id) THEN
+    RAISE EXCEPTION 'scope_owner_approval_job_forbidden' USING ERRCODE = '42501';
+  END IF;
+  IF p_via IS NULL OR p_via NOT IN ('session', 'terminal') THEN
+    RAISE EXCEPTION 'scope_owner_approval_via_invalid' USING ERRCODE = '22023';
+  END IF;
+  v_authority := public.owner_approval_authority(p_approver);
+  IF v_authority IS NULL THEN
+    RAISE EXCEPTION 'scope_owner_approval_approver_required' USING ERRCODE = '42501';
+  END IF;
+  SELECT * INTO r FROM public.scope_revisions WHERE id = p_scope_revision_id AND job_id = j.id FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'scope_owner_approval_revision_not_found' USING ERRCODE = 'P0002'; END IF;
+  IF r.status NOT IN ('frozen', 'superseded') THEN
+    RAISE EXCEPTION 'scope_owner_approval_revision_not_frozen' USING ERRCODE = '23514';
+  END IF;
+  IF encode(sha256(convert_to(r.scope_canonical_text, 'UTF8')), 'hex') IS DISTINCT FROM r.scope_hash
+     OR encode(sha256(convert_to(r.pricing_canonical_text, 'UTF8')), 'hex') IS DISTINCT FROM r.pricing_hash THEN
+    RAISE EXCEPTION 'scope_owner_approval_source_corrupt' USING ERRCODE = '23514';
+  END IF;
+  IF p_expected_documents IS NOT NULL THEN
+    SELECT COALESCE(array_agg(DISTINCT e COLLATE "C" ORDER BY e COLLATE "C"), '{}'::text[])
+      INTO v_expected FROM unnest(p_expected_documents) e;
+  END IF;
+  SELECT * INTO a FROM public.scope_owner_approvals x
+    WHERE x.kind = 'price' AND x.job_id = j.id AND x.scope_revision_id = r.id;
+  IF FOUND THEN
+    IF v_expected IS NOT NULL AND v_expected IS DISTINCT FROM a.quote_document_sha256s THEN
+      RAISE EXCEPTION 'scope_owner_approval_documents_changed' USING ERRCODE = '23514';
+    END IF;
+    v_replayed := true;
+  ELSE
+    v_documents := public.scope_revision_quote_documents(r.id);
+    IF v_expected IS NOT NULL AND v_expected IS DISTINCT FROM v_documents THEN
+      RAISE EXCEPTION 'scope_owner_approval_documents_changed' USING ERRCODE = '23514';
+    END IF;
+    INSERT INTO public.scope_owner_approvals(kind, job_id, org_id, scope_revision_id, scope_hash,
+        pricing_hash, quote_document_sha256s, approver_user_id, authority, via)
+      VALUES ('price', j.id, j.org_id, r.id, r.scope_hash, r.pricing_hash, v_documents,
+        p_approver, v_authority, p_via)
+      RETURNING * INTO a;
+    INSERT INTO public.job_events(job_id, event_type, detail_json) VALUES
+      (j.id, 'scope_price_owner_approved', jsonb_build_object('approval_id', a.id,
+        'scope_revision_id', r.id, 'authority', a.authority, 'via', a.via,
+        'quote_documents', cardinality(v_documents)));
+  END IF;
+  FOR v_wo IN SELECT w.id FROM public.work_orders w
+      WHERE w.job_id = j.id AND w.kind = 'job' AND w.status = 'draft'
+        AND COALESCE(w.scope_revision_id, w.quote_filled_scope_revision_id) = r.id
+      ORDER BY w.created_at LOOP
+    v_issues := v_issues || public.issue_owner_approved_job_work_order(v_wo);
+  END LOOP;
+  RETURN jsonb_build_object('approval', public.scope_owner_approval_json(a), 'replayed', v_replayed,
+    'revision_is_current', NOT EXISTS (SELECT 1 FROM public.scope_revisions n
+      WHERE n.job_id = j.id AND n.revision_number > r.revision_number),
+    'issues', v_issues);
+END $$;
+
+-- p_scope_revision_id, when given, must be the order's own saved revision.
+-- The company check always runs (owner_approval_company_ok): p_org_id, when
+-- given, is the caller's verified company; without it the approver's own.
+CREATE OR REPLACE FUNCTION public.record_job_work_order_approval(
+  p_work_order_id uuid, p_approver uuid, p_via text, p_expected_updated_at timestamptz,
+  p_scope_revision_id uuid DEFAULT NULL, p_org_id uuid DEFAULT NULL, p_require_revision boolean DEFAULT false
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_job uuid;
+  j public.jobs%ROWTYPE;
+  w public.work_orders%ROWTYPE;
+  a public.scope_owner_approvals%ROWTYPE;
+  v_authority text;
+  v_gate jsonb;
+  v_rev uuid;
+  v_hash text;
+  v_not_ready text;
+  v_replayed boolean := false;
+  v_issue jsonb;
+BEGIN
+  SELECT x.job_id INTO v_job FROM public.work_orders x WHERE x.id = p_work_order_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'work order not found' USING ERRCODE = 'P0002'; END IF;
+  -- The job first, as release and preparation lock it.
+  SELECT * INTO j FROM public.jobs WHERE id = v_job FOR UPDATE;
+  SELECT * INTO w FROM public.work_orders WHERE id = p_work_order_id FOR UPDATE;
+  IF w.kind <> 'job' THEN
+    RAISE EXCEPTION 'only a job work order is approved' USING ERRCODE = '23514';
+  END IF;
+  IF NOT public.owner_approval_company_ok(p_approver, p_org_id, j.org_id) THEN
+    RAISE EXCEPTION 'scope_owner_approval_job_forbidden' USING ERRCODE = '42501';
+  END IF;
+  IF w.status <> 'draft' THEN
+    RAISE EXCEPTION 'work order is %, not draft', w.status USING ERRCODE = '23514';
+  END IF;
+  IF p_expected_updated_at IS NULL OR w.updated_at IS DISTINCT FROM p_expected_updated_at THEN
+    RAISE EXCEPTION 'The draft changed after it was read. Read it again before approving.'
+      USING ERRCODE = 'WO409';
+  END IF;
+  IF p_via IS NULL OR p_via NOT IN ('session', 'terminal') THEN
+    RAISE EXCEPTION 'scope_owner_approval_via_invalid' USING ERRCODE = '22023';
+  END IF;
+  v_authority := public.owner_approval_authority(p_approver);
+  IF v_authority IS NULL THEN
+    RAISE EXCEPTION 'only an approver named in work_order_settings can approve a job work order'
+      USING ERRCODE = '42501';
+  END IF;
+  v_hash := public.job_work_order_content_hash(w);
+  v_gate := public.job_work_order_owner_gate(w, v_hash);
+  IF (v_gate->>'bound')::boolean AND v_gate->>'revision_id' IS NULL THEN
+    RAISE EXCEPTION 'scope_owner_approval_revision_conflict' USING ERRCODE = '23514';
+  END IF;
+  v_rev := (v_gate->>'revision_id')::uuid;
+  IF (p_require_revision OR p_scope_revision_id IS NOT NULL)
+     AND v_rev IS DISTINCT FROM p_scope_revision_id THEN
+    RAISE EXCEPTION 'scope_owner_approval_revision_mismatch' USING ERRCODE = '23514';
+  END IF;
+  v_not_ready := public.job_work_order_not_ready(w);
+  IF v_not_ready IS NOT NULL THEN
+    RAISE EXCEPTION '%', v_not_ready USING ERRCODE = '23514';
+  END IF;
+  SELECT * INTO a FROM public.scope_owner_approvals x
+    WHERE x.kind = 'work_order' AND x.work_order_id = w.id AND x.work_order_content_hash = v_hash
+      AND x.scope_revision_id IS NOT DISTINCT FROM v_rev;
+  IF FOUND THEN
+    v_replayed := true;
+  ELSE
+    INSERT INTO public.scope_owner_approvals(kind, job_id, org_id, scope_revision_id, work_order_id,
+        work_order_content_hash, work_order_updated_at, approver_user_id, authority, via)
+      VALUES ('work_order', w.job_id, j.org_id, v_rev, w.id, v_hash, w.updated_at,
+        p_approver, v_authority, p_via)
+      RETURNING * INTO a;
+    INSERT INTO public.job_events(job_id, event_type, detail_json) VALUES
+      (w.job_id, 'job_work_order_owner_approved', jsonb_build_object('approval_id', a.id,
+        'work_order_id', w.id, 'scope_revision_id', v_rev, 'authority', a.authority, 'via', a.via));
+  END IF;
+  IF v_rev IS NOT NULL THEN
+    v_issue := public.issue_owner_approved_job_work_order(w.id);
+  ELSE
+    -- No saved revision: the existing approval, by this approver, while the
+    -- owner's switch allows it. The seal refuses it otherwise.
+    UPDATE public.work_orders
+      SET status = 'approved', approved_by = a.approver_user_id, approved_at = now(), approved_via = a.via
+      WHERE id = w.id;
+    PERFORM public.link_issued_job_work_order(w.id);
+    v_issue := jsonb_build_object('issued', true, 'replayed', false, 'work_order_id', w.id,
+      'missing', '[]'::jsonb, 'unbound', true);
+  END IF;
+  RETURN jsonb_build_object('approval', public.scope_owner_approval_json(a), 'replayed', v_replayed,
+    'issue', v_issue);
+END $$;
+
+-- The manual approval exactly as it stood before this change, used while
+-- owner_approval_saved_revision_required_v1 is off, plus the company check
+-- (owner_approval_company_ok). It records no owner decision; the seal records
+-- what the switch would have waited for, best effort.
+CREATE OR REPLACE FUNCTION public.approve_job_work_order_switch_off(
+  p_work_order_id uuid, p_approver uuid, p_via text, p_expected_updated_at timestamptz, p_org_id uuid
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_wo public.work_orders%ROWTYPE;
+  v_out public.work_orders%ROWTYPE;
+BEGIN
+  SELECT * INTO v_wo FROM public.work_orders WHERE id = p_work_order_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'work order not found' USING ERRCODE = 'P0002';
+  END IF;
+  IF v_wo.kind <> 'job' THEN
+    RAISE EXCEPTION 'only a job work order is approved' USING ERRCODE = '23514';
+  END IF;
+  IF NOT public.owner_approval_company_ok(p_approver, p_org_id,
+       (SELECT j.org_id FROM public.jobs j WHERE j.id = v_wo.job_id)) THEN
+    RAISE EXCEPTION 'scope_owner_approval_job_forbidden' USING ERRCODE = '42501';
+  END IF;
+  IF v_wo.status <> 'draft' THEN
+    RAISE EXCEPTION 'work order is %, not draft', v_wo.status USING ERRCODE = '23514';
+  END IF;
+  IF p_expected_updated_at IS NULL OR v_wo.updated_at IS DISTINCT FROM p_expected_updated_at THEN
+    RAISE EXCEPTION 'The draft changed after it was read. Read it again before approving.'
+      USING ERRCODE = 'WO409';
+  END IF;
+
+  -- (added) The record waits until the approval is done.
+  PERFORM set_config('secureworks.owner_unapproved_hold', 'on', true);
+  UPDATE public.work_orders
+    SET status = 'approved', approved_by = p_approver, approved_at = now(), approved_via = p_via
+    WHERE id = v_wo.id
+    RETURNING * INTO v_out;
+
+  PERFORM public.link_issued_job_work_order(v_out.id);
+  PERFORM set_config('secureworks.owner_unapproved_hold', 'off', true);
+  -- (added) Last: what the switch would have wanted, best effort.
+  PERFORM public.flush_owner_unapproved();
+
+  RETURN to_jsonb(v_out);
+END $$;
+
+-- The existing manual RPC: records the work order decision and issues only
+-- when the policy allows. It returns the work order as it now stands plus
+-- owner_approval. This four-argument form judges the company from the
+-- approver's own; the two ops-api doors (approve_work_order,
+-- approve_office_job_work_order) call the five-argument form below with the
+-- caller's verified company.
+CREATE OR REPLACE FUNCTION public.approve_job_work_order(
+  p_work_order_id uuid,
+  p_approver uuid,
+  p_via text,
+  p_expected_updated_at timestamptz
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_result jsonb;
+  v_out public.work_orders%ROWTYPE;
+BEGIN
+  IF NOT public.owner_approval_required() THEN
+    RETURN public.approve_job_work_order_switch_off(p_work_order_id, p_approver, p_via,
+      p_expected_updated_at, NULL);
+  END IF;
+  v_result := public.record_job_work_order_approval(p_work_order_id, p_approver, p_via,
+    p_expected_updated_at, NULL, NULL, false);
+  SELECT * INTO v_out FROM public.work_orders WHERE id = p_work_order_id;
+  RETURN to_jsonb(v_out) || jsonb_build_object('owner_approval', v_result);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.approve_job_work_order(
+  p_work_order_id uuid,
+  p_approver uuid,
+  p_via text,
+  p_expected_updated_at timestamptz,
+  p_org_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_result jsonb;
+  v_out public.work_orders%ROWTYPE;
+BEGIN
+  IF p_org_id IS NULL THEN
+    RAISE EXCEPTION 'scope_owner_approval_job_forbidden' USING ERRCODE = '42501';
+  END IF;
+  IF NOT public.owner_approval_required() THEN
+    RETURN public.approve_job_work_order_switch_off(p_work_order_id, p_approver, p_via,
+      p_expected_updated_at, p_org_id);
+  END IF;
+  v_result := public.record_job_work_order_approval(p_work_order_id, p_approver, p_via,
+    p_expected_updated_at, NULL, p_org_id, false);
+  SELECT * INTO v_out FROM public.work_orders WHERE id = p_work_order_id;
+  RETURN to_jsonb(v_out) || jsonb_build_object('owner_approval', v_result);
+END;
+$$;
+
+-- ── 7. release on acceptance ─────────────────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION public.scope_job_draft_issue_state(p_job_id uuid)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  s public.scope_job_draft_sets%ROWTYPE;
+  w public.work_orders%ROWTYPE;
+  v_check jsonb;
+  v_price public.scope_owner_approvals%ROWTYPE;
+  v_order public.scope_owner_approvals%ROWTYPE;
+  v_state text;
+BEGIN
+  SELECT * INTO s FROM public.scope_job_draft_sets WHERE job_id = p_job_id;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  SELECT * INTO w FROM public.work_orders WHERE id = s.work_order_id;
+  IF w.status = 'approved' THEN
+    SELECT * INTO v_price FROM public.scope_owner_approvals WHERE id = w.price_approval_id;
+    SELECT * INTO v_order FROM public.scope_owner_approvals WHERE id = w.work_order_approval_id;
+    v_check := jsonb_build_object('missing', '[]'::jsonb);
+  ELSE
+    v_check := public.job_work_order_issue_check(w);
+    SELECT * INTO v_price FROM public.scope_owner_approvals WHERE id = (v_check->>'price_approval_id')::uuid;
+    SELECT * INTO v_order FROM public.scope_owner_approvals WHERE id = (v_check->>'work_order_approval_id')::uuid;
+  END IF;
+  v_state := CASE
+    WHEN w.status = 'approved' AND s.released_at IS NOT NULL THEN 'released'
+    WHEN w.status = 'approved' THEN 'issued'
+    WHEN s.released_at IS NOT NULL THEN 'released_not_issued'
+    WHEN v_check->'missing' ?| ARRAY['price_approval', 'work_order_approval', 'work_order_revision_conflict', 'saved_revision']
+      THEN 'awaiting_owner_approval'
+    WHEN v_check->'missing' ? 'customer_acceptance' THEN 'awaiting_customer_acceptance'
+    WHEN jsonb_array_length(v_check->'missing') > 0 THEN 'held'
+    ELSE 'ready_to_issue' END;
+  RETURN jsonb_build_object(
+    'state', v_state,
+    'missing', v_check->'missing',
+    'released_at', s.released_at,
+    'acceptance', jsonb_build_object('recorded_at', s.acceptance_recorded_at,
+      'scope_revision_id', s.acceptance_scope_revision_id, 'legacy', s.acceptance_legacy),
+    'approvals', jsonb_build_object(
+      'price', public.scope_owner_approval_json(v_price),
+      'work_order', public.scope_owner_approval_json(v_order)),
+    'work_order_actual', jsonb_build_object('id', w.id, 'status', w.status,
+      'approved_at', w.approved_at, 'approved_by', w.approved_by, 'approved_via', w.approved_via,
+      'sealed_content_hash', w.sealed_content_hash,
+      'content_hash', public.job_work_order_content_hash(w),
+      'price_approval_id', w.price_approval_id, 'work_order_approval_id', w.work_order_approval_id),
+    'revision_is_current', NOT EXISTS (SELECT 1 FROM public.scope_revisions r
+      JOIN public.scope_revisions n ON n.job_id = r.job_id AND n.revision_number > r.revision_number
+      WHERE r.id = s.scope_revision_id));
+END $$;
+
+-- Called only by the existing server acceptance paths after their full-job
+-- decision. They resolve the accepted quote through acceptedRevisionForOrders;
+-- a bound release may never substitute a newer frozen quote. The acceptance
+-- is retained whatever the owner approvals say; the issue waits for them.
+CREATE OR REPLACE FUNCTION public.release_scope_job_drafts(p_job_id uuid, p_scope_revision_id uuid, p_legacy boolean DEFAULT false)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE s public.scope_job_draft_sets%ROWTYPE; j public.jobs%ROWTYPE; v_first boolean; v_issue jsonb;
+BEGIN
+  SELECT * INTO j FROM public.jobs WHERE id = p_job_id FOR UPDATE;
+  IF NOT FOUND OR j.status IS DISTINCT FROM 'accepted' THEN
+    RAISE EXCEPTION 'scope_drafts_acceptance_required' USING ERRCODE = '23514';
+  END IF;
+  SELECT * INTO s FROM public.scope_job_draft_sets WHERE job_id = j.id FOR UPDATE;
+  IF NOT FOUND THEN RETURN jsonb_build_object('released', false, 'reason', 'no_drafts'); END IF;
+  IF s.scope_revision_id IS DISTINCT FROM p_scope_revision_id THEN
+    RAISE EXCEPTION 'scope_drafts_accepted_revision_mismatch' USING ERRCODE = '23514';
+  END IF;
+  IF s.released_at IS NOT NULL THEN
+    IF NOT public.owner_approval_required() THEN
+      RETURN jsonb_build_object('released', true, 'replayed', true);
+    END IF;
+    RETURN jsonb_build_object('released', true, 'replayed', true,
+      'issue', public.scope_job_draft_issue_state(j.id));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.scope_revisions r JOIN public.work_orders w ON w.id = s.work_order_id
+    WHERE r.id = s.scope_revision_id AND r.job_id = j.id AND r.status IN ('frozen', 'superseded')
+      AND w.scope_revision_id = r.id AND w.scope_items = s.labour_lines
+      AND w.agreed_labour_ex IS NOT DISTINCT FROM s.labour_total_cents / 100.0
+      AND (NOT p_legacy OR r.status = 'frozen' AND NOT EXISTS (
+        SELECT 1 FROM public.scope_revisions n WHERE n.job_id = j.id AND n.revision_number > r.revision_number))) THEN
+    RAISE EXCEPTION 'scope_drafts_source_changed' USING ERRCODE = '23514';
+  END IF;
+  -- Switch off: the release exactly as before. Last, best effort: the
+  -- acceptance time and what the switch would have waited for.
+  IF NOT public.owner_approval_required() THEN
+    UPDATE public.scope_job_draft_sets SET released_at = now() WHERE job_id = j.id AND released_at IS NULL;
+    INSERT INTO public.job_events(job_id, event_type, detail_json) VALUES
+      (j.id, 'scope_job_draft_work_order_released', jsonb_build_object('work_order_id', s.work_order_id, 'scope_revision_id', s.scope_revision_id));
+    PERFORM public.owner_unapproved_queue(jsonb_build_object('kind', 'released', 'job_id', j.id,
+      'legacy', COALESCE(p_legacy, false)));
+    PERFORM public.flush_owner_unapproved();
+    RETURN jsonb_build_object('released', true, 'replayed', false);
+  END IF;
+  v_first := s.acceptance_recorded_at IS NULL OR s.acceptance_scope_revision_id IS DISTINCT FROM s.scope_revision_id;
+  IF v_first THEN
+    UPDATE public.scope_job_draft_sets
+      SET acceptance_recorded_at = now(), acceptance_scope_revision_id = s.scope_revision_id,
+          acceptance_legacy = COALESCE(p_legacy, false)
+      WHERE job_id = j.id;
+  END IF;
+  v_issue := public.issue_owner_approved_job_work_order(s.work_order_id);
+  IF (v_issue->>'issued')::boolean THEN
+    RETURN jsonb_build_object('released', true, 'replayed', false,
+      'issue', public.scope_job_draft_issue_state(j.id));
+  END IF;
+  IF v_first THEN
+    INSERT INTO public.job_events(job_id, event_type, detail_json) VALUES
+      (j.id, 'scope_job_draft_issue_held', jsonb_build_object('work_order_id', s.work_order_id,
+        'scope_revision_id', s.scope_revision_id, 'missing', v_issue->'missing'));
+  END IF;
+  RETURN jsonb_build_object('released', false, 'held', true, 'reason', 'owner_approval_required',
+    'acceptance_recorded', true, 'missing', v_issue->'missing',
+    'issue', public.scope_job_draft_issue_state(j.id));
+END $$;
+
+-- This reader returns persisted ids/amounts. It never recalculates a quote.
+-- Approvals are read for this revision and the order's current content only.
+CREATE OR REPLACE FUNCTION public.read_scope_job_drafts(
+  p_job_id uuid, p_scope_revision_id uuid, p_org_id uuid
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE s public.scope_job_draft_sets%ROWTYPE; v_invoices jsonb; v_issue jsonb;
+BEGIN
+  PERFORM 1 FROM public.jobs j WHERE j.id = p_job_id AND j.org_id = p_org_id FOR SHARE;
+  IF NOT FOUND OR p_org_id IS NULL THEN
+    RAISE EXCEPTION 'scope_drafts_job_forbidden' USING ERRCODE = '42501';
+  END IF;
+  SELECT * INTO s FROM public.scope_job_draft_sets d WHERE d.job_id = p_job_id AND d.org_id = p_org_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'scope_drafts_not_found' USING ERRCODE = 'P0002'; END IF;
+  IF s.scope_revision_id IS DISTINCT FROM p_scope_revision_id OR NOT EXISTS (
+    SELECT 1 FROM public.scope_revisions r WHERE r.id = p_scope_revision_id AND r.job_id = p_job_id
+      AND (s.released_at IS NOT NULL AND r.status IN ('frozen', 'superseded') OR r.status = 'frozen' AND NOT EXISTS (
+        SELECT 1 FROM public.scope_revisions n WHERE n.job_id = p_job_id AND n.revision_number > r.revision_number
+      ))
+  ) THEN RAISE EXCEPTION 'scope_drafts_revision_stale' USING ERRCODE = '23514'; END IF;
+  SELECT jsonb_agg(jsonb_build_object('id', i.id, 'payer_id', i.payer_id, 'status', 'draft',
+      'ex_gst', i.ex_cents / 100.0, 'gst', i.gst_cents / 100.0, 'inc_gst', i.inc_cents / 100.0)
+      ORDER BY i.payer_id COLLATE "C") INTO v_invoices
+    FROM public.scope_job_draft_invoices i WHERE i.job_id = p_job_id AND i.scope_revision_id = s.scope_revision_id;
+  IF public.owner_approval_required() THEN
+    v_issue := public.scope_job_draft_issue_state(p_job_id);
+  ELSE
+    -- Switch off: the owner state is shown when it can be read and never
+    -- stops the read.
+    -- A user's cancel is raised again, as it would be without this read.
+    BEGIN
+      v_issue := public.scope_job_draft_issue_state(p_job_id);
+    EXCEPTION WHEN OTHERS OR query_canceled THEN
+      IF SQLSTATE = '57014' AND SQLERRM = 'canceling statement due to user request' THEN
+        RAISE;
+      END IF;
+      RAISE WARNING 'scope draft owner state not read (%): %', SQLSTATE, SQLERRM;
+      v_issue := NULL;
+    END;
+  END IF;
+  RETURN jsonb_build_object('job_id', s.job_id, 'scope_revision_id', s.scope_revision_id,
+    'work_order', jsonb_build_object('id', s.work_order_id,
+      'status', CASE WHEN s.released_at IS NULL THEN 'draft' ELSE 'released' END,
+      'labour_total_ex_gst', s.labour_total_cents / 100.0,
+      'actual', v_issue->'work_order_actual'),
+    'invoices', coalesce(v_invoices, '[]'::jsonb), 'amounts_confirmed', s.amounts_confirmed,
+    'released_at', s.released_at,
+    'acceptance', v_issue->'acceptance',
+    'approvals', v_issue->'approvals',
+    'issue', jsonb_build_object('state', v_issue->'state', 'missing', v_issue->'missing'),
+    'revision_is_current', v_issue->'revision_is_current',
+    'xero_writes', false, 'sent', false, 'payment_links', false);
+END $$;
+
+-- The owner approval state of any job's work order (shared lane or not).
+CREATE OR REPLACE FUNCTION public.read_job_owner_approval_state(p_job_id uuid, p_org_id uuid)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  j public.jobs%ROWTYPE;
+  w public.work_orders%ROWTYPE;
+  cur public.scope_revisions%ROWTYPE;
+  v_check jsonb;
+  v_price public.scope_owner_approvals%ROWTYPE;
+  v_order public.scope_owner_approvals%ROWTYPE;
+  v_prices jsonb;
+BEGIN
+  SELECT * INTO j FROM public.jobs WHERE id = p_job_id;
+  IF NOT FOUND OR p_org_id IS NULL OR j.org_id IS DISTINCT FROM p_org_id THEN
+    RAISE EXCEPTION 'scope_owner_approval_job_forbidden' USING ERRCODE = '42501';
+  END IF;
+  SELECT * INTO cur FROM public.scope_revisions r WHERE r.job_id = j.id
+    ORDER BY r.revision_number DESC LIMIT 1;
+  SELECT * INTO w FROM public.work_orders x WHERE x.job_id = j.id AND x.kind = 'job'
+    ORDER BY (x.status = 'approved') DESC, x.created_at DESC LIMIT 1;
+  IF w.id IS NOT NULL THEN
+    IF w.status = 'approved' THEN
+      SELECT * INTO v_price FROM public.scope_owner_approvals WHERE id = w.price_approval_id;
+      SELECT * INTO v_order FROM public.scope_owner_approvals WHERE id = w.work_order_approval_id;
+      v_check := jsonb_build_object('missing', '[]'::jsonb,
+        'revision_id', COALESCE(w.scope_revision_id, w.quote_filled_scope_revision_id),
+        'bound', COALESCE(w.scope_revision_id, w.quote_filled_scope_revision_id) IS NOT NULL);
+    ELSE
+      v_check := public.job_work_order_issue_check(w);
+      SELECT * INTO v_price FROM public.scope_owner_approvals WHERE id = (v_check->>'price_approval_id')::uuid;
+      SELECT * INTO v_order FROM public.scope_owner_approvals WHERE id = (v_check->>'work_order_approval_id')::uuid;
+    END IF;
+  END IF;
+  SELECT jsonb_agg(public.scope_owner_approval_json(a) ORDER BY a.decided_at DESC) INTO v_prices
+    FROM (SELECT * FROM public.scope_owner_approvals x WHERE x.job_id = j.id AND x.kind = 'price'
+          ORDER BY x.decided_at DESC LIMIT 20) a;
+  RETURN jsonb_build_object(
+    'job_id', j.id,
+    'current_scope_revision', CASE WHEN cur.id IS NULL THEN NULL ELSE
+      jsonb_build_object('id', cur.id, 'status', cur.status, 'revision_number', cur.revision_number,
+        'quote_document_sha256s', to_jsonb(public.scope_revision_quote_documents(cur.id)),
+        'quote_documents', COALESCE((SELECT jsonb_agg(jsonb_build_object(
+            'artifact_id', d.id, 'artifact_type', d.artifact_type, 'sha256', d.sha256,
+            'size_bytes', d.size_bytes, 'created_at', d.created_at)
+            ORDER BY d.created_at, d.id)
+          FROM public.scope_artifacts d WHERE d.scope_revision_id = cur.id
+            AND d.artifact_type IN ('quote_pdf', 'per_contact_pdf')), '[]'::jsonb)) END,
+    'work_order', CASE WHEN w.id IS NULL THEN NULL ELSE jsonb_build_object(
+      'id', w.id, 'status', w.status, 'approved_at', w.approved_at, 'approved_by', w.approved_by,
+      'approved_via', w.approved_via, 'sealed_content_hash', w.sealed_content_hash,
+      'updated_at', w.updated_at, 'content_hash', public.job_work_order_content_hash(w),
+      'source_scope_revision_id', v_check->'revision_id', 'bound', v_check->'bound',
+      'source_is_current', (v_check->>'revision_id') IS NOT NULL AND (v_check->>'revision_id')::uuid = cur.id,
+      'price_approval_id', w.price_approval_id, 'work_order_approval_id', w.work_order_approval_id,
+      'approvals', jsonb_build_object('price', public.scope_owner_approval_json(v_price),
+        'work_order', public.scope_owner_approval_json(v_order)),
+      'missing', v_check->'missing') END,
+    'price_approvals', COALESCE(v_prices, '[]'::jsonb));
+END $$;
+
+-- The price decision a quote send for this revision needs, or NULL.
+CREATE OR REPLACE FUNCTION public.scope_price_owner_approval(p_job_id uuid, p_scope_revision_id uuid)
+RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT public.scope_owner_approval_json(a) FROM public.scope_owner_approvals a
+  WHERE a.kind = 'price' AND a.job_id = p_job_id AND a.scope_revision_id = p_scope_revision_id;
+$$;
+
+-- The local payment stages (20261106044806) date the quote_accepted signal
+-- from the release. The release may now wait for the owner, so the signal
+-- takes the customer's retained acceptance of the same revision instead; the
+-- release time is used only for an older record that has none. The drafts
+-- still wait for the issue; only the event time and the due date it sets
+-- keep the acceptance day.
+CREATE OR REPLACE FUNCTION public.scope_payment_acceptance_event()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE
+  signal record;
+  v_accepted_at timestamptz;
+BEGIN
+  IF OLD.released_at IS NULL AND NEW.released_at IS NOT NULL THEN
+    v_accepted_at := CASE
+      WHEN NEW.acceptance_recorded_at IS NOT NULL
+       AND NEW.acceptance_scope_revision_id IS NOT DISTINCT FROM NEW.scope_revision_id
+      THEN NEW.acceptance_recorded_at ELSE NEW.released_at END;
+    BEGIN
+      PERFORM public.record_scope_payment_signal(NEW.job_id,'quote_accepted',
+        jsonb_build_object('kind','quote_accepted','scope_revision_id',NEW.scope_revision_id),v_accepted_at);
+      FOR signal IN SELECT * FROM public.scope_payment_signals WHERE job_id=NEW.job_id AND scope_revision_id=NEW.scope_revision_id
+        AND kind IN ('install_scheduled','council_step_completed') ORDER BY happened_at,id LOOP
+        PERFORM public.apply_scope_payment_event(NEW.job_id,signal.kind,signal.coordinate,signal.happened_at);
+      END LOOP;
+    EXCEPTION
+      WHEN query_canceled THEN RAISE WARNING 'local payment stages held after timeout; acceptance retained';
+      WHEN OTHERS THEN RAISE WARNING 'local payment stages held; acceptance retained: %',SQLSTATE;
+    END;
+  END IF;
+  RETURN NULL;
+END $$;
+
+-- ── 8. the automatic issue carries out, never decides ────────────────────────
+
+CREATE OR REPLACE FUNCTION public.auto_issue_job_work_order(
+  p_work_order_id uuid,
+  p_expected_updated_at timestamptz
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_wo public.work_orders%ROWTYPE;
+  v_out public.work_orders%ROWTYPE;
+  v_gate jsonb;
+BEGIN
+  IF NOT COALESCE((SELECT f.enabled FROM public.feature_flags f
+                   WHERE f.flag_name = 'job_work_order_auto_issue_v1' LIMIT 1), false) THEN
+    RAISE EXCEPTION 'automatic issue of job work orders is switched off (feature flag job_work_order_auto_issue_v1)'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT * INTO v_wo FROM public.work_orders WHERE id = p_work_order_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'work order not found' USING ERRCODE = 'P0002';
+  END IF;
+  IF v_wo.kind <> 'job' THEN
+    RAISE EXCEPTION 'only a job work order is issued' USING ERRCODE = '23514';
+  END IF;
+  IF v_wo.status <> 'draft' THEN
+    RAISE EXCEPTION 'work order is %, not draft', v_wo.status USING ERRCODE = '23514';
+  END IF;
+  IF p_expected_updated_at IS NULL OR v_wo.updated_at IS DISTINCT FROM p_expected_updated_at THEN
+    RAISE EXCEPTION 'The draft changed after it was read. Read it again.'
+      USING ERRCODE = 'WO409';
+  END IF;
+  IF v_wo.quote_filled_at IS NULL OR v_wo.hand_edited_at IS NOT NULL THEN
+    RAISE EXCEPTION 'only a draft filled from the quote and not edited by hand is issued automatically'
+      USING ERRCODE = 'WO423';
+  END IF;
+  -- (added) With the switch on, refused before any write when either owner
+  -- decision is missing. Off: as before (the seal records it).
+  IF public.owner_approval_required() THEN
+    v_gate := public.job_work_order_owner_gate(v_wo);
+    IF NOT (v_gate->>'bound')::boolean OR jsonb_array_length(v_gate->'missing') > 0 THEN
+      RAISE EXCEPTION 'owner_approval_required: %',
+        (SELECT string_agg(m, ', ') FROM jsonb_array_elements_text(v_gate->'missing') m)
+        USING ERRCODE = 'WO428';
+    END IF;
+  END IF;
+
+  PERFORM set_config('secureworks.job_work_order_auto_issue', 'on', true);
+  -- (added) The record waits until the issue is done.
+  PERFORM set_config('secureworks.owner_unapproved_hold', 'on', true);
+  UPDATE public.work_orders
+    SET status = 'approved', approved_by = NULL, approved_at = now(), approved_via = 'auto'
+    WHERE id = v_wo.id
+    RETURNING * INTO v_out;
+  PERFORM set_config('secureworks.job_work_order_auto_issue', 'off', true);
+
+  PERFORM public.link_issued_job_work_order(v_out.id);
+  PERFORM set_config('secureworks.owner_unapproved_hold', 'off', true);
+  -- (added) Last: what the switch would have wanted, best effort.
+  PERFORM public.flush_owner_unapproved();
+
+  RETURN to_jsonb(v_out);
+END;
+$$;
+
+-- Drafts the automatic issue may carry out: filled from the quote, untouched,
+-- on an open fencing or patio job and, with the switch on, with both owner
+-- decisions for their saved revision and current content, so drafts still
+-- waiting for the owner never crowd out ones that are ready. Off: every such
+-- draft, as before.
+CREATE OR REPLACE FUNCTION public.owner_approved_job_work_order_drafts(p_limit integer DEFAULT 25)
+RETURNS TABLE (job_id uuid, work_order_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT w.job_id, w.id
+  FROM public.work_orders w
+  JOIN public.jobs j ON j.id = w.job_id
+  WHERE w.kind = 'job' AND w.status = 'draft'
+    AND w.hand_edited_at IS NULL AND w.quote_filled_at IS NOT NULL
+    AND w.agreed_labour_ex IS NOT NULL
+    AND j.type IN ('fencing', 'patio')
+    AND j.status = ANY (public.job_work_order_open_statuses())
+    -- CASE, not OR: with the switch off the gate is never read.
+    AND CASE WHEN public.owner_approval_required() THEN
+      (public.job_work_order_owner_gate(w)->>'bound')::boolean
+      AND jsonb_array_length(public.job_work_order_owner_gate(w)->'missing') = 0
+    ELSE true END
+  ORDER BY w.created_at
+  LIMIT GREATEST(1, LEAST(COALESCE(p_limit, 25), 100));
+$$;
+
+-- ── 8b. quote sends that name no saved revision ─────────────────────────────
+
+-- While owner_approval_saved_revision_required_v1 is off, a quote send goes
+-- out as it does today even when no owner price decision allows it: one that
+-- names no saved revision (scope_revision_id null), or one naming a saved
+-- revision whose price the owner has not approved (scope_revision_id set).
+-- Each one is recorded here BEFORE
+-- the email is handed to the provider (state claimed), so a send that went
+-- out is never unaccounted when a later step fails, and marked sent once the
+-- provider takes it. A replay only moves an existing record to sent; it never
+-- invents one and never sends again. One record per send key: a quote
+-- document for /send and /send-runs, one call for Quick Quote. Ids only.
+CREATE TABLE IF NOT EXISTS public.quote_send_price_unapproved_sends (
+  send_key text PRIMARY KEY CHECK (length(send_key) BETWEEN 1 AND 200),
+  job_id uuid NOT NULL,
+  path text NOT NULL CHECK (path IN ('send', 'send-runs', 'quick-quote')),
+  document_id uuid,
+  scope_revision_id uuid,
+  state text NOT NULL DEFAULT 'claimed' CHECK (state IN ('claimed', 'sent')),
+  claimed_at timestamptz NOT NULL DEFAULT now(),
+  sent_at timestamptz,
+  CHECK ((state = 'sent') = (sent_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS quote_send_price_unapproved_sends_job_idx
+  ON public.quote_send_price_unapproved_sends (job_id, claimed_at);
+ALTER TABLE public.quote_send_price_unapproved_sends ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.quote_send_price_unapproved_sends FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT ON public.quote_send_price_unapproved_sends TO service_role;
+
+-- A record is never deleted and only ever moves forward, claimed to sent.
+CREATE OR REPLACE FUNCTION public.quote_send_price_unapproved_forward_only()
+RETURNS trigger LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+BEGIN
+  IF TG_OP = 'DELETE' OR TG_OP = 'TRUNCATE' THEN
+    RAISE EXCEPTION 'quote_send_price_unapproved_sends is append only' USING ERRCODE = '42501';
+  END IF;
+  IF NEW.send_key IS DISTINCT FROM OLD.send_key OR NEW.job_id IS DISTINCT FROM OLD.job_id
+     OR NEW.path IS DISTINCT FROM OLD.path OR NEW.document_id IS DISTINCT FROM OLD.document_id
+     OR NEW.scope_revision_id IS DISTINCT FROM OLD.scope_revision_id
+     OR NEW.claimed_at IS DISTINCT FROM OLD.claimed_at
+     OR (OLD.state = 'sent' AND (NEW.state IS DISTINCT FROM 'sent' OR NEW.sent_at IS DISTINCT FROM OLD.sent_at)) THEN
+    RAISE EXCEPTION 'quote_send_price_unapproved_sends only moves from claimed to sent' USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_quote_send_price_unapproved_forward_only ON public.quote_send_price_unapproved_sends;
+CREATE TRIGGER trg_quote_send_price_unapproved_forward_only
+  BEFORE UPDATE OR DELETE ON public.quote_send_price_unapproved_sends
+  FOR EACH ROW EXECUTE FUNCTION public.quote_send_price_unapproved_forward_only();
+DROP TRIGGER IF EXISTS trg_quote_send_price_unapproved_no_truncate ON public.quote_send_price_unapproved_sends;
+CREATE TRIGGER trg_quote_send_price_unapproved_no_truncate
+  BEFORE TRUNCATE ON public.quote_send_price_unapproved_sends
+  FOR EACH STATEMENT EXECUTE FUNCTION public.quote_send_price_unapproved_forward_only();
+
+-- p_state claimed: before the email. Idempotent on the send key; the first
+-- claim also writes the job event quote_send_price_unapproved. A key already
+-- held by another job or path refuses. p_state sent: after the provider took
+-- it, or on a replay of a published document; only an existing record moves,
+-- and recorded is false when there is none.
+CREATE OR REPLACE FUNCTION public.record_quote_send_price_unapproved(
+  p_send_key text, p_job_id uuid, p_path text, p_document_id uuid, p_state text,
+  p_scope_revision_id uuid DEFAULT NULL
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  r public.quote_send_price_unapproved_sends%ROWTYPE;
+BEGIN
+  IF p_send_key IS NULL OR length(p_send_key) NOT BETWEEN 1 AND 200 OR p_job_id IS NULL
+     OR p_path IS NULL OR p_path NOT IN ('send', 'send-runs', 'quick-quote')
+     OR p_state IS NULL OR p_state NOT IN ('claimed', 'sent') THEN
+    RAISE EXCEPTION 'quote_send_price_unapproved_input_invalid' USING ERRCODE = '22023';
+  END IF;
+  IF p_state = 'claimed' THEN
+    INSERT INTO public.quote_send_price_unapproved_sends(send_key, job_id, path, document_id,
+        scope_revision_id)
+      VALUES (p_send_key, p_job_id, p_path, p_document_id, p_scope_revision_id)
+      ON CONFLICT (send_key) DO NOTHING
+      RETURNING * INTO r;
+    IF FOUND THEN
+      INSERT INTO public.job_events(job_id, event_type, detail_json) VALUES
+        (p_job_id, 'quote_send_price_unapproved', jsonb_build_object(
+          'reason', CASE WHEN p_scope_revision_id IS NULL THEN 'no_saved_revision'
+                         ELSE 'no_price_decision' END,
+          'scope_revision_id', p_scope_revision_id, 'path', p_path,
+          'document_ids', CASE WHEN p_document_id IS NULL THEN '[]'::jsonb
+                               ELSE jsonb_build_array(p_document_id) END));
+    ELSE
+      SELECT * INTO r FROM public.quote_send_price_unapproved_sends WHERE send_key = p_send_key;
+    END IF;
+    -- One document is one record whichever send path claimed it first: a
+    -- document claimed by a failed bundle attempt is retried through /send
+    -- (or the reverse) on the same record. Only another job's key conflicts.
+    IF r.job_id IS DISTINCT FROM p_job_id OR r.document_id IS DISTINCT FROM p_document_id THEN
+      RAISE EXCEPTION 'quote_send_price_unapproved_key_conflict' USING ERRCODE = '23505';
+    END IF;
+    RETURN jsonb_build_object('recorded', true, 'state', r.state, 'path', r.path);
+  END IF;
+  UPDATE public.quote_send_price_unapproved_sends
+    SET state = 'sent', sent_at = COALESCE(sent_at, now())
+    WHERE send_key = p_send_key AND job_id = p_job_id AND state = 'claimed'
+    RETURNING * INTO r;
+  IF NOT FOUND THEN
+    SELECT * INTO r FROM public.quote_send_price_unapproved_sends
+      WHERE send_key = p_send_key AND job_id = p_job_id;
+  END IF;
+  RETURN jsonb_build_object('recorded', r.send_key IS NOT NULL, 'state', r.state);
+END $$;
+
+-- ── 9. access ────────────────────────────────────────────────────────────────
+
+REVOKE ALL ON FUNCTION
+  public.owner_approval_authority(uuid),
+  public.job_work_order_content_hash(public.work_orders),
+  public.job_work_order_not_ready(public.work_orders),
+  public.scope_owner_approval_json(public.scope_owner_approvals),
+  public.job_work_order_owner_gate(public.work_orders, text),
+  public.job_work_order_issue_check(public.work_orders),
+  public.link_issued_job_work_order(uuid),
+  public.issue_owner_approved_job_work_order(uuid),
+  public.record_scope_price_approval(uuid, uuid, uuid, text, uuid, text[]),
+  public.record_job_work_order_approval(uuid, uuid, text, timestamptz, uuid, uuid, boolean),
+  public.approve_job_work_order(uuid, uuid, text, timestamptz),
+  public.approve_job_work_order(uuid, uuid, text, timestamptz, uuid),
+  public.owner_approval_company_ok(uuid, uuid, uuid),
+  public.scope_job_draft_issue_state(uuid),
+  public.release_scope_job_drafts(uuid, uuid, boolean),
+  public.read_scope_job_drafts(uuid, uuid, uuid),
+  public.read_job_owner_approval_state(uuid, uuid),
+  public.scope_price_owner_approval(uuid, uuid),
+  public.scope_revision_quote_documents(uuid),
+  public.auto_issue_job_work_order(uuid, timestamptz),
+  public.owner_approved_job_work_order_drafts(integer),
+  public.work_orders_crew_owner_gate(),
+  public.work_orders_crew_owner_hold(public.work_orders),
+  public.approve_job_work_order_switch_off(uuid, uuid, text, timestamptz, uuid),
+  public.scope_owner_approvals_append_only(),
+  public.quote_send_price_unapproved_forward_only(),
+  public.record_quote_send_price_unapproved(text, uuid, text, uuid, text, uuid),
+  public.owner_approval_required(),
+  public.record_work_order_owner_unapproved(uuid, uuid, text, text, text, uuid, text[]),
+  public.flush_owner_unapproved(),
+  public.work_orders_owner_unapproved_flush(),
+  public.job_work_order_owner_unapproved_append_only()
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION
+  public.owner_approval_authority(uuid),
+  public.record_scope_price_approval(uuid, uuid, uuid, text, uuid, text[]),
+  public.record_job_work_order_approval(uuid, uuid, text, timestamptz, uuid, uuid, boolean),
+  public.approve_job_work_order(uuid, uuid, text, timestamptz),
+  public.approve_job_work_order(uuid, uuid, text, timestamptz, uuid),
+  public.release_scope_job_drafts(uuid, uuid, boolean),
+  public.read_scope_job_drafts(uuid, uuid, uuid),
+  public.read_job_owner_approval_state(uuid, uuid),
+  public.scope_price_owner_approval(uuid, uuid),
+  public.auto_issue_job_work_order(uuid, timestamptz),
+  public.owner_approved_job_work_order_drafts(integer),
+  public.issue_owner_approved_job_work_order(uuid),
+  public.record_quote_send_price_unapproved(text, uuid, text, uuid, text, uuid)
+  TO service_role;

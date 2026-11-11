@@ -70,6 +70,19 @@ secret, so it does not prove the caller is Shaun. Whether that is enough for
 While the flag is off, a terminal approval is refused 403
 `terminal_approval_switched_off` and Shaun approves from his signed-in session.
 
+### Not before the customer accepts (RQ-19.a)
+
+A fencing or patio job is not accepted yet while its status is `draft`,
+`quoted`, `partially_accepted` or `lost` (`job_not_yet_accepted`,
+`20261111090000`). While it is, the database refuses to issue its job work
+order by any path (the office approval, the office queue, the automatic issue,
+a direct write or an approved insert): `WO412`, answered 409
+`job_not_accepted`. No crew group opens on the job either (409
+`group_job_not_accepted`; the automatic group lists it as `job_not_accepted`).
+The draft stays a draft and issues once the job moves to any later status. An
+order already issued stays issued if the job moves back. Other job types are
+untouched, and so is the owner approval rule (`job_work_order_issue_check`).
+
 ## Automatic issue (switch `job_work_order_auto_issue_v1`, OFF)
 
 Captain, 14 Oct 2026: "those work orders should be able to be seen every single
@@ -84,6 +97,23 @@ through `my_job_work_order` with no human step. Code:
 `job_work_orders.ts`; schema, door and sweep:
 `supabase/migrations/20261016120000_job_work_order_auto_issue.sql` (contract
 `supabase/tests/migration-contracts/20261016120000_job_work_order_auto_issue/`).
+
+Since `20261109040000_scope_owner_approvals.sql` (captain, 9 Nov 2026: the
+owner always approves the pricing and the work order) the automatic issue only
+carries out decisions already recorded: an order on a saved revision is issued
+only when the owner's price decision on that revision and the owner's work
+order decision on that exact content both exist, and an order with no saved
+revision is never issued automatically. Anything else is refused
+`owner_approval_required` and stays a draft. The sweep lists only orders whose
+decisions exist (`owner_approved_job_work_order_drafts`). The decisions are
+recorded through `approve_scope_price` and `approve_scope_work_order`; see
+AGENTS.md, "Price And Work Order Issue On Two Owner Decisions". All of this
+holds only while `owner_approval_saved_revision_required_v1` is on (seeded
+off). While it is off the automatic issue, the sweep, acceptance release and
+an approver's approve run main's logic and write no decision, and each issue
+that would have been held is recorded in `job_work_order_owner_unapproved` with
+what was missing. That record is best effort: a failed write or an unreadable
+gate is logged as a warning and never blocks or rolls back the issue.
 
 What is issued, and what waits for the approver:
 

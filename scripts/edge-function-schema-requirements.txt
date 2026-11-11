@@ -1165,4 +1165,35 @@ ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|table|
 ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|function|read_scope_payment_stages
 ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|function|confirm_scope_payment_stage
 ops-api|supabase/migrations/20261106044806_scope_local_payment_stages.sql|function|consume_scope_council_payment_event
+
+
+# Client confirmation and private signed-copy proof, before ops-api selects it.
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|column|job_client_signoffs.confirmation_kind
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|column|job_client_signoffs.signed_copy_path
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|column|job_client_signoffs.capture_request_id
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|column|group_work_orders.signoff_required_after
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|table|group_client_signoff_policy
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|constraint|job_client_signoffs_office_confirmation_check
+ops-api|supabase/migrations/20261106054912_client_signoff_copies.sql|trigger|group_work_orders.trg_group_reopen_client_confirmation
+
 ops-api|supabase/migrations/20261106062000_scope_work_order_saved_handoff.sql|function|prepare_scope_job_drafts
+# TK-S28: the office status writer asks for the scope draft release on every
+# open status; the release accepts them from 20261110200000. Ahead of it a move
+# to Deposit or Scheduled would only log a held release, so wait for it.
+ops-api|supabase/migrations/20261110200000_scope_draft_release_open_status.sql|function|release_scope_job_drafts
+ops-api|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|table|trade_invoice_events
+ops-api|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|table|trade_invoice_extra_rate_rules
+ops-api|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|index|trade_invoices_invoice_number_key
+ops-api|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|trigger|trade_invoice_lines.trg_trade_invoice_lines_no_week_claim_guard
+xero-sync|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|table|trade_invoice_events
+
+# Shared installer population must exist before the matching edge reads.
+ops-api|supabase/migrations/20261106083000_group_work_order_crew.sql|function|group_work_order_crew
+
+# Crew already paid by the hour: the group opens, they are left out of the
+# split and the pot is reduced by their pay (read before the matching edge).
+ops-api|supabase/migrations/20261106160000_group_paid_by_hours_member.sql|column|group_work_orders.hours_paid_ex
+ops-api|supabase/migrations/20261106160000_group_paid_by_hours_member.sql|function|group_work_order_hours_paid
+ops-api|supabase/migrations/20261106170000_group_office_removal_wins.sql|table|group_work_order_crew_removals
+ops-api|supabase/migrations/20261106170000_group_office_removal_wins.sql|function|restore_group_work_order_participant
+ops-api|supabase/migrations/20261106193000_group_on_site_signoff_claim.sql|function|record_on_site_client_signoff

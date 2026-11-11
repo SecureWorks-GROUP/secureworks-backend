@@ -1,3 +1,4 @@
+import { hasOfficeClientConfirmation, SIGNED_CLIENT_COPY_COLUMNS } from "./client_signoff_form_data.ts";
 // Client sign-off — the gate between "job finished" and "allocated trades can
 // invoice it" (Marnin, 19 Oct 2026, CALLS DSP-11): "trades should invoice when
 // the job has been signed off by the client, they should have a workflow where
@@ -62,6 +63,17 @@ export const DEFAULT_CLIENT_SIGNOFF_SETTINGS: ClientSignoffSettings = {
 export type ClientSignoffRow = {
   id: string
   job_id: string
+  org_id?: string | null
+  captured_by?: string | null
+  captured_by_actor?: string | null
+  capture_auth_source?: string | null
+  confirmation_kind?: string | null
+  confirmation_reference?: string | null
+  signed_copy_path?: string | null
+  signed_copy_sha256?: string | null
+  signed_copy_type?: string | null
+  client_confirmed_on?: string | null
+  work_done?: string | null
   method: string
   signed_name?: string | null
   happy?: boolean | null
@@ -72,6 +84,7 @@ export type ClientSignoffRow = {
 }
 
 export type ClientSignoffMissing =
+  | 'client_confirmation_missing'
   | 'evidence_unavailable'
   | 'not_signed'
   | 'client_not_happy'
@@ -152,6 +165,8 @@ export function evaluateClientSignoff(args: {
   if (args.readFailed) missing = 'evidence_unavailable'
   else if (!current) missing = 'not_signed'
   else if (current.method === 'revoked') missing = 'not_signed'
+  else if (current.method === 'office_on_behalf' && !hasOfficeClientConfirmation(row)) missing = 'client_confirmation_missing'
+  else if (current.method === 'office_on_behalf' && current.happy !== true) missing = 'client_not_happy'
   else if (current.method !== 'office_waiver') {
     if (current.happy === false) missing = 'client_not_happy'
     else if (current.satisfaction_rating != null && current.satisfaction_rating < args.settings.min_happy_rating) {
@@ -280,7 +295,7 @@ export async function loadClientSignoffByJob(
       // newest first so the row cap can only ever cut older sign-offs.
       for (const chunk of chunkClientSignoffIds(gated.map((j) => j.id))) {
         const { data, error } = await client.from('job_client_signoffs')
-          .select('id, job_id, method, signed_name, happy, satisfaction_rating, signature_media_id, waiver_reason, created_at')
+          .select('id, job_id, method, signed_name, happy, satisfaction_rating, signature_media_id, waiver_reason, created_at,' + SIGNED_CLIENT_COPY_COLUMNS)
           .in('job_id', chunk)
           .order('created_at', { ascending: false })
         if (error) {

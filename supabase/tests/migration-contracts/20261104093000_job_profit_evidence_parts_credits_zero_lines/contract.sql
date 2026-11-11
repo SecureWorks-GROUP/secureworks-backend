@@ -11,6 +11,12 @@ SET LOCAL statement_timeout = '60s';
 -- it inside this transaction (the ROLLBACK at the end puts it back) so the checks below meet this migration's rule.
 SELECT md5(pg_get_functiondef('public.job_profit_line_evidence_many(uuid[])'::regprocedure))='b9114d87ccc74b6171bbb51d92be69b4' AS test_has_a2_credits \gset
 \if :test_has_a2_credits
+-- 20261111100000 (RQ-15.g office variations) sits on v_job_profit and v_job_revenue_events: when the stack has it,
+-- its down runs first.
+SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.v_job_profit'::regclass AND attname = 'office_variations_ex' AND NOT attisdropped) AS rq15g_unwind_20261104093000 \gset
+\if :rq15g_unwind_20261104093000
+\ir ../../../rollbacks/20261111100000_job_profit_office_variations_down.sql
+\endif
 \ir ../../../rollbacks/20261104200500_job_profit_credits_follow_their_documents_down.sql
 \endif
 

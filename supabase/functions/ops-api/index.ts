@@ -1,5 +1,11 @@
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
+import {
+  assertTradeMayBillExtraJobs,
+  ExtraJobBillingRefusal,
+  extraLineType,
+  normaliseExtraItem,
+} from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
@@ -162,6 +168,8 @@ import {
   type NamedScopeRevisionRead,
   type SentQuoteSourceHashes,
 } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
+import { approvedQuotePdf, markUnapprovedLegacySendSent, ownerPriceBeforeSend, quotePdfBase64, unapprovedSendKeyForQuickQuote } from '../_shared/scope_freeze/owner_price_approval.ts'
+import { releaseScopeJobDraftsOnAcceptance, releasesScopeDraftOnStatus } from '../_shared/scope_freeze/release_scope_job_drafts.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
@@ -205,6 +213,7 @@ import {
   signoffRowCounts,
   type ClientSignoff,
 } from './trade_client_signoff.ts'
+import { ClientSignoffFormError, readOfficeClientSignoff, recordOfficeClientConfirmation, readOfficeClientSignedCopy, printableClientSignoff } from './client_signoff_form.ts'
 import {
   TRADE_QUOTE_EXTRACT_DOC_TYPE,
   TRADE_QUOTE_EXTRACT_SCHEMA,
@@ -730,7 +739,9 @@ import {
   resolveWorkOrderScopeLine,
   WEEKLY_INVOICE_DEDUCTION_LINE_TYPES,
   WeeklyInvoiceError,
+  unbilledBookingWeekEnding,
   weeklyWorkOrderBusinessDate,
+  workOrderDirectInvoiceBlock,
   workOrderHasPricedScope,
   WORK_ORDER_INVOICE_LIST_STATUSES,
   workOrderIsInvoiceReady,
@@ -798,10 +809,21 @@ import {
   shouldOpenBlankJobWorkOrder,
 } from './job_work_order_office.ts'
 import { releaseVoidedTradeInvoice, VoidedTradeInvoiceReleaseError } from './trade_invoice_voided_release.ts'
+import { presentTradeInvoiceBillOutcome } from './trade_invoice_bill_outcome.ts'
+import { ExtraRateRuleError, extraLineRateHold, listExtraRateRules, loadExtraRateRules, setExtraRateRule, type ExtraRateHold } from './trade_invoice_extra_rate_rule.ts'
+import { findNoWeekClaimConflict, isNoWeekClaimRefusal, NO_WEEK_CLAIM_MESSAGE, NO_WEEK_CLAIM_REFUSAL } from './trade_invoice_no_week_claim.ts'
+import { isTradeInvoiceNumberCollision, nextTradeInvoiceNumber, tradeInvoiceDay, tradeInvoiceInitials } from './trade_invoice_number.ts'
+import { recordTradeInvoiceEvent } from './trade_invoice_events.ts'
+import { acknowledgeTradeInvoiceLine, TradeInvoiceLineAckError } from './trade_invoice_line_ack.ts'
+import { createOrReuseTradeXeroBill, findLiveTradeBillsByNumber, TradeXeroBillSearchError } from './trade_invoice_xero_existing_bill.ts'
+import { markTradeInvoiceReadyForXero, resolveStuckTradeInvoice, STUCK_TRADE_INVOICE_STATUS, StuckTradeInvoiceError } from './trade_invoice_stuck.ts'
+import { TRADE_INVOICE_ROUTE_ACTIONS, TradeInvoiceStoreError, tradeInvoiceRefusal } from './trade_invoice_refusal.ts'
+import { officeSentBackNote, tradeInvoiceOfficeNote } from './trade_invoice_office_note.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
 import { autoGroupFenceJobs, autoGroupPatioJobs, openMissingFenceWorkOrders, openMissingPatioWorkOrders } from './patio_auto_group.ts'
 import {
   assertAllInGroupInvoiceStandalone,
+  assertGroupClientConfirmationBeforeCompletion,
   claimGroupReleaseForInvoice,
   releasedGroupSiblingInvoiceIds,
   assertGroupJobDraftUsesShare,
@@ -829,6 +851,7 @@ import {
   readGroupWorkOrderPublic,
   rekeyGroupWorkOrder,
   removeGroupWorkOrderParticipant,
+  restoreGroupWorkOrderParticipant,
   resolveGroupShareInvoiceExtra,
   revokeGroupSignoff,
   signGroupWorkOrderCrew,
@@ -837,6 +860,9 @@ import {
   unfreezeGroupWorkOrder,
   voidGroupWorkOrder,
   withoutGroupJobAssignments,
+  groupRouteNextStep,
+  readInvoicePayableRoutes,
+  type InvoicePayableRoute,
   type GroupCaller,
 } from './group_work_order.ts'
 import { requestWorkOrderAmount, sendOutlookWorkOrderRequest } from './work_order_request.ts'
@@ -1857,7 +1883,8 @@ async function resolveJobsByExternalRef(
   client: any,
   refs: string[],
   activeJobStatusExclude: string,
-  jobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status'
+  jobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status',
+  orgId: string | null = null,
 ): Promise<{ byId: Record<string, any>; byRef: Record<string, any[]> }> {
   if (refs.length === 0) return { byId: {}, byRef: {} }
   // Build a list of digit cores to filter makesafe_job_details efficiently.
@@ -1886,11 +1913,13 @@ async function resolveJobsByExternalRef(
   )]
   if (matchedJobIds.length === 0) return { byId: {}, byRef: {} }
 
-  // Fetch the actual job rows (filtered to active statuses).
-  const { data: jobRows, error: jobErr } = await client.from('jobs')
+  // Fetch the actual job rows (filtered to active statuses, and to the
+  // caller's company when one is given).
+  let jobQuery = client.from('jobs')
     .select(jobSelect)
     .not('status', 'in', activeJobStatusExclude)
-    .in('id', matchedJobIds)
+  if (orgId) jobQuery = jobQuery.eq('org_id', orgId)
+  const { data: jobRows, error: jobErr } = await jobQuery.in('id', matchedJobIds)
   if (jobErr) throw jobErr
 
   // Build byId (all matched jobs) and byRef (jobs per normalised input ref).
@@ -2014,6 +2043,21 @@ export class ApiError extends Error {
     this.status = status
     this.body = body
   }
+}
+
+// A crew work order on a job built from a saved revision leaves draft only once
+// the job work order is issued on both owner approvals
+// (work_orders_crew_owner_gate, 20261109040000). The database refuses with
+// WO428; a caller gets a plain 409, never a raw fault.
+const CREW_OWNER_APPROVAL_MESSAGE =
+  'This job\'s work order is not issued yet: the owner must approve the price and the work order first. The crew work order stays a draft.'
+function crewWorkOrderOwnerApprovalError(error: any): ApiError | null {
+  if (String(error?.code ?? '') !== 'WO428') return null
+  return new ApiError(CREW_OWNER_APPROVAL_MESSAGE, 409, {
+    ok: false,
+    code: 'owner_approval_required',
+    error: CREW_OWNER_APPROVAL_MESSAGE,
+  })
 }
 
 function tradeInvoiceMoneyApiError(error: unknown): never {
@@ -2314,8 +2358,10 @@ async function noteTradeRecurringDeductionNotTaken(
 }
 
 function presentTradeInvoice<T extends Record<string, unknown>>(
-  invoice: T,
+  rawInvoice: T,
 ): T & { trade_payable: number | null } & Record<string, unknown> {
+  // A bill voided or deleted in Xero says so on every read.
+  const invoice = { ...rawInvoice, ...presentTradeInvoiceBillOutcome(rawInvoice) } as T
   try {
     const presented = presentTradeInvoiceMoney(withTradeRecurringDeductionOfficeNote(invoice))
     if (String(invoice.invoice_source || '') !== 'weekly_work_order') {
@@ -2467,6 +2513,25 @@ async function releaseGroupCrewBills(client: any, invoiceId: string, actor: stri
   // Once released, every crew bill goes, whatever happened to this one.
   const crew = await pushReleasedGroupSiblings(client, invoiceId, actor).catch(() => null)
   return { released: true, xero_push: own, ...(crew || {}) }
+}
+
+// B13: every trade bill create goes through here. It looks in Xero for a live
+// bill with the same number first, so a retry never makes a second bill.
+function createTradeXeroBillOnce(
+  client: any,
+  args: { accessToken: string; tenantId: string; tradeInvoiceId: string; payload: any; idempotencyKey: string; actor: string },
+) {
+  return createOrReuseTradeXeroBill(client, {
+    xeroGet,
+    putBill: (payload, key) => xeroPost('/Invoices', args.accessToken, args.tenantId, payload, 'PUT', key),
+  }, args)
+}
+
+function tradeXeroBillSearchApiError(error: unknown): never {
+  if (error instanceof TradeXeroBillSearchError) {
+    throw new ApiError(error.message, error.status, { ok: false, code: error.code, error: error.message })
+  }
+  throw error
 }
 
 async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops-api:push_trade_invoice_to_xero') {
@@ -2684,7 +2749,10 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
   }
 
   const idempotencyKey = tradeInvoiceXeroIdempotencyKey(invoice_id)
-  const xeroResult = await xeroPost('/Invoices', accessToken, tenantId, xeroPayload, 'PUT', idempotencyKey)
+  // B13: a retry after a lost reply reuses the bill Xero already holds.
+  const { result: xeroResult } = await createTradeXeroBillOnce(client, {
+    accessToken, tenantId, tradeInvoiceId: invoice_id, payload: xeroPayload, idempotencyKey, actor,
+  }).catch((error) => tradeXeroBillSearchApiError(error))
   const bill = xeroResult?.Invoices?.[0]
   const billIdentity = await checkpointAndAssertReturnedTradeInvoiceXeroSplit({
     bill,
@@ -10116,17 +10184,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           })
         }
         return json(await sendWorkOrder(client, body))
-      // Shaun only: work_order_settings.approver_user_ids, checked here and
-      // again by the database. The approver is the signed-in user. An approver
-      // named only by x-sw-actor `user:<id>` on a server-secret call is refused
-      // until feature flag work_order_terminal_approval_v1 is on.
+      // The owner or an approver named in work_order_settings
+      // (owner_approval_authority), checked here and again by the database.
+      // The approver is the signed-in user. An approver named only by
+      // x-sw-actor `user:<id>` on a server-secret call is refused until
+      // feature flag work_order_terminal_approval_v1 is on. Records the work
+      // order decision; the order is issued only when the owner approval
+      // policy allows (20261109040000).
       case 'approve_work_order':
         return json(await runJobWorkOrder(() => approveJobWorkOrder(client, body, resolveWorkOrderApprover({
           authMode,
           authUserId: authUser?.id ?? null,
           serverSecretPresented,
           actor: requestActor,
-        }))))
+        }), authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID)))
       // Dry run unless apply:true AND feature flag job_work_order_backfill_v1.
       case 'backfill_job_work_orders': {
         if (authMode !== 'api_key' || !serverSecretPresented) {
@@ -10135,7 +10206,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json(await runJobWorkOrder(() => backfillJobWorkOrders(client, body)))
       }
       // The automatic issue sweep (pg_cron job-work-order-auto-issue, every 2
-      // minutes): fills and issues job work orders with no human approval.
+      // minutes): fills drafts from the accepted quote, and issues only drafts
+      // both owner decisions already allow (it never creates a decision).
       // Writes nothing while feature flag job_work_order_auto_issue_v1 is off.
       case 'auto_issue_job_work_orders': {
         if (authMode !== 'api_key' || !serverSecretPresented) {
@@ -10310,6 +10382,31 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const response = await scopeJobDraftsAction(client, action, req.method, body, {
           staff: _opsApiCallerIsStaffOperator(authMode, authUser),
           orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+          approver: resolveWorkOrderApprover({
+            authMode,
+            authUserId: authUser?.id ?? null,
+            serverSecretPresented,
+            actor: requestActor,
+          }),
+        })
+        return json(await response.json(), response.status)
+      }
+      // Owner approval of the price and of the work order (TK-S28). The
+      // approver is the signed-in user; who may approve is the database's
+      // owner_approval_authority. 20261109040000_scope_owner_approvals.sql.
+      case 'approve_scope_price':
+      case 'approve_scope_work_order':
+      case 'read_scope_owner_approvals': {
+        const { scopeOwnerApprovalsAction } = await import('./scope_owner_approvals.ts')
+        const response = await scopeOwnerApprovalsAction(client, action, req.method, req.method === 'GET' ? { job_id: url.searchParams.get('job_id') } : body, {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+          approver: resolveWorkOrderApprover({
+            authMode,
+            authUserId: authUser?.id ?? null,
+            serverSecretPresented,
+            actor: requestActor,
+          }),
         })
         return json(await response.json(), response.status)
       }
@@ -10991,7 +11088,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw new ApiError('Cannot reject an invoice already in Xero/paid', 400)
         }
         const { data: rejected, error: rejErr } = await client.from('trade_invoices')
-          .update({ status: 'ops-reject', query_note: rejNote || 'Rejected by ops — re-submit corrected hours.' })
+          .update({ status: 'ops-reject', query_note: officeSentBackNote(rejNote) })
           .eq('id', rejInvId)
           .is('xero_bill_id', null)
           .is('xero_pushed_at', null)
@@ -11053,21 +11150,71 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       }
 
       case 'acknowledge_invoice_line': {
-        const { line_id: ackLineId, acknowledged: ackApproved, query_note: ackQueryNote } = body
-        if (!ackLineId) throw new ApiError('line_id required', 400)
-
-        const ackUpdateData: Record<string, any> = {
-          acknowledged_at: new Date().toISOString(),
-          acknowledgment_status: ackApproved !== false ? 'acknowledged' : 'queried',
+        // B12: a trade acknowledges only their own line, on an invoice still
+        // waiting for acknowledgement; staff get the state checks.
+        if (req.method !== 'POST') return json({ error: 'acknowledge_invoice_line is POST only', code: 'method_not_allowed' }, 405)
+        try {
+          return json(await acknowledgeTradeInvoiceLine(client, body, {
+            staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+            userId: authMode === 'jwt' ? (authUser?.id || null) : null,
+          }))
+        } catch (error) {
+          if (error instanceof TradeInvoiceLineAckError) {
+            return json({ ok: false, code: error.code, error: error.message }, error.status)
+          }
+          throw error
         }
-        if (ackQueryNote) ackUpdateData.query_note = ackQueryNote
+      }
 
-        const { error: ackErr } = await client.from('trade_invoice_lines')
-          .update(ackUpdateData)
-          .eq('id', ackLineId)
+      case 'resolve_stuck_trade_invoice': {
+        // B5: the office's way out of pending acknowledgment, with a reason.
+        if (req.method !== 'POST') return json({ error: 'resolve_stuck_trade_invoice is POST only', code: 'method_not_allowed' }, 405)
+        let resolved: Record<string, any>
+        try {
+          resolved = await resolveStuckTradeInvoice(client, body, {
+            staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+            userId: authMode === 'jwt' ? (authUser?.id || null) : null,
+            label: reviewActorLabel(authUser),
+          }, {
+            // A release reads Xero first: a lost create reply leaves a bill there.
+            findLiveBills: async (invoiceNumber: string) => {
+              const auth = await getToken(client)
+              return await findLiveTradeBillsByNumber(xeroGet, auth, invoiceNumber)
+            },
+          })
+        } catch (error) {
+          if (error instanceof StuckTradeInvoiceError) {
+            return json({ ok: false, code: error.code, error: error.message }, error.status)
+          }
+          throw error
+        }
+        if (resolved.status !== 'approved') return json(resolved)
+        try {
+          const pushed = await pushTradeInvoiceToXeroAction(client, { invoice_id: resolved.invoice_id }, reviewActorLabel(authUser))
+          return json({ ...resolved, xero_push: pushed })
+        } catch (pushErr) {
+          // The invoice stays approved: push_trade_invoice_to_xero retries it,
+          // and the retry looks for an existing bill first.
+          return json({ ...resolved, xero_push: 'unconfirmed', xero_push_error: (pushErr as Error)?.message || 'Xero push failed' })
+        }
+      }
 
-        if (ackErr) throw new Error(ackErr.message)
-        return json({ success: true })
+      // B14: the office's rate limits for trade-typed extras lines. Staff only.
+      case 'list_trade_invoice_extra_rate_rules':
+      case 'set_trade_invoice_extra_rate_rule': {
+        const isSet = action === 'set_trade_invoice_extra_rate_rule'
+        if (isSet && req.method !== 'POST') return json({ error: `${action} is POST only`, code: 'method_not_allowed' }, 405)
+        const staff = _opsApiCallerIsStaffOperator(authMode, authUser)
+        try {
+          return json(isSet
+            ? await setExtraRateRule(client, body, { staff, userId: authMode === 'jwt' ? (authUser?.id || null) : null })
+            : await listExtraRateRules(client, { staff }))
+        } catch (error) {
+          if (error instanceof ExtraRateRuleError) {
+            return json({ ok: false, code: error.code, error: error.message }, error.status)
+          }
+          throw error
+        }
       }
 
       // ── Job Completion Package ──
@@ -12126,7 +12273,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return await groupWorkOrderJson(readGroupWorkOrderPublic(
           client,
           String(url.searchParams.get('token') || url.searchParams.get('share_token') || body.share_token || ''),
-        ))
+        ).then(async read => url.searchParams.get('format') === 'pdf' ? await printableClientSignoff(read.form) : read))
       case 'group_work_order_client_sign':
         return await groupWorkOrderJson(clientSignGroupWorkOrder(client, groupBody({
           ...body,
@@ -12137,6 +12284,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           ...body,
           share_token: body.share_token || url.searchParams.get('share_token') || url.searchParams.get('token'),
         })))
+      // The office files the client's actual confirmation; these routes send nothing.
+      // Recording requires its own identified staff JWT, not an agent or shared key.
+      case 'client_signoff_office':
+      case 'client_signoff_form_pdf':
+      case 'client_signoff_copy':
+      case 'record_client_signoff': {
+        const writing = action === 'record_client_signoff'
+        if (req.method !== (writing ? 'POST' : 'GET')) return json({error: 'Method not allowed', code:'method_not_allowed'}, 405)
+        const caller = {userId: authMode === 'jwt' ? authUser?.id || '' : '', orgId: authUser?.orgId || null, isStaff: _opsApiCallerIsStaffOperator(authMode, authUser)}
+        const jobId = String(body.job_id || url.searchParams.get('job_id') || '')
+        try {
+          if (writing) return json(await recordOfficeClientConfirmation(client, caller, body))
+          if (action === 'client_signoff_copy') return json(await readOfficeClientSignedCopy(client, caller, jobId, String(url.searchParams.get('signoff_id') || '')))
+          const read = await readOfficeClientSignoff(client, caller, jobId)
+          return json(action === 'client_signoff_form_pdf' ? await printableClientSignoff(read.form) : read)
+        } catch (error) {
+          if (error instanceof ClientSignoffFormError) return json({error:error.message,code:error.code}, error.status)
+          throw error
+        }
+      }
+
       // Office only. Not on the trade profile-scoped list, so a trade JWT is 403.
       case 'group_work_order_feedback':
       case 'group_work_order_office':
@@ -12145,6 +12313,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'void_group_work_order':
       case 'rekey_group_work_order':
       case 'remove_group_work_order_participant':
+      case 'restore_group_work_order_participant':
       case 'office_approve_group_hours': {
         const officeCaller: GroupCaller = {
           userId: authUser?.id || '',
@@ -12170,6 +12339,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             ? rekeyGroupWorkOrder(client, officeCaller, officeBody)
             : action === 'remove_group_work_order_participant'
             ? removeGroupWorkOrderParticipant(client, officeCaller, officeBody)
+            : action === 'restore_group_work_order_participant'
+            ? restoreGroupWorkOrderParticipant(client, officeCaller, officeBody)
             : action === 'office_approve_group_hours'
             ? officeApproveGroupHours(client, officeCaller, officeBody)
             : readGroupWorkOrderOffice(client, officeCaller, officeBody),
@@ -12594,7 +12765,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 if (l?.job_id && refByJob[l.job_id]) l.external_ref = refByJob[l.job_id]
               }
             }
-            return json({ invoice: presentTradeInvoice(inv) })
+            return json({
+              invoice: {
+                ...presentTradeInvoice(inv),
+                office_note: tradeInvoiceOfficeNote(inv, detailLines),
+              },
+            })
           }
           case 'search_all_jobs':
             return json(await searchAllJobs(client, url.searchParams, tradeUser, isDispatcher))
@@ -12720,8 +12896,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             )) {
               throw new ApiError('Not authorised — this work order is outside your assigned or managed work', 403)
             }
-            if (!workOrderIsInvoiceReady({ ...wo, jobs: woJob })) {
-              throw new ApiError('Work order must be complete, or sent/accepted on a finished job, before invoicing', 400)
+            // The direct door saves through a database function that accepts
+            // only a complete work order with a finish date. Refuse plainly
+            // here, with the way on, rather than let that function raise.
+            const directBlock = workOrderIsInvoiceReady({ ...wo, jobs: woJob })
+              ? workOrderDirectInvoiceBlock(wo)
+              : workOrderDirectInvoiceBlock({ status: 'not_ready' })
+            if (directBlock) {
+              throw new ApiError(directBlock.message, 409, {
+                ok: false,
+                error: directBlock.message,
+                code: directBlock.code,
+              })
             }
             await assertFencingCompletionEvidence(client, [{
               id: String(woJob?.id || wo.job_id || ''),
@@ -13065,7 +13251,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let createdXeroBillId = ''
             let woPdfAttached = false
             try {
-              const xeroResult = await xeroPost('/Invoices', woAt, woTi, xeroPayload, 'PUT', woIdempotencyKey)
+              const { result: xeroResult } = await createTradeXeroBillOnce(client, {
+                accessToken: woAt, tenantId: woTi, tradeInvoiceId: tradeInv.id, payload: xeroPayload,
+                idempotencyKey: woIdempotencyKey, actor: 'submit_work_order_invoice',
+              })
               const xeroInv = xeroResult?.Invoices?.[0]
               createdXeroBillId = String(xeroInv?.InvoiceID || '')
               const identity = await checkpointAndAssertReturnedTradeInvoiceXeroSplit({
@@ -14054,8 +14243,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let extraSubtotal = 0
             let clientPricedExtraCount = 0
             if (hasExtras) {
-              const requestedJobIds = [...new Set((invoiceExtraItems || []).map((i: any) => i?.job_id).filter(Boolean))]
-              const requestedJobNumbers = [...new Set((invoiceExtraItems || []).map((i: any) => String(i?.job_number || '').trim()).filter(Boolean))]
+              // Client lines are trimmed once (type and job references) and
+              // every step below reads those values. Weekly work-order lines
+              // are server-built and pass through as they are.
+              const extraItemsIn: any[] = weeklyInvoice
+                ? invoiceExtraItems
+                : (invoiceExtraItems || []).map(normaliseExtraItem)
+              const requestedJobIds = [...new Set(extraItemsIn.map((i: any) => i?.job_id).filter(Boolean))]
+              const requestedJobNumbers = [...new Set(extraItemsIn.map((i: any) => String(i?.job_number || '').trim()).filter(Boolean))]
               const activeJobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status'
               // Change 3: removed complete/completed/invoiced so WO/commission extra-item rows on completed
               // make-safes still resolve job_id (fixes null job_id on audit log for finished jobs)
@@ -14073,11 +14268,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               // own HOURLY_STATUS_WHITELIST above and is unaffected.
               const activeJobStatusExclude = '("lost","cancelled","deleted","duplicate","duplicated","void","voided")'
               const extraJobReads: PromiseLike<any>[] = []
+              // Every job read here is the caller's company only: an extra line
+              // can never name another company's job.
               if (requestedJobIds.length > 0) {
-                extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).in('id', requestedJobIds))
+                extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).eq('org_id', tradeUser.orgId).in('id', requestedJobIds))
               }
               if (requestedJobNumbers.length > 0) {
-                extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).in('job_number', requestedJobNumbers))
+                extraJobReads.push(client.from('jobs').select(activeJobSelect).not('status', 'in', activeJobStatusExclude).eq('org_id', tradeUser.orgId).in('job_number', requestedJobNumbers))
               }
               const extraJobResults = extraJobReads.length > 0 ? await Promise.all(extraJobReads) : []
               const extraJobs = extraJobResults.flatMap((r: any) => r.data || [])
@@ -14085,10 +14282,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (extraJobsErr) throw extraJobsErr
               const jobById: Record<string, any> = {}
               const jobByNumber: Record<string, any> = {}
+              // A job number that matches more than one job is never guessed.
+              const ambiguousJobNumbers = new Set<string>()
               for (const j of (extraJobs || [])) {
                 if (j.id) jobById[j.id] = j
-                if (j.job_number) jobByNumber[String(j.job_number)] = j
+                if (!j.job_number) continue
+                const number = String(j.job_number)
+                if (jobByNumber[number] && jobByNumber[number].id !== j.id) ambiguousJobNumbers.add(number)
+                else jobByNumber[number] = j
               }
+              for (const number of ambiguousJobNumbers) delete jobByNumber[number]
 
               // M9 r2 FIX 2: resolve external_ref (MLB builder ref) for extra items that
               // were not resolved via exact job_id or job_number lookup above.
@@ -14103,6 +14306,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 const unresolvedExternalRefs = requestedJobNumbers.filter(ref => {
                   if (/^[0-9a-f-]{36}$/i.test(ref)) return false   // UUID — handled by jobById path
                   if (/^SWMS-/i.test(ref)) return false              // SWMS ref — not a builder ref
+                  if (ambiguousJobNumbers.has(ref)) return false     // several jobs: stays unresolved
                   return !jobByNumber[ref]                           // not already resolved
                 })
                 if (unresolvedExternalRefs.length > 0) {
@@ -14110,7 +14314,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     client,
                     unresolvedExternalRefs,
                     activeJobStatusExclude,
-                    activeJobSelect
+                    activeJobSelect,
+                    tradeUser.orgId,
                   )
                   for (const ref of unresolvedExternalRefs) {
                     // byRef[normRef(ref)] is the list of distinct active jobs that matched.
@@ -14126,6 +14331,49 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     // 2+ matches → ambiguous ref, refuse silently (error fires downstream)
                   }
                 }
+              }
+
+              // Who may bill each job (trade_invoice_extra_job_authority.ts).
+              // Before any extra line is priced or written, every line that
+              // names a job must name one job in the caller's company that the
+              // trade may bill, or the whole submission is refused. Not checked
+              // here: the weekly work-order lane (server-built lines), group
+              // shares, clock mirrors the loop below skips, and lines that name
+              // no job.
+              if (!weeklyInvoice) {
+                const jobLines = extraItemsIn.filter((item: any) =>
+                  item &&
+                  item.source !== 'clock' && item._source !== 'clock' && item.source !== 'server_labour' &&
+                  !isGroupShareInvoiceItem(item) && !item.group_share_id &&
+                  (item.job_id || item.job_number)
+                ).map((item: any) => ({
+                  lineType: extraLineType(item),
+                  ref: item.job_number || String(item.job_id),
+                  job: item.job_id ? (jobById[item.job_id] || null) : (jobByNumber[item.job_number] || null),
+                }))
+                await assertTradeMayBillExtraJobs(client, {
+                  trade: {
+                    id: tradeUser.id,
+                    orgId: tradeUser.orgId,
+                    managedVerticals: tradeUser.managedVerticals || [],
+                    isMakesafeManager,
+                  },
+                  lines: jobLines,
+                  jobVertical: _jobVertical,
+                }).catch((error) => {
+                  if (error instanceof ExtraJobBillingRefusal) {
+                    throw new ApiError(error.message, 403, {
+                      ok: false,
+                      success: false,
+                      saved: false,
+                      code: error.code,
+                      jobs: error.jobs,
+                      error: error.message,
+                      userMessage: error.message,
+                    })
+                  }
+                  throw new ApiError(error?.message || 'Could not check the jobs on this invoice', 500)
+                })
               }
 
               // double-pay guard removed per Marnin 2026-06-18 — the office verifies every invoice
@@ -14151,7 +14399,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }
               }
 
-              for (const rawItem of invoiceExtraItems) {
+              // B14: the office's rate limits for trade-typed extras.
+              const extraRateRules = await loadExtraRateRules(client)
+              for (const rawItem of extraItemsIn) {
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
                 // They must never be accepted as extra items, or normal weekly hours are double-counted.
                 if (rawItem?.source === 'clock' || rawItem?._source === 'clock' || rawItem?.source === 'server_labour') continue
@@ -14194,9 +14444,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }
                 const resolvedJob = item.job_id ? jobById[item.job_id] : jobByNumber[String(item.job_number || '')]
                 if (week_start && !resolvedJob && item.type !== 'final_payout_deduction') throw new ApiError('Manual invoice job is not active or does not exist: ' + (item.job_number || item.job_id), 422)
-                const rateSource = serverResolvedWeeklyLine
-                  ? 'server_resolved'
-                  : item.rate_source || (item.client_rate_entered ? 'client_entered' : 'client_entered')
+                // Only a line the server priced itself is server_resolved. The
+                // client's own rate_source is never trusted (B14).
+                const rateSource = serverResolvedWeeklyLine ? 'server_resolved' : 'client_entered'
                 if (week_start && rateSource === 'client_entered') clientPricedExtraCount++
                 const amt = Math.round((Number(item.quantity || 1) * Number(item.rate || 0)) * 100) / 100
                 if (serverResolvedWeeklyLine && Math.abs(amt - Number(item.line_total_ex)) > 0.01) {
@@ -14204,11 +14454,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }
                 extraSubtotal += amt
                 const extraHours = serverResolvedWeeklyLine ? 0 : Number(item.quantity ?? item.qty ?? item.hours ?? 0)
-                const extraRateNote = rateSource === 'client_entered'
-                  ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
-                  : serverResolvedWeeklyLine
-                  ? 'Server-resolved from work order, acknowledged crew line, or dated trade rate.'
-                  : 'Server-resolved rate from trade_rates.'
+                // B14: a typed rate above the office limit holds the line for
+                // office review, which holds the whole invoice out of Xero.
+                const extraRateHold: ExtraRateHold | null = item.type === 'final_payout_deduction'
+                  ? null
+                  : extraLineRateHold({
+                    lineType: item.type,
+                    rate,
+                    serverResolved: Boolean(serverResolvedWeeklyLine),
+                    rules: extraRateRules,
+                    tradeHourlyRate: resolvedRate > 0 ? resolvedRate : null,
+                  })
+                const extraRateNote = [
+                  rateSource === 'client_entered'
+                    ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
+                    : serverResolvedWeeklyLine
+                    ? 'Server-resolved from work order, acknowledged crew line, or dated trade rate.'
+                    : 'Server-resolved rate from trade_rates.',
+                  extraRateHold?.note,
+                ].filter(Boolean).join(' | ')
 
                 // ── M4 U1: make-safe hours flag (searched-in extras path) ────
                 // Structured activation via job type / division / line_type —
@@ -14257,7 +14521,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }
 
                 extraLineItems.push({
-                  line_type: item.type ? item.type.toLowerCase() : 'other',
+                  line_type: extraLineType(item),
                   description: woDescription || item.description || item.type || 'Extra item',
                   quantity: Number(item.quantity || 1),
                   // M0 guard reads total_hours for lines that bill hours; extras carry their
@@ -14299,6 +14563,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   _hoursFlag: extraHoursFlag,
                   _woProblems: woProblems,
                   _weeklyServerResolved: serverResolvedWeeklyLine,
+                  _rateHold: extraRateHold,
                 })
               }
             }
@@ -14430,14 +14695,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const duplicateExtraInvoiceRefs = [...new Set(duplicateExtraMatches.map((m: any) => m.invoice?.invoice_number || m.trade_invoice_id).filter(Boolean))]
 
             // Generate invoice number: SW-INV-{initials}-{YYMMDD}-{seq} (global sequence, never reused)
-            const initials = (userProfile?.name || 'XX').split(' ').map((n: string) => n.charAt(0).toUpperCase()).join('').slice(0, 3)
-            const today = new Date().toISOString().slice(2, 10).replace(/-/g, '')
-            // Global count of ALL invoices by this user (never decreases even if deleted)
-            const { count: totalCount } = await client.from('trade_invoices')
-              .select('id', { count: 'exact', head: true })
-              .eq('user_id', tradeUser.id)
-            const seq = String((totalCount || 0) + 1).padStart(3, '0')
-            const invoiceNumber = `SW-INV-${initials}-${today}-${seq}`
+            // The database refuses a repeat (trade_invoices_invoice_number_key),
+            // so this picks the first free number and a collision at insert
+            // picks the next one (trade_invoice_number.ts).
+            const initials = tradeInvoiceInitials(userProfile?.name)
+            const today = tradeInvoiceDay()
+            let invoiceNumberSkip = 0
+            let invoiceNumber = await nextTradeInvoiceNumber(client, { userId: tradeUser.id, initials, day: today })
+              .catch((error) => { throw new ApiError(error instanceof Error ? error.message : String(error), 503) })
 
             let priorDraftId: string | null = null
             if (weeklyInvoice && week_start) {
@@ -14513,7 +14778,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               // memory-only metadata (_hoursFlag unpacks into the flag columns below;
               // _woProblems feeds the unresolved-line audit event). Never send
               // memory-only fields to PostgREST.
-              const { _hoursFlag: _hf, _woProblems: _wp, _weeklyServerResolved: _wsr, ...dbLine } = { ...defaults, ...line }
+              const { _hoursFlag: _hf, _woProblems: _wp, _weeklyServerResolved: _wsr, _rateHold: _rh, ...dbLine } = { ...defaults, ...line }
               // M4 U1: land the flag-fact fields (U4 contract) from the resolver
               // outcome. baseline_hours/baseline_source are recorded for EVERY
               // make-safe line; flag_type/hours_justification/flagged_at only when
@@ -14546,7 +14811,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 group_share_id: dbLine.group_share_id || null,
                 // Only the server-priced group lane adds this hold. Ordinary
                 // invoices retain the existing flag-controlled review policy.
-                office_review_status: isGroupShareInvoiceItem(dbLine) ? 'awaiting' : null,
+                // A held typed rate (B14) starts awaiting office review.
+                office_review_status: isGroupShareInvoiceItem(dbLine) || (line?._rateHold as ExtraRateHold | null)?.held ? 'awaiting' : null,
                 source_trade_invoice_line_id: dbLine.source_trade_invoice_line_id || null,
                 deduction_user_id: dbLine.deduction_user_id || null,
                 deduction_assignment_id: dbLine.deduction_assignment_id || null,
@@ -14661,14 +14927,65 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 },
               )
             }
-            const invoiceId = weeklyInvoice
-              ? await _persistWeeklyTradeInvoice(
+            // B16: one live no-week invoice per person per claim. The database
+            // trigger is the guard; this read answers first, in plain words.
+            if (!week_start) {
+              const noWeekClaim = await findNoWeekClaimConflict(client, tradeUser.id, [
+                ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour' })),
+                ...extraLineItems,
+              ])
+              if (!noWeekClaim.ok) {
+                throw new ApiError('Your open invoices could not be checked, so nothing was sent. Try again shortly.', 503, {
+                  error: 'Your open invoices could not be checked, so nothing was sent. Try again shortly.',
+                  code: 'no_week_claim_unreadable',
+                })
+              }
+              if (noWeekClaim.conflict) {
+                const message = noWeekClaim.conflict.invoice_number
+                  ? `${NO_WEEK_CLAIM_MESSAGE} It is on ${noWeekClaim.conflict.invoice_number}.`
+                  : NO_WEEK_CLAIM_MESSAGE
+                throw new ApiError(message, 409, {
+                  error: message,
+                  code: NO_WEEK_CLAIM_REFUSAL,
+                  existing_invoice_id: noWeekClaim.conflict.invoice_id,
+                  existing_invoice_number: noWeekClaim.conflict.invoice_number,
+                })
+              }
+            }
+            // A repeat invoice number is refused by the database. Pick the next
+            // free number and try again, at most three times in all.
+            const persistWithFreeNumber = async (persist: () => Promise<string>): Promise<string> => {
+              for (let attempt = 0; ; attempt++) {
+                try {
+                  return await persist()
+                } catch (error) {
+                  if (isNoWeekClaimRefusal(error)) {
+                    throw new ApiError(NO_WEEK_CLAIM_MESSAGE, 409, { error: NO_WEEK_CLAIM_MESSAGE, code: NO_WEEK_CLAIM_REFUSAL })
+                  }
+                  if (!isTradeInvoiceNumberCollision(error)) throw error
+                  if (attempt >= 2) {
+                    const message = 'Another invoice took the same number at the same moment. Nothing was saved. Please submit again.'
+                    throw new ApiError(message, 409, { error: message, code: 'invoice_number_taken' })
+                  }
+                  invoiceNumberSkip++
+                  invoiceNumber = await nextTradeInvoiceNumber(client, {
+                    userId: tradeUser.id,
+                    initials,
+                    day: today,
+                    skip: invoiceNumberSkip,
+                  }).catch((e) => { throw new ApiError(e instanceof Error ? e.message : String(e), 503) })
+                  invoicePayload.invoice_number = invoiceNumber
+                }
+              }
+            }
+            const invoiceId = await persistWithFreeNumber(() => weeklyInvoice
+              ? _persistWeeklyTradeInvoice(
                 client,
                 invoicePayload,
                 weeklyInvoice,
                 priorDraftId,
               )
-              : await replaceTradeInvoiceDraftKeepingPrior({
+              : replaceTradeInvoiceDraftKeepingPrior({
               createInvoice: async () => {
                 const { data: newInvoice, error: invErr } = await client.from('trade_invoices')
                   .insert(invoicePayload)
@@ -14705,8 +15022,24 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   tradeUser.id,
                   includedAssignmentIds,
                 ),
-              }, priorDraftId)
+              }, priorDraftId))
             const invoice = { id: invoiceId }
+
+            // B14: one audit event per held typed rate. No amounts in the
+            // reason; the line itself carries them.
+            for (const held of extraLineItems.filter((line: any) => line?._rateHold?.held)) {
+              await recordTradeInvoiceEvent(client, {
+                trade_invoice_id: String(invoiceId),
+                event_type: 'extra_rate_held',
+                actor: `user:${tradeUser.id}`,
+                reason: held._rateHold.note,
+                detail: {
+                  line_type: held.line_type || null,
+                  job_id: held.job_id || null,
+                  cap_source: held._rateHold.source,
+                },
+              })
+            }
 
             // ── Layer B: stamp invoiced_in on every included assignment ──────
             // Marks each manual/clocked assignment as belonging to this invoice so
@@ -14991,6 +15324,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (noteErr) console.error('[ops-api] office review hold note update failed:', noteErr.message)
             }
 
+            // B5: nothing holds it, so it leaves pending acknowledgment before
+            // the push. A push that never runs or fails leaves it approved,
+            // which push_trade_invoice_to_xero can always finish.
+            if (!officeReviewHold && !officeReviewUnreadable) {
+              await markTradeInvoiceReadyForXero(client, invoice.id)
+            }
+
             // ── Auto-push to Xero as DRAFT ACCPAY bill ──
             // Change 6 (Q18): ALWAYS fires now (no pending_ops_review skip). Every
             // invoice that passed the hard guards goes straight to a Xero DRAFT bill.
@@ -15135,14 +15475,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     LineItems: allLines,
                   }],
                 }
-                const xeroResult = await xeroPost(
-                  '/Invoices',
+                const { result: xeroResult } = await createTradeXeroBillOnce(client, {
                   accessToken,
                   tenantId,
-                  xeroPayload,
-                  'PUT',
-                  tradeInvoiceXeroIdempotencyKey(invoice.id),
-                )
+                  tradeInvoiceId: invoice.id,
+                  payload: xeroPayload,
+                  idempotencyKey: tradeInvoiceXeroIdempotencyKey(invoice.id),
+                  actor: 'generate_trade_invoice',
+                })
                 const bill = xeroResult?.Invoices?.[0]
                 createdXeroBillId = String(bill?.InvoiceID || '')
                 if (createdXeroBillId) {
@@ -15360,44 +15700,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }
 
           case 'acknowledge_invoice_line': {
-            const { line_id, acknowledged, query_note: ackNote } = body
-            if (!line_id) throw new ApiError('line_id required', 400)
-
-            const updateData: Record<string, any> = {
-              acknowledged_by: tradeUser.id,
-              acknowledged_at: new Date().toISOString(),
-              acknowledgment_status: acknowledged !== false ? 'acknowledged' : 'queried',
-            }
-            if (ackNote) updateData.query_note = ackNote
-
-            const { error } = await client.from('trade_invoice_lines')
-              .update(updateData)
-              .eq('id', line_id)
-
-            if (error) throw new Error(error.message)
-
-            // Check if all lines on this invoice are acknowledged
-            const { data: line } = await client.from('trade_invoice_lines')
-              .select('trade_invoice_id')
-              .eq('id', line_id)
-              .maybeSingle()
-
-            if (line) {
-              const { data: allLines } = await client.from('trade_invoice_lines')
-                .select('acknowledgment_status')
-                .eq('trade_invoice_id', line.trade_invoice_id)
-
-              const allAcked = allLines?.every((l: any) => l.acknowledgment_status === 'acknowledged')
-              if (allAcked) {
-                await client.from('trade_invoices')
-                  .update({ status: 'acknowledged', acknowledged_at: new Date().toISOString() })
-                  .eq('id', line.trade_invoice_id)
-
+            // Unreachable today (the main switch answers first); kept on the
+            // same checked path so it can never reopen another trade's line.
+            try {
+              return json(await acknowledgeTradeInvoiceLine(client, body, { staff: false, userId: tradeUser.id }))
+            } catch (error) {
+              if (error instanceof TradeInvoiceLineAckError) {
+                return json({ ok: false, code: error.code, error: error.message }, error.status)
               }
-
+              throw error
             }
-
-            return json({ success: true })
           }
 
           case 'clock_event': {
@@ -15711,6 +16023,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       return json(err.body || { error: err.message }, err.status)
     }
     console.error('[ops-api] ERROR:', err)
+    // A trade invoice door never shows the trade a raw database or server
+    // sentence: a guard refusal is a plain 409, anything else a plain 500.
+    if (auditAction && TRADE_INVOICE_ROUTE_ACTIONS.has(auditAction)) {
+      const refusal = tradeInvoiceRefusal(err)
+      return json(refusal.body, refusal.status)
+    }
     return json({ error: (err as Error).message || 'Internal error' }, 500)
   }
 }
@@ -16969,7 +17287,7 @@ export async function _persistTradeInvoiceWeekDraft(
     if (persistMessage.includes('work_order_claim_blocked_by_group_share')) {
       throwIfGroupJobDraftClaim(error)
     }
-    throw new Error('Failed to persist weekly/hourly draft invoice: ' + persistMessage)
+    throw new TradeInvoiceStoreError('Failed to persist weekly/hourly draft invoice: ' + persistMessage, error?.code)
   }
   return invoiceId
 }
@@ -16990,7 +17308,7 @@ export async function _persistWorkOrderInvoice(
   })
   const invoiceId = String(data || '')
   if (error || !invoiceId) {
-    throw new Error('Failed to persist work-order invoice: ' + (error?.message || 'no invoice id returned'))
+    throw new TradeInvoiceStoreError('Failed to persist work-order invoice: ' + (error?.message || 'no invoice id returned'), error?.code)
   }
   return invoiceId
 }
@@ -17365,14 +17683,16 @@ async function readWorkOrderChargeRows(
 // The module throws JobWorkOrderError; the serve() handler answers ApiError.
 function officeJobWorkOrderActor(
   authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
-  authUser: Pick<TradeAuthContext, 'id' | 'role'> | null,
+  authUser: Pick<TradeAuthContext, 'id' | 'role' | 'orgId'> | null,
 ): {
   staff: boolean
   userId: string | null
+  orgId: string | null
 } {
   return {
     staff: _opsApiCallerIsStaffOperator(authMode, authUser),
     userId: authMode === 'jwt' ? authUser?.id || null : null,
+    orgId: authMode === 'jwt' ? authUser?.orgId || null : null,
   }
 }
 
@@ -17707,6 +18027,7 @@ export async function tradeWorkOrders(
     const blockingInvoice = existingBlocker || weeklyDraft
     const alreadyInvoiced = !!blockingInvoice &&
       !RELEASED_INVOICE_STATUS_SET.has(String(blockingInvoice.status || ''))
+    const directBlock = workOrderIsInvoiceReady(workOrder) ? workOrderDirectInvoiceBlock(workOrder) : null
     return {
       id: workOrder.id,
       wo_number: workOrder.wo_number,
@@ -17748,8 +18069,43 @@ export async function tradeWorkOrders(
         workOrderHasPricedScope(scopeItems) && !weeklyBuilderBlocker,
       can_invoice: workOrderIsInvoiceReady(workOrder) &&
         workOrderHasPricedScope(scopeItems) && !blockingInvoice,
+      // The Work Order Invoice door (submit_work_order_invoice) saves through a
+      // database function that accepts only a complete work order with a
+      // finish day. can_invoice stays the weekly rule; this is the door's.
+      can_invoice_direct: workOrderIsInvoiceReady(workOrder) && !directBlock &&
+        workOrderHasPricedScope(scopeItems) && !blockingInvoice,
+      direct_invoice_block_reason: directBlock ? directBlock.code : null,
+      direct_invoice_block_message: directBlock ? directBlock.message : null,
     }
   })
+  // A work order the door cannot take still leaves the trade a way to bill
+  // real work: their hours for the week of their unbilled booking on the job.
+  const directBlockedJobIds = [...new Set(mapped
+    .filter((card: any) => !!card.direct_invoice_block_reason)
+    .map((card: any) => String(card.job_id || ''))
+    .filter(Boolean))]
+  if (directBlockedJobIds.length > 0) {
+    const { data: bookingRows, error: bookingError } = await client
+      .from('job_assignments')
+      .select('job_id, scheduled_date, status, is_ghost, invoiced_in')
+      .eq('user_id', viewer.id)
+      .in('job_id', directBlockedJobIds)
+    if (bookingError) {
+      console.error('[my_work_orders] booking read for hours hint failed', bookingError.code)
+    } else {
+      const bookingsByJob = new Map<string, any[]>()
+      for (const row of bookingRows || []) {
+        const key = String(row?.job_id || '')
+        const bucket = bookingsByJob.get(key)
+        if (bucket) bucket.push(row)
+        else bookingsByJob.set(key, [row])
+      }
+      for (const card of mapped) {
+        if (!card.direct_invoice_block_reason) continue
+        card.hours_week_ending = unbilledBookingWeekEnding(bookingsByJob.get(String(card.job_id || '')) || [])
+      }
+    }
+  }
   // Fencing completion evidence: same rule the submit paths enforce, so a
   // card never offers an invoice action that 422s.
   const evidenceByJob = await loadCompletionEvidenceByJob(
@@ -17762,6 +18118,7 @@ export async function tradeWorkOrders(
     mapped[i].completion_evidence = ev
     if (!ev.satisfied) {
       mapped[i].can_invoice = false
+      mapped[i].can_invoice_direct = false
       mapped[i].can_add_to_weekly_invoice = false
       mapped[i].invoice_block_reason = mapped[i].invoice_block_reason || COMPLETION_EVIDENCE_BLOCK_REASON
     }
@@ -17776,6 +18133,7 @@ export async function tradeWorkOrders(
       mapped[i].client_signoff = so
       if (!so.satisfied) {
         mapped[i].can_invoice = false
+        mapped[i].can_invoice_direct = false
         mapped[i].can_add_to_weekly_invoice = false
         mapped[i].invoice_block_reason = mapped[i].invoice_block_reason || CLIENT_SIGNOFF_BLOCK_REASON
       }
@@ -37599,8 +37957,17 @@ async function updateJobStatus(client: any, body: any) {
     data = written
   }
 
-  if (status === 'accepted') {
-    const { releaseScopeJobDraftsOnAcceptance } = await import('../_shared/scope_freeze/release_scope_job_drafts.ts')
+  // TK-S28: any open status past acceptance releases the scope draft work
+  // order (the database checks the status again), so a card moved straight to
+  // Deposit or Scheduled, or moved on by the deposit after a held release, is
+  // released or retried here. A released draft answers at once and replays.
+  // Scope drafts are made only on fencing and patio jobs; 'accepted' asks
+  // whatever the type, as before.
+  if (
+    status === 'accepted' ||
+    ((data?.type === 'fencing' || data?.type === 'patio') &&
+      releasesScopeDraftOnStatus(status, JOB_WORK_ORDER_OPEN_STATUSES))
+  ) {
     await releaseScopeJobDraftsOnAcceptance(client, jId)
   }
 
@@ -37764,9 +38131,23 @@ async function updateJobStatus(client: any, body: any) {
         const { data: draftWOs } = await draftWoQuery
         if (draftWOs && draftWOs.length > 0) {
           for (const wo of draftWOs) {
-            await client.from('work_orders')
+            const { error: woApproveError } = await client.from('work_orders')
               .update({ status: 'approved', approved_at: new Date().toISOString() })
               .eq('id', wo.id)
+            if (woApproveError) {
+              // Held until the job work order is issued on both owner
+              // approvals (WO428); the job's status move is unaffected.
+              const held = String(woApproveError?.code ?? '') === 'WO428'
+              console.error(`[ops-api] crew WO ${wo.wo_number} not auto-approved on acceptance:`, woApproveError?.code ?? 'error')
+              if (held) {
+                await client.from('job_events').insert({
+                  job_id: jId,
+                  event_type: 'work_order_approval_held',
+                  detail_json: { wo_number: wo.wo_number, trigger: 'acceptance_auto', reason: 'owner_approval_required' },
+                })
+              }
+              continue
+            }
             await client.from('job_events').insert({
               job_id: jId,
               event_type: 'work_order_approved',
@@ -38368,7 +38749,7 @@ async function updateWorkOrder(client: any, body: any) {
     .select()
     .single()
 
-  if (error) throw error
+  if (error) throw crewWorkOrderOwnerApprovalError(error) ?? error
   return { work_order: data }
 }
 
@@ -38391,9 +38772,10 @@ async function sendWorkOrder(client: any, body: any) {
   )
 
   // Mark as sent
-  await client.from('work_orders')
+  const { error: sentError } = await client.from('work_orders')
     .update({ status: 'sent', sent_at: new Date().toISOString() })
     .eq('id', id)
+  if (sentError) throw crewWorkOrderOwnerApprovalError(sentError) ?? sentError
 
   if (wo.job_id) {
     await client.from('job_events').insert({
@@ -41026,6 +41408,17 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   if (!(totalIncGST > 0)) {
     throw new Error('Quote total is zero or missing. Set pricing on the job in the scoping tool before sending.')
   }
+  // TK-S28: with no owner price decision the send follows
+  // owner_approval_saved_revision_required_v1 (off: sent as today and
+  // recorded before the email; on: refused). With a decision its PDF must be
+  // one the decision covers (20261109040000). Refused: nothing is sent.
+  const ownerPrice = await ownerPriceBeforeSend(client, {
+    job_id, sealed: sealedSource, path: 'quick-quote',
+    send_key: unapprovedSendKeyForQuickQuote(crypto.randomUUID()), document_id: null,
+  })
+  if (ownerPrice.kind === 'refused') {
+    throw new ApiError(ownerPrice.body.error, ownerPrice.status, { ok: false, ...ownerPrice.body })
+  }
   const paymentTerms = pricing.payment_terms || '50/50 split'
   const validDays = pricing.valid_days || 30
   const validUntil = new Date(Date.now() + validDays * 86400000).toLocaleDateString('en-AU', { day: 'numeric', month: 'long', year: 'numeric' })
@@ -41062,8 +41455,19 @@ async function sendQuickQuoteEmail(client: any, body: any) {
     html: emailHtml,
   }
 
-  // Attach PDF if URL provided
-  if (pdf_url) {
+  // Attach PDF if URL provided. On an approved saved revision the PDF must be
+  // one the owner's price decision covers, and exactly those bytes are
+  // attached; otherwise nothing is sent.
+  if (pdf_url && ownerPrice.approved) {
+    const approvedPdf = await approvedQuotePdf(ownerPrice.approved, String(pdf_url))
+    if (!approvedPdf.ok) {
+      throw new ApiError(approvedPdf.body.error, approvedPdf.status, { ok: false, ...approvedPdf.body })
+    }
+    emailPayload.attachments = [{
+      filename: `${job.job_number || 'Quote'}.pdf`,
+      content: quotePdfBase64(approvedPdf.bytes),
+    }]
+  } else if (pdf_url) {
     try {
       const pdfResp = await fetch(pdf_url)
       if (pdfResp.ok) {
@@ -41090,6 +41494,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
   })
   const resendResult = await resendResp.json()
   if (!resendResp.ok) throw new Error('Email send failed: ' + (resendResult.message || JSON.stringify(resendResult)))
+  if (ownerPrice.unapproved) await markUnapprovedLegacySendSent(client, ownerPrice.unapproved)
 
   // ── Cap 0 release-truth: atomic draft → quoted transition + canonical events ──
   // Mirrors /send-quote/send (post-`350e943`) so Quick Quote inherits the same exactly-once
@@ -55247,6 +55652,13 @@ async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthCo
   if (ev && ev.applies && !ev.satisfied) {
     throw new ApiError(completionEvidenceMessage(ev, null, 'marked complete'), 422)
   }
+  // End-work and freeze use the same current client-confirmation boundary.
+  // A signature uploaded by this wizard may satisfy it before job completion.
+  let groupConfirmation: {grouped:boolean;requiresConfirmation:boolean;capture:unknown}
+  try {
+    groupConfirmation = await assertGroupClientConfirmationBeforeCompletion(client, job.id,
+      () => recordOnSiteClientSignoff(client, body, tradeUser, job))
+  } catch (error) { groupWorkOrderApiError(error) }
   const result = await completeJob(client, {
     job_id: job.id,
     user_id: tradeUser.id,
@@ -55261,9 +55673,9 @@ async function tradeCompleteMyJob(client: any, body: any, tradeUser: TradeAuthCo
     console.warn('[ops-api] complete_my_job invoice queue failed (non-blocking):', e instanceof Error ? e.message : e)
     invoiceQueue = { lane: null, work_orders: [], error: e instanceof Error ? e.message : String(e) }
   }
-  // DSP-11: record the client's on-site sign-off. Never blocks completion.
-  let clientSignoff: any = null
-  try {
+  // Jobs on the ordinary hours route keep their existing non-blocking capture behaviour.
+  let clientSignoff: any = groupConfirmation.capture || (groupConfirmation.requiresConfirmation ? {recorded:false,reason:'already_on_file',counts:true} : null)
+  if (!groupConfirmation.requiresConfirmation) try {
     clientSignoff = await recordOnSiteClientSignoff(client, body, tradeUser, job)
   } catch (e) {
     console.error('[ops-api] complete_my_job client sign-off record failed (non-blocking):', e instanceof Error ? e.message : e)
@@ -55878,7 +56290,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   // invoiceable. invoice_type on the users row is the primary signal.   [F4 / M1]
   const { data: userRow } = await client
     .from('users')
-    .select('invoice_type, trade_details')
+    .select('invoice_type, trade_details, org_id')
     .eq('id', userId)
     .maybeSingle()
   const isPerMetre = userRow?.invoice_type === 'per_metre'
@@ -55957,14 +56369,60 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   const referencedInvoiceIds = [...new Set((rawAssignments || [])
     .map((a: any) => a.invoiced_in).filter(Boolean))]
   let liveInvoiceIds = new Set<string>()
+  // A card the office sent back still points at that invoice. Its earlier
+  // line (day, times, break, description) rides along so the reopened week
+  // starts from what the trade sent, with the office's reason.
+  const sentBackInvoices = new Map<string, any>()
   if (referencedInvoiceIds.length > 0) {
     const { data: refInvoices } = await client
       .from('trade_invoices')
-      .select('id, status')
+      .select('id, status, invoice_number, query_note')
       .in('id', referencedInvoiceIds)
     liveInvoiceIds = new Set((refInvoices || [])
       .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
       .map((ti: any) => ti.id))
+    for (const ti of refInvoices || []) {
+      if (String(ti?.status || '') === 'ops-reject' && ti.id) sentBackInvoices.set(String(ti.id), ti)
+    }
+  }
+  const previousEntryByAssignment = new Map<string, any>()
+  if (sentBackInvoices.size > 0) {
+    const { data: priorLines, error: priorErr } = await client
+      .from('trade_invoice_lines')
+      .select('trade_invoice_id, assignment_ids, work_date, start_time, finish_time, break_minutes, description, total_hours, office_review_status, office_review_note')
+      .in('trade_invoice_id', [...sentBackInvoices.keys()])
+    if (priorErr) {
+      console.error('[ops-api] my_hours: sent-back lines unreadable:', priorErr.code)
+    } else {
+      const linesByInvoice = new Map<string, any[]>()
+      for (const line of priorLines || []) {
+        const key = String(line?.trade_invoice_id || '')
+        const bucket = linesByInvoice.get(key)
+        if (bucket) bucket.push(line)
+        else linesByInvoice.set(key, [line])
+      }
+      for (const a of rawAssignments || []) {
+        const invoiceId = String(a?.invoiced_in || '')
+        const invoice = sentBackInvoices.get(invoiceId)
+        if (!invoice) continue
+        const lines = linesByInvoice.get(invoiceId) || []
+        const line = lines.find((l: any) =>
+          Array.isArray(l?.assignment_ids) && l.assignment_ids.map(String).includes(String(a.id))
+        )
+        if (!line) continue
+        previousEntryByAssignment.set(String(a.id), {
+          invoice_id: invoiceId,
+          invoice_number: invoice.invoice_number || null,
+          office_note: tradeInvoiceOfficeNote(invoice, lines),
+          work_date: line.work_date || null,
+          start_time: line.start_time || null,
+          finish_time: line.finish_time || null,
+          break_minutes: line.break_minutes ?? null,
+          description: line.description || null,
+          hours: line.total_hours != null ? Number(line.total_hours) : null,
+        })
+      }
+    }
   }
   let assignments = (rawAssignments || [])
     .filter((a: any) => !(a.invoiced_in && liveInvoiceIds.has(a.invoiced_in)))
@@ -55972,10 +56430,12 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   // A group job is paid as a share. Leave it out of ordinary hours. A failed
   // read fails closed: never show a group job as if it were a normal claim.
   const groupHoursJobIds = [...new Set(assignments.map((a: any) => String(a.jobs?.id || '')).filter(Boolean))]
+  let groupHourRowsRead: any[] = []
+  const groupRouteJobs: any[] = []
   if (groupHoursJobIds.length > 0) {
     const { data: groupHourRows, error: groupHourErr } = await client
       .from('group_work_orders')
-      .select('job_id, status')
+      .select('id, job_id, status')
       .in('job_id', groupHoursJobIds)
     if (groupHourErr) {
       throw new ApiError(
@@ -55988,12 +56448,79 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
         },
       )
     }
+    groupHourRowsRead = groupHourRows || []
     const groupJobIds = new Set<string>(
-      (groupHourRows || [])
+      groupHourRowsRead
         .filter((row: any) => String(row.status || '') !== 'void' && row.job_id)
         .map((row: any) => String(row.job_id)),
     )
+    // The weekly invoice's group card offers these booked days first when the
+    // trade adds their hours. Any other day can still be entered there.
+    for (const jobId of groupJobIds) {
+      const rows = assignments.filter((a: any) => String(a.jobs?.id || '') === jobId)
+      if (!rows.length) continue
+      const job = rows[0]?.jobs || {}
+      const group = groupHourRowsRead.find((row: any) =>
+        String(row.job_id) === jobId && String(row.status || '') !== 'void'
+      )
+      groupRouteJobs.push({
+        job_id: jobId,
+        job_number: job.job_number || '',
+        client_name: job.client_name || '',
+        site_suburb: job.site_suburb || '',
+        booked_dates: [...new Set(rows.map((a: any) => String(a.scheduled_date || '')).filter(Boolean))].sort(),
+        route: 'group',
+        group_id: group?.id ? String(group.id) : null,
+        setup_reason: null,
+        discovery: null,
+        next_step: 'This job is paid through a crew group work order. Add your hours on the group card.',
+      })
+    }
     assignments = withoutGroupJobAssignments(assignments, groupJobIds)
+  }
+
+  // A patio job that must be paid through a group (no group yet, or a voided
+  // one) is never an ordinary hours card: the submit guard refuses it. It is
+  // listed under group_route_jobs with the next step instead. When the route
+  // cannot be read, the patio cards are held back the same way, so the trade
+  // never builds a claim that cannot be accepted; every other card stays.
+  const patioHoursJobIds: string[] = [...new Set<string>(assignments
+    .filter((a: any) => String(a.jobs?.type || '') === 'patio')
+    .map((a: any) => String(a.jobs?.id || ''))
+    .filter(Boolean))]
+  if (patioHoursJobIds.length > 0) {
+    let routes: InvoicePayableRoute[] | null = null
+    try {
+      routes = userRow?.org_id
+        ? await readInvoicePayableRoutes(client, patioHoursJobIds, groupHourRowsRead, String(userRow.org_id), [])
+        : null
+    } catch (routeErr) {
+      console.error('[ops-api] my_hours: pay route unreadable:', (routeErr as Error)?.message)
+      routes = null
+    }
+    const routeByJob = new Map<string, InvoicePayableRoute>((routes || []).map((r) => [String(r.job_id), r]))
+    const groupOnly = new Set<string>(patioHoursJobIds.filter((jobId) => {
+      const route = routeByJob.get(jobId)
+      return !route || route.route !== 'hours'
+    }))
+    for (const jobId of groupOnly) {
+      const rows = assignments.filter((a: any) => String(a.jobs?.id || '') === jobId)
+      const job = rows[0]?.jobs || {}
+      const route = routeByJob.get(jobId) || null
+      groupRouteJobs.push({
+        job_id: jobId,
+        job_number: job.job_number || '',
+        client_name: job.client_name || '',
+        site_suburb: job.site_suburb || '',
+        booked_dates: [...new Set(rows.map((a: any) => String(a.scheduled_date || '')).filter(Boolean))].sort(),
+        route: route?.route || 'unknown',
+        group_id: null,
+        setup_reason: route?.setup_reason || null,
+        discovery: route?.discovery || null,
+        next_step: groupRouteNextStep(route),
+      })
+    }
+    assignments = assignments.filter((a: any) => !groupOnly.has(String(a.jobs?.id || '')))
   }
 
   // Look up current rate
@@ -56036,6 +56563,8 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
       amount: Math.round(hours * rate * 100) / 100,
       // { work_date, start_time, finish_time, break_minutes, hours } or null.
       logged_time_entry: loggedTimeEntryForCard(loggedTimeByCard.get(String(a.id)), a.hours_worked, userId),
+      // What the trade sent on the invoice the office sent back, or null.
+      previous_entry: previousEntryByAssignment.get(String(a.id)) || null,
     }
   })
 
@@ -56121,6 +56650,8 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     xero_bill_number: existingInvoice?.xero_bill_number || null,
     pending_verification: pendingVerification,
     all_verified: allVerified,
+    // Jobs this week that are paid through a group work order, never as hours.
+    group_route_jobs: groupRouteJobs,
   }
 }
 
@@ -56665,7 +57196,10 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
 
   // Push to Xero (reuse token from contact resolution above)
   const idempotencyKey = tradeInvoiceXeroIdempotencyKey(insertedInvoice.id)
-  const result = await xeroPost('/Invoices', stAt, stTi, xeroPayload, 'PUT', idempotencyKey)
+  const { result } = await createTradeXeroBillOnce(client, {
+    accessToken: stAt, tenantId: stTi, tradeInvoiceId: insertedInvoice.id, payload: xeroPayload,
+    idempotencyKey, actor: 'submit_trade_invoice',
+  }).catch((error) => tradeXeroBillSearchApiError(error))
 
   const xeroInv = result?.Invoices?.[0]
   const xeroIdentity = await checkpointAndAssertReturnedTradeInvoiceXeroSplit({
@@ -56758,14 +57292,35 @@ function presentTradeInvoiceSafe(inv: any): any {
 async function myTradeInvoices(client: any, userId: string) {
   const { data, error } = await client
     .from('trade_invoices')
-    .select(MY_TRADE_INVOICE_COLUMNS)
+    .select(MY_TRADE_INVOICE_COLUMNS + ', query_note')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .limit(100)
 
   if (error) throw error
-  const invoices = (data || []).map((inv: any) => ({
+  // The office's reason on a sent-back or queried invoice. The raw query_note
+  // also carries system notes, so it is read here and never returned.
+  const reviewIds = (data || [])
+    .filter((inv: any) => inv?.id && ['ops-reject', 'pending_acknowledgment', 'draft'].includes(String(inv.status || '')))
+    .map((inv: any) => String(inv.id))
+  const reviewLinesByInvoice = new Map<string, any[]>()
+  if (reviewIds.length > 0) {
+    const { data: reviewLines, error: reviewErr } = await client
+      .from('trade_invoice_lines')
+      .select('trade_invoice_id, description, office_review_status, office_review_note')
+      .in('trade_invoice_id', reviewIds)
+      .in('office_review_status', ['queried', 'rejected'])
+    if (reviewErr) console.error('[ops-api] my_trade_invoices: line review notes unreadable:', reviewErr.code)
+    for (const line of reviewLines || []) {
+      const key = String(line?.trade_invoice_id || '')
+      const bucket = reviewLinesByInvoice.get(key)
+      if (bucket) bucket.push(line)
+      else reviewLinesByInvoice.set(key, [line])
+    }
+  }
+  const invoices = (data || []).map(({ query_note: rawNote, ...inv }: any) => ({
     ...presentTradeInvoiceSafe(inv),
+    office_note: tradeInvoiceOfficeNote({ status: inv.status, query_note: rawNote }, reviewLinesByInvoice.get(String(inv.id)) || []),
     week_ending: inv.week_end,
     total: inv.total_inc ?? 0,
     subtotal: inv.subtotal_ex ?? 0,
@@ -56852,16 +57407,41 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
   // relational trade_invoice_lines), not the legacy week_ending/line_items shape.
   // This is the surface the inline ops.html review queue reads, so it must carry
   // pending_ops_review invoices with their totals + query_note.            [D3]
-  let query = client
-    .from('trade_invoices')
-    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, xero_bill_status, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)')
-    .order('week_start', { ascending: false, nullsFirst: false })
-    .limit(limit)
-
-  if (status) query = query.eq('status', status)
-
-  const { data, error } = await query
-  if (error) throw error
+  //
+  // Invoices with no week (group shares, work-order invoices) are read on their
+  // own, newest first. Ordered with the weekly ones by week they sort last and
+  // fall off the limit, so the office never saw them.
+  const build = (noWeek: boolean) => {
+    let query = client
+      .from('trade_invoices')
+      .select(TRADE_BILLS_COLUMNS)
+    query = noWeek
+      ? query.is('week_start', null).order('created_at', { ascending: false })
+      : query.not('week_start', 'is', null).order('week_start', { ascending: false })
+    query = query.limit(limit)
+    if (status) query = query.eq('status', status)
+    return query
+  }
+  // A stuck invoice (saved, no Xero bill, never pushed) can be any age, so the
+  // newest-by-week read above misses old ones and the office never sees the
+  // button that clears them. Read them on their own, whatever their week, and
+  // merge: mergeTradeBillRows drops any already listed. Skipped when the list
+  // is filtered to another status. Bounded: one row over the cap says it hit.
+  const stuckRead = !status || status === STUCK_TRADE_INVOICE_STATUS
+    ? client
+      .from('trade_invoices')
+      .select(TRADE_BILLS_COLUMNS)
+      .eq('status', STUCK_TRADE_INVOICE_STATUS)
+      .is('xero_bill_id', null)
+      .order('created_at', { ascending: false })
+      .limit(STUCK_TRADE_BILLS_CAP + 1)
+    : Promise.resolve({ data: [], error: null })
+  const [weekly, noWeek, stuck] = await Promise.all([build(false), build(true), stuckRead])
+  if (weekly.error) throw weekly.error
+  if (noWeek.error) throw noWeek.error
+  if (stuck.error) throw stuck.error
+  const stuckRows = stuck.data || []
+  const stuckCapHit = stuckRows.length > STUCK_TRADE_BILLS_CAP
 
   // Also get trade rates for display
   const { data: rates } = await client
@@ -56871,9 +57451,34 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
     .order('effective_from', { ascending: false })
 
   return {
-    invoices: (data || []).map((invoice: any) => presentTradeInvoice(invoice)),
+    invoices: mergeTradeBillRows(weekly.data || [], noWeek.data || [], stuckRows.slice(0, STUCK_TRADE_BILLS_CAP))
+      .map((invoice: any) => presentTradeInvoiceSafe(invoice)),
     rates: rates || [],
+    ...(stuckCapHit
+      ? { stuck_note: `More than ${STUCK_TRADE_BILLS_CAP} invoices are stuck with no Xero bill; only the newest ${STUCK_TRADE_BILLS_CAP} are listed.` }
+      : {}),
   }
+}
+export const _listTradeInvoicesForTest = listTradeInvoices
+
+/** Most stuck invoices (no Xero bill) one Trade Bills read adds. */
+export const STUCK_TRADE_BILLS_CAP = 200
+
+const TRADE_BILLS_COLUMNS = 'id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, xero_bill_status, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)'
+
+/** Weekly and no-week invoices in one list, newest first by week, else by day made. */
+export function mergeTradeBillRows(weekly: any[], noWeek: any[], stuck: any[] = []): any[] {
+  const key = (row: any) => String(row?.week_start || String(row?.created_at || '').slice(0, 10) || '')
+  const seen = new Set<string>()
+  return [...weekly, ...noWeek, ...stuck]
+    .filter((row: any) => {
+      const id = String(row?.id || '')
+      if (!id || seen.has(id)) return false
+      seen.add(id)
+      return true
+    })
+    .sort((a: any, b: any) => key(b).localeCompare(key(a)) ||
+      String(b?.created_at || '').localeCompare(String(a?.created_at || '')))
 }
 
 // ── labour_reconciliation: labour PO budget vs trade hours per job ──
@@ -63377,7 +63982,7 @@ const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string
   // fencing job still renders the approved "fence". No cross-sell footer is
   // appended to this one. Fired ONLY from the calendar popup's explicit Yes —
   // never automatically.
-  install_rescheduled: { channel: 'sms', template: "Hi {name},\nHope you're well! Just letting you know we've got your {service} install rescheduled for {reschedule_date} at {street}. Our crew will be out between 7-10am to get it done. They'll be in contact with you closer to the day.\nLet us know if you have any questions.\nCheers, Shaun" },
+  install_rescheduled: { channel: 'sms', template: "Hi {name},\n\nHope you're well! Just letting you know we've got your {service} install rescheduled for {reschedule_date} at {street}. Our crew will be out between 7-10am to get it done. They'll be in contact with you closer to the day.\n\nLet us know if you have any questions.\n\nCheers,\nShaun" },
   crew_arriving: { channel: 'sms', template: 'Our crew is on their way to {address}. Expected arrival: {time}.' },
   daily_progress: { channel: 'sms', template: 'Day {day} update: {progress_note}' },
   job_complete: { channel: 'email', template: 'Your {service} is complete! Please review and sign off here: {link}' },
@@ -63511,7 +64116,7 @@ export async function sendClientUpdate(client: any, body: any) {
   }
 
   // Append cross-sell footer for SMS — except install_rescheduled, whose wording
-  // is approved verbatim and ends "Cheers, Shaun".
+  // is approved verbatim and ends "Cheers,\nShaun".
   if (channel === 'sms' && comms_trigger !== 'install_rescheduled') {
     message += '\n\nSecureWorks Group — Patios | Fencing | Decking | Screening | Makesafe'
   }

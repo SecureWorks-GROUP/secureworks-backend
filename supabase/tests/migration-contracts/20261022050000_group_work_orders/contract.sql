@@ -5,6 +5,20 @@
 
 BEGIN;
 
+-- Later policy: reopening invalidates client approval even with unchanged
+-- hours. These invoice-recalculation fixtures explicitly reconfirm the work.
+CREATE FUNCTION pg_temp.group_fixture_client_reconfirms(j uuid) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE marker timestamptz; prior public.job_client_signoffs%ROWTYPE;
+BEGIN
+ SELECT (to_jsonb(g)->>'signoff_required_after')::timestamptz INTO marker
+ FROM public.group_work_orders g WHERE g.job_id=j AND g.status<>'void';
+ IF marker IS NULL THEN RETURN; END IF;
+ SELECT * INTO prior FROM public.job_client_signoffs WHERE job_id=j AND signature_media_id IS NOT NULL
+ ORDER BY created_at DESC,id DESC LIMIT 1;
+ INSERT INTO public.job_client_signoffs(job_id,method,signed_name,happy,signature_media_id,captured_by_actor,created_at)
+ VALUES(j,'share_link','Synthetic Client',true,prior.signature_media_id,'client link',greatest(clock_timestamp(),marker)+interval '1 microsecond');
+END $$;
+
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -364,6 +378,7 @@ BEGIN
     v_org, v_pot_job, 'GWO-POT-1', 'job', 'draft', 482.15, '[]', 'group split fixture'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-POT-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders
   SET status = 'approved', approved_by = v_shaun
   WHERE id = v_wo;
@@ -711,6 +726,7 @@ BEGIN
     v_org, v_job, 'GWO-NORATE-1', 'job', 'draft', 482.15, '[]', 'missing rate'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-NORATE-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders
   SET status = 'approved', approved_by = v_shaun
   WHERE id = v_wo;
@@ -817,6 +833,7 @@ BEGIN
     v_org, v_job, 'GWO-PAY-1', 'job', 'draft', 100, '[]', 'pay types'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-PAY-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
   VALUES (v_group, v_org, v_job, v_wo, 'token-pay-types');
@@ -887,6 +904,7 @@ BEGIN
     v_org, v_pay_job, 'GWO-PAY-2', 'job', 'draft', 100, '[]', 'pay then share'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-PAY-2';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.trade_invoices (
     id, org_id, user_id, status, subtotal_ex, gst, total_inc,
@@ -919,6 +937,7 @@ BEGIN
     v_org, v_open_job, 'GWO-OPEN-1', 'job', 'draft', 100, '[]', 'open blocked'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-OPEN-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.trade_invoices (
     id, org_id, user_id, status, subtotal_ex, gst, total_inc,
@@ -926,9 +945,10 @@ BEGIN
   ) VALUES (
     v_open_invoice, v_org, v_a, 'draft', 10, 0, 10, false, 0.12, 1.20, 10, 9.40
   );
+  -- A work-order claim blocks a group; hourly pay no longer does (20261106160000).
   INSERT INTO public.trade_invoice_lines (
     trade_invoice_id, job_id, line_type, line_total_ex
-  ) VALUES (v_open_invoice, v_open_job, 'decking', 10);
+  ) VALUES (v_open_invoice, v_open_job, 'work order', 10);
   BEGIN
     INSERT INTO public.group_work_orders (org_id, job_id, work_order_id, share_token)
     VALUES (v_org, v_open_job, v_wo, 'token-open-blocked');
@@ -939,7 +959,9 @@ BEGIN
     END IF;
   END;
 
-  -- 'Other' is pay on a group job. Pending Marnin.
+  -- 'Other' is hourly pay. Since 20261106160000, once billed in Xero it no
+  -- longer blocks a group: the paid member stays out of the crew and their
+  -- pay comes off the pot.
   INSERT INTO public.jobs (id, org_id, type, status, job_number)
   VALUES (v_other_job, v_org, 'fencing', 'quoted', 'GWO-OTHER');
   INSERT INTO public.work_orders (
@@ -948,25 +970,22 @@ BEGIN
     v_org, v_other_job, 'GWO-OTHER-1', 'job', 'draft', 100, '[]', 'other blocks open'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-OTHER-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.trade_invoices (
     id, org_id, user_id, status, subtotal_ex, gst, total_inc,
-    gst_on, super_rate, super_amount, gross_earned, net_pay
+    gst_on, super_rate, super_amount, gross_earned, net_pay, xero_bill_id, xero_bill_status
   ) VALUES (
-    v_other_invoice, v_org, v_a, 'draft', 10, 0, 10, false, 0.12, 1.20, 10, 9.40
+    v_other_invoice, v_org, v_a, 'paid', 10, 0, 10, false, 0.12, 1.20, 10, 9.40, 'GWO-OTHER-BILL', 'PAID'
   );
   INSERT INTO public.trade_invoice_lines (
     trade_invoice_id, job_id, line_type, line_total_ex
   ) VALUES (v_other_invoice, v_other_job, 'Other', 10);
-  BEGIN
-    INSERT INTO public.group_work_orders (org_id, job_id, work_order_id, share_token)
-    VALUES (v_org, v_other_job, v_wo, 'token-other-blocked');
-    RAISE EXCEPTION 'group-wo: a group opened over an Other line';
-  EXCEPTION WHEN check_violation THEN
-    IF SQLERRM IS DISTINCT FROM 'group_open_blocked_by_work_order_claim' THEN
-      RAISE EXCEPTION 'group-wo: open over Other said %', SQLERRM;
-    END IF;
-  END;
+  INSERT INTO public.group_work_orders (org_id, job_id, work_order_id, share_token)
+  VALUES (v_org, v_other_job, v_wo, 'token-other-opens');
+  IF NOT public.group_work_order_paid_by_hours(v_other_job, v_a) THEN
+    RAISE EXCEPTION 'group-wo: an Other line did not read as hourly pay';
+  END IF;
 
   -- Freeze names an installer who is assigned and has not joined.
   INSERT INTO public.jobs (id, org_id, type, status, job_number)
@@ -977,6 +996,7 @@ BEGIN
     v_org, v_hours_job, 'GWO-HOURS-1', 'job', 'draft', 482.15, '[]', 'assigned hours'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-HOURS-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   -- v_a and v_b already have a rate from the pot fixture (unique on org, user, effective_from).
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
@@ -1021,13 +1041,14 @@ BEGIN
   WHERE id = 'd2140000-0000-4000-8000-0000000000d5';
   SET LOCAL ROLE service_role;
   PERFORM public.remove_group_work_order_participant(v_hours_group, v_b, v_shaun);
+  -- Since 20261106170000 the office removal wins over the booking: the freeze
+  -- no longer waits on v_b's hours and stops at the sign-off the removal
+  -- made stale instead.
   BEGIN
     PERFORM public.freeze_group_work_order_split(v_hours_group);
-    RAISE EXCEPTION 'group-wo: freeze ignored a removed participant who is still assigned';
+    RAISE EXCEPTION 'group-wo: freeze passed a stale sign-off after a removal';
   EXCEPTION WHEN check_violation THEN
-    IF SQLERRM NOT LIKE 'group_split_needs_hours:%'
-       OR position(v_b::text IN SQLERRM) = 0
-    THEN
+    IF SQLERRM IS DISTINCT FROM 'group_client_signoff_required' THEN
       RAISE EXCEPTION 'group-wo: removed-participant freeze said %', SQLERRM;
     END IF;
   END;
@@ -1074,6 +1095,7 @@ BEGIN
     v_org, v_sign_job, 'GWO-SIGN-1', 'job', 'draft', 482.15, '[]', 'signoff date'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-SIGN-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
   VALUES (v_sign_group, v_org, v_sign_job, v_wo, 'token-sign');
@@ -1152,6 +1174,7 @@ BEGIN
     v_org, v_strip_job, 'GWO-STRIP-1', 'job', 'draft', 482.15, '[]', 'strip share'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-STRIP-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
   VALUES (v_strip_group, v_org, v_strip_job, v_wo, 'token-strip');
@@ -1177,6 +1200,7 @@ BEGIN
     v_strip_job, 'share_link', 'Alex Client', true, 5,
     'd2140000-0000-4000-8000-000000000503', 'client link'
   );
+  PERFORM pg_temp.group_fixture_client_reconfirms(v_strip_job);
   SET LOCAL ROLE service_role;
   PERFORM public.freeze_group_work_order_split(v_strip_group);
   RESET ROLE;
@@ -1257,9 +1281,10 @@ BEGIN
     RAISE EXCEPTION 'group-wo: unfreeze did not leave the travel line and the queried status';
   END IF;
 
-  -- Hours were not edited, so the same sign-off still counts. A weekly
-  -- invoice keeps its final-payout header and does not take the recurring
+  -- The client reconfirms after reopening under the later sign-off policy.
+  -- A weekly invoice keeps its final-payout header and does not take the recurring
   -- deduction off gross.
+  PERFORM pg_temp.group_fixture_client_reconfirms(v_strip_job);
   SET LOCAL ROLE service_role;
   PERFORM public.freeze_group_work_order_split(v_strip_group);
   RESET ROLE;
@@ -1340,6 +1365,7 @@ BEGIN
     v_org, v_void_job, 'GWO-VOID-1', 'job', 'draft', 100, '[]', 'void stays'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-VOID-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
   VALUES (v_void_group, v_org, v_void_job, v_wo, 'token-void');
@@ -1404,6 +1430,7 @@ BEGIN
     v_org, v_job, 'GWO-STAMP-1', 'job', 'draft', 100, '[]', 'hours stamp'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-STAMP-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
   VALUES (v_group, v_org, v_job, v_wo, 'token-stamp');
@@ -1520,6 +1547,7 @@ BEGIN
     v_org, v_ded_job, 'GWO-DED-1', 'job', 'draft', 100, '[]', 'deduction refit'
   );
   SELECT id INTO v_wo FROM public.work_orders WHERE wo_number = 'GWO-DED-1';
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id = v_wo);
   UPDATE public.work_orders SET status = 'approved', approved_by = v_shaun WHERE id = v_wo;
   INSERT INTO public.group_work_orders (id, org_id, job_id, work_order_id, share_token)
   VALUES (v_ded_group, v_org, v_ded_job, v_wo, 'token-ded');
@@ -1551,6 +1579,7 @@ BEGIN
     (v_ded_zero, v_a, 'Ute hire', 50, DATE '2026-10-05'),
     (v_ded_fit, v_a, 'Ute hire', 5, DATE '2026-09-28');
 
+  PERFORM pg_temp.group_fixture_client_reconfirms(v_ded_job);
   SET LOCAL ROLE service_role;
   PERFORM public.freeze_group_work_order_split(v_ded_group);
   RESET ROLE;
@@ -1592,6 +1621,7 @@ BEGIN
     RAISE EXCEPTION 'group-wo: unfreeze left a deduction the payable cannot cover';
   END IF;
 
+  PERFORM pg_temp.group_fixture_client_reconfirms(v_ded_job);
   SET LOCAL ROLE service_role;
   PERFORM public.freeze_group_work_order_split(v_ded_group);
   RESET ROLE;
@@ -1625,6 +1655,7 @@ BEGIN
     RAISE EXCEPTION 'group-wo: a zero payable kept the deduction or its note';
   END IF;
 
+  PERFORM pg_temp.group_fixture_client_reconfirms(v_ded_job);
   SET LOCAL ROLE service_role;
   PERFORM public.freeze_group_work_order_split(v_ded_group);
   RESET ROLE;

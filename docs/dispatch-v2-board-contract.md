@@ -565,6 +565,17 @@ Nothing merges to main until Shaun says "merge to main".
    (most hand-sent Outlook orders today), an invoice, or a second and third
    reply never moves a box. Automatic moves go forward only. A person can
    still pick any stage, backwards included, at any time.
+   **Only a reply that says something moves a box** (Shaun, 6 Nov 2026,
+   "go"): a PDF kept from the email (`context_email_attachments`, by
+   `provider_message_id`), a delivery date the reader found in it, or a
+   dollar amount in its snippet ("$1,234.50", "980.00 ex GST").
+   `dispatchV2ReplyHasSubstance` in `dispatch_v2_payment.ts`. A plain "All
+   good Shaun" leaves the box at Sent to supplier; the box view and the
+   board's order carry it as `reply_note` / `material_stage_reply_note`
+   (`email_id`, `received_at`, `snippet` cut at 140 characters) so the
+   screen shows the supplier answered. When the attachments cannot be read
+   (or a reply has no message id) the reply moves the box as before, so a
+   failed read never hides a real quote. No migration: read time only.
 3. **The payment gate.** On a pay-first box that is not paid for the current
    order, a confirmed date (Accept on a reply, or a date ticked by hand) is
    saved but does NOT lift the stage to Order confirmed. It lifts an earlier

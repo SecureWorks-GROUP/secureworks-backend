@@ -48,6 +48,8 @@ run_classifier() {
   (
     cd "$repo" || exit 99
     BEFORE_SHA="$before_sha" \
+      DEPLOY_BASE_SHA="${6:-}" \
+      REQUIRE_DEPLOY_BASELINE="${7:-false}" \
       HEAD_SHA="$head_sha" \
       EVENT_NAME="$event_name" \
       GITHUB_OUTPUT="$output_file" \
@@ -251,6 +253,106 @@ test_other_function_change_keeps_existing_deploy_scope() {
   pass "$name"
 }
 
+test_failed_deploy_changes_survive_a_green_migration_only_run() {
+  local name="test_failed_deploy_changes_survive_a_green_migration_only_run"
+  local repo output base_sha before_sha head_sha
+  repo="$(make_fixture_repo)"
+  output="$TEST_TMP/catchup.out"
+  base_sha="$(git -C "$repo" rev-parse HEAD)"
+  # Two failed deploy pushes, then a green migration repair which deployed no
+  # functions. The next push must recover BOTH functions, not just its own diff.
+  printf '%s\n' 'missed ops-api' >> "$repo/supabase/functions/ops-api/index.ts"
+  git -C "$repo" add . && git -C "$repo" commit -q -m failed-ops-api
+  printf '%s\n' 'missed send-quote' >> "$repo/supabase/functions/send-quote/index.ts"
+  git -C "$repo" add . && git -C "$repo" commit -q -m failed-send-quote
+  printf '%s\n' '-- migration repair' > "$repo/supabase/migrations/20260731000000_repair.sql"
+  git -C "$repo" add . && git -C "$repo" commit -q -m green-migration-only
+  before_sha="$(git -C "$repo" rev-parse HEAD)"
+  printf '%s\n' '# baseline repair' >> "$repo/scripts/identify-edge-deploy-changes.sh"
+  git -C "$repo" add . && git -C "$repo" commit -q -m repair-selection
+  head_sha="$(git -C "$repo" rev-parse HEAD)"
+  if ! run_classifier "$repo" "$before_sha" "$head_sha" push "$output" "$base_sha" true; then
+    fail "$name" 'catch-up classification failed'; return
+  fi
+  if [[ "$(output_value "$output" functions)" != 'ops-api send-quote ' ||
+        "$(output_value "$output" diff_base)" != "$base_sha" ||
+        "$(output_value "$output" diff_mode)" != 'last-successful-deploy' ||
+        "$(output_value "$output" migrations_changed)" != 'true' ]]; then
+    fail "$name" 'failed deploy changes were lost behind the later push'; return
+  fi
+  pass "$name"
+}
+
+test_production_baseline_fails_closed() {
+  local name="test_production_baseline_fails_closed"
+  local repo output head_sha unrelated_sha candidate
+  repo="$(make_fixture_repo)"
+  output="$TEST_TMP/baseline-refusal.out"
+  head_sha="$(git -C "$repo" rev-parse HEAD)"
+  unrelated_sha="$(printf 'unrelated\n' | git -C "$repo" commit-tree HEAD^{tree})"
+  for candidate in '' '1111111111111111111111111111111111111111' "$unrelated_sha"; do
+    if run_classifier "$repo" "$head_sha" "$head_sha" push "$output" "$candidate" true; then
+      fail "$name" 'missing, unavailable or non-ancestor baseline was accepted'; return
+    fi
+    if [[ -s "$output" ]]; then
+      fail "$name" 'refusal emitted deployment outputs'; return
+    fi
+  done
+  pass "$name"
+}
+
+test_workflow_resolves_actual_successful_deploy() {
+  local name="test_workflow_resolves_actual_successful_deploy"
+  if ! DEPLOY_WORKFLOW="$DEPLOY_WORKFLOW" node <<'NODE'
+const fs = require('fs');
+const assert = require('assert/strict');
+const workflow = fs.readFileSync(process.env.DEPLOY_WORKFLOW, 'utf8');
+const block = workflow.match(/- name: Resolve last successful function deploy[\s\S]*?script: \|\n([\s\S]*?)(?=\n      - name:)/);
+assert.ok(block, 'baseline resolver missing');
+const code = block[1].split('\n').map(line => line.replace(/^            /, '')).join('\n');
+const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+const resolve = new AsyncFunction('github', 'context', 'core', code);
+const sha = 'a'.repeat(40);
+const run = (id, extra = {}) => ({ id, conclusion: 'success', event: 'push', head_branch: 'main', head_sha: sha, ...extra });
+async function check(pages, jobs, failure) {
+  const outputs = {};
+  const paginate = async (route, params) => {
+    assert.equal(route, 'jobs'); assert.equal(params.filter, 'latest');
+    if (failure) throw new Error('history unreadable');
+    return jobs[params.run_id];
+  };
+  paginate.iterator = async function* (route, params) {
+    assert.equal(route, 'runs'); assert.equal(params.status, 'success');
+    assert.equal(params.branch, 'main'); assert.equal(params.event, 'push');
+    assert.equal(params.workflow_id, 'deploy-edge-functions.yml');
+    // Octokit's pagination plugin normalizes the workflow_runs envelope to an
+    // array on page.data, including when there is only one page.
+    for (const runs of pages) yield { data: runs };
+  };
+  await resolve({ paginate, rest: { actions: { listWorkflowRuns: 'runs', listJobsForWorkflowRun: 'jobs' } } },
+    { repo: { owner: 'fixture', repo: 'fixture' }, runId: 9 },
+    { setOutput: (key, value) => { outputs[key] = value; }, info: () => {} });
+  return outputs;
+}
+const job = conclusion => [{ name: 'deploy', conclusion: 'success', steps: [
+  { name: 'Deploy changed edge functions', conclusion }
+] }];
+(async () => {
+  // Skip current run, wrong branch, a failed workflow, then a green migration
+  // run with a skipped deploy step. Paginate to the actual successful deploy.
+  const pages = [[run(9), run(8, { head_branch: 'feature' }), run(7, { conclusion: 'failure' }), run(6)], [run(5)]];
+  assert.deepEqual(await check(pages, { 6: job('skipped'), 5: job('success') }), { sha });
+  await assert.rejects(check([[run(6)]], { 6: job('skipped') }), /No successful production function deploy/);
+  await assert.rejects(check([[run(5)]], {}, true), /history unreadable/);
+  await assert.rejects(check([[run(5, { head_sha: 'invalid' })]], { 5: job('success') }), /no valid source commit/);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+NODE
+  then
+    fail "$name" 'actual deploy resolver did not preserve its history boundary'; return
+  fi
+  pass "$name"
+}
+
 test_unusual_event_uses_a_valid_fallback_range() {
   local name="test_unusual_event_uses_a_valid_fallback_range"
   local repo output head_sha
@@ -408,6 +510,10 @@ for (const triggerPath of [
 }
 
 requireText(deploy, 'bash scripts/identify-edge-deploy-changes.sh', 'change classifier');
+requireText(deploy, 'actions: read', 'read-only deploy history permission');
+requireText(deploy, 'DEPLOY_BASE_SHA: ${{ steps.deployed.outputs.sha }}', 'successful deploy baseline');
+requireText(deploy, "REQUIRE_DEPLOY_BASELINE: 'true'", 'mandatory production baseline');
+if (deploy.includes('github.event.before')) throw new Error('production still uses the previous push as its baseline');
 requireText(deploy, "if: steps.changed.outputs.functions != ''", 'function deploy condition');
 requireText(
   deploy,
@@ -540,6 +646,9 @@ main() {
     test_migration_only_change_requests_apply_without_function_deploy
     test_ops_api_source_change_preserves_deploy_and_verification
     test_other_function_change_keeps_existing_deploy_scope
+    test_failed_deploy_changes_survive_a_green_migration_only_run
+    test_production_baseline_fails_closed
+    test_workflow_resolves_actual_successful_deploy
     test_unusual_event_uses_a_valid_fallback_range
     test_missing_push_base_fails_safe_without_an_invalid_diff
     test_every_verification_trigger_path_is_classified

@@ -22,6 +22,7 @@ BEGIN
     VALUES(job,org,'fencing','quoted','SYN-GROUP-REVIEW-RPC');
   INSERT INTO public.work_orders(id,org_id,job_id,wo_number,kind,status,agreed_labour_ex,scope_items,special_instructions)
     VALUES(wo,org,job,'SYN-GROUP-REVIEW-WO','job','draft',2160,'[]','Synthetic RPC proof');
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id=wo);
   UPDATE public.work_orders SET status='approved',approved_by=office WHERE id=wo;
   INSERT INTO public.group_work_orders(id,org_id,job_id,work_order_id,share_token)
     VALUES(grp,org,job,wo,'synthetic-group-review-rpc-token');

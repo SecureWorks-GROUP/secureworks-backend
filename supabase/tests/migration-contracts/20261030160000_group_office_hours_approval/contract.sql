@@ -19,6 +19,7 @@ BEGIN
   INSERT INTO public.jobs(id,org_id,type,status,job_number) VALUES(job,org,'patio','quoted','SYN-OFFICE-HOURS');
   INSERT INTO public.work_orders(id,org_id,job_id,wo_number,kind,status,agreed_labour_ex,scope_items,special_instructions)
     VALUES(wo,org,job,'SYN-OFFICE-HOURS-WO','job','draft',1000,'[]','Synthetic office hours proof');
+  UPDATE public.jobs SET status = 'accepted' WHERE id IN (SELECT job_id FROM public.work_orders WHERE id=wo);
   UPDATE public.work_orders SET status='approved',approved_by=office WHERE id=wo;
   INSERT INTO public.group_work_orders(id,org_id,job_id,work_order_id,share_token,pay_basis,approved_budget_ex,budget_approved_by,budget_approved_at,budget_approval_reason)
     VALUES(grp,org,job,wo,'synthetic-office-hours-token','all_in_12_v2',1000,office,now(),'Synthetic owner budget');
@@ -70,8 +71,10 @@ BEGIN
   IF n <> 0 THEN RAISE EXCEPTION 'office approval wrote % crew signatures', n; END IF;
 
   -- Once the split is final the approval cannot be given or moved.
-  INSERT INTO public.job_client_signoffs(job_id,method,waiver_reason,captured_by_actor,created_at)
-    VALUES(job,'office_waiver','Synthetic office sign-off','user:'||office,clock_timestamp() + interval '1 second');
+  INSERT INTO public.job_media(id,job_id,phase,type,storage_url)
+    VALUES('f0310000-0000-4000-8000-000000000599',job,'signature','photo','data:image/png;base64,iVBORw0KGgo=');
+  INSERT INTO public.job_client_signoffs(job_id,method,signed_name,happy,signature_media_id,captured_by_actor,created_at)
+    VALUES(job,'share_link','Synthetic Client',true,'f0310000-0000-4000-8000-000000000599','client link',clock_timestamp() + interval '1 second');
   PERFORM public.freeze_group_work_order_split(grp);
   refused := NULL;
   BEGIN PERFORM public.office_approve_group_hours(grp, office, 'Again after freeze');

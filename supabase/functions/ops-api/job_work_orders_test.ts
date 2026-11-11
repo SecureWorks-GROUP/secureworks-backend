@@ -198,7 +198,29 @@ class FakeDb {
   from(table: string) {
     return new Query(this, table);
   }
+  authorityCalls: string[] = [];
   rpc(fn: string, args: any) {
+    // Who may approve is the database's owner_approval_authority; this fake
+    // answers it from the settings row the same way, apart from rpcCalls.
+    if (fn === "owner_approval_authority") {
+      this.authorityCalls.push(String(args.p_user));
+      if (this.failOn.has("rpc:owner_approval_authority")) {
+        return Promise.resolve({ data: null, error: { code: "57014" } });
+      }
+      const settings = (this.tables.work_order_settings || [])[0] || {};
+      const user = String(args.p_user).toLowerCase();
+      const has = (list: unknown) =>
+        Array.isArray(list) &&
+        list.some((id) => String(id).toLowerCase() === user);
+      const authority = has(settings.owner_user_ids)
+        ? "owner"
+        : has(settings.approver_user_ids)
+        ? "approver_list"
+        : has(settings.backup_approver_user_ids)
+        ? "backup_approver_list"
+        : null;
+      return Promise.resolve({ data: authority, error: null });
+    }
     this.rpcCalls.push({ fn, args });
     return Promise.resolve(this.rpcImpl(fn, args));
   }
@@ -642,7 +664,7 @@ Deno.test("approve: only Shaun, and only with a named identity", async () => {
   const db = draftDb();
   assertEquals(
     (await assertRejects(
-      () => approveJobWorkOrder(db, { work_order_id: DRAFT }, null),
+      () => approveJobWorkOrder(db, { work_order_id: DRAFT }, null, ORG),
       JobWorkOrderError,
     ) as JobWorkOrderError).code,
     "approver_identity_missing",
@@ -653,7 +675,7 @@ Deno.test("approve: only Shaun, and only with a named identity", async () => {
         approveJobWorkOrder(db, { work_order_id: DRAFT }, {
           userId: HUGO,
           via: "session",
-        }),
+        }, ORG),
       JobWorkOrderError,
     ) as JobWorkOrderError).status,
     403,
@@ -665,7 +687,7 @@ Deno.test("approve: only Shaun, and only with a named identity", async () => {
   }, {
     userId: SHAUN,
     via: "session",
-  });
+  }, ORG);
   assertEquals(out.work_order.status, "approved");
   assertEquals(db.rpcCalls[0], {
     fn: "approve_job_work_order",
@@ -674,6 +696,7 @@ Deno.test("approve: only Shaun, and only with a named identity", async () => {
       p_approver: SHAUN,
       p_via: "session",
       p_expected_updated_at: READ_AT,
+      p_org_id: ORG,
     },
   });
   const event = db.tables.job_events.at(-1);
@@ -709,7 +732,7 @@ Deno.test("events: what this module writes to job_events carries no price, amoun
   }, {
     userId: SHAUN,
     via: "session",
-  });
+  }, ORG);
 
   const reported = baseDb();
   await reportWorkOrderVariation(
@@ -750,6 +773,83 @@ Deno.test("events: what this module writes to job_events carries no price, amoun
   }
 });
 
+Deno.test("approve: the owner approves without a role, and a decision the policy holds is no issue", async () => {
+  const ownerDb = draftDb();
+  ownerDb.tables.work_order_settings = [{
+    id: 1,
+    approver_user_ids: [],
+    owner_user_ids: [HUGO],
+  }];
+  ownerDb.rpcImpl = (fn, args) =>
+    fn === "approve_job_work_order"
+      ? {
+        data: {
+          id: args.p_work_order_id,
+          status: "draft",
+          owner_approval: {
+            approval: { kind: "work_order", authority: "owner" },
+            replayed: false,
+            issue: {
+              issued: false,
+              held: true,
+              missing: ["price_approval"],
+            },
+          },
+        },
+        error: null,
+      }
+      : { data: null, error: null };
+  const held = await approveJobWorkOrder(ownerDb, {
+    work_order_id: DRAFT,
+    expected_updated_at: READ_AT,
+  }, { userId: HUGO, via: "session" }, ORG);
+  assertEquals(ownerDb.authorityCalls, [HUGO]);
+  assertEquals(held.issued, false);
+  assertEquals(held.work_order.status, "draft");
+  assertEquals(held.owner_approval.issue.missing, ["price_approval"]);
+  assertEquals("owner_approval" in held.work_order, false);
+  assertEquals(
+    ownerDb.tables.job_events.filter((e) =>
+      e.event_type === "job_work_order_approved"
+    ).length,
+    0,
+  );
+
+  const policy = draftDb();
+  policy.rpcImpl = () => ({
+    data: null,
+    error: { code: "WO428", message: "owner_approval_required" },
+  });
+  const err = await assertRejects(
+    () =>
+      approveJobWorkOrder(policy, {
+        work_order_id: DRAFT,
+        expected_updated_at: READ_AT,
+      }, { userId: SHAUN, via: "session" }, ORG),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals([err.status, err.code], [409, "owner_approval_required"]);
+
+  // RQ-19.a: the job not accepted yet is its own refusal, never a 500.
+  const notAccepted = draftDb();
+  notAccepted.rpcImpl = () => ({
+    data: null,
+    error: {
+      code: "WO412",
+      message: "job_work_order_job_not_accepted: the job is quoted, so its work order is issued once the customer accepts",
+    },
+  });
+  const refused = await assertRejects(
+    () =>
+      approveJobWorkOrder(notAccepted, {
+        work_order_id: DRAFT,
+        expected_updated_at: READ_AT,
+      }, { userId: SHAUN, via: "session" }, ORG),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals([refused.status, refused.code], [409, "job_not_accepted"]);
+});
+
 Deno.test("approve: a header-named terminal approver is refused until its flag is on", async () => {
   const terminal = { userId: SHAUN, via: "terminal" as const };
   for (
@@ -760,7 +860,7 @@ Deno.test("approve: a header-named terminal approver is refused until its flag i
   ) {
     const off = draftDb({ feature_flags: flags });
     const err = await assertRejects(
-      () => approveJobWorkOrder(off, { work_order_id: DRAFT }, terminal),
+      () => approveJobWorkOrder(off, { work_order_id: DRAFT }, terminal, ORG),
       JobWorkOrderError,
     ) as JobWorkOrderError;
     assertEquals([err.status, err.code], [
@@ -780,7 +880,7 @@ Deno.test("approve: a header-named terminal approver is refused until its flag i
   unreadable.failOn.add("select:feature_flags");
   assertEquals(
     (await assertRejects(
-      () => approveJobWorkOrder(unreadable, { work_order_id: DRAFT }, terminal),
+      () => approveJobWorkOrder(unreadable, { work_order_id: DRAFT }, terminal, ORG),
       JobWorkOrderError,
     ) as JobWorkOrderError).code,
     "terminal_approval_switched_off",
@@ -795,12 +895,27 @@ Deno.test("approve: a header-named terminal approver is refused until its flag i
   const out = await approveJobWorkOrder(on, {
     work_order_id: DRAFT,
     expected_updated_at: READ_AT,
-  }, terminal);
+  }, terminal, ORG);
   assertEquals(out.work_order.status, "approved");
   assertEquals(on.rpcCalls[0].args.p_via, "terminal");
 });
 
 Deno.test("approve: an empty approver list means nobody, a stale review refuses, database refusals map", async () => {
+  const unreadable = draftDb();
+  unreadable.failOn.add("rpc:owner_approval_authority");
+  assertEquals(
+    (await assertRejects(
+      () =>
+        approveJobWorkOrder(unreadable, { work_order_id: DRAFT }, {
+          userId: SHAUN,
+          via: "session",
+        }, ORG),
+      JobWorkOrderError,
+    ) as JobWorkOrderError).code,
+    "approvers_unreadable",
+  );
+  assertEquals(unreadable.rpcCalls.length, 0);
+
   const empty = draftDb();
   empty.tables.work_order_settings = [{ id: 1, approver_user_ids: [] }];
   assertEquals(
@@ -809,11 +924,12 @@ Deno.test("approve: an empty approver list means nobody, a stale review refuses,
         approveJobWorkOrder(empty, { work_order_id: DRAFT }, {
           userId: SHAUN,
           via: "session",
-        }),
+        }, ORG),
       JobWorkOrderError,
     ) as JobWorkOrderError).code,
-    "approver_not_set",
+    "approver_required",
   );
+  assertEquals(empty.rpcCalls.length, 0);
 
   const stale = draftDb();
   stale.rpcImpl = () => ({
@@ -829,7 +945,7 @@ Deno.test("approve: an empty approver list means nobody, a stale review refuses,
       approveJobWorkOrder(stale, {
         work_order_id: DRAFT,
         expected_updated_at: "2026-10-06T00:30:00+00:00",
-      }, { userId: SHAUN, via: "session" }),
+      }, { userId: SHAUN, via: "session" }, ORG),
     JobWorkOrderError,
   ) as JobWorkOrderError;
   assertEquals([staleErr.status, staleErr.code], [409, "stale_review"]);
@@ -849,7 +965,7 @@ Deno.test("approve: an empty approver list means nobody, a stale review refuses,
       }, {
         userId: SHAUN,
         via: "session",
-      }),
+      }, ORG),
     JobWorkOrderError,
   ) as JobWorkOrderError;
   assertEquals([err.status, err.code], [422, "work_order_not_ready"]);
@@ -868,7 +984,7 @@ Deno.test("approve: Shaun must send the stamp of the draft he read, and it reach
   ) {
     const db = draftDb();
     const err = await assertRejects(
-      () => approveJobWorkOrder(db, body, shaun),
+      () => approveJobWorkOrder(db, body, shaun, ORG),
       JobWorkOrderError,
     ) as JobWorkOrderError;
     assertEquals([err.status, err.code], [400, "expected_updated_at_required"]);
@@ -897,12 +1013,61 @@ Deno.test("approve: Shaun must send the stamp of the draft he read, and it reach
       approveJobWorkOrder(db, {
         work_order_id: DRAFT,
         expected_updated_at: READ_AT,
-      }, shaun),
+      }, shaun, ORG),
     JobWorkOrderError,
   ) as JobWorkOrderError;
   assertEquals([err.status, err.code], [409, "stale_review"]);
   assertEquals(db.rpcCalls[0].args.p_expected_updated_at, READ_AT);
   assertEquals(db.tables.job_events.length, 0);
+});
+
+Deno.test("approve: a named approver never decides another company's work order", async () => {
+  // A generated approver: the database rule decides who approves.
+  const approverId = crypto.randomUUID();
+  const approver = { userId: approverId, via: "session" as const };
+  const body = { work_order_id: DRAFT, expected_updated_at: READ_AT };
+  const listed = () => {
+    const db = draftDb();
+    db.tables.work_order_settings = [{ id: 1, approver_user_ids: [approverId] }];
+    return db;
+  };
+  const approveCalls = (db: any) =>
+    db.rpcCalls.filter((c: any) => c.fn === "approve_job_work_order");
+
+  // Another company's work order is not found, and nothing is recorded.
+  const elsewhere = listed();
+  const foreign = await assertRejects(
+    () => approveJobWorkOrder(elsewhere, body, approver, crypto.randomUUID()),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals([foreign.status, foreign.code], [404, "work_order_not_found"]);
+  assertEquals(approveCalls(elsewhere), []);
+
+  // No verified company: refused before any read.
+  const noCompany = listed();
+  const missing = await assertRejects(
+    () => approveJobWorkOrder(noCompany, body, approver, null),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals([missing.status, missing.code], [403, "operator_access_required"]);
+  assertEquals(approveCalls(noCompany), []);
+
+  // The database checks the company again; its refusal reads as not found.
+  const refused = listed();
+  refused.rpcImpl = (fn: string) =>
+    fn === "approve_job_work_order"
+      ? {
+        data: null,
+        error: { code: "42501", message: "scope_owner_approval_job_forbidden" },
+      }
+      : { data: null, error: null };
+  const db = await assertRejects(
+    () => approveJobWorkOrder(refused, body, approver, ORG),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals([db.status, db.code], [404, "work_order_not_found"]);
+  assertEquals(approveCalls(refused)[0].args.p_org_id, ORG);
+  assertEquals(refused.tables.job_events.length, 0);
 });
 
 // ── Staff read ───────────────────────────────────────────────────────────────

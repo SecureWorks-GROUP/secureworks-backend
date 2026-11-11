@@ -142,7 +142,8 @@ Deno.test("void release refuses unverified, paid, credited, missing and group bi
   for (
     const bill of [
       { ...provider(), Status: "AUTHORISED" },
-      { ...provider(), Status: "DELETED" },
+      { ...provider(), Status: "PAID" },
+      { ...provider(), Status: "DRAFT" },
       { ...provider(), Type: "ACCREC" },
       { ...provider(), InvoiceID: "other" },
       { ...provider(), AmountPaid: 1 },
@@ -228,4 +229,25 @@ Deno.test("missing provider AmountPaid cannot be interpreted as zero", () => {
     () => assertUnpaidVoidedSupplierBill(bill, BILL),
     VoidedTradeInvoiceReleaseError,
   );
+});
+
+Deno.test("a deleted bill with nothing paid releases like a voided one and says deleted", async () => {
+  const db = new Office();
+  db.providerBill = { ...provider(), Status: "DELETED" };
+  const result = await db.run();
+  assertEquals(result.status, "ops-reject");
+  assertEquals(result.xero_bill_status, "DELETED");
+  assertEquals(db.invoice.xero_bill_status, "DELETED");
+  assertEquals(db.invoice.xero_bill_id, BILL);
+  assertEquals(db.invoice.override_details.voided_release.automatic, false);
+  assertEquals(db.invoice.query_note.startsWith("Xero bill deleted with nothing paid."), true);
+});
+
+Deno.test("an approved invoice holding a deleted bill can be released", async () => {
+  const db = new Office();
+  db.invoice.status = "approved";
+  db.providerBill = { ...provider(), Status: "DELETED" };
+  const result = await db.run();
+  assertEquals(result.status, "ops-reject");
+  assertEquals(db.invoice.override_details.voided_release.prior_status, "approved");
 });

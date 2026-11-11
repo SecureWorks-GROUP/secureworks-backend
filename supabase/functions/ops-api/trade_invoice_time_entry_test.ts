@@ -472,6 +472,10 @@ type Stub = {
   viewEntries?: any[];
   // table name -> PostgREST error message
   fail?: Record<string, string>;
+  // jobs the trade is booked on, for the extra-line job check
+  // (trade_invoice_extra_job_authority.ts). Missing: every fixture job, so
+  // these tests keep testing time entries, not who may bill a job.
+  bookedJobIds?: string[];
 };
 
 // PostgREST answers only the columns a select names. Fixture rows for the
@@ -677,6 +681,13 @@ async function callTradeAction(
       return Promise.resolve(
         reply([{ hourly_rate: 50, effective_from: "2026-01-01" }]),
       );
+    }
+    if (table === "job_assignments" && url.searchParams.has("is_ghost")) {
+      const jobIds = idsIn("job_id");
+      const booked = stub.bookedJobIds ?? jobs.map((job) => job.id);
+      return Promise.resolve(reply(booked
+        .filter((id) => !jobIds || jobIds.includes(id))
+        .map((job_id) => ({ job_id }))));
     }
     if (table === "job_assignments") {
       const ids = idsIn("id");

@@ -1044,10 +1044,20 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Local scope drafts are migration-first in ops-api.
                       ("20261106040518", "scope_job_drafts"),
                       ("20261106044806", "scope_local_payment_stages"),
+                      ("20261106054912", "client_signoff_copies"),
                       ("20261106062000", "scope_work_order_saved_handoff"),
+                      ("20261106083000", "group_work_order_crew"),
                       # Dispatch v2 section 3g: an order sent from Outlook is
                       # recorded when it is sent (dispatch_v2_outlook_on_send.ts).
-                      ("20261106120000", "dispatch_v2_outlook_order_on_send")]:
+                      ("20261106120000", "dispatch_v2_outlook_order_on_send"),
+                      ("20261106160000", "group_paid_by_hours_member"),
+                      # Trade invoice money controls: events, extras limits, number index.
+                      ("20261106163712", "trade_invoice_money_controls"),
+                      ("20261106170000", "group_office_removal_wins"),
+                      # On-site client sign-off saved once per capture.
+                      ("20261106193000", "group_on_site_signoff_claim"),
+                      # TK-S28: scope draft release on any open status.
+                      ("20261110200000", "scope_draft_release_open_status")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

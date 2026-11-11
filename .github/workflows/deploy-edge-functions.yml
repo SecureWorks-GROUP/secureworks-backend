@@ -22,6 +22,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: production-edge-deploy-${{ github.repository }}
@@ -38,10 +39,42 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Resolve last successful function deploy
+        id: deployed
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // A green migration-only or verification-only run deployed no code.
+            // Keep searching until both the workflow and actual deploy succeeded.
+            const { owner, repo } = context.repo;
+            for await (const page of github.paginate.iterator(
+              github.rest.actions.listWorkflowRuns,
+              { owner, repo, workflow_id: 'deploy-edge-functions.yml',
+                branch: 'main', event: 'push', status: 'success', per_page: 100 }
+            )) {
+              for (const run of page.data) {
+                if (run.id === context.runId || run.conclusion !== 'success' ||
+                    run.head_branch !== 'main' || run.event !== 'push') continue;
+                const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun,
+                  { owner, repo, run_id: run.id, filter: 'latest', per_page: 100 });
+                if (!jobs.some(job => job.name === 'deploy' && job.conclusion === 'success' &&
+                    job.steps?.some(step => step.name === 'Deploy changed edge functions' &&
+                      step.conclusion === 'success'))) continue;
+                if (!/^[0-9a-f]{40}$/.test(run.head_sha)) {
+                  throw new Error('Successful function deploy has no valid source commit');
+                }
+                core.setOutput('sha', run.head_sha);
+                core.info(`Function deploy baseline: run ${run.id}, commit ${run.head_sha}`);
+                return;
+              }
+            }
+            throw new Error('No successful production function deploy found; refusing to guess a baseline');
+
       - name: Identify function-source and verification-only changes
         id: changed
         env:
-          BEFORE_SHA: ${{ github.event.before }}
+          DEPLOY_BASE_SHA: ${{ steps.deployed.outputs.sha }}
+          REQUIRE_DEPLOY_BASELINE: 'true'
           HEAD_SHA: ${{ github.sha }}
           EVENT_NAME: ${{ github.event_name }}
         run: |

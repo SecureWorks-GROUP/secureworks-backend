@@ -117,12 +117,16 @@ BEGIN
     '00000000-0000-4000-8000-0000000000b1', 'ghl:contactp1', 'fp-patio-2', 'RESOLVED_NO_JOB',
     'contactP1', NULL, '{}', NULL, 'Test', 'Patio', NULL, '0400000001', NULL, NULL, 'patio');
   v := public.bind_fence_job_mint_identity('00000000-0000-4000-8000-000000000003', 'contactP1', NULL);
-  IF v->'canonical'->>'jobNumber' IS NULL AND v->>'state' <> 'opportunity_created' THEN
+  -- IS DISTINCT FROM: a refusal carries NULL canonical fields, and a plain <>
+  -- on NULL never raised, which hid the Whole test 2 refusal (20261106081500).
+  IF v->>'decision' IS DISTINCT FROM 'complete'
+    OR v->'canonical'->>'mappingOutcome' IS DISTINCT FROM 'existing_contact_job_reused'
+    OR v->'canonical'->>'jobNumber' NOT LIKE 'SWP-%' THEN
     RAISE EXCEPTION 'second patio start did not reuse: %', v;
   END IF;
   v := public.complete_fence_job_mint('00000000-0000-4000-8000-000000000003');
-  IF v->'canonical'->>'mappingOutcome' <> 'existing_contact_job_reused'
-    OR (SELECT count(*) FROM public.jobs WHERE type = 'patio' AND ghl_contact_id = 'contactP1') <> 1 THEN
+  IF v->>'decision' IS DISTINCT FROM 'complete'
+    OR (SELECT count(*) FROM public.jobs WHERE type = 'patio' AND ghl_contact_id = 'contactP1') IS DISTINCT FROM 1::bigint THEN
     RAISE EXCEPTION 'second patio start made another job: %', v;
   END IF;
 END $$;

@@ -1,14 +1,14 @@
 import { assert, assertEquals } from "jsr:@std/assert";
-import { findFenceProblem, isNormalWorkOrderPayLine, isOfficeFeeLine } from "./group_work_order.ts";
+import { findFenceProblem, isNormalWorkOrderPayLine, isOfficeFeeLine, isBilledHoursInvoice, isPaidHoursLine } from "./group_work_order.ts";
 import {
   autoGroupFenceJobs,
   autoGroupPatioJobs,
-  crewByJob,
   GROUP_WORK_ORDER_AUTO_FENCE_FLAG,
   GROUP_WORK_ORDER_AUTO_PATIO_FLAG,
   labourOutsidePool,
   openMissingFenceWorkOrders,
   openMissingPatioWorkOrders,
+  removedUserIds,
 } from "./patio_auto_group.ts";
 
 type Row = Record<string, any>;
@@ -28,6 +28,37 @@ class Fake {
       from: (t: string) => new FakeQuery(fake, t),
       rpc: (fn: string, args: Row) => {
         fake.rpcs.push({ fn, args });
+        if (fn === "group_work_order_crew") {
+          // Fixture stand-in for SQL; the PostgreSQL contract owns qualification.
+          const out = new Map<string, Row>();
+          // Paid by the hour on the job: not group crew (20261106160000).
+          const paid = (jobId: string, userId: string) => fake.rows("trade_invoice_lines").some((line) => {
+            const invoice = fake.rows("trade_invoices").find((i) => i.id === line.trade_invoice_id);
+            return line.job_id === jobId && isPaidHoursLine(line) && invoice?.user_id === userId &&
+              isBilledHoursInvoice(invoice);
+          });
+          for (const row of fake.rows("job_assignments")) {
+            const user = fake.rows("users").find((u) => u.id === row.user_id);
+            if (!(args.p_job_ids as string[]).includes(row.job_id) || row.is_ghost === true ||
+              row.status === "cancelled" || row.role === "observer" || user?.role === "admin" ||
+              paid(row.job_id, row.user_id)) continue;
+            out.set(`${row.job_id}:${row.user_id}`,{job_id:row.job_id,user_id:row.user_id});
+          }
+          for (const member of fake.rows("group_work_order_participants")) {
+            const group = fake.rows("group_work_orders").find((g) => g.id === member.group_id);
+            if (group && group.status !== "void" && (args.p_job_ids as string[]).includes(group.job_id) &&
+              !paid(group.job_id, member.user_id)) {
+              out.set(`${group.job_id}:${member.user_id}`,{job_id:group.job_id,user_id:member.user_id});
+            }
+          }
+          let bounds: [number, number] | null = null;
+          const q: any = {order: () => q, range: (a:number,b:number) => {bounds=[a,b];return q;},
+            then: (resolve:any) => {
+              const rows=[...out.values()];
+              return Promise.resolve({data:bounds?rows.slice(bounds[0],bounds[1]+1):rows,error:null}).then(resolve);
+            }};
+          return q;
+        }
         if (fn === "ensure_job_work_order_draft") {
           const id = `wo-${args.p_job_id}`;
           fake.rows("work_orders").push({ id, job_id: args.p_job_id, kind: "job", status: "draft" });
@@ -80,6 +111,7 @@ function patioWorld() {
     { id: "ryan", role: "crew" },
     { id: "nithin", role: "ops_manager" },
     { id: "jan", role: "admin" },
+    { id: "kai", role: "crew" },
   );
   const job = (id: string, status = "scheduled", type = "patio") => ({
     id, org_id: "org", job_number: id.toUpperCase(), type, status, work_order_id: `wo-${id}`,
@@ -93,14 +125,16 @@ function patioWorld() {
   }
   const allocate = (jobId: string, userId: string, extra: Row = {}) =>
     fake.rows("job_assignments").push({ job_id: jobId, user_id: userId, status: "scheduled", role: "lead_installer", ...extra });
-  // a: Isaac, Ryan, Nithin plus a watching admin. b: Isaac and Ryan, Ryan paid by hours.
+  // a: Isaac, Ryan, Nithin plus a watching admin. b: Isaac, Ryan and Kai, Ryan
+  // already paid by the hour there.
   // c: Isaac and a cancelled Ryan. d: archived. e: fencing.
   for (const u of ["isaac", "ryan", "nithin", "jan"]) allocate("a", u);
-  allocate("b", "isaac"); allocate("b", "ryan");
+  allocate("b", "isaac"); allocate("b", "ryan"); allocate("b", "kai");
   allocate("c", "isaac"); allocate("c", "ryan", { status: "cancelled" }); allocate("c", "ryan", { is_ghost: true, status: "scheduled" });
   for (const j of ["d", "e"]) { allocate(j, "isaac"); allocate(j, "ryan"); }
-  fake.rows("trade_invoices").push({ id: "inv-n", status: "paid" }, { id: "inv-r", status: "approved" });
-  // Nithin's council fee on a does not block; Ryan's hours on b do.
+  fake.rows("trade_invoices").push({ id: "inv-n", status: "paid", user_id: "nithin" }, { id: "inv-r", status: "paid", user_id: "ryan", xero_bill_id: "BILL-R", xero_bill_status: "PAID" });
+  // Nithin's council fee on a is not crew pay; Ryan's hours on b keep him out
+  // of b's group (the rest of b's crew still get one).
   fake.rows("trade_invoice_lines").push(
     { job_id: "a", line_type: "labour", description: "Council Approval (Job Complete)", trade_invoice_id: "inv-n" },
     { job_id: "a", line_type: "commission", description: "Commission", trade_invoice_id: "inv-n" },
@@ -126,19 +160,6 @@ Deno.test("office milestone fees are not crew pay; install hours still are", () 
   const prior = [{ job_id: "j", line_type: "group share", user_id: "isaac" }];
   assertEquals(findFenceProblem("nithin", [{ job_id: "j", line_type: "labour", description: "Council Approval" }], prior), null);
   assertEquals(findFenceProblem("ryan", [{ job_id: "j", line_type: "labour", description: "Framing" }], prior)?.code, "work_order_claim_blocked_by_group_share");
-});
-
-Deno.test("crew is live allocations, admins left out", () => {
-  const crew = crewByJob([
-    { job_id: "a", user_id: "isaac", status: "scheduled" },
-    { job_id: "a", user_id: "isaac", status: "complete" },
-    { job_id: "a", user_id: "ryan", status: "cancelled" },
-    { job_id: "a", user_id: "obs", status: "scheduled", role: "observer" },
-    { job_id: "a", user_id: "ghost", status: "scheduled", is_ghost: true },
-    { job_id: "a", user_id: "jan", status: "scheduled" },
-    { job_id: "a", user_id: "nithin", status: "scheduled" },
-  ], new Map([["jan", "admin"], ["nithin", "ops_manager"]]));
-  assertEquals(crew.get("a"), ["isaac", "nithin"]);
 });
 
 Deno.test("patio pay through the group: one crew, or none yet, still gets the group", async () => {
@@ -168,10 +189,23 @@ Deno.test("auto group: priced open patio jobs with 2+ crew get a group with the 
   assertEquals(out.switched_on, true);
   const by = Object.fromEntries(out.results.map((r) => [r.job_id, r]));
   assertEquals(by.a.reason, "group_created");
-  assertEquals(by.b.reason, "crew_paid_by_hours_already");
+  // b: Ryan was paid by the hour there, so b's group is Isaac and Kai.
+  assertEquals(by.b.reason, "group_created");
+  assertEquals(by.b.crew, 2);
   assertEquals(by.c, undefined); // one live crew
   assertEquals(by.d, undefined); // archived
   assertEquals(by.e, undefined); // fencing
+  const bGroup = fake.rows("group_work_orders").find((g) => g.job_id === "b");
+  assertEquals(
+    fake.rows("group_work_order_participants").filter((p) => p.group_id === bGroup?.id).map((p) => p.user_id).sort(),
+    ["isaac", "kai"],
+  );
+  // The rest of this test follows job a only.
+  fake.tables.group_work_order_participants = fake.rows("group_work_order_participants").filter((p) => p.group_id !== bGroup?.id);
+  fake.tables.group_work_orders = fake.rows("group_work_orders").filter((g) => g.job_id !== "b");
+  fake.tables.job_events = fake.rows("job_events").filter((e) => e.job_id !== "b");
+  fake.tables.trade_invoice_lines = fake.rows("trade_invoice_lines").filter((l) => l.job_id !== "b");
+  fake.tables.job_assignments = fake.rows("job_assignments").filter((a) => a.job_id !== "b");
   const groups = fake.rows("group_work_orders");
   assertEquals(groups.length, 1);
   assertEquals(groups[0].pay_basis, "all_in_12_v2");
@@ -197,6 +231,24 @@ Deno.test("auto group: priced open patio jobs with 2+ crew get a group with the 
   assertEquals((await autoGroupPatioJobs(fake.client())).crew_added, 0);
 });
 
+Deno.test("auto group: someone who left or was removed is never added back by the sweep", async () => {
+  assertEquals([...removedUserIds([{ detail: { user_id: "u-1" } }, { detail: null }, {}])], ["u-1"]);
+  const fake = patioWorld();
+  await autoGroupPatioJobs(fake.client());
+  const group = fake.rows("group_work_orders")[0];
+  const people = fake.rows("group_work_order_participants");
+  // The crew member leaves (or the office removes them): the row goes and an event stays.
+  people.splice(people.findIndex((p) => p.user_id === "ryan"), 1);
+  fake.rows("group_work_order_events").push({ group_id: group.id, action: "remove_participant", detail: { user_id: "ryan" } });
+  const swept = await autoGroupPatioJobs(fake.client());
+  assertEquals(swept.crew_added, 0);
+  assertEquals(people.some((p) => p.user_id === "ryan"), false);
+  // Someone newly allocated still joins.
+  fake.rows("users").push({ id: "new-crew", role: "crew" });
+  fake.rows("job_assignments").push({ job_id: "a", user_id: "new-crew", status: "scheduled" });
+  assertEquals((await autoGroupPatioJobs(fake.client())).crew_added, 1);
+});
+
 Deno.test("auto group: off switch, and the database fence wins", async () => {
   const off = patioWorld();
   off.rows("feature_flags")[1].enabled = false;
@@ -212,8 +264,18 @@ Deno.test("auto group: off switch, and the database fence wins", async () => {
   const fenced = patioWorld();
   fenced.failInsert.group_work_orders = { code: "23514", message: "group_open_blocked_by_work_order_claim" };
   const out = await autoGroupPatioJobs(fenced.client());
-  assertEquals(out.results.find((r) => r.job_id === "a")?.reason, "crew_paid_by_hours_already");
+  assertEquals(out.results.find((r) => r.job_id === "a")?.reason, "work_order_claimed_already");
   assertEquals(fenced.rows("group_work_order_participants").length, 0);
+
+  // RQ-19.a: no crew group before the customer accepts (partially accepted is open, not accepted).
+  const notAccepted = patioWorld();
+  notAccepted.failInsert.group_work_orders = {
+    code: "WO412",
+    message: "group_job_not_accepted: the job is partially_accepted, so no crew group opens before the customer accepts",
+  };
+  const held = await autoGroupPatioJobs(notAccepted.client());
+  assertEquals(held.results.find((r) => r.job_id === "a")?.reason, "job_not_accepted");
+  assertEquals(notAccepted.rows("group_work_order_participants").length, 0);
 });
 
 Deno.test("missing work orders: open patio jobs with 2+ crew get a draft", async () => {
@@ -229,7 +291,7 @@ Deno.test("missing work orders: open patio jobs with 2+ crew get a draft", async
   fake.rows("job_assignments").push({ job_id: "g", user_id: "isaac", status: "scheduled" }, { job_id: "g", user_id: "jan", status: "scheduled" });
   const out = await openMissingPatioWorkOrders(fake.client());
   assertEquals(out.results.map((r: any) => r.job_id), ["f"]);
-  assertEquals(fake.rpcs, [{ fn: "ensure_job_work_order_draft", args: { p_job_id: "f", p_origin: "backfill" } }]);
+  assertEquals(fake.rpcs.filter((call) => call.fn !== "group_work_order_crew"), [{ fn: "ensure_job_work_order_draft", args: { p_job_id: "f", p_origin: "backfill" } }]);
 });
 
 // ── V8 fence groups (job-profit INBOX 3 Nov 2026), switched off ─────────────
@@ -347,8 +409,8 @@ Deno.test("fence switch on: 2+ crew on a priced fence work order get a group; na
   assertEquals(by["swf-261370"].crew, 2);
   // SWF-261459: the $0.35 pool would leave $1,200 of quoted labour out.
   assertEquals(by["swf-261459"].reason, "labour_outside_pool");
-  // SWF-26968: the lead's fixed-price work-order claim is pay already.
-  assertEquals(by["swf-26968"].reason, "crew_paid_by_hours_already");
+  // SWF-26968: the lead's fixed-price work-order claim still blocks a group.
+  assertEquals(by["swf-26968"].reason, "work_order_claimed_already");
   assertEquals(by["swf-26968"].code, "group_open_blocked_by_work_order_claim");
   // Solo stays hours only; the patio job is not the fence sweep's.
   assertEquals(by["swf-solo"], undefined);
@@ -403,7 +465,7 @@ Deno.test("fence missing work orders: open fence jobs with 2+ crew get a draft; 
   fake.rows("job_assignments").push({ job_id: "swf-one", user_id: "alyx", status: "scheduled" }, { job_id: "swf-one", user_id: "jan", status: "scheduled" });
   const out = await openMissingFenceWorkOrders(fake.client());
   assertEquals(out.results.map((r: any) => r.job_id), ["swf-26091"]);
-  assertEquals(fake.rpcs, [{ fn: "ensure_job_work_order_draft", args: { p_job_id: "swf-26091", p_origin: "backfill" } }]);
+  assertEquals(fake.rpcs.filter((call) => call.fn !== "group_work_order_crew"), [{ fn: "ensure_job_work_order_draft", args: { p_job_id: (out.results as Array<{job_id:string}>)[0].job_id, p_origin: "backfill" } }]);
 
   // Off, the same world opens nothing.
   const off = fenceWorld(false);
@@ -427,7 +489,7 @@ Deno.test("patio pay only through the group: what the crew are told", async () =
       { id: "p-legacy", type: "patio" }, { id: "fence", type: "fencing" },
     );
     fake.rows("group_work_orders").push({ job_id: "p-grouped", status: "open" });
-    // SWP-261283 shape: Henry's hours were billed and approved before the switch.
+    // A previous ordinary claim alone does not prove earlier scheduling.
     fake.rows("trade_invoice_lines").push({ job_id: "p-legacy", line_type: "labour", description: "Patio install", trade_invoice_id: "old", trade_invoices: { status: "approved" } });
     return fake.client();
   };
@@ -441,7 +503,7 @@ Deno.test("patio pay only through the group: what the crew are told", async () =
   assert(String(noWo?.message).includes("office needs to set the job work-order amount first"));
   const grouped = await refused(world(true), hours("p-grouped"));
   assert(String(grouped?.message).includes("Log your hours on the group"));
-  assertEquals(await refused(world(true), hours("p-legacy")), null);
+  assertEquals((await refused(world(true), hours("p-legacy")))?.code, "patio_pay_group_only");
   assertEquals(await refused(world(true), hours("fence")), null);
   assertEquals(await refused(world(true), [{ job_id: "p-new", line_type: "commission", description: "Commission" }]), null);
   assertEquals(await refused(world(true), [{ job_id: "p-new", line_type: "labour", description: "Council Approval" }]), null);
