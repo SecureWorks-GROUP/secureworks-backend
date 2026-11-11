@@ -1235,9 +1235,25 @@ Migration: `20261105160000_dispatch_v2_order_crew_lines.sql` (rollback in
 
 ### 3e.2 The supplier's documents on the job
 
-On Accept and on the stage press (not on a by-hand date press), every PDF
+On Accept and on the stage press (not on a by-hand date press), the PDFs
 on the supplier replies **matched** to the order (`state 'matched'`, the
-order named) is saved to the job (`dispatch_v2_order_documents.ts`).
+order named) are considered for the job (`dispatch_v2_order_documents.ts`).
+
+**Latest only (Shaun, 11 Nov 2026).** One supplier document per order is
+kept on the job: from the newest matched reply that carries a proper
+document, the best one in it. A file whose own name says what it is beats
+one that does not; then invoice or pro forma, then sales order or order
+confirmation, then quote. Side files are never saved, judged by their own
+file name: price lists, drawings, terms and conditions, brochures,
+catalogues, credit or account applications, statements, spec or data
+sheets, SDS, warranties, install guides, colour charts, remittances. When a
+newer document arrives (the sweep below), it is saved and the older one
+this rule saved (`job_documents.metadata.latest_only`) is deleted from the
+job, with a `dispatch_v2_order_document_replaced` job event. Its memory row
+stays `saved`, so it never comes back. Documents saved before this rule, or
+added by hand, are never removed. A failed save of the newer one leaves the
+older one in place. An order whose replies carry only side files counts as
+having no documents, so it gets our order sheet (3e.3).
 
 1. **Matched replies only.** A reply waiting for a person to confirm a best
    guess carries an `order_id` too, but those are often statements, lead

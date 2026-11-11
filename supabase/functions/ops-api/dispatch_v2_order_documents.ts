@@ -22,6 +22,13 @@
 //     five minutes and saves any new PDF. Newest shows on top (the job's
 //     documents read newest first). Prices do not matter: the crew must see
 //     the document.
+//   * LATEST ONLY (Shaun, 11 Nov 2026), which narrows the two rules above:
+//     one supplier document per order, the newest proper one (the newest
+//     email's invoice, else its sales order or confirmation, else its
+//     quote). Price lists, drawings, terms and other side files are never
+//     saved. A newer one replaces the older one this rule saved; documents
+//     saved before the rule or added by hand are never removed. See
+//     pickLatestSupplierDocument and saveDispatchSupplierDocuments.
 //   * Saved as job_documents type 'material_order', visible_to_trades true:
 //     the trade app shows that type (it is not one of the money types it
 //     hides, TRADE_MONEY_DOC_TYPES in trade.html), and the ops dashboard
@@ -120,6 +127,64 @@ export function dispatchSupplierDocumentName(
     ? supplier.trim()
     : "Supplier";
   return `${name} ${KIND_WORDS[kind]}`;
+}
+
+// ── Latest only (Shaun, 11 Nov 2026) ────────────────────────────────────────
+//
+// Shaun: "against the email thread, I only want the latest documents ... if
+// they send me a quote and a price list, you don't save the price list, you
+// save the quote. If they send two documents, you only save one."
+//
+// So one supplier document per order: the newest proper one. Side files are
+// never saved: price lists, drawings, terms, brochures, credit forms,
+// statements and the like, judged by the file's own name (the email's words
+// describe the main document, not the extras: Bondor's "please see attached
+// quote" also carried a price list).
+
+const SIDE_FILE =
+  /price[\s_-]*list|price[\s_-]*book|\bdrawings?\b|\bdwg\b|\bterms\b|conditions|\bt\s*&\s*c|brochure|catalogue|\bcatalog\b|credit[\s_-]*app|account[\s_-]*app|application[\s_-]*form|statement|spec(?:ification)?s?[\s_-]*sheet|data[\s_-]*sheet|\bm?sds\b|warranty|install(?:ation)?[\s_-]*(?:guide|instructions|manual)|colou?r[\s_-]*chart|remittance/i;
+
+/** A side file the latest-only rule never saves (by its own file name). */
+export function dispatchDocIsSideFile(fileName: unknown): boolean {
+  return SIDE_FILE.test(String(fileName ?? "").replace(/[_]+/g, " "));
+}
+
+const KIND_RANK: Record<DispatchSupplierDocKind, number> = {
+  invoice: 3,
+  order_confirmation: 2,
+  quote: 1,
+  order_document: 0,
+};
+
+/** The one document to keep for an order: from the newest supplier email
+ * that carries a proper document, the best one in it. A file whose own name
+ * says what it is beats one that does not; then invoice (or pro forma), then
+ * sales order or order confirmation, then quote. Side files never count.
+ * Null when there is nothing proper. */
+export function pickLatestSupplierDocument<
+  T extends {
+    file_name: string | null;
+    received_at: string | null;
+    kind: DispatchSupplierDocKind;
+  },
+>(candidates: T[]): T | null {
+  const proper = candidates.filter((c) => !dispatchDocIsSideFile(c.file_name));
+  if (proper.length === 0) return null;
+  const when = (c: T) => {
+    const t = Date.parse(String(c.received_at ?? ""));
+    return Number.isFinite(t) ? t : -Infinity;
+  };
+  const newest = Math.max(...proper.map(when));
+  const score = (c: T) => {
+    const named = kindIn(c.file_name);
+    return named ? 10 + KIND_RANK[named] : KIND_RANK[c.kind];
+  };
+  let best: T | null = null;
+  for (const c of proper) {
+    if (when(c) !== newest) continue;
+    if (!best || score(c) > score(best)) best = c;
+  }
+  return best;
 }
 
 /** A file the capture reader kept that may be a PDF: a PDF type, or a .pdf
@@ -365,6 +430,10 @@ export type DispatchSaveDocInput = {
   // The file's type: left out, a PDF. The order's photos pass image/jpeg,
   // image/png or image/webp.
   contentType?: string;
+  // Saved under the latest-only rule (Shaun, 11 Nov 2026): a newer supplier
+  // document for the same order replaces it. Marked on the job document as
+  // metadata.latest_only, so only these are ever removed by the rule.
+  latestOnly?: boolean;
   trigger: string;
   operatorUserId?: string | null;
   now: string;
@@ -534,6 +603,7 @@ export async function saveDispatchOrderDocument(
         reply_email_id: input.replyEmailId ?? null,
         storage_path: path,
         trigger: input.trigger,
+        ...(input.latestOnly ? { latest_only: true } : {}),
       },
     }).select("id").maybeSingle();
     if (doc.error || !doc.data?.id) {
@@ -587,10 +657,102 @@ export type DispatchOrderDocumentsResult = {
   found: number;
   saved: Array<{ job_document_id: string; name: string }>;
   skipped: Array<{ sha256: string; reason: string }>;
+  // Older latest-only documents of this order taken off the job because a
+  // newer one replaced them.
+  replaced: Array<{ job_document_id: string; name: string | null }>;
 };
 
-/** Save every PDF on the order's matched replies to the job, once each.
- * order: a dispatch_supplier_order_emails row (id, job_id, supplier_id,
+// Reasons a file was left alone on purpose (not a failure).
+export const DISPATCH_DOC_SKIP_OK = new Set([
+  "already_saved",
+  "in_progress",
+  "side_file",
+  "not_latest",
+]);
+
+/** Take the order's older latest-only supplier documents off the job, keeping
+ * the file with keepSha. Only job documents this rule saved (metadata
+ * latest_only) are removed: anything saved before the rule, or added by
+ * hand, stays. The memory row stays 'saved' (migration 20261111150000), so a
+ * removed file is never saved again. The file stays in the supplier's email.
+ * Never throws. */
+async function removeReplacedSupplierDocuments(
+  client: any,
+  input: {
+    jobId: string;
+    orderId: string;
+    keepSha: string;
+    trigger: string;
+    operatorUserId?: string | null;
+  },
+): Promise<Array<{ job_document_id: string; name: string | null }>> {
+  try {
+    const mem = await client.from("dispatch_v2_order_documents")
+      .select("content_sha256, job_document_id, state, source")
+      .eq("job_id", input.jobId)
+      .eq("order_id", input.orderId)
+      .eq("source", "supplier_reply")
+      .eq("state", "saved");
+    if (mem.error) {
+      log("replaced documents read failed", mem.error);
+      return [];
+    }
+    const ids = (mem.data || [])
+      .filter((r: any) =>
+        r.job_document_id && String(r.content_sha256) !== input.keepSha
+      )
+      .map((r: any) => String(r.job_document_id));
+    if (ids.length === 0) return [];
+    const docs = await client.from("job_documents")
+      .select("id, file_name, metadata")
+      .in("id", ids);
+    if (docs.error) {
+      log("replaced job documents read failed", docs.error);
+      return [];
+    }
+    const gone = (docs.data || []).filter((d: any) =>
+      d?.metadata?.latest_only === true
+    ).map((d: any) => ({
+      job_document_id: String(d.id),
+      name: typeof d.file_name === "string" ? d.file_name : null,
+    }));
+    if (gone.length === 0) return [];
+    const goneIds = gone.map((g: { job_document_id: string }) => g.job_document_id);
+    const del = await client.from("job_documents").delete().in("id", goneIds);
+    if (del.error) {
+      log("replaced job documents delete failed", del.error);
+      return [];
+    }
+    // The foreign key already clears these; said here too so the memory
+    // never points at a removed document whatever the database does.
+    const clear = await client.from("dispatch_v2_order_documents")
+      .update({ job_document_id: null })
+      .in("job_document_id", goneIds);
+    if (clear.error) log("replaced memory clear failed", clear.error);
+    const audit = await client.from("job_events").insert({
+      job_id: input.jobId,
+      user_id: input.operatorUserId ?? null,
+      event_type: "dispatch_v2_order_document_replaced",
+      detail_json: {
+        order_id: input.orderId,
+        kept_sha256: input.keepSha,
+        removed: gone,
+        trigger: input.trigger,
+      },
+    });
+    if (audit.error) log("replaced audit insert failed", audit.error);
+    return gone;
+  } catch (e) {
+    log("replace failed", e);
+    return [];
+  }
+}
+
+/** Latest only (Shaun, 11 Nov 2026): keep ONE supplier document per order on
+ * the job, the newest proper one (pickLatestSupplierDocument). When a newer
+ * one arrives it is saved and the older one this rule saved is taken off the
+ * job. Side files and older documents are never saved. order: a
+ * dispatch_supplier_order_emails row (id, job_id, supplier_id,
  * supplier_name). Never throws. */
 export async function saveDispatchSupplierDocuments(
   client: any,
@@ -607,29 +769,41 @@ export async function saveDispatchSupplierDocuments(
     found: 0,
     saved: [],
     skipped: [],
+    replaced: [],
   };
   try {
     const orderId = String(input.order.id);
     const listed = await listDispatchOrderPdfs(client, input.orgId, orderId);
     result.read = listed.read;
-    result.found = listed.candidates.length;
+    // Proper documents only: side files do not count, so an order whose
+    // supplier sent only a price list still gets our order sheet.
+    result.found = listed.candidates.filter((c) =>
+      !dispatchDocIsSideFile(c.file_name)
+    ).length;
     if (listed.candidates.length === 0) return result;
+    const chosen = pickLatestSupplierDocument(listed.candidates);
+    for (const c of listed.candidates) {
+      if (c === chosen) continue;
+      result.skipped.push({
+        sha256: c.sha256,
+        reason: dispatchDocIsSideFile(c.file_name) ? "side_file" : "not_latest",
+      });
+    }
+    if (!chosen) return result;
     const jobId = String(input.order.job_id);
-    // Files already on the job: skip them without a claim.
+    // Already on the job (or saved once and deleted by the office): no claim.
     const have = await client.from("dispatch_v2_order_documents")
       .select("content_sha256, state")
       .eq("job_id", jobId)
-      .in("content_sha256", listed.candidates.map((c) => c.sha256));
-    const already = new Set(
-      (have.error ? [] : have.data || []).filter((r: any) =>
-        r.state === "saved"
-      ).map((r: any) => String(r.content_sha256)),
+      .eq("content_sha256", chosen.sha256);
+    const already = (have.error ? [] : have.data || []).some((r: any) =>
+      r.state === "saved"
     );
-    for (const c of listed.candidates) {
-      if (already.has(c.sha256)) {
-        result.skipped.push({ sha256: c.sha256, reason: "already_saved" });
-        continue;
-      }
+    let onJob = already;
+    if (already) {
+      result.skipped.push({ sha256: chosen.sha256, reason: "already_saved" });
+    }
+    for (const c of already ? [] : [chosen]) {
       const saved = await saveDispatchOrderDocument(client, {
         orgId: input.orgId,
         jobId,
@@ -654,11 +828,13 @@ export async function saveDispatchSupplierDocuments(
           }
           return new Uint8Array(await data.arrayBuffer());
         },
+        latestOnly: true,
         trigger: input.trigger,
         operatorUserId: input.operatorUserId ?? null,
         now: input.now,
       });
       if (saved.saved) {
+        onJob = true;
         result.saved.push({
           job_document_id: saved.job_document_id,
           name: saved.name,
@@ -666,6 +842,17 @@ export async function saveDispatchSupplierDocuments(
       } else {
         result.skipped.push({ sha256: c.sha256, reason: saved.reason });
       }
+    }
+    // Only once the newest one is safely on the job (or already was) does
+    // the older one come off.
+    if (onJob) {
+      result.replaced = await removeReplacedSupplierDocuments(client, {
+        jobId,
+        orderId,
+        keepSha: chosen.sha256,
+        trigger: input.trigger,
+        operatorUserId: input.operatorUserId ?? null,
+      });
     }
     return result;
   } catch (e) {
@@ -701,6 +888,7 @@ export async function saveDispatchOrderPhotos(
     found: 0,
     saved: [],
     skipped: [],
+    replaced: [],
   };
   try {
     const ids: string[] = (Array.isArray(input.order?.photo_ids)
@@ -845,9 +1033,8 @@ export async function sweepDispatchV2OrderDocuments(
         now: input.now,
       });
       out.saved += r.saved.length;
-      out.failed += r.skipped.filter((s) => s.reason !== "already_saved" &&
-        s.reason !== "in_progress"
-      ).length;
+      out.failed += r.skipped.filter((s) => !DISPATCH_DOC_SKIP_OK.has(s.reason))
+        .length;
     }
     return out;
   } catch (e) {
