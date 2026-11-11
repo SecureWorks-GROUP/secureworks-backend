@@ -1550,6 +1550,41 @@ and assemble on the physical labour/materials pack path — matrix rows in
 `job_type: physical_makesafe` (same pattern as temporary_fencing). Evidence
 ruler: `physicalShapedFamily()` for both. Do not invent a weaker pack shape.
 
+## Restoration Is An SES Card With A Quote Stage, And Its Prices Live Off The Job
+
+Owner's word, 12 Nov 2026: restoration work is accepted through ses@. Contract:
+`docs/restoration-workflow-v1.md`. A restoration job is a make-safe board card
+(`SWMS-`, family `restoration`) in one of two modes read off the work order:
+`do_and_charge` (the existing pack path, unchanged) or `assess_and_quote`
+(report + quote, wait for the builder's yes, works, invoice). Rules:
+`restoration_workflow.ts`; reads and writes: `restoration_workflow_store.ts`;
+actions `restoration_*`. What must not regress:
+
+- **Intake.** Only the builder's own header declares restoration: an anchored
+  `Restoration` with no other type line and no `Make Safe` sub-line
+  (`extractPdfDeclaredType`). `Restoration` + `Make Safe` stays a make-safe
+  (Ruling 9), prose alone still parks (Ruling 15), AJ stays a make-safe.
+  `MLR-` is ML Builders' restoration job-number series: a second claim prefix
+  of the one `MLB` scope (key stays `MLB:PO-n`). It is NOT in
+  `REF_PREFIX_FLOOR` or the company row yet; that needs a migration.
+- **No quote money where a trade can read.** `jobs.metadata.restoration` and
+  the `restoration_*` job events are price-free (`restorationPlanForStorage`).
+  Lines and totals live only on the quote's own `job_documents` row (`type =
+  'other'`, `metadata.restoration_document = 'quote'`, never trade-visible;
+  `toggle_document_visibility` refuses to switch it on). A content hash binds
+  record to document; a mismatch refuses (`restoration_quote_mismatch`), and
+  only an interrupted draft is repaired by saving again.
+- **It prices nothing and sends nothing.** An approved quote reaches an invoice
+  only as the `commercial_quantity_override` object in the `restoration_plan`
+  read, passed unchanged to `prepare_ses_invoice_obligation`. Do not add an
+  invoice basis, a quote email or a board stage here. A quote the override
+  cannot carry (no labour line, two labour rates) is refused with the reason.
+- An approval needs the builder's person and where it can be read. Never
+  record one from inference.
+
+Tests: `restoration_intake_test.ts`, `restoration_workflow_test.ts`,
+`restoration_workflow_store_test.ts`.
+
 ## Repair Mints As A Real SWR- Job Type, Supervised, With No Backfill
 
 `jobs.type = 'repair'` with SWR- numbering is live (PR #771, deployed 2026-08-28;

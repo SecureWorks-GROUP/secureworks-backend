@@ -128,3 +128,70 @@ Deno.test("declared type: empty and headerless text abstain", () => {
     null,
   );
 });
+
+// Owner's word 12 Nov 2026: restoration work is accepted through ses@. The
+// header shape is the live MLB restoration allocation (read-only production
+// check the same day: every "Restoration" + "Restoration" work order on file
+// is restoration work; "Restoration" + "Make Safe" is the Ruling 9 make-safe).
+Deno.test("declared type: Restoration + Restoration under the anchor declares restoration", () => {
+  const read = extractPdfDeclaredType(
+    [
+      "Work Order",
+      "Work Order Assigned Secureworks Group Pty Ltd Work Order Number MLR-40001PO-60001",
+      "Policyholders Name EXAMPLE PERSON",
+      "Site Address 1 EXAMPLE WAY, Suburb, WA 6000",
+      "Allocation Work Order",
+      "MLR-40001PO-60001",
+      "Restoration",
+      "Restoration",
+      "Please attend to inspect damage to the bedroom and provide a quote for structural drying.",
+      "Totals Totals",
+    ].join("\n"),
+  );
+  assertEquals(read.declaredType, "restoration");
+  assertEquals(read.restorationLabel, true);
+  assertEquals(read.anchored, true);
+  assertEquals(read.fenceSubtype, false);
+});
+
+Deno.test("declared type: a single anchored Restoration line declares restoration", () => {
+  const read = extractPdfDeclaredType(
+    woPdfText(["Restoration"], "Please attend to dry carpets after burst pipe"),
+  );
+  assertEquals(read.declaredType, "restoration");
+});
+
+Deno.test("declared type: Restoration beside another type line never moves that type", () => {
+  const roof = extractPdfDeclaredType(
+    woPdfText(["Restoration", "Roof Reports EXTERNAL"], "scope"),
+  );
+  assertEquals(roof.declaredType, "roof");
+  assertEquals(roof.restorationLabel, true);
+  const conflict = extractPdfDeclaredType(
+    woPdfText(
+      ["Restoration", "Roof Reports", "Assessment Report & Quote"],
+      "scope",
+    ),
+  );
+  assertEquals(conflict.declaredType, null);
+});
+
+Deno.test("declared type: an unanchored Restoration line declares nothing", () => {
+  const read = extractPdfDeclaredType(
+    ["Some Other Layout", "Restoration", "Restoration", "words"].join("\n"),
+  );
+  assertEquals(read.declaredType, null);
+  assertEquals(read.restorationLabel, true);
+});
+
+Deno.test("declared type: restoration wording inside the scope never fires the header", () => {
+  const read = extractPdfDeclaredType(
+    woPdfText(
+      ["Makesafe/Emergency Repairs", "Make Safe"],
+      "Restoration",
+    ),
+  );
+  // The scope line sits inside the scan window as its own line; a real type
+  // line is present, so the label only corroborates (Ruling 9).
+  assertEquals(read.declaredType, "makesafe");
+});

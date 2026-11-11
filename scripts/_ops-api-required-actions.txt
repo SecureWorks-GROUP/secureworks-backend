@@ -232,6 +232,16 @@ quote_builder_pdf_upload_url     # probe=source-only
 quote_builder_issue              # probe=source-only
 quote_builder_decide_variation   # probe=source-only
 
+# ── Restoration work on the SES board (docs/restoration-workflow-v1.md) ──
+# The SecureSuite sw_restoration_* tools depend on every one. They read or
+# write a job's restoration plan and priced quote, so all are source-only: no
+# smoke run may call them against production.
+restoration_plan                  # probe=source-only
+restoration_set_plan              # probe=source-only
+restoration_save_quote            # probe=source-only
+restoration_mark_quote_sent       # probe=source-only
+restoration_record_quote_decision # probe=source-only
+
 # ── Trade authenticated surface ──
 # Post-deploy recognition uses API-key-only GET requests and must fail closed at
 # authTrade before any tenant read or invoice submission path can run.

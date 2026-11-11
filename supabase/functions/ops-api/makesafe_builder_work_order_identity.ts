@@ -16,10 +16,13 @@ export interface BuilderWorkOrderIdentity {
 
 // ABJR is a live-mail typo of AJBR (Track A D7): both spellings are read and
 // canonicalClaim collapses them onto the one AJBR identity.
+// MLR is ML Builders' restoration job-number series (first seen 9 Nov 2026:
+// "MLR-41228", work order "MLR-41228PO-64545"). It is a second claim prefix of
+// the one MLB scope: the claim keeps its MLR- spelling, the key stays MLB:PO-n.
 const BUILDER_REF_WITH_PO_RE =
-  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB(?:[-\s]+(?!PO(?:[-\s#]|$))[A-Z]{2})?|BWCWA|BWC|WB|KBA|ACG)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?P\s*O\s*[-_\s#]*(\d{3,})(?![A-Z0-9])/i;
+  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB(?:[-\s]+(?!PO(?:[-\s#]|$))[A-Z]{2})?|MLR|BWCWA|BWC|WB|KBA|ACG)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?P\s*O\s*[-_\s#]*(\d{3,})(?![A-Z0-9])/i;
 const BUILDER_REF_RE =
-  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB(?:[-\s]+(?!PO(?:[-\s#]|$))[A-Z]{2})?|BWCWA|BWC|WB|KBA|ACG)[-\s#]*(\d{3,})(?![A-Z0-9])/i;
+  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB(?:[-\s]+(?!PO(?:[-\s#]|$))[A-Z]{2})?|MLR|BWCWA|BWC|WB|KBA|ACG)[-\s#]*(\d{3,})(?![A-Z0-9])/i;
 
 /**
  * Ambrose Construct Group (`makesafe_companies.slug = 'acg'`) numbers each
@@ -711,7 +714,7 @@ export function builderInstructionScope(input: {
   if (/^BWC(WA)?$/.test(prefix)) return "BWCWA";
   // MLB routes work through two-letter business units (MLB-RR, MLB-MW). The
   // unit is a routing label inside one builder, never a separate scope.
-  if (/^MLB(-[A-Z]{2})?$/.test(prefix)) return "MLB";
+  if (/^MLB(-[A-Z]{2})?$/.test(prefix) || prefix === "MLR") return "MLB";
   if (prefix === "WB") return "WB";
   if (prefix === "KBA") return "KBA";
   if (prefix === "ACG") return "ACG";
