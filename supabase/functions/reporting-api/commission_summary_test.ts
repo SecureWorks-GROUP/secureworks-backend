@@ -39,7 +39,7 @@ function job(id: string, extra: Record<string, unknown> = {}) {
     id,
     type: "fencing",
     client_name: `Client ${id}`,
-    job_number: `SWF-${id}`,
+    job_number: `ZZTEST-${id}`,
     // A price and a stored margin that the old formula multiplied out:
     // 0.15 x 0.289 x 11000 = 476.85. The saved commission below is not that.
     pricing_json: { totalIncGST: 11000, margin_pct: 28.9 },
@@ -104,7 +104,7 @@ Deno.test("Saved: a job pays its accepted quote's saved commission, not price x 
 });
 
 Deno.test("Saved: a scoper's edited percentage is paid as saved", () => {
-  // The scoper typed 20% of a $2,000 gross profit: $400 saved on the quote.
+  // The scoper edited the percentage; the quote saved the resulting figure.
   const out = build([job("a")], { a: "2026-11-05" }, [
     profit("a", { expected_commission_ex: 400 }),
   ]);
