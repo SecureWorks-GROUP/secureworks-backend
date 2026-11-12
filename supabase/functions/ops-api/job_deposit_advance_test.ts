@@ -734,6 +734,27 @@ Deno.test("deposit paid: patio with council not needed or undecided goes to Orde
   }
 });
 
+Deno.test("deposit paid: the live move's job event carries the council mark at that moment", async () => {
+  for (
+    const [council, label] of [
+      [true, "needs council"],
+      [false, "no council"],
+      [null, "not answered"],
+    ] as const
+  ) {
+    const { db, deps, moves } = setup("live");
+    const job = addJob(db, { type: "patio", council_required: council });
+    addDeposit(db, job);
+    const r = await depositOnInvoiceChange(deps, { job_id: job.id });
+    assertEquals(r.action, "moved");
+    assertEquals(moves.length, 1);
+    assertEquals(moves[0].event_detail, {
+      council_required: council,
+      council_required_label: label,
+    });
+  }
+});
+
 Deno.test("deposit paid: dry_run moves and texts nothing and records once", async () => {
   const { db, deps, moves, sms } = setup("dry_run");
   const job = addJob(db);

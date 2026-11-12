@@ -41,6 +41,7 @@
 // deposit_advance_dry_run (once per job, from status and target) and nothing moves or is
 // texted. live: jobs move. The database switch alone decides.
 
+import { councilMarkLabel } from "./council_mark.ts";
 import {
   DEPOSIT_FLAG_STATUSES,
   DEPOSIT_LAND_FROM_STATUSES,
@@ -501,6 +502,11 @@ async function settlePaid(
     source: DEPOSIT_PAID_SOURCE,
     expected_statuses: [...DEPOSIT_PAID_FROM_STATUSES],
     skip_ghl_push: true,
+    // The council mark as it stood at the move, on the move's own job event.
+    event_detail: {
+      council_required: job.council_required ?? null,
+      council_required_label: councilMarkLabel(job.council_required),
+    },
   });
   if (moved?.success !== true) {
     return {
