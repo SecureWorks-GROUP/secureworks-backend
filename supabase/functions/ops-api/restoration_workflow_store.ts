@@ -258,19 +258,49 @@ async function loadRestorationJob(
   }
   const detailResponse = await client.from("makesafe_job_details")
     .select(
-      "job_id, external_ref, requesting_company_name, requesting_company_slug, special_instructions",
+      "job_id, external_ref, requesting_company_id, requesting_company_name, requesting_company_slug, special_instructions",
     )
     .eq("job_id", job.id).maybeSingle();
   if (detailResponse.error) {
     readFailed("The job's builder details", detailResponse.error);
   }
-  const detail = detailResponse.data || null;
+  const detail = detailResponse.data
+    ? { ...detailResponse.data, ...(await builderCompanyName(client, detailResponse.data)) }
+    : null;
   const scopeText = restorationScopeText(job, detail);
   const { plan, stored } = readRestorationPlan(
     await withFiledQuoteContent(client, job, options),
     scopeText,
   );
   return { job, detail, scopeText, plan, stored };
+}
+
+// The builder's proper name (makesafe_companies.name). requesting_company_name
+// on the detail row often holds the slug ("mlb"), which must never be printed
+// on a quote. A failed read keeps the detail as it was.
+async function builderCompanyName(
+  client: any,
+  detail: any,
+): Promise<{ requesting_company_display_name?: string }> {
+  const companyId = text(detail?.requesting_company_id);
+  if (!companyId) return {};
+  try {
+    const { data, error } = await client.from("makesafe_companies")
+      .select("name").eq("id", companyId).maybeSingle();
+    if (error || !text(data?.name)) return {};
+    return { requesting_company_display_name: text(data.name) };
+  } catch {
+    return {};
+  }
+}
+
+function builderName(job: any, detail: any): string | null {
+  const display = text(detail?.requesting_company_display_name);
+  if (display) return display;
+  const name = text(detail?.requesting_company_name);
+  const slug = text(detail?.requesting_company_slug);
+  if (name && name.toLowerCase() !== slug.toLowerCase()) return name;
+  return text(record(record(job.metadata).requesting_company).name) || name || null;
 }
 
 function actorFor(
@@ -457,8 +487,7 @@ function jobSummary(job: any, detail: any): Record<string, unknown> {
     site_address: siteAddress(job) || null,
     builder_reference: builderReference(job, detail),
     builder_purchase_order: builderPurchaseOrder(job),
-    builder_name: text(detail?.requesting_company_name) ||
-      text(record(record(job.metadata).requesting_company).name) || null,
+    builder_name: builderName(job, detail),
   };
 }
 
@@ -550,8 +579,7 @@ async function fileQuoteDocument(
     job_number: text(job.job_number),
     builder_reference: builderReference(job, detail),
     builder_purchase_order: builderPurchaseOrder(job),
-    builder_name: text(detail?.requesting_company_name) ||
-      text(record(record(job.metadata).requesting_company).name) || null,
+    builder_name: builderName(job, detail),
     attention: text(body?.attention) || null,
     site_address: siteAddress(job),
     insured_name: text(job.client_name) || null,
