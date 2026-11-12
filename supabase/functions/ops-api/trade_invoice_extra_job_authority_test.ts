@@ -203,7 +203,7 @@ function assertRefused(out: Captured, code: string, jobRef: string) {
   assertEquals(out.body.code, code);
   assertEquals(out.body.saved, false);
   assertStringIncludes(out.body.userMessage, jobRef);
-  assertStringIncludes(out.body.userMessage.toLowerCase(), "ask the office to add you");
+  assertStringIncludes(out.body.userMessage.toLowerCase(), "ask the office");
   assertEquals(out.writes, [], "nothing is written");
 }
 
@@ -226,6 +226,10 @@ Deno.test("extra job rules: four named rules, in order", () => {
   assertEquals(extraJobBillingRule({ lineType: "labour", job: base, trade }), null);
   assertEquals(extraJobBillingRule({ lineType: "labour", job: { ...base, bookedOn: true }, trade }), "booked_on_job");
   assertEquals(extraJobBillingRule({ lineType: "commission", job: { ...base, createdBy: TRADE_ID }, trade }), "commission_on_job_they_created");
+  // Being booked on a job never allows commission (Marnin, 11 Nov 2026).
+  assertEquals(extraJobBillingRule({ lineType: "commission", job: { ...base, bookedOn: true }, trade }), null);
+  assertEquals(extraJobBillingRule({ lineType: "commission", job: base, trade: { ...trade, managedVerticals: ["fencing"] } }), "manages_job_division");
+  assertEquals(extraJobBillingRule({ lineType: "commission", job: base, trade: { ...trade, invoiceAnyJob: true } }), "invoice_any_job_grant");
   // A job they created allows a commission line only.
   assertEquals(extraJobBillingRule({ lineType: "labour", job: { ...base, createdBy: TRADE_ID }, trade }), null);
   assertEquals(extraJobBillingRule({ lineType: "commission", job: { ...base, createdBy: null }, trade: { ...trade, id: "" } }), null);
@@ -259,8 +263,38 @@ handlerTest("extra job: a cancelled card or a ghost watcher row is not a booking
 handlerTest("extra job: commission on a job they created is accepted; other lines on it are not", async () => {
   assertAccepted(await submit([line({ job_id: CREATED }, "Commission")]));
   assertRefused(await submit([line({ job_id: CREATED }, "Labour")]), "extra_job_not_allowed", "ZZF-1003");
-  // Commission on a job somebody else created, not booked: refused.
-  assertRefused(await submit([line({ job_id: NOT_BOOKED }, "Commission")]), "extra_job_not_allowed", "ZZF-1002");
+  // Commission on a job somebody else created, not booked: refused as
+  // commission, never as "add yourself to the job".
+  const notBooked = await submit([line({ job_id: NOT_BOOKED }, "Commission")]);
+  assertRefused(notBooked, "commission_not_allowed", "ZZF-1002");
+  assertEquals(notBooked.body.jobs, []);
+  assertEquals(notBooked.body.commission_jobs, ["ZZF-1002"]);
+  assertStringIncludes(notBooked.body.userMessage, "Commission can only be claimed on a job you created");
+});
+
+handlerTest("extra job: being booked on a job does not allow commission on it", async () => {
+  // Ordinary lines on a job they are booked on still go through.
+  assertAccepted(await submit([line({ job_id: BOOKED })]));
+  const out = await submit([line({ job_id: BOOKED }, "Commission")]);
+  assertRefused(out, "commission_not_allowed", "ZZF-1001");
+  assertEquals(out.body.commission_jobs, ["ZZF-1001"]);
+});
+
+handlerTest("extra job: commission in a division they manage, or with the grant, is accepted", async () => {
+  assertAccepted(await submit([line({ job_id: NOT_BOOKED }, "Commission")], { managedVerticals: ["fencing"] }));
+  assertAccepted(await submit([line({ job_id: NOT_BOOKED }, "Commission")], { invoiceAnyJob: true }));
+});
+
+handlerTest("extra job: a not-booked job and a refused commission are both named", async () => {
+  const out = await submit([
+    line({ job_id: NOT_BOOKED }),
+    line({ job_id: BOOKED }, "Commission"),
+  ]);
+  assertRefused(out, "extra_job_not_allowed", "ZZF-1002");
+  assertEquals(out.body.jobs, ["ZZF-1002"]);
+  assertEquals(out.body.commission_jobs, ["ZZF-1001"]);
+  assertStringIncludes(out.body.userMessage, "Commission can only be claimed on a job you created");
+  assertStringIncludes(out.body.userMessage, "ZZF-1001");
 });
 
 handlerTest("extra job: a job in a division they manage is accepted", async () => {
@@ -314,6 +348,7 @@ handlerTest("extra job: one refused line refuses the whole batch", async () => {
   ]);
   assertRefused(out, "extra_job_not_allowed", "ZZF-1002");
   assertEquals(out.body.jobs, ["ZZF-1002"]);
+  assertEquals(out.body.commission_jobs, []);
 });
 
 handlerTest("extra job: a line that names no job is not a job claim and is not checked", async () => {
@@ -343,7 +378,7 @@ handlerTest("extra job: a padded commission type is checked and saved as the sam
   assertAccepted(out);
   assertEquals(out.lineRows.map((row) => row.line_type), ["commission"]);
   // Padded, on a job they did not create: refused, not read as something else.
-  assertRefused(await submit([line({ job_id: NOT_BOOKED }, " Commission ")]), "extra_job_not_allowed", "ZZF-1002");
+  assertRefused(await submit([line({ job_id: NOT_BOOKED }, " Commission ")]), "commission_not_allowed", "ZZF-1002");
 });
 
 handlerTest("extra job: a whitespace job number on a no-week ordinary line is refused, nothing written", async () => {

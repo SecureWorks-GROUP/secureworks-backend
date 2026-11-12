@@ -111,7 +111,7 @@ screens are live. Until then no trade is locked out of invoicing.
 | 3 | `generate_trade_invoice` | auto-collected clock lane (no job cards sent) | direct insert | nowhere: nobody typed the line, so it carries no entry |
 | 4 | `save_trade_invoice_draft` | no week | direct insert | the request, stored as sent |
 | 5 | `save_trade_invoice_draft` | dated week | `persist_weekly_trade_invoice_v3` (calls v2, which stamps the times) | the request, stored as sent |
-| 6 | `submit_trade_invoice` | legacy hourly lane | direct insert | nowhere: nobody typed the line, so it carries no entry |
+| 6 | `submit_trade_invoice` | retired 11 Nov 2026: 410 `use_weekly_invoice`, writes nothing | none | none |
 
 Not time lines, unchanged: the weekly work-order invoice (`work_order_blocks`:
 priced scope lines, crew deductions and `labour_deduction` lines),
@@ -190,6 +190,9 @@ hours?, assignment_id? }`.
 - They are a record of their own, never an invoice line's entry. The server
   does not copy them onto a line on any lane: the Weekly Invoice card can open
   on them, and the trade confirms and submits them as that line's entry.
+- Since 11 Nov 2026 the trade app also saves them at clock off (`source:
+  clock_off`), after asking the trade about a break and showing the start and
+  finish for them to confirm, and the Weekly Invoice card opens on them.
 - They are listed against the job straight away: see "Stamped against the
   job".
 
