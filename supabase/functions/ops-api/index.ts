@@ -10100,7 +10100,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // UI can show the "see admin" message and machine-read the code.
         return json(cancelResult, cancelResult?.ok === false ? 409 : 200)
       }
-      case 'update_job_status': return json(await updateJobStatus(client, body))
+      case 'update_job_status': {
+        const { event_detail: _ujsEventDetail, ...ujsBody } = body
+        return json(await updateJobStatus(client, ujsBody))
+      }
       // Repairs board stage move. Guarded to staff operators and deliberately
       // absent from ROUTINE_ALLOWED_ACTIONS, so the routine key is refused by
       // the default-deny above: an autonomous loop may not reshuffle the board.
