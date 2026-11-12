@@ -12,6 +12,12 @@
 // checks. A line that names no job (an adjustment) is not a job claim and is
 // not checked here.
 //
+// Commission (Marnin, 11 Nov 2026) is an extra line a trade may add only on a
+// job they created, a job in a division they manage, or with the office's
+// invoice-any-job grant. Being booked on the job does not allow commission.
+// tradeMayClaimCommission is the read the trade app is given
+// (trade_invoice_mode.ts); it runs this same list.
+//
 // The rules are the owner's to change: edit this list, with a test.
 // deno-lint-ignore-file no-explicit-any
 
@@ -43,13 +49,16 @@ export const EXTRA_JOB_BILLING_RULES: ReadonlyArray<{
   allows: (c: ExtraJobBillingCase) => boolean;
 }> = [
   // (a) The trade has a live assignment on the job (not cancelled, not a
-  //     ghost watcher row).
-  { name: "booked_on_job", allows: (c) => c.job.bookedOn },
+  //     ghost watcher row). Any line but commission.
+  {
+    name: "booked_on_job",
+    allows: (c) => c.job.bookedOn && !isCommissionLine(c.lineType),
+  },
   // (b) A commission line on a job the trade created.
   {
     name: "commission_on_job_they_created",
     allows: (c) =>
-      c.lineType === "commission" && !!c.job.createdBy &&
+      isCommissionLine(c.lineType) && !!c.job.createdBy &&
       c.job.createdBy === c.trade.id,
   },
   // (c) The job is in a division the trade manages, or the trade is a
@@ -64,8 +73,42 @@ export const EXTRA_JOB_BILLING_RULES: ReadonlyArray<{
   { name: "invoice_any_job_grant", allows: (c) => c.trade.invoiceAnyJob },
 ];
 
+export function isCommissionLine(lineType: string): boolean {
+  return String(lineType || "").trim().toLowerCase() === "commission";
+}
+
+// The commission lines of an invoice, ex GST: what carries no super (Marnin,
+// 12 Nov 2026). Reads each line's saved line_type through isCommissionLine,
+// so a saved line and the line about to be saved are read the same way.
+export function commissionLinesTotalEx(
+  lines: ReadonlyArray<{ line_type?: unknown; line_total_ex?: unknown }>,
+): number {
+  const cents = (lines || []).reduce((sum, line) => {
+    if (!isCommissionLine(String(line?.line_type ?? ""))) return sum;
+    const amount = Number(line?.line_total_ex ?? 0);
+    return Number.isFinite(amount) ? sum + Math.round(amount * 100) : sum;
+  }, 0);
+  return cents / 100;
+}
+
 export function extraJobBillingRule(c: ExtraJobBillingCase): string | null {
   return EXTRA_JOB_BILLING_RULES.find((rule) => rule.allows(c))?.name ?? null;
+}
+
+// May this trade add a commission line on this job? The same rule list, asked
+// for a commission line; booking plays no part.
+export function tradeMayClaimCommission(input: {
+  job: Omit<ExtraJobBillingJob, "bookedOn">;
+  trade: Omit<ExtraJobBillingTrade, "isMakesafeManager">;
+}): boolean {
+  return extraJobBillingRule({
+    lineType: "commission",
+    job: { ...input.job, bookedOn: false },
+    trade: {
+      ...input.trade,
+      isMakesafeManager: input.trade.managedVerticals.includes("makesafe"),
+    },
+  }) !== null;
 }
 
 // The line's type, decided once. The same value is checked here, read by the
@@ -97,17 +140,27 @@ export function normaliseExtraItem(item: any): any {
   };
 }
 
+export type ExtraJobBillingRefusalCode =
+  | "extra_job_not_found"
+  | "extra_job_not_allowed"
+  | "commission_not_allowed";
+
 export class ExtraJobBillingRefusal extends Error {
-  code: "extra_job_not_found" | "extra_job_not_allowed";
+  code: ExtraJobBillingRefusalCode;
+  // Jobs refused because the trade is not on them (adding themselves helps).
   jobs: string[];
+  // Jobs whose commission line was refused (adding themselves does not help).
+  commissionJobs: string[];
   constructor(
-    code: "extra_job_not_found" | "extra_job_not_allowed",
+    code: ExtraJobBillingRefusalCode,
     jobs: string[],
     message: string,
+    commissionJobs: string[] = [],
   ) {
     super(message);
     this.code = code;
     this.jobs = jobs;
+    this.commissionJobs = commissionJobs;
   }
 }
 
@@ -127,13 +180,38 @@ export function extraJobNotFoundRefusal(refs: string[]): ExtraJobBillingRefusal 
   );
 }
 
-export function extraJobNotAllowedRefusal(refs: string[]): ExtraJobBillingRefusal {
+const COMMISSION_ONLY_ON_OWN_JOB =
+  "Commission can only be claimed on a job you created.";
+
+// `refs`: ordinary lines on jobs the trade is not on. `commissionRefs`:
+// commission lines on jobs the trade did not create (and does not manage,
+// and holds no grant for). With only commission refused the code is
+// commission_not_allowed, so the app never offers to add them to the job.
+export function extraJobNotAllowedRefusal(
+  refs: string[],
+  commissionRefs: string[] = [],
+): ExtraJobBillingRefusal {
   const unique = [...new Set(refs)];
+  const commission = [...new Set(commissionRefs)];
+  if (unique.length === 0) {
+    return new ExtraJobBillingRefusal(
+      "commission_not_allowed",
+      [],
+      `This invoice was not saved. ${COMMISSION_ONLY_ON_OWN_JOB} ` +
+        `Take the commission line off ${jobList(commission)}, or ask the office, then submit again.`,
+      commission,
+    );
+  }
+  const commissionNote = commission.length > 0
+    ? ` ${COMMISSION_ONLY_ON_OWN_JOB} Take the commission line off ${jobList(commission)}.`
+    : "";
   return new ExtraJobBillingRefusal(
     "extra_job_not_allowed",
     unique,
     `This invoice was not saved. You are not booked on ${jobList(unique)}. ` +
-      "Ask the office to add you to the job, then submit again.",
+      "Add yourself to the job on your invoice (pick the job again), or ask the office, then submit again." +
+      commissionNote,
+    commission,
   );
 }
 
@@ -189,6 +267,7 @@ export async function assertTradeMayBillExtraJobs(
   let invoiceAnyJob: boolean | null = null;
   const passed: string[] = [];
   const refused: string[] = [];
+  const refusedCommission: string[] = [];
   for (const line of lines) {
     const row = jobs.get(String(line.job!.id));
     const job: ExtraJobBillingJob = {
@@ -217,8 +296,12 @@ export async function assertTradeMayBillExtraJobs(
       });
     }
     if (rule) passed.push(rule);
-    else refused.push(String(row.job_number || line.ref));
+    else if (isCommissionLine(line.lineType)) {
+      refusedCommission.push(String(row.job_number || line.ref));
+    } else refused.push(String(row.job_number || line.ref));
   }
-  if (refused.length > 0) throw extraJobNotAllowedRefusal(refused);
+  if (refused.length > 0 || refusedCommission.length > 0) {
+    throw extraJobNotAllowedRefusal(refused, refusedCommission);
+  }
   return passed;
 }

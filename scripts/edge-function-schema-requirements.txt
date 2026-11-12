@@ -1134,6 +1134,15 @@ ops-api|supabase/migrations/20261105170000_dispatch_v2_outlook_orders.sql|functi
 ops-api|supabase/migrations/20261106120000_dispatch_v2_outlook_order_on_send.sql|column|dispatch_v2_reply_scan_state.sent_orders_since
 ops-api|supabase/migrations/20261106120000_dispatch_v2_outlook_order_on_send.sql|index|dispatch_supplier_order_emails_source_event_supplier_idx
 ops-api|supabase/migrations/20261106120000_dispatch_v2_outlook_order_on_send.sql|function|dispatch_v2_record_outlook_order_on_send
+# Solarspan is Bondor (Shaun, 11 Nov 2026): the approved list's recognise-only
+# addresses. ops-api's Outlook send rule and reply scan select the column (a
+# 42703 there would leave the send rule failing and the reply scan with no
+# approved senders), and the email reader's supplier domains
+# (_shared/evidence/outlook_partners.ts) select it in outlook-mail-capture and
+# context-capture-census, where a failed read stops the partner list.
+ops-api|supabase/migrations/20261111160000_dispatch_v2_solarspan_as_bondor.sql|column|dispatch_approved_supplier_emails.also_known_emails
+outlook-mail-capture|supabase/migrations/20261111160000_dispatch_v2_solarspan_as_bondor.sql|column|dispatch_approved_supplier_emails.also_known_emails
+context-capture-census|supabase/migrations/20261111160000_dispatch_v2_solarspan_as_bondor.sql|column|dispatch_approved_supplier_emails.also_known_emails
 #
 # Dispatch v2 Tweak 2 piece 2: the job number in a supplier's stored PDF, saved
 # with the rung pdf_job_number (dispatch_v2_replies.ts, dispatch_v2_reply_pdf.ts).
@@ -1207,3 +1216,6 @@ ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|functi
 ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|function|revoke_job_deposit_gate_override
 send-po-email|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|table|job_deposit_gate_overrides
 send-po-email|supabase/migrations/20261106040518_scope_job_drafts.sql|table|scope_job_draft_invoices
+ops-api|supabase/migrations/20261112090000_trade_invoice_commission_super_base.sql|column|trade_invoices.super_base_ex
+ops-api|supabase/migrations/20261112090000_trade_invoice_commission_super_base.sql|constraint|trade_invoices_super_gst_split_check
+xero-sync|supabase/migrations/20261112090000_trade_invoice_commission_super_base.sql|column|trade_invoices.super_base_ex

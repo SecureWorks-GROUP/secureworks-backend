@@ -722,11 +722,14 @@ Deno.test("an unreadable office review after invoice save is marked retryable", 
     spots.push(at);
     from = at + needle.length;
   }
-  assertEquals(spots.length, 4);
+  // The import plus one call site per saving invoice door:
+  // generate_trade_invoice and submit_work_order_invoice.
+  // submit_trade_invoice is retired (410 use_weekly_invoice, 11 Nov 2026).
+  assertEquals(spots.length, 3);
   const callSites = spots.filter((at) =>
     source.slice(Math.max(0, at - 280), at).includes("markTradeInvoiceRetryable")
   );
-  assertEquals(callSites.length, 3);
+  assertEquals(callSites.length, 2);
   for (const at of callSites) {
     const before = source.slice(Math.max(0, at - 280), at);
     const after = source.slice(at, at + 220);

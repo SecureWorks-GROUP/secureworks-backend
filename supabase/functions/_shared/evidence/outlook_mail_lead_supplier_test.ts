@@ -241,3 +241,35 @@ Deno.test("a no-email supplier's order mail from its no-reply address is supplie
     senderKind: "automated",
   });
 });
+
+Deno.test("an approved supplier's recognise-only address names its domain as a supplier (Solarspan on Bondor, 11 Nov 2026)", async () => {
+  const selected: string[] = [];
+  const sb: PartnerClient = {
+    rpc: async () => ({ data: [], error: null }),
+    from: (table: string) => ({
+      select: (cols: string) => {
+        selected.push(`${table}:${cols}`);
+        return {
+          eq: async () => ({
+            data: table === "dispatch_approved_supplier_emails"
+              ? [{
+                to_emails: ["wa@bondor.com.au"],
+                cc_emails: [],
+                also_known_emails: ["wasales@solarspan.com.au"],
+              }]
+              : [],
+            error: null,
+          }),
+        };
+      },
+    }),
+  };
+  const p = await loadTradingPartners(sb);
+  assert(p.supplierDomains.has("bondor.com.au"));
+  assert(p.supplierDomains.has("solarspan.com.au"));
+  assert(
+    selected.includes(
+      "dispatch_approved_supplier_emails:to_emails,cc_emails,also_known_emails",
+    ),
+  );
+});

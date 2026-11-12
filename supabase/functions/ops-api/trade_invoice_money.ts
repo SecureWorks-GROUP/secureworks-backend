@@ -68,6 +68,11 @@ export type TradeInvoiceMoney = {
   // Group shares only (owner, 30 Oct 2026): the company pays all 12% super
   // inside the share, so nothing is withheld and net pay equals gross.
   super_basis?: TradeInvoiceSuperBasis | null;
+  // No super on commission (Marnin, 12 Nov 2026): the amount super is charged
+  // on when the invoice carries commission lines (gross less commission, never
+  // below 0). Absent or null: super is on the whole gross, as on every invoice
+  // before trade_invoices.super_base_ex existed.
+  super_base_ex?: number | null;
   // Absent or null on every invoice that carries no recurring deduction.
   recurring_deduction?: TradeInvoiceRecurringDeduction | null;
 };
@@ -121,10 +126,15 @@ function assertPayableSplitRates(): void {
   }
 }
 
-/** Current payable split (Captain 2026-09-18): 6% withheld from cash, 6% company. */
+/**
+ * Current payable split (Captain 2026-09-18): 6% withheld from cash, 6%
+ * company. Both are on the super base, which is the whole gross unless the
+ * invoice carries commission (Marnin, 12 Nov 2026: no super on commission).
+ */
 export function tradeInvoiceCurrentPayableSplit(
   grossEarned: number,
   superRate: number,
+  superBaseEx: number = grossEarned,
 ): {
   super_amount: number;
   worker_withhold: number;
@@ -134,8 +144,9 @@ export function tradeInvoiceCurrentPayableSplit(
 } {
   assertPayableSplitRates();
   const gross = round2(grossEarned);
-  const superAmount = round2(gross * superRate);
-  const workerWithhold = round2(gross * TRADE_INVOICE_WORKER_WITHHOLD_RATE);
+  const base = round2(superBaseEx);
+  const superAmount = round2(base * superRate);
+  const workerWithhold = round2(base * TRADE_INVOICE_WORKER_WITHHOLD_RATE);
   const companyContribution = round2(superAmount - workerWithhold);
   if (workerWithhold < 0 || companyContribution < 0) {
     throw new TradeInvoiceMoneyError(
@@ -182,11 +193,51 @@ function netPayMatchesKnownPayableSplit(
   superAmount: number,
   netPay: number,
   superRate: number,
+  superBaseEx: number | null,
 ): boolean {
+  // An invoice that stores a super base was priced after 12 Nov 2026, on the
+  // current split only. One without is checked exactly as before.
+  if (superBaseEx !== null) {
+    return closeMoney(
+      netPay,
+      tradeInvoiceCurrentPayableSplit(gross, superRate, superBaseEx).net_pay,
+    );
+  }
   const current = tradeInvoiceCurrentPayableSplit(gross, superRate);
   const legacyFullCarveOut = round2(gross - superAmount);
   return closeMoney(netPay, current.net_pay) ||
     closeMoney(netPay, legacyFullCarveOut);
+}
+
+/**
+ * The super base for an invoice whose commission lines total `commissionEx`
+ * (Marnin, 12 Nov 2026: no super on commission). null when there is no
+ * commission to leave out, so the invoice stores nothing new and super is on
+ * the whole gross. Never below 0. Which lines are commission is decided by
+ * the caller through the one line-type rule (isCommissionLine).
+ */
+export function tradeInvoiceSuperBaseEx(
+  grossEarned: number,
+  commissionEx: unknown,
+): number | null {
+  const commission = round2(Number(commissionEx ?? 0));
+  if (!Number.isFinite(commission) || commission <= 0) return null;
+  const gross = round2(grossEarned);
+  const base = Math.max(0, round2(gross - commission));
+  return base < gross ? base : null;
+}
+
+/** A stored super base, or null when the invoice has none. */
+export function persistedTradeInvoiceSuperBaseEx(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const base = Number(value);
+  if (!Number.isFinite(base)) {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_INVALID",
+      "Trade invoice super_base_ex is invalid",
+    );
+  }
+  return round2(base);
 }
 
 function validDateOnly(raw: unknown): string | null {
@@ -232,6 +283,9 @@ export function calculateTradeInvoiceMoney(input: {
   gstOn: unknown;
   earningsDate: unknown;
   superBasis?: unknown;
+  // The invoice's commission lines, ex GST. Commission is gross but carries no
+  // super (Marnin, 12 Nov 2026). Absent or 0: super on the whole gross.
+  commissionEx?: unknown;
 }): TradeInvoiceMoney {
   const superBasis = resolveTradeInvoiceSuperBasis(input.superBasis);
   const grossEarned = Number(input.grossEarned);
@@ -259,9 +313,11 @@ export function calculateTradeInvoiceMoney(input: {
   }
 
   const gross = round2(grossEarned);
+  const superBaseEx = tradeInvoiceSuperBaseEx(gross, input.commissionEx);
+  const base = superBaseEx ?? gross;
   const split = superBasis
-    ? employerSuperSplit(gross, superRate)
-    : tradeInvoiceCurrentPayableSplit(gross, superRate);
+    ? employerSuperSplit(gross, superRate, base)
+    : tradeInvoiceCurrentPayableSplit(gross, superRate, base);
   // GST remains 10% of the original contractor supply (gross earned). Super is
   // a split of that amount, not an extra taxable amount. total_inc stays the
   // GST-inclusive supply face (gross + GST), not company total out.
@@ -280,11 +336,12 @@ export function calculateTradeInvoiceMoney(input: {
     total_inc: round2(gross + gstAmount),
     company_total_out: split.company_total_out,
     ...(superBasis ? { super_basis: superBasis } : {}),
+    ...(superBaseEx !== null ? { super_base_ex: superBaseEx } : {}),
   };
 }
 
-function employerSuperSplit(gross: number, superRate: number) {
-  const superAmount = round2(gross * superRate);
+function employerSuperSplit(gross: number, superRate: number, superBaseEx: number = gross) {
+  const superAmount = round2(round2(superBaseEx) * superRate);
   return {
     super_amount: superAmount,
     worker_withhold: 0,
@@ -410,6 +467,8 @@ export function validatePersistedTradeInvoiceMoney(
   const totalInc = requiredNumber(record, "total_inc");
   const subtotalEx = requiredNumber(record, "subtotal_ex");
   const superBasis = resolveTradeInvoiceSuperBasis(record.super_basis);
+  const superBaseEx = persistedTradeInvoiceSuperBaseEx(record.super_base_ex);
+  const superBase = superBaseEx ?? gross;
   const earningsDate = record.week_end ?? record.week_start ??
     record.submitted_at ?? record.created_at;
   const statutoryRate = resolveSuperGuaranteeRate(earningsDate);
@@ -427,10 +486,11 @@ export function validatePersistedTradeInvoiceMoney(
     netPay < 0 || gstAmount < 0 ||
     Math.abs(superRate - statutoryRate) > 0.000001 ||
     !closeMoney(gross, subtotalEx) ||
-    !closeMoney(superAmount, round2(gross * superRate)) ||
+    (superBaseEx !== null && !(superBaseEx >= 0 && superBaseEx < gross)) ||
+    !closeMoney(superAmount, round2(superBase * superRate)) ||
     (superBasis
       ? !closeMoney(netPay, gross)
-      : !netPayMatchesKnownPayableSplit(gross, superAmount, netPay, superRate)) ||
+      : !netPayMatchesKnownPayableSplit(gross, superAmount, netPay, superRate, superBaseEx)) ||
     !closeMoney(
       gstAmount,
       record.gst_on ? round2(gross * TRADE_INVOICE_GST_RATE) : 0,
@@ -460,6 +520,7 @@ export function validatePersistedTradeInvoiceMoney(
     total_inc: round2(totalInc),
     company_total_out: derived.company_total_out,
     ...(superBasis ? { super_basis: superBasis } : {}),
+    ...(superBaseEx !== null ? { super_base_ex: superBaseEx } : {}),
   }, persistedTradeInvoiceRecurringDeduction(record));
 }
 
@@ -739,6 +800,24 @@ export function formatTradeInvoiceSuperWithheldDescription(
       `Paid to the super fund separately. Not part of the amount payable to ${name}`,
     ].join("\n");
   }
+  const base = money.super_base_ex ?? null;
+  if (base !== null) {
+    return [
+      `Superannuation Guarantee ${
+        rateLabel(money.super_rate)
+      } of submitted total less commission`,
+      `Submitted total ${moneyLabel(money.gross_earned)}. Commission ${
+        moneyLabel(round2(money.gross_earned - base))
+      } carries no super. Super remittance ${
+        moneyLabel(money.super_amount)
+      } on ${moneyLabel(base)}. Worker withhold ${
+        moneyLabel(money.worker_withhold)
+      }. Company contribution ${
+        moneyLabel(money.company_contribution)
+      }. Amount payable ${moneyLabel(money.net_pay)}.`,
+      `Paid to the super fund separately - this line withholds the worker share only; the company pays the other half. Not part of the amount payable to ${name}`,
+    ].join("\n");
+  }
   return [
     `Superannuation Guarantee ${
       rateLabel(money.super_rate)
@@ -771,6 +850,9 @@ export type TradeInvoiceAuditModel = {
   submitted_total: number;
   super_rate: number;
   super_amount: number;
+  // What super is charged on: the submitted total less commission when the
+  // invoice carries commission, else null (the whole submitted total).
+  super_base_ex: number | null;
   amount_payable: number;
   gst_amount: number;
   trade_payable: number;
@@ -824,15 +906,18 @@ export function buildTradeInvoiceAuditModel(
       } do not match gross earned ${moneyLabel(money.gross_earned)}`,
     );
   }
+  const superBase = money.super_base_ex ?? null;
   if (
+    (superBase !== null &&
+      !(superBase >= 0 && superBase < money.gross_earned)) ||
     !closeMoney(
       money.super_amount,
-      round2(money.gross_earned * money.super_rate),
+      round2((superBase ?? money.gross_earned) * money.super_rate),
     )
   ) {
     throw new TradeInvoiceMoneyError(
       "MONEY_SPLIT_INVALID",
-      "Super must be 12% of the submitted total, calculated once",
+      "Super must be 12% of the submitted total less commission, calculated once",
     );
   }
   if (
@@ -879,6 +964,7 @@ export function buildTradeInvoiceAuditModel(
     submitted_total: money.gross_earned,
     super_rate: money.super_rate,
     super_amount: money.super_amount,
+    super_base_ex: superBase,
     amount_payable: money.net_pay,
     gst_amount: money.gst_amount,
     trade_payable: money.trade_payable,
@@ -963,6 +1049,27 @@ export function splitTradeInvoiceXeroLines(
   }
 
   return labourLines;
+}
+
+/**
+ * A stored super base must still be the stored lines less their commission
+ * (the caller sums the commission lines through isCommissionLine). An invoice
+ * with no stored base was priced before 12 Nov 2026 with super on the whole
+ * gross, commission included, and stays that way: nothing here re-prices it.
+ */
+export function assertTradeInvoiceSuperBaseMatchesLines(
+  money: TradeInvoiceMoney,
+  commissionEx: unknown,
+): void {
+  const stored = money.super_base_ex ?? null;
+  if (stored === null) return;
+  const expected = tradeInvoiceSuperBaseEx(money.gross_earned, commissionEx);
+  if (expected === null || !closeMoney(stored, expected)) {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_INVALID",
+      "Trade invoice super base no longer matches its commission lines and cannot be pushed to Xero",
+    );
+  }
 }
 
 /** Xero returns a NONE tax type as BASEXCLUDED on Australian organisations. */

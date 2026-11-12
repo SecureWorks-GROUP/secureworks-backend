@@ -5,11 +5,9 @@
  *     sanitised (finite, > 0, <= 24).
  *  3. generate_trade_invoice: one live invoice per trade + week_end. A second
  *     submit returns the existing invoice instead of minting a second bill.
- *  4. submitTradeInvoice (legacy hourly lane) applies the assignment lock:
- *     live-held cards are refused and covered cards are stamped invoiced_in
- *     before any Xero contact.
+ *  4. submitTradeInvoice (legacy hourly lane) is retired: 410
+ *     use_weekly_invoice before any read or write (Marnin, 11 Nov 2026).
  *  5. $35/m lives in one constant, overridable from users.trade_details.
- *  6. submitTradeInvoice takes the billing mode from users.invoice_type.
  *  7. my_hours preview reuses the invoice money split.
  *
  * Fake client pattern follows trade_invoice_weekly_resolver_test.ts: a
@@ -194,42 +192,23 @@ Deno.test("audit 3: generate_trade_invoice refuses a second submit for a live we
   assertStringIncludes(guard, "This submission was NOT saved");
 });
 
-// ── 4. legacy hourly lane applies the assignment lock ───────────────────────
+// ── 4. the legacy hourly lane is retired (Marnin, 11 Nov 2026) ──────────────
 
-Deno.test("audit 4: submitTradeInvoice refuses job cards held by a live invoice", async () => {
-  const { client } = fakeClient({
-    user: { id: USER_ID, name: "Trade", invoice_type: "hourly", trade_details: {} },
-    assignments: [
-      completeAssignment("asn-1", { invoiced_in: LIVE_INVOICE }),
-      completeAssignment("asn-2", { invoiced_in: LIVE_INVOICE }),
-    ],
-    invoices: [{ id: LIVE_INVOICE, user_id: USER_ID, week_end: "2026-08-23", status: "pushed_to_xero" }],
-    rates: [{ hourly_rate: 50 }],
-  });
-  await assertRejects(
-    () => submitTradeInvoice(client, USER_ID, { week_ending: WEEK_END, gst_on: false }),
-    Error,
-    "already on a live invoice",
-  );
-});
-
-Deno.test("audit 4: submitTradeInvoice stamps invoiced_in on covered cards before Xero", async () => {
+Deno.test("audit 4: submitTradeInvoice is retired: 410 use_weekly_invoice, nothing read or written", async () => {
   const { client, writes } = fakeClient({
     user: { id: USER_ID, name: "Trade", invoice_type: "hourly", trade_details: {} },
     assignments: [completeAssignment("asn-1"), completeAssignment("asn-2")],
     rates: [{ hourly_rate: 50 }],
   });
-  // The fake has no xero_tokens row, so the run stops at the Xero boundary.
-  await assertRejects(
+  const error: any = await assertRejects(
     () => submitTradeInvoice(client, USER_ID, { week_ending: WEEK_END, gst_on: false }),
     Error,
-    "No Xero token available",
+    "Weekly Invoice",
   );
-  const stamp = writes.find((w) => w.table === "job_assignments" && w.op === "update" && w.payload?.invoiced_in === NEW_INVOICE);
-  assert(stamp, "covered assignments must be stamped with the new invoice id");
-  assertEquals((stamp!.filters.id as string[]).sort(), ["asn-1", "asn-2"]);
-  const invoiceInsertAt = writes.findIndex((w) => w.table === "trade_invoices" && w.op === "insert");
-  assert(writes.indexOf(stamp!) > invoiceInsertAt, "stamp must follow the local invoice insert");
+  assertEquals(error.status, 410);
+  assertEquals(error.body.code, "use_weekly_invoice");
+  assertEquals(error.body.saved, false);
+  assertEquals(writes, [], "the retired door writes nothing");
 });
 
 // ── 5. one per-metre constant ────────────────────────────────────────────────
@@ -242,31 +221,6 @@ Deno.test("audit 5: per-metre rate has one default and honours the user's own ra
   assertEquals(_resolvePerMetreRate({ ratePerMetre: "abc" }), 35);
   assertEquals(INDEX.includes("|| 35"), false, "no hard-coded $35/m fallback may remain");
   assertStringIncludes(INDEX, "labourPerM:PER_METRE_DEFAULT_RATE");
-});
-
-// ── 6. billing mode comes from the users row ────────────────────────────────
-
-Deno.test("audit 6: submitTradeInvoice ignores the client invoice_type and uses users.invoice_type", async () => {
-  // Client claims per_metre and sends metres; the users row says hourly, and
-  // there are no completed hours, so the HOURLY refusal must fire.
-  const { client } = fakeClient({
-    user: { id: USER_ID, name: "Trade", invoice_type: "hourly", trade_details: {} },
-    assignments: [completeAssignment("asn-1", { status: "scheduled", started_at: null, completed_at: null })],
-    rates: [{ hourly_rate: 50 }],
-  });
-  await assertRejects(
-    () =>
-      submitTradeInvoice(client, USER_ID, {
-        week_ending: WEEK_END,
-        gst_on: false,
-        invoice_type: "per_metre",
-        rate_per_metre: 99,
-        items: [{ job_id: "job-1", metres: 10 }],
-      }),
-    Error,
-    "No completed hours found for this week",
-  );
-  assertStringIncludes(INDEX, "invoice_type_source: 'user'");
 });
 
 // ── 7. my_hours preview reuses the invoice money split ──────────────────────
