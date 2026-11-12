@@ -385,6 +385,8 @@ jobs:
             supabase/functions/ops-api/restoration_intake_test.ts \
             supabase/functions/ops-api/restoration_workflow_test.ts \
             supabase/functions/ops-api/restoration_workflow_store_test.ts \
+            supabase/functions/ops-api/restoration_send_test.ts \
+            supabase/functions/ops-api/ses_owner_directed_approval_test.ts \
             supabase/functions/ops-api/makesafe_pdf_declared_type_test.ts \
             supabase/functions/ops-api/makesafe_intake_gate_test.ts
 

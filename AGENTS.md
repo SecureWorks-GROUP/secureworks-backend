@@ -1599,6 +1599,12 @@ actions `restoration_*`. What must not regress:
   its `SWR` slice, which answers ''. Restoration reports and photos may go to a
   builder's `makesafe_companies.restoration_recipients` (outbound only) through
   `send_mailer_ops_visibility`, restoration cards only, named by the operator.
+  The invoice and the quote, which that route must never carry, go through
+  `send_restoration_document` (`restoration_send.ts`, effect_kind
+  `restoration_send`, `20261112170000`): restoration cards only, one named
+  document per call, an AUTHORISED or PAID ACCREC invoice on that job or the
+  card's restoration quote document, to a listed restoration contact with ses@
+  copied, dry run by default. It never mints, authorises or changes money.
 
 Tests: `restoration_intake_test.ts`, `restoration_workflow_test.ts`,
 `restoration_workflow_store_test.ts`, the SWRESTO cases in

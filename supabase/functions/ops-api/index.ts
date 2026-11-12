@@ -1174,6 +1174,7 @@ import {
 } from './ses_echo_code_approval.ts'
 import { createSesGraphMailGateway } from './ses_graph_mail_gateway.ts'
 import { resolveSesOwnerDirectedApproval } from './ses_owner_directed_approval.ts'
+import { sendRestorationDocumentAction } from './restoration_send.ts'
 import {
   sendMailerOpsVisibilityAction,
   isMailerOpsRouteKind,
@@ -12205,6 +12206,45 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             makeMailGateway: (loadAttachments) =>
               makeMailerOpsGraphMailGateway(client, loadAttachments),
             effectStore: createSupabaseSesEffectStore(client),
+          },
+        ))
+      }
+      // A restoration card's AUTHORISED invoice or its quote, to the builder's
+      // restoration contact (owner, 12 Nov 2026). Contract: restoration_send.ts.
+      case 'send_restoration_document': {
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id ? [body.job_id] : [],
+          'send_restoration_document',
+        )
+        return json(await sendRestorationDocumentAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            org_id: body.org_id || DEFAULT_ORG_ID,
+            job_id: body.job_id,
+            kind: body.kind,
+            to: body.to,
+            xero_invoice_id: body.xero_invoice_id,
+            job_document_id: body.job_document_id,
+            note: body.note,
+            attempt_key: body.attempt_key,
+            dry_run: body.dry_run,
+            actor: authUser?.email || body.actor || 'restoration-send-operator',
+          },
+          {
+            makeMailGateway: (loadAttachments) =>
+              makeMailerOpsGraphMailGateway(client, loadAttachments),
+            effectStore: createSupabaseSesEffectStore(client),
+            fetchInvoicePdf: async (xeroInvoiceId) => {
+              const { accessToken, tenantId } = await getToken(client)
+              return await _fetchXeroInvoicePdfBytes(accessToken, tenantId, xeroInvoiceId)
+            },
+            fetchDocumentBytes: async (url) => {
+              const response = await fetch(url)
+              if (!response.ok) throw new Error(`document fetch failed: HTTP ${response.status}`)
+              return new Uint8Array(await response.arrayBuffer())
+            },
           },
         ))
       }
