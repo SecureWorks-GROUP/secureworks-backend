@@ -45,6 +45,7 @@ const PAGE_W = 210;
 const PAGE_H = 297;
 const MARGIN = 14;
 const CONTENT_W = PAGE_W - 2 * MARGIN;
+const BODY_TOP = 47;
 
 export const RESTORATION_QUOTE_TITLE = "Restoration Quote";
 
@@ -190,7 +191,7 @@ export async function renderRestorationQuotePdf(
     doc.setDrawColor(...RULE);
     doc.setLineWidth(0.3);
     doc.line(MARGIN, 41, PAGE_W - MARGIN, 41);
-    return 52;
+    return BODY_TOP;
   };
 
   const footer = (): void => {
@@ -212,32 +213,6 @@ export async function renderRestorationQuotePdf(
       footer();
       doc.addPage();
       y = header();
-    }
-  };
-
-  const kvTable = (rows: Array<[string, string]>): void => {
-    for (const [label, value] of rows) {
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(8.4);
-      const valueLines: string[] = doc.splitTextToSize(
-        sanitiseText(value) || "-",
-        CONTENT_W - 52,
-      );
-      const rowH = Math.max(8.5, 5 + valueLines.length * 4.1);
-      ensureSpace(rowH);
-      doc.setFillColor(...LIGHT);
-      doc.setDrawColor(...RULE);
-      doc.setLineWidth(0.2);
-      doc.rect(MARGIN, y, CONTENT_W, rowH, "FD");
-      doc.setTextColor(...MID);
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(7.5);
-      doc.text(label.toUpperCase(), MARGIN + 4, y + 5.2);
-      doc.setTextColor(...DARK);
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(8.4);
-      doc.text(valueLines, MARGIN + 46, y + 5.2);
-      y += rowH;
     }
   };
 
@@ -269,8 +244,63 @@ export async function renderRestorationQuotePdf(
     y += 4;
   };
 
-  kvTable(restorationQuoteHeaderRows(input));
-  y += 5;
+  // Details as a two-column grid (the site address takes a full row), so the
+  // header stays short and the priced table fits on the first page.
+  const kvGrid = (rows: Array<[string, string]>): void => {
+    const half = CONTENT_W / 2;
+    const cellLines = (value: string, width: number): string[] => {
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8.4);
+      return doc.splitTextToSize(sanitiseText(value) || "-", width);
+    };
+    const drawCell = (
+      x: number,
+      width: number,
+      rowH: number,
+      label: string,
+      lines: string[],
+    ): void => {
+      doc.setFillColor(...LIGHT);
+      doc.setDrawColor(...RULE);
+      doc.setLineWidth(0.2);
+      doc.rect(x, y, width, rowH, "FD");
+      doc.setTextColor(...MID);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(7);
+      doc.text(label.toUpperCase(), x + 3, y + 5.2);
+      doc.setTextColor(...DARK);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8.4);
+      doc.text(lines, x + 35, y + 5.2);
+    };
+    const full = rows.filter(([label]) => label === "Site address");
+    const paired = rows.filter(([label]) => label !== "Site address");
+    for (let i = 0; i < paired.length; i += 2) {
+      const left = paired[i];
+      const right = paired[i + 1];
+      const leftLines = cellLines(left[1], half - 38);
+      const rightLines = right ? cellLines(right[1], half - 38) : [];
+      const rowH = Math.max(
+        8.5,
+        5 + Math.max(leftLines.length, rightLines.length) * 4.1,
+      );
+      ensureSpace(rowH);
+      drawCell(MARGIN, half, rowH, left[0], leftLines);
+      if (right) drawCell(MARGIN + half, half, rowH, right[0], rightLines);
+      else drawCell(MARGIN + half, half, rowH, "", []);
+      y += rowH;
+    }
+    for (const [label, value] of full) {
+      const lines = cellLines(value, CONTENT_W - 38);
+      const rowH = Math.max(8.5, 5 + lines.length * 4.1);
+      ensureSpace(rowH);
+      drawCell(MARGIN, CONTENT_W, rowH, label, lines);
+      y += rowH;
+    }
+  };
+
+  kvGrid(restorationQuoteHeaderRows(input));
+  y += 6;
 
   if (quote.scope_of_works) {
     section("Scope of works", 12);
@@ -282,7 +312,7 @@ export async function renderRestorationQuotePdf(
   const COL_UNIT = MARGIN + 124;
   const COL_RATE = MARGIN + 151;
   const COL_AMOUNT = MARGIN + CONTENT_W - 3;
-  const DESC_W = 100;
+  const DESC_W = 92;
 
   const tableHead = (): void => {
     ensureSpace(8);
@@ -301,16 +331,25 @@ export async function renderRestorationQuotePdf(
     y += 7.5;
   };
 
-  section("Quoted works", 30);
-  tableHead();
-  for (const line of quote.lines) {
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(8.8);
+  // Measure the whole priced table first. When the table and its totals fit
+  // on one page they are never split: they start on a new page instead.
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8.8);
+  const measured = quote.lines.map((line) => {
     const descLines: string[] = doc.splitTextToSize(
       sanitiseText(line.description),
       DESC_W,
     );
-    const rowH = Math.max(7.5, 3.6 + descLines.length * 4.1);
+    // jsPDF sets a multi-line description about 3.6 mm per line at 8.8 pt.
+    return { line, descLines, rowH: 7.5 + (descLines.length - 1) * 3.6 };
+  });
+  const TOTALS_H = 26;
+  const tableH = 13 + 7.5 + measured.reduce((sum, m) => sum + m.rowH, 0) +
+    TOTALS_H;
+  const freshPageRoom = BODY_BOTTOM - BODY_TOP;
+  section("Quoted works", tableH <= freshPageRoom ? tableH - 13 : 30);
+  tableHead();
+  for (const { line, descLines, rowH } of measured) {
     if (y + rowH > BODY_BOTTOM) {
       footer();
       doc.addPage();
@@ -339,7 +378,7 @@ export async function renderRestorationQuotePdf(
 
   // Totals block, right aligned under the amount column.
   y += 3;
-  ensureSpace(24);
+  ensureSpace(TOTALS_H - 2);
   const totalsRow = (label: string, amount: number, strong = false): void => {
     doc.setTextColor(...(strong ? DARK : MID));
     doc.setFont("helvetica", strong ? "bold" : "normal");
@@ -358,13 +397,33 @@ export async function renderRestorationQuotePdf(
   totalsRow("Total inc GST", quote.total_inc_gst, true);
   y += 5;
 
+  const bullets = (items: string[]): void => {
+    doc.setTextColor(...BODY);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9.2);
+    for (const item of items) {
+      const lines: string[] = doc.splitTextToSize(item, CONTENT_W - 6);
+      ensureSpace(lines.length * 4.4 + 1.2);
+      doc.setFillColor(...ORANGE);
+      doc.circle(MARGIN + 1.4, y - 1.2, 0.7, "F");
+      doc.text(lines, MARGIN + 5, y);
+      y += lines.length * 4.4 + 1.2;
+    }
+    y += 4;
+  };
+  const listItems = (body: string): string[] =>
+    sanitiseText(body).split("\n")
+      .map((item) => item.replace(/^\s*[-*\u2022]\s*/, "").trim())
+      .filter(Boolean);
+
   if (quote.exclusions) {
-    section("Exclusions and assumptions", 12);
-    para(quote.exclusions);
+    const items = listItems(quote.exclusions);
+    section("Exclusions and assumptions", Math.min(items.length, 3) * 5.6);
+    bullets(items);
   }
 
-  section("Terms", 16);
-  para(RESTORATION_QUOTE_TERMS.join("\n"));
+  section("Terms", 3 * 5.6);
+  bullets([...RESTORATION_QUOTE_TERMS]);
 
   footer();
   const out = doc.output("arraybuffer") as ArrayBuffer;
