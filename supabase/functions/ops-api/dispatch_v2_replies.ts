@@ -84,6 +84,7 @@ export const DISPATCH_V2_REPLIES_WRITE_ACTIONS = [
   "dispatch_v2_replies_confirm_guess",
   "dispatch_v2_replies_reject_guess",
   "dispatch_v2_replies_hide",
+  "dispatch_v2_replies_clear",
   "dispatch_v2_suggestion_accept",
   "dispatch_v2_suggestion_dismiss",
 ] as const;
@@ -1031,32 +1032,40 @@ export async function rejectGuess(body: any, ctx: DispatchV2RepliesContext) {
       },
     );
   }
-  const now = nowIso(ctx);
-  const rejected = [
-    ...new Set([...(email.rejected_order_ids ?? []), email.order_id]),
-  ];
   const updated = await ctx.store.updateEmail(
     ctx.orgId,
     email.id,
     "needs_confirmation",
-    {
-      state: "unmatched",
-      rung: null,
-      match_reason: "Best guess turned down",
-      job_id: null,
-      order_id: null,
-      matched_at: null,
-      rejected_order_ids: rejected,
-      candidates: (email.candidates ?? []).filter((c: any) =>
-        !rejected.includes(c?.order_id)
-      ),
-      ...decided(operator, "rejected", now),
-    },
+    turnDownPatch(email, operator, nowIso(ctx)),
   );
   if (!updated) {
     refuse(409, "email_changed", "Someone else changed this email first");
   }
   return { ok: true, email: await projectOne(ctx, updated) };
+}
+
+// A best guess turned down: back to unmatched, and its order remembered as
+// wrong so the scan never guesses it again. Shared by Not this one and Clear all.
+function turnDownPatch(email: EmailRow, operator: Operator, now: string) {
+  const rejected = [
+    ...new Set([
+      ...(email.rejected_order_ids ?? []),
+      ...(email.order_id ? [email.order_id] : []),
+    ]),
+  ];
+  return {
+    state: "unmatched" as const,
+    rung: null,
+    match_reason: "Best guess turned down",
+    job_id: null,
+    order_id: null,
+    matched_at: null,
+    rejected_order_ids: rejected,
+    candidates: (email.candidates ?? []).filter((c: any) =>
+      !rejected.includes(c?.order_id)
+    ),
+    ...decided(operator, "rejected", now),
+  };
 }
 
 /** POST {email_id}: take an unmatched email out of the tray (marketing,
@@ -1084,6 +1093,61 @@ export async function hideReply(body: any, ctx: DispatchV2RepliesContext) {
   }
   return { ok: true, email: await projectOne(ctx, updated) };
 }
+
+/** POST {email_ids: [...]}: Clear all (Shaun, 12 Nov 2026). Takes every
+ * listed email out of the tray in one press. A best guess is turned down
+ * first, exactly as Not this one, then each is hidden, exactly as Hide. The
+ * screen names the emails it shows, so one that arrives after the list was
+ * read stays in the tray. One already decided elsewhere is skipped, never an
+ * error. Emails stay in the capture record; nothing is sent. */
+export async function clearTray(body: any, ctx: DispatchV2RepliesContext) {
+  const operator = await resolveOperator(body, ctx);
+  const raw = Array.isArray(body?.email_ids) ? body.email_ids : null;
+  if (!raw || raw.length === 0) {
+    refuse(400, "invalid_request", "email_ids is required");
+  }
+  if (raw.length > CLEAR_MAX) {
+    refuse(400, "invalid_request", `At most ${CLEAR_MAX} emails at once`);
+  }
+  const ids: string[] = [
+    ...new Set<string>(raw.map((v: unknown) => uuidParam(v, "email_ids")!)),
+  ];
+  let cleared = 0;
+  let skipped = 0;
+  for (const id of ids) {
+    const email = await ctx.store.getEmail(ctx.orgId, id);
+    if (
+      !email ||
+      (email.state !== "unmatched" && email.state !== "needs_confirmation")
+    ) {
+      skipped++;
+      continue;
+    }
+    const now = nowIso(ctx);
+    if (email.state === "needs_confirmation") {
+      const down = await ctx.store.updateEmail(
+        ctx.orgId,
+        id,
+        "needs_confirmation",
+        turnDownPatch(email, operator, now),
+      );
+      if (!down) {
+        skipped++;
+        continue;
+      }
+    }
+    const hidden = await ctx.store.updateEmail(ctx.orgId, id, "unmatched", {
+      state: "hidden",
+      ...decided(operator, "hidden", now),
+    });
+    if (hidden) cleared++;
+    else skipped++;
+  }
+  return { ok: true, cleared, skipped };
+}
+
+// The tray reads at most 200 emails, so one Clear all names at most that.
+const CLEAR_MAX = 200;
 
 async function loadOpenSuggestion(ctx: DispatchV2RepliesContext, body: any) {
   const id = uuidParam(body?.suggestion_id, "suggestion_id")!;
@@ -1295,6 +1359,8 @@ export async function runDispatchV2RepliesAction(
         return await rejectGuess(body, ctx);
       case "dispatch_v2_replies_hide":
         return await hideReply(body, ctx);
+      case "dispatch_v2_replies_clear":
+        return await clearTray(body, ctx);
       case "dispatch_v2_suggestion_accept":
         return await acceptSuggestion(body, ctx);
       case "dispatch_v2_suggestion_dismiss":

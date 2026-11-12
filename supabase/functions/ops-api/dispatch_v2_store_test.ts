@@ -2222,7 +2222,7 @@ Deno.test("B3 fence fill: each row carries its sealed line and unit; Shaun's ema
 
 // ── Boxes and the main tick ─────────────────────────────────────────────────
 
-Deno.test("boxes: add flags a supplier with no approved email; an occupied box cannot be removed", async () => {
+Deno.test("boxes: add flags a supplier with no approved email; the X takes a box off with its lines", async () => {
   const db = makeDb();
   const plain = await addBox(db, JOB.fence, SUP.plain);
   assertEquals(plain.supplier.send_blocked.code, "no_approved_email");
@@ -2240,22 +2240,143 @@ Deno.test("boxes: add flags a supplier with no approved email; an occupied box c
   await refused(addBox(db, JOB.fence, SUP.inactive), 409, "supplier_inactive");
   await refused(addBox(db, JOB.fence, SUP.otherOrg), 404, "supplier_not_found");
   await addLine(db, JOB.fence, 1, { supplier_id: SUP.stratco, description: "x" });
-  await refused(
-    call(db, "dispatch_v2_remove_supplier", {
-      job_id: JOB.fence,
-      supplier_id: SUP.stratco,
-    }),
-    409,
-    "supplier_has_lines",
+  // Shaun, 12 Nov 2026: a box with lines comes off too, lines and all.
+  const out = await call(db, "dispatch_v2_remove_supplier", {
+    job_id: JOB.fence,
+    supplier_id: SUP.stratco,
+  });
+  assertEquals(out.removed, {
+    lines: 1,
+    photos_deleted: 0,
+    photos_kept: 0,
+    held_emails_discarded: 0,
+    sent_emails_kept: 0,
+  });
+  assertEquals(
+    db.tables.job_material_lines.filter((l) => l.supplier_id === SUP.stratco),
+    [],
   );
   await call(db, "dispatch_v2_remove_supplier", {
     job_id: JOB.fence,
     supplier_id: SUP.plain,
   });
   assertEquals(
-    db.tables.job_material_suppliers.map((b) => b.supplier_id).sort(),
-    [SUP.oldlink, SUP.stratco].sort(),
+    db.tables.job_material_suppliers.map((b) => b.supplier_id),
+    [SUP.oldlink],
   );
+  // Gone already: nothing to do.
+  assertEquals(
+    (await call(db, "dispatch_v2_remove_supplier", {
+      job_id: JOB.fence,
+      supplier_id: SUP.stratco,
+    })).unchanged,
+    true,
+  );
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("remove: the X discards the held email, deletes lines and unsent photos, keeps the sent email and its photo", async () => {
+  const db = await fencingJob();
+  // A first order to Stratco went, with one photo on it.
+  const sentPhoto = await uploadPhoto(db, JOB.fence, SUP.stratco, "sent.jpg");
+  await makeEmail(db, JOB.fence, SUP.stratco);
+  const sent = db.tables.dispatch_supplier_order_emails.find((e: any) =>
+    e.supplier_id === SUP.stratco
+  )!;
+  sent.status = "sent";
+  sent.sent_at = "2026-11-05T01:00:00.000Z";
+  sent.photo_ids = [sentPhoto.id];
+  for (const line of db.tables.job_material_lines) {
+    if (line.supplier_id === SUP.stratco) line.dispatch_order_email_id = sent.id;
+  }
+  // A second order is made up and held, with a new line and a new photo.
+  await addLine(db, JOB.fence, 5, {
+    supplier_id: SUP.stratco,
+    description: "150mm long width plinths",
+    quantity: 2,
+  });
+  const heldPhoto = await uploadPhoto(db, JOB.fence, SUP.stratco, "held.jpg");
+  await makeEmail(db, JOB.fence, SUP.stratco);
+  const held = db.tables.dispatch_supplier_order_emails.find((e: any) =>
+    e.supplier_id === SUP.stratco && e.status === "draft"
+  )!;
+  const heldPath = db.tables.dispatch_material_photos.find((p: any) =>
+    p.id === heldPhoto.id
+  )!.storage_path;
+
+  const out = await call(db, "dispatch_v2_remove_supplier", {
+    job_id: JOB.fence,
+    supplier_id: SUP.stratco,
+  });
+  assertEquals(out.removed, {
+    lines: 4,
+    photos_deleted: 1,
+    photos_kept: 1,
+    held_emails_discarded: 1,
+    sent_emails_kept: 1,
+  });
+  // The box and its lines are gone; Metroll's box and line are untouched.
+  assertEquals(
+    db.tables.job_material_suppliers.map((b) => b.supplier_id),
+    [SUP.metroll],
+  );
+  assertEquals(
+    db.tables.job_material_lines.map((l) => l.supplier_id),
+    [SUP.metroll],
+  );
+  // The held email is discarded; the sent one is kept as it was.
+  assertEquals(held.status, "discarded");
+  assertEquals(sent.status, "sent");
+  // The sent photo is kept, now on the draft list; the held one is deleted
+  // with its file.
+  assertEquals(
+    db.tables.dispatch_material_photos.map((p: any) => [p.id, p.supplier_id]),
+    [[sentPhoto.id, null]],
+  );
+  assert(
+    db.requests.some((r: any) =>
+      r.table === "storage" && r.kind === "remove" && r.select === heldPath
+    ),
+    "the held photo's file is removed",
+  );
+  // The read: no Stratco box, and the sent email still listed for the panel.
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(read.suppliers.map((s: any) => s.supplier_id), [SUP.metroll]);
+  assertEquals(read.main_supplier_id, SUP.metroll);
+  assertEquals(read.unboxed_sent_emails.length, 1);
+  assertEquals(read.unboxed_sent_emails[0].supplier_id, SUP.stratco);
+  assertEquals(read.unboxed_sent_emails[0].email.id, sent.id);
+  assertEquals(read.draft_list.photos.map((p: any) => p.id), [sentPhoto.id]);
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("remove: an order email sending now, or that may have gone, keeps the box", async () => {
+  for (const status of ["sending", "send_unknown"]) {
+    const db = await fencingJob();
+    await makeEmail(db, JOB.fence, SUP.metroll);
+    const row = db.tables.dispatch_supplier_order_emails.find((e: any) =>
+      e.supplier_id === SUP.metroll
+    )!;
+    row.status = status;
+    if (status === "sending") row.send_claimed_at = "2026-11-12T01:00:00.000Z";
+    await refused(
+      call(db, "dispatch_v2_remove_supplier", {
+        job_id: JOB.fence,
+        supplier_id: SUP.metroll,
+      }),
+      409,
+      "supplier_email_sending",
+    );
+    assert(
+      db.tables.job_material_suppliers.some((b) => b.supplier_id === SUP.metroll),
+    );
+    assertEquals(
+      db.tables.job_material_lines.filter((l) => l.supplier_id === SUP.metroll)
+        .length,
+      1,
+    );
+    assertEquals(row.status, status);
+  }
 });
 
 Deno.test("main tick: moves the standing lines to the ticked box; null clears it", async () => {

@@ -995,6 +995,24 @@ Deno.test("hide: only an unmatched email", async () => {
   );
 });
 
+Deno.test("clear: Clear all turns down the guesses and hides every listed email; others are skipped", async () => {
+  const t = await scanned();
+  const guess = t.bySeq(104)!;
+  const tray = t.bySeq(107)!;
+  const matched = t.bySeq(101)!;
+  const r = await t.run("dispatch_v2_replies_clear", {
+    email_ids: [guess.id, tray.id, matched.id, tray.id],
+  });
+  assertEquals(r, { ok: true, cleared: 2, skipped: 1 });
+  const row = (id: string) => t.store.emails.find((e) => e.id === id)!;
+  assertEquals(row(guess.id).state, "hidden");
+  assertEquals(row(guess.id).rejected_order_ids, [O3]);
+  assertEquals(row(tray.id).state, "hidden");
+  assertEquals(row(matched.id).state, "matched");
+  await refused(t.run("dispatch_v2_replies_clear", { email_ids: [] }), 400, "invalid_request");
+  await refused(t.run("dispatch_v2_replies_clear", { email_ids: ["nope"] }), 400, "invalid_request");
+});
+
 Deno.test("accept: sets the order's confirmed date and never the job status", async () => {
   const t = await scanned();
   const s = t.store.suggestions.find((x) => x.order_id === O1)!;

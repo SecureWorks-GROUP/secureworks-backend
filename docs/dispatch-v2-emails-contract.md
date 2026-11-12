@@ -170,9 +170,14 @@ Params: `job_id`. Returns the whole tab for one job.
       "sent_emails": [Email],
       "fulfilment": "delivery | pickup | null"
     }
+  ],
+  "unboxed_sent_emails": [
+    { "supplier_id": "uuid or null", "supplier_name": "R&R Fencing", "email": Email }
   ]
 }
 ```
+
+- `unboxed_sent_emails` are sent order emails whose supplier box was taken off with the X (12 Nov 2026). They are kept so the job's Emails still shows them. The board's Arrival line reads boxes only, so these do not count toward it.
 
 - `send_blocked` is set when the supplier has no approved order email: `{ "code": "no_approved_email", "message": "This supplier has no approved order email. Ask Shaun to add one before sending." }`. The screen should grey out Make email and Send now for that box.
 - `test_send_done` is true once anyone has sent a test copy. For information only: a real send does not wait for one (Shaun, 26 Oct).
@@ -337,12 +342,27 @@ Refusals: 404 `supplier_not_found`, 409 `supplier_inactive`.
 
 ### dispatch_v2_remove_supplier (POST)
 
-Body: `{ "job_id", "supplier_id" }`. Returns `{ "success": true }`.
+Body: `{ "job_id", "supplier_id" }`. The X on a supplier box. The screen asks first; this call does it.
 
-Refusals, both 409:
+Since 12 Nov 2026 (Shaun) a box can be taken off at any time, whatever is in it. It is for cancelling an order before it goes. What goes and what stays:
 
-- `supplier_has_lines`: the box still has lines or photos. Move them out first.
-- `supplier_has_emails`: the box has a held, sent or unknown email.
+- The box's lines are deleted.
+- A held (draft) order email is discarded (`status: "discarded"`). It was never sent.
+- The box's photos are deleted, rows and files, unless a sent order email carried the photo. Those are kept, with the box link cleared.
+- A sent order email is kept as it is. It still shows in the job's Emails, from `unboxed_sent_emails` (see `dispatch_v2_materials`).
+- Nothing is sent to the supplier. Xero and any purchase order are not touched.
+- If the box was the ticked main supplier, the default main rule applies again.
+
+```json
+{ "success": true, "removed": { "lines": 4, "photos_deleted": 1, "photos_kept": 1, "held_emails_discarded": 1, "sent_emails_kept": 1 } }
+```
+
+A box not on the job gives `{ "success": true, "unchanged": true }`. A re-run of the Outlook catch-up does not bring a removed box back: an email it has already recorded is `already_recorded`.
+
+Refusals, all 409, and the box is kept:
+
+- `supplier_email_sending`: an order email to this supplier is sending now ("Wait a moment, then try again."), or may have gone (`send_unknown`: "Check admin@ Sent Items first.").
+- `box_changed`: something was added to the box while it was being removed. Press X again.
 
 ### dispatch_v2_set_main_supplier (POST)
 

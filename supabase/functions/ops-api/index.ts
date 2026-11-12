@@ -7695,7 +7695,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
       }
       // Dispatch v2 slice 8, supplier replies and suggested moves (contract:
-      // replies.md; engine dispatch_v2_replies.ts). Two reads (GET) and six
+      // replies.md; engine dispatch_v2_replies.ts). Two reads (GET) and seven
       // presses (POST), gated as the other Dispatch actions. Absent from
       // ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and
       // LEAD_INSTALLER_READ_ACTIONS. They write only the dispatch_v2_* reply
@@ -7707,6 +7707,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'dispatch_v2_replies_confirm_guess':
       case 'dispatch_v2_replies_reject_guess':
       case 'dispatch_v2_replies_hide':
+      case 'dispatch_v2_replies_clear':
       case 'dispatch_v2_suggestion_accept':
       case 'dispatch_v2_suggestion_dismiss': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
