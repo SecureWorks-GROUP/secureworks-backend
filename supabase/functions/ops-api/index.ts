@@ -38645,11 +38645,29 @@ export async function updateJobStatus(client: any, body: any) {
       })
       const ghlResult = await ghlResp.json().catch(() => ({}))
       if (ghlResp.ok && ghlResult.success) {
-        console.log(`[ops-api] GHL stage synced: ${data.ghl_opportunity_id} → ${status}`)
+        // ghl-proxy may move the job's Execution opportunity rather than the
+        // Sales one the job points at (ghl-proxy stage_move_target.ts). Record
+        // the one it moved; jobs.ghl_opportunity_id is left as it is.
+        const movedOpportunityId = ghlResult.opportunityId || data.ghl_opportunity_id
+        console.log(`[ops-api] GHL stage synced: ${movedOpportunityId} → ${status}`)
         await client.from('job_events').insert({
           job_id: jId,
           event_type: 'ghl_stage_synced',
-          detail_json: { status, opportunity_id: data.ghl_opportunity_id, stage_id: ghlResult.stageId },
+          detail_json: {
+            status,
+            opportunity_id: movedOpportunityId,
+            stage_id: ghlResult.stageId,
+            ...(ghlResult.salesOpportunityId ? { sales_opportunity_id: ghlResult.salesOpportunityId } : {}),
+          },
+        })
+      } else if (ghlResp.ok && ghlResult.moved === false) {
+        // A deliberate no-move (for example, GoHighLevel has not made this job's
+        // Execution opportunity yet): say so plainly and keep a record of it.
+        console.warn(`[ops-api] GHL stage NOT moved for ${data.ghl_opportunity_id} → ${status} (${ghlResult.reason}): ${ghlResult.error || ''}`)
+        await client.from('job_events').insert({
+          job_id: jId,
+          event_type: 'ghl_stage_not_moved',
+          detail_json: { status, opportunity_id: data.ghl_opportunity_id, reason: ghlResult.reason || null },
         })
       } else {
         console.log(`[ops-api] GHL stage sync failed (non-blocking): HTTP ${ghlResp.status}; ${ghlResult.error || 'No success confirmation'}`)
@@ -47915,7 +47933,14 @@ async function submitServiceReport(
             jobType: jobData.type || 'patio',
             jobId: jId,
           }),
-        }).catch((e: any) => console.log('[ops-api] GHL move_to_complete fire-and-forget error:', e))
+        })
+          .then(async (res) => {
+            const out = await res.json().catch(() => ({}))
+            if (!res.ok || out.stageMoved !== true) {
+              console.warn(`[ops-api] GHL move_to_complete NOT moved (non-blocking): HTTP ${res.status}; ${out.reason || out.error || 'No move confirmation'}`)
+            }
+          })
+          .catch((e: any) => console.log('[ops-api] GHL move_to_complete fire-and-forget error:', e))
       }
     } catch (e) {
       console.log('[ops-api] GHL stage move lookup failed (non-blocking):', e)
@@ -57792,7 +57817,7 @@ async function completeJob(client: any, body: any) {
   if (job.ghl_opportunity_id) {
     try {
       const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=move_stage`
-      await fetch(ghlUrl, {
+      const ghlResp = await fetch(ghlUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -57801,6 +57826,12 @@ async function completeJob(client: any, body: any) {
           jobType: job.type || 'patio',
         }),
       })
+      const ghlResult = await ghlResp.json().catch(() => ({}))
+      if (ghlResp.ok && ghlResult.success) {
+        console.log(`[ops-api] complete_job GHL stage synced: ${ghlResult.opportunityId || job.ghl_opportunity_id}`)
+      } else {
+        console.warn(`[ops-api] complete_job GHL stage NOT moved (non-blocking): HTTP ${ghlResp.status}; ${ghlResult.reason || ''} ${ghlResult.error || 'No success confirmation'}`)
+      }
     } catch (e) {
       console.log('[ops-api] complete_job GHL sync failed (non-blocking):', e)
     }

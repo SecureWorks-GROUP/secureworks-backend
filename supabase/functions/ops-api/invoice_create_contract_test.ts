@@ -744,6 +744,56 @@ Deno.test("SES invoice retains its obligation key, DRAFT status and no-email gua
   }
 });
 
+Deno.test("job status GHL push records a deliberate no-move as one, and the moved Execution opportunity when there is one", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWarn = console.warn;
+  const warns: string[] = [];
+  console.warn = (...args: unknown[]) => {
+    warns.push(args.map(String).join(" "));
+  };
+  let proxyReply: Record<string, unknown> = {};
+  globalThis.fetch = (input) => {
+    if (String(input).includes("ghl-proxy?action=move_stage")) {
+      return Promise.resolve(Response.json(proxyReply));
+    }
+    return Promise.resolve(Response.json({}));
+  };
+  try {
+    const first = fixtureClient();
+    proxyReply = {
+      success: false,
+      moved: false,
+      reason: "execution_opportunity_not_created",
+      error: "not made yet",
+    };
+    const notMoved = await updateJobStatus(first.client, { job_id: JOB_ID, status: "processing" });
+    assertEquals(notMoved.success, true);
+    // deno-lint-ignore no-explicit-any
+    const notMovedRows = first.events.filter((row: any) => String(row.event_type).startsWith("ghl_stage"));
+    assertEquals(notMovedRows.map((row: { event_type: string }) => row.event_type), ["ghl_stage_not_moved"]);
+    assertMatch(warns.join("\n"), /GHL stage NOT moved.*execution_opportunity_not_created/);
+
+    const second = fixtureClient();
+    proxyReply = {
+      success: true,
+      moved: true,
+      stageId: "stage-x",
+      opportunityId: "execution-opp",
+      salesOpportunityId: "sales-opp",
+    };
+    await updateJobStatus(second.client, { job_id: JOB_ID, status: "processing" });
+    // deno-lint-ignore no-explicit-any
+    const synced = second.events.find((row: any) => row.event_type === "ghl_stage_synced") as
+      | { detail_json: Record<string, unknown> }
+      | undefined;
+    assertEquals(synced?.detail_json.opportunity_id, "execution-opp");
+    assertEquals(synced?.detail_json.sales_opportunity_id, "sales-opp");
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+  }
+});
+
 Deno.test("job status GHL push authenticates and makes HTTP 401 observable without failing the status update", async () => {
   const originalFetch = globalThis.fetch;
   const originalLog = console.log;
