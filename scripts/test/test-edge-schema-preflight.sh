@@ -1064,6 +1064,8 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261110200000", "scope_draft_release_open_status"),
                       # RQ-19.e: the deposit gate override record.
                       ("20261111110000", "job_deposit_gate_overrides"),
+                      # RQ-17.c: sealed payers registered as job parties.
+                      ("20261111120000", "scope_payer_parties"),
                       # No super on commission: trade_invoices.super_base_ex
                       # and the widened split check (trade_invoice_money.ts).
                       ("20261112090000", "trade_invoice_commission_super_base"),

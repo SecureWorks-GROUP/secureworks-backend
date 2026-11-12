@@ -15,6 +15,12 @@ const revision = crypto.randomUUID();
 const org = crypto.randomUUID();
 const body = { job_id: job, scope_revision_id: revision };
 const actor = { staff: true, orgId: org };
+const singlePayer = {
+  job_id: job,
+  scope_revision_id: revision,
+  outcome: "single_payer",
+  parties: [],
+};
 
 Deno.test("scope freeze handoff: persisted draft or explicit hold accompanies the saved revision", async () => {
   const stored = {
@@ -23,19 +29,25 @@ Deno.test("scope freeze handoff: persisted draft or explicit hold accompanies th
   const result = await prepareScopeDraftsAfterFreeze(
     {
       rpc: (name: string, args: unknown) => {
-        assertEquals(name, "prepare_scope_job_drafts");
         assertEquals(args, {
           p_job_id: job,
           p_scope_revision_id: revision,
           p_org_id: org,
         });
+        if (name === "register_scope_payer_parties") {
+          return { data: singlePayer, error: null };
+        }
+        assertEquals(name, "prepare_scope_job_drafts");
         return { data: stored, error: null };
       },
     },
     body,
     actor,
   );
-  assertEquals(result, { status: 200, data: stored });
+  assertEquals(result, {
+    status: 200,
+    data: { ...stored, payer_parties: singlePayer },
+  });
   assertEquals(
     await prepareScopeDraftsAfterFreeze(
       { rpc: () => ({ error: { message: "scope_drafts_work_order_sealed" } }) },
@@ -119,12 +131,16 @@ Deno.test("scope drafts: retained response and server organisation pass through 
   for (const action of ["prepare_scope_job_drafts", "read_scope_job_drafts"]) {
     const client = {
       rpc: (name: string, args: unknown) => {
-        assertEquals(name, action);
         assertEquals(args, {
           p_job_id: job,
           p_scope_revision_id: revision,
           p_org_id: org,
         });
+        if (
+          action === "prepare_scope_job_drafts" &&
+          name === "register_scope_payer_parties"
+        ) return { data: singlePayer, error: null };
+        assertEquals(name, action);
         return { data: stored, error: null };
       },
     };
@@ -148,9 +164,110 @@ Deno.test("scope drafts: retained response and server organisation pass through 
             reason: "approver_identity_missing",
           },
         }
-        : stored,
+        : { ...stored, payer_parties: singlePayer },
     );
   }
+});
+
+Deno.test("scope drafts: a prepare registers each sealed payer as a job party, after the drafts are saved", async () => {
+  const registered = {
+    job_id: job,
+    scope_revision_id: revision,
+    outcome: "registered",
+    parties: [
+      {
+        payer_id: "__client__",
+        source_party_key: "primary",
+        outcome: "party_adopted",
+      },
+      { payer_id: "nb-1", source_party_key: "nb-1", outcome: "party_inserted" },
+    ],
+  };
+  const calls: string[] = [];
+  const result = await scopeJobDraftsAction(
+    {
+      rpc: (name: string) => {
+        calls.push(name);
+        return name === "register_scope_payer_parties"
+          ? { data: registered, error: null }
+          : { data: { work_order: null }, error: null };
+      },
+    },
+    "prepare_scope_job_drafts",
+    "POST",
+    body,
+    actor,
+  );
+  assertEquals(result.status, 200);
+  assertEquals((await result.json()).payer_parties, registered);
+  assertEquals(calls, [
+    "prepare_scope_job_drafts",
+    "register_scope_payer_parties",
+  ]);
+});
+
+Deno.test("scope drafts: a payer registration refusal or fault keeps the saved drafts and names the code", async () => {
+  for (
+    const [fault, code] of [
+      [
+        { error: { message: "scope_payer_parties_legacy_unmatched" } },
+        "scope_payer_parties_legacy_unmatched",
+      ],
+      [
+        { error: { message: "party_adopt_ambiguous" } },
+        "party_adopt_ambiguous",
+      ],
+      [
+        { error: { message: "provider detail must remain private" } },
+        "scope_payer_parties_unavailable",
+      ],
+      [{ data: null, error: null }, "scope_payer_parties_unavailable"],
+      ["throw", "scope_payer_parties_unavailable"],
+    ] as const
+  ) {
+    const stored = { work_order: { id: crypto.randomUUID() } };
+    const result = await scopeJobDraftsAction(
+      {
+        rpc: (name: string) => {
+          if (name !== "register_scope_payer_parties") {
+            return { data: stored, error: null };
+          }
+          if (fault === "throw") throw new Error("private provider detail");
+          return fault;
+        },
+      },
+      "prepare_scope_job_drafts",
+      "POST",
+      body,
+      actor,
+    );
+    assertEquals(result.status, 200);
+    assertEquals(await result.json(), {
+      ...stored,
+      payer_parties: { outcome: "refused", code },
+    });
+  }
+});
+
+Deno.test("scope drafts: a refused prepare registers no payer", async () => {
+  const calls: string[] = [];
+  const result = await scopeJobDraftsAction(
+    {
+      rpc: (name: string) => {
+        calls.push(name);
+        return {
+          data: null,
+          error: { message: "scope_drafts_revision_stale" },
+        };
+      },
+    },
+    "prepare_scope_job_drafts",
+    "POST",
+    body,
+    actor,
+  );
+  assertEquals(result.status, 409);
+  assertEquals(calls, ["prepare_scope_job_drafts"]);
 });
 
 Deno.test("scope drafts: the read says what the signed-in caller may approve, from the database rule only", async () => {
@@ -400,9 +517,14 @@ Deno.test("scope drafts: the open statuses that release match the database list"
 });
 
 Deno.test("scope drafts: the office status writer asks for the release on every open status, not only accepted", async () => {
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
   const start = source.indexOf("async function updateJobStatus(");
-  const writer = source.slice(start, source.indexOf("\nasync function ", start + 10));
+  const writer = source.slice(
+    start,
+    source.indexOf("\nasync function ", start + 10),
+  );
   assertEquals(
     writer.includes(
       "status === 'accepted' ||\n    ((data?.type === 'fencing' || data?.type === 'patio') &&\n      releasesScopeDraftOnStatus(status, JOB_WORK_ORDER_OPEN_STATUSES))\n  ) {\n    await releaseScopeJobDraftsOnAcceptance(client, jId)",
@@ -410,7 +532,8 @@ Deno.test("scope drafts: the office status writer asks for the release on every 
     true,
   );
   assertEquals(
-    /if \(status === 'accepted'\) \{\s*const \{ releaseScopeJobDraftsOnAcceptance \}/.test(writer),
+    /if \(status === 'accepted'\) \{\s*const \{ releaseScopeJobDraftsOnAcceptance \}/
+      .test(writer),
     false,
   );
 });

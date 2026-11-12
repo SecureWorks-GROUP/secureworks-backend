@@ -1190,6 +1190,10 @@ ops-api|supabase/migrations/20261106062000_scope_work_order_saved_handoff.sql|fu
 # open status; the release accepts them from 20261110200000. Ahead of it a move
 # to Deposit or Scheduled would only log a held release, so wait for it.
 ops-api|supabase/migrations/20261110200000_scope_draft_release_open_status.sql|function|release_scope_job_drafts
+# RQ-17.c: a scope draft prepare registers the sealed payers as job parties
+# (register_scope_payer_parties); ahead of it every prepare reports the
+# registration unavailable, so wait for it.
+ops-api|supabase/migrations/20261111120000_scope_payer_parties.sql|function|register_scope_payer_parties
 ops-api|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|table|trade_invoice_events
 ops-api|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|table|trade_invoice_extra_rate_rules
 ops-api|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|index|trade_invoices_invoice_number_key
