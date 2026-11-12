@@ -2,7 +2,9 @@
 // Run: deno test --allow-read supabase/functions/send-quote/council_kickoff_email_test.ts
 import { assert, assertEquals } from 'https://deno.land/std@0.208.0/assert/mod.ts'
 import {
+  buildCouncilKickoffEmail,
   COUNCIL_KICKOFF_SUBJECT,
+  councilKickoffApplies,
   readQuoteRecipientEmail,
   sendCouncilKickoffEmail,
 } from './council_kickoff_email.ts'
@@ -137,4 +139,68 @@ Deno.test('regression: the accept handler sends the house-plans email through se
   const call = src.indexOf('sendCouncilKickoffEmail({')
   assert(call > 0, 'accept does not call sendCouncilKickoffEmail')
   assert(src.slice(call, call + 600).includes('documentId: doc.id'), 'the helper is not given the accepted document')
+})
+
+// ── Words: director's ruling 5 ──
+
+function bodyText(html: string): string {
+  return html.replace(/<[^>]*>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ')
+}
+
+Deno.test('words: subject unchanged', () => {
+  assertEquals(COUNCIL_KICKOFF_SUBJECT, 'Your Patio Project - Next Steps & What We Need From You')
+})
+
+Deno.test('words: no invoice, no Upload, no CDC, no durations, no em dash, no link to the upload page', () => {
+  const html = buildCouncilKickoffEmail('Sam', '1 Example St', 'Exampleton')
+  const text = bodyText(html)
+  assert(!/invoice/i.test(html), 'mentions an invoice')
+  assert(!/upload/i.test(html), 'mentions Upload')
+  assert(!/CDC/.test(html), 'mentions CDC')
+  assert(!/\d\s*(?:-|–)?\s*\d*\s*weeks?/i.test(text), 'states a duration in weeks')
+  assert(!html.includes('—'), 'em dash')
+  assert(!html.includes('upload-plans'), 'links the upload page')
+  assert(!/Or simply/.test(html), 'keeps the "Or simply" line')
+})
+
+Deno.test('words: the ruling-5 lines, word for word', () => {
+  const text = bodyText(buildCouncilKickoffEmail('Sam', '1 Example St', 'Exampleton'))
+  for (const line of [
+    'Hi Sam,',
+    'There is one thing we need from you to get started:',
+    'Please reply to this email with your house plans attached (PDF or photos are fine).',
+    'Not sure where to find them? Check your original build pack, request a copy from your local council (Exampleton), or ask your builder.',
+    'Our engineer prepares the structural drawings.',
+    'We lodge the building permit application with your council.',
+    'Once the permit is issued, we order materials and schedule your build.',
+    'We handle the entire council process for you - no need for you to contact council directly.',
+    'Questions? Call 0489 267 771 or reply to this email.',
+    'SecureWorks Group Pty Ltd | ABN 64 689 223 416',
+  ]) assert(text.includes(line), `missing: ${line}`)
+  assertEquals((text.match(/<li>|Our engineer|We lodge|Once the permit/g) || []).length, 3)
+})
+
+Deno.test('words: the body does not depend on the deposit invoice (held, failed or sent give the same body)', async () => {
+  // The builder takes no invoice input at all, and the accept handler passes it only the name and site.
+  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const calls = src.match(/buildCouncilKickoffEmail\(([^)]*)\)/g) || []
+  assertEquals(calls, ["buildCouncilKickoffEmail(clientFirst, job.site_address || '', job.site_suburb || '')"])
+  assertEquals(buildCouncilKickoffEmail.length, 3)
+  const a = buildCouncilKickoffEmail('Sam', '1 Example St', 'Exampleton')
+  const b = buildCouncilKickoffEmail('Sam', '1 Example St', 'Exampleton')
+  assertEquals(a, b)
+})
+
+Deno.test('fence accept sends nothing: only a patio accept starts the council email', async () => {
+  assertEquals(councilKickoffApplies({ type: 'fencing', job_number: 'SWF-1' }), false)
+  assertEquals(councilKickoffApplies({ type: 'general', job_number: 'SWG-1' }), false)
+  assertEquals(councilKickoffApplies(null), false)
+  assertEquals(councilKickoffApplies({ type: 'patio', job_number: 'SWP-1' }), true)
+  assertEquals(councilKickoffApplies({ type: null, job_number: 'SWP-1' }), true)
+  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  assert(src.includes('const isPatio = councilKickoffApplies(job)'))
+  const guard = src.indexOf('if (isPatio && job) {')
+  const send = src.indexOf('sendCouncilKickoffEmail({')
+  assert(guard > 0 && send > guard, 'the send is not inside the patio guard')
+  assertEquals((src.match(/sendCouncilKickoffEmail\(\{/g) || []).length, 1)
 })

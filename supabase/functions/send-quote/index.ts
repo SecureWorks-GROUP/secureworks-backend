@@ -113,7 +113,7 @@ import {
 } from '../_shared/release_packet/build_v2_augmentation.ts'
 import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from './quote_run.ts'
 import { depositHeldMessage, namedPartyDeposit, neighbourLetter, readAcceptedRelease, runDepositFromRelease } from './accepted_deposit.ts'
-import { sendCouncilKickoffEmail } from './council_kickoff_email.ts'
+import { buildCouncilKickoffEmail, councilKickoffApplies, sendCouncilKickoffEmail } from './council_kickoff_email.ts'
 import { setJobPriceToAcceptedQuote } from './accepted_job_price.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
@@ -2525,7 +2525,7 @@ serve(async (req: Request) => {
 
         // ── Auto-start council process for patio jobs (fire-and-forget) ──
         let councilSubmissionId: string | null = null
-        const isPatio = job?.type === 'patio' || job?.job_number?.startsWith('SWP')
+        const isPatio = councilKickoffApplies(job)
         if (isPatio && job) {
           try {
             const councilRes = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=create_council_submission`, {
@@ -2547,7 +2547,6 @@ serve(async (req: Request) => {
           // (council_kickoff_email.ts).
           {
             const clientFirst = (acceptorName || '').split(' ')[0] || 'there'
-            const uploadUrl = `${BASE_URL}/functions/v1/send-quote/upload-plans?token=${token}&job=${job.id}`
             sendCouncilKickoffEmail({
               sb,
               fetch,
@@ -2559,7 +2558,7 @@ serve(async (req: Request) => {
               documentId: doc.id,
               councilSubmissionId,
               replyTo: getClientReplyTo(job?.type, job?.job_number),
-              html: buildCouncilKickoffEmail(clientFirst, job.site_address || '', job.site_suburb || '', uploadUrl),
+              html: buildCouncilKickoffEmail(clientFirst, job.site_address || '', job.site_suburb || ''),
             })
             .catch((e: Error) => console.log('[send-quote] Council email failed (non-blocking):', e.message))
           }
@@ -5677,54 +5676,6 @@ async function doUpload(files) {
   } catch(e) { dz.innerHTML = '<div style="color:#E74C3C">Upload failed: '+e.message+'</div>'; }
 }
 </script></body></html>`
-}
-
-function buildCouncilKickoffEmail(clientFirst: string, address: string, suburb: string, uploadUrl: string): string {
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-<body style="margin:0;padding:0;background:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#fff;">
-  <tr><td style="background:#F15A29;height:4px;"></td></tr>
-  <tr><td style="background:#293C46;padding:20px 32px;">
-    <span style="color:#fff;font-size:18px;font-weight:700;">SecureWorks</span>
-    <span style="color:rgba(255,255,255,0.6);font-size:16px;font-weight:400;margin-left:4px;">Group</span>
-  </td></tr>
-  <tr><td style="padding:32px;background:#fff;">
-    <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Hi ${clientFirst},</p>
-    <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Thanks for choosing SecureWorks Group for your patio project${address ? ' at ' + address : ''}!</p>
-    <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Your deposit invoice has been sent separately. While we wait for that to come through, there's one thing we need from you to get started:</p>
-
-    <div style="background:#293C46;border-radius:8px;padding:20px;margin:20px 0;text-align:center;">
-      <div style="color:#fff;font-size:18px;font-weight:700;margin-bottom:8px;">📋 We Need Your House Plans</div>
-      <p style="color:rgba(255,255,255,0.8);font-size:14px;margin:0 0 16px;">To begin engineering and council approval, we need a copy of your original house plans showing the building footprint.</p>
-      <a href="${uploadUrl}" style="display:inline-block;padding:12px 28px;background:#F15A29;color:#fff;text-decoration:none;border-radius:6px;font-weight:700;font-size:15px;">Upload Your Plans Here</a>
-    </div>
-
-    <p style="color:#4C6A7C;font-size:14px;line-height:1.6;margin:0 0 8px;">Or simply <strong>reply to this email</strong> with your plans attached.</p>
-    <p style="color:#999;font-size:13px;line-height:1.6;margin:0 0 20px;">Not sure where to find them? Check your original build pack, request a copy from your local council${suburb ? ' (' + suburb + ')' : ''}, or ask your builder.</p>
-
-    <div style="border-top:1px solid #eee;padding-top:20px;margin-top:20px;">
-      <p style="color:#293C46;font-size:14px;font-weight:700;margin:0 0 12px;">What happens from here:</p>
-      <ol style="color:#4C6A7C;font-size:14px;line-height:1.8;padding-left:20px;margin:0;">
-        <li>Our engineer prepares structural drawings (1–2 weeks)</li>
-        <li>We submit your CDC application to council</li>
-        <li>Council reviews and issues a building permit (typically 6–8 weeks)</li>
-        <li>We order materials and schedule your build</li>
-      </ol>
-      <p style="color:#4C6A7C;font-size:13px;margin-top:12px;">We handle the entire council process for you - no need for you to contact council directly.</p>
-    </div>
-
-    <p style="color:#4C6A7C;font-size:14px;margin-top:20px;">Questions? Call <a href="tel:+61489267771" style="color:#F15A29;text-decoration:none;font-weight:600;">0489 267 771</a> or reply to this email.</p>
-  </td></tr>
-  <tr><td style="background:#293C46;padding:20px 32px;">
-    <p style="color:#ffffff;font-size:13px;margin:0;text-align:center;line-height:1.6;">
-      <strong>SecureWorks Group</strong> - Insulated Patios | Fencing &amp; Screening | Composite Decking<br>
-      <span style="color:#F15A29;">Transform your entire outdoor space - ask us about a complete package</span>
-    </p>
-  </td></tr>
-  <tr><td style="background:#f5f5f7;padding:16px 32px;">
-    <p style="color:#999;font-size:11px;margin:0;text-align:center;">SecureWorks Group Pty Ltd | ABN 64 689 223 416</p>
-  </td></tr>
-</table></body></html>`
 }
 
 function buildPaymentConfirmPromptPage(token: string): string {
