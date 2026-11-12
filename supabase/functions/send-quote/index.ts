@@ -132,6 +132,7 @@ import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { freezeExpectedCostsOnAcceptance } from '../_shared/expected_costs/expected_costs_freeze.ts'
 import { inspectSealedSesJob } from '../_shared/sealed_ses_money_fence.ts'
+import { customerSiteLine } from '../_shared/customer_site_line.ts'
 import {
   claimInvoiceEmailSend,
   publishInvoiceEmailSendOrRevert,
@@ -2626,7 +2627,7 @@ serve(async (req: Request) => {
         }
 
         // Return Next Steps HTML page directly (not via redirect — this is fetched by JS, not loaded as a page)
-        const address = [job?.site_address, job?.site_suburb].filter(Boolean).join(', ')
+        const address = customerSiteLine(job?.site_address, job?.site_suburb)
         // D1F-1: with no invoice, show the deposit from the accepted version, not the live job.
         const acceptedForPage = invoiceResult?.deposit_amount ? null : await readAcceptedRelease(sb, doc.id)
         const acceptedDeposit = acceptedForPage?.ok ? (acceptedForPage.pricing.deposit || {}) : {}
@@ -3852,6 +3853,7 @@ serve(async (req: Request) => {
       const emailHtml = buildInvoiceEmail({
         firstName,
         jobType: typeName,
+        projectLabel: nextStepsProjectLabel(job_type),
         address: address || '',
         invoiceNumber: invoice_number || '',
         depositAmount: depositFormatted,
@@ -4035,7 +4037,7 @@ serve(async (req: Request) => {
       // Only a real share token, for the job the link names (upload_plans.ts).
       const job = await resolveUploadPlansJob(sb, url.searchParams.get('token'), url.searchParams.get('job'))
       if (!job.ok) return new Response('Invalid link', { status: job.status, headers: corsHeaders })
-      const addr = [job.site?.site_address, job.site?.site_suburb].filter(Boolean).join(', ')
+      const addr = customerSiteLine(job.site?.site_address, job.site?.site_suburb)
       return new Response(buildUploadPlansPage(url.searchParams.get('token') || '', job.jobId, addr), {
         status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
       })
@@ -5522,9 +5524,11 @@ export function buildNextStepsPage(opts: {
 // BRANDED INVOICE EMAIL TEMPLATE (T3 + T8 referral footer)
 // ════════════════════════════════════════════════════════════
 
-function buildInvoiceEmail(opts: {
+export function buildInvoiceEmail(opts: {
   firstName: string
   jobType: string
+  // "your <this>": a general job's says "project", never "patio project" (division_routing.ts).
+  projectLabel: string
   address: string
   invoiceNumber: string
   depositAmount: string
@@ -5575,7 +5579,7 @@ function buildInvoiceEmail(opts: {
         Hi ${opts.firstName},
       </p>
       <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 24px;">
-        Your deposit invoice for your ${opts.jobType} project${opts.address ? ' at ' + opts.address : ''} is ready.
+        Your deposit invoice for your ${opts.projectLabel}${opts.address ? ' at ' + opts.address : ''} is ready.
       </p>
 
       <!-- Invoice card with orange left border -->
