@@ -2007,8 +2007,8 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
       } else if (category !== 'all') {
         defaultsQuery = defaultsQuery.eq('category', category)
       }
-      // Skip surcharge/panel-width rows — not comparable to supplier prices
-      defaultsQuery = defaultsQuery.not('category', 'in', '("fencing_surcharge","fencing_panels")')
+      // Skip surcharge/panel-width rows and staff_only policy rows (commission %) — not comparable to supplier prices
+      defaultsQuery = defaultsQuery.not('category', 'in', '("fencing_surcharge","fencing_panels","staff_only")')
       const { data: defaults } = await defaultsQuery
 
       // Get recent confirmed ledger prices (last 90 days)
@@ -2033,6 +2033,7 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
       // Compare: for each default, find matching ledger entries and compute drift
       const driftItems: any[] = []
       for (const def of (defaults || [])) {
+        if (def.category === 'staff_only') continue // staff policy (commission %), not a material price
         const defScopeTool = def.scope_tool || 'patio-tool'
         const isFencingDefault = defScopeTool === 'fence-designer'
 

@@ -3139,7 +3139,7 @@ async function createDailyAnnotations(sb: any, digest: any) {
       sb.from('scope_tool_defaults')
         .select('scope_tool, category, item_key, item_description, material_code, unit, default_price, default_cost_rate')
         .eq('org_id', DEFAULT_ORG_ID)
-        .not('category', 'in', '("fencing_surcharge","fencing_panels")'), // Skip non-priceable rows
+        .not('category', 'in', '("fencing_surcharge","fencing_panels","staff_only")'), // Skip non-priceable rows (staff_only: commission and other staff policy, never a supplier price)
       sb.from('material_price_ledger')
         .select('supplier_name, material_category, material_code, item_description, unit_price, captured_at')
         .eq('org_id', DEFAULT_ORG_ID)
@@ -3157,6 +3157,7 @@ async function createDailyAnnotations(sb: any, digest: any) {
     }
 
     for (const def of (scopeDefaults || [])) {
+      if (def.category === 'staff_only') continue // staff policy (commission %), not a material price
       const isFencing = (def.scope_tool || 'patio-tool') === 'fence-designer'
       const matches = (recentLedger || []).filter((l: any) => {
         // Division filter: don't cross-match patio defaults to fencing ledger items
