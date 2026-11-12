@@ -644,6 +644,7 @@ import {
 import {
   recordScopeArtifact as _recordScopeArtifact,
   isArtifactType as _isArtifactType,
+  ARTIFACT_TYPES as _ARTIFACT_TYPES,
 } from '../_shared/scope_freeze/record_scope_artifact.ts'
 // Scope-Memory-Saving M1 (issue #127) — read-only revision lister backing
 // the ops.html "View Frozen Revisions" picker, which has been calling
@@ -10671,7 +10672,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ error: 'scope_revision_id required' }, 400)
         }
         if (!_isArtifactType(body.artifact_type)) {
-          return json({ error: 'artifact_type required (one of render_hero, render_front, render_side, render_site_plan, render_riser, render_post_detail, render_profile, render_3d_scene, quote_pdf, per_contact_pdf, work_order_pdf, material_order_pdf, model_glb, drawing)' }, 400)
+          return json({ error: `artifact_type required (one of ${_ARTIFACT_TYPES.join(', ')})` }, 400)
         }
         const result = await _recordScopeArtifact(client, {
           scope_revision_id,
