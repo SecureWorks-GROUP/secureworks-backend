@@ -16,8 +16,9 @@
 //
 // Answers: 200 { rev_label, model }; 404 no model (or no such quote); 410
 // { current: true } when the quote was replaced; 503 when a read failed. The
-// model is copied through an allow-list of its geometry keys, so no price,
-// name, address or product code can ride along. Cache-Control: no-store, and
+// model is rebuilt from its declared geometry at every level (customerSafeModel),
+// so no note, price, name, address, token or product code can ride along, and
+// a model of any other shape is refused. Cache-Control: no-store, and
 // cross-site reads only from the hosted page's own origin.
 //
 // The quote email's third button (customerModelEmailBlock) is shown only when
@@ -78,42 +79,162 @@ const RUNS_RELEASE_VIA = 'send-quote/send-runs'
 const RELEASE_STAMP_KEY = 'released_quote_revision_id'
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-// The model's own keys (scope-engine-v2 patio/scoper/src/present/model.ts
-// CustomerModel, less `revision`, the revision id customerCopy strips). A key
-// the tool adds later is dropped here until it is listed: geometry only.
-const MODEL_KEYS = [
-  'what', 'notes', 'shapes', 'surfaces', 'pieces', 'subject', 'house', 'houseWalls', 'houseContext',
-  'houseStandIn', 'contextNote', 'front', 'ground', 'start', 'views', 'frontClearMm', 'runs',
-] as const
+// The model as the tool declares it (scope-engine-v2 patio/scoper/src/present/
+// model.ts CustomerModel). The public route rebuilds it from scratch, field by
+// field and type by type, at every level: `revision` and `notes` are never
+// copied, an unknown key at any depth is dropped, and a field of the wrong type
+// refuses the whole model. Text is limited to the view names and the house
+// note, in plain words with no digits, so no price, name, address, token or
+// product code can ride along, however the stored bytes were made.
 
-// A price or an email address anywhere in the model's text. (No phone pattern:
-// long decimals in the geometry would read as one.)
-const MONEY_RE = /\$\s?\d/
-const EMAIL_RE = /[^\s@"]+@[^\s@"]+\.[a-z]{2,}/i
+type Num = number
+const isNum = (v: unknown): v is Num => typeof v === 'number' && Number.isFinite(v)
+const MAX_NUMBERS = 2_000_000
+const MAX_ITEMS = 100_000
+
+class Refused extends Error {}
+const refuse = (): never => { throw new Refused() }
+
+function obj(v: unknown): Row {
+  return v && typeof v === 'object' && !Array.isArray(v) ? v as Row : refuse()
+}
+function list(v: unknown): unknown[] {
+  return Array.isArray(v) && v.length <= MAX_ITEMS ? v : refuse()
+}
+function nums(v: unknown, len?: number): Num[] {
+  if (!Array.isArray(v) || v.length > MAX_NUMBERS || (len !== undefined && v.length !== len)) refuse()
+  const a = v as unknown[]
+  return a.map((x) => (isNum(x) ? x : refuse()))
+}
+function numsOrNull(v: unknown, len?: number): Num[] | null {
+  return v === null ? null : nums(v, len)
+}
+function num(v: unknown): Num {
+  return isNum(v) ? v : refuse()
+}
+function bool(v: unknown): boolean {
+  return typeof v === 'boolean' ? v : refuse()
+}
+function oneOf<T extends string>(v: unknown, allowed: readonly T[]): T {
+  return typeof v === 'string' && (allowed as readonly string[]).includes(v) ? v as T : refuse()
+}
+
+// Words only: letters, spaces and light punctuation, no digits, no $ or @.
+const SAFE_TEXT_RE = /^[A-Za-z ,.;:'()\-]{0,200}$/
+const safeText = (v: unknown): string | null => (typeof v === 'string' && SAFE_TEXT_RE.test(v) ? v : null)
+const VIEW_KEY_RE = /^[a-z][a-z0-9_-]{0,31}$/i
+const LOOK_RE = /^(lawn|(finish|context):[a-z-]{1,32})$/
+const COLOR_RE = /^#[0-9a-f]{6}$/i
+
+function view(v: unknown): Row {
+  const s = obj(v)
+  const out: Row = {
+    key: typeof s.key === 'string' && VIEW_KEY_RE.test(s.key) ? s.key : refuse(),
+    label: safeText(s.label) ?? '',
+    eye: nums(s.eye, 3),
+    at: nums(s.at, 3),
+    fov: num(s.fov),
+  }
+  if (s.cutaway !== undefined) out.cutaway = s.cutaway === true ? true : refuse()
+  return out
+}
+
+function shape(v: unknown): Row {
+  const s = obj(v)
+  if (s.kind === 'run') {
+    return { kind: 'run', outer: nums(s.outer), holes: list(s.holes).map((h) => nums(h)), length: num(s.length) }
+  }
+  if (s.kind === 'mesh') return { kind: 'mesh', position: nums(s.position), uv: numsOrNull(s.uv) }
+  return refuse()
+}
+
+function surface(v: unknown): Row {
+  const s = obj(v)
+  const look = typeof s.look === 'string' ? s.look : refuse()
+  return {
+    // Colorbond codes come off (colour:XYZ -> colour:); any other look the
+    // page does not know is blanked rather than passed through.
+    look: look.startsWith('colour:') ? 'colour:' : LOOK_RE.test(look) ? look : '',
+    color: typeof s.color === 'string' && COLOR_RE.test(s.color) ? s.color : refuse(),
+    roughness: num(s.roughness),
+    metalness: num(s.metalness),
+    clearcoat: num(s.clearcoat),
+    clearcoatRoughness: num(s.clearcoatRoughness),
+    doubleSided: bool(s.doubleSided),
+    lawn: bool(s.lawn),
+  }
+}
+
+function piece(v: unknown, shapeCount: number, surfaceCount: number): Row {
+  const s = obj(v)
+  const index = (x: unknown, n: number) => (Number.isInteger(x) && (x as number) >= 0 && (x as number) < n ? x as number : refuse())
+  const out: Row = {
+    shape: index(s.shape, shapeCount),
+    surface: index(s.surface, surfaceCount),
+    matrix: nums(s.matrix, 16),
+    clip: nums(s.clip),
+    notches: nums(s.notches),
+  }
+  if (s.roof !== undefined) out.roof = s.roof === true ? true : refuse()
+  if (s.wallConnection !== undefined) out.wallConnection = oneOf(s.wallConnection, ['member', 'anchor'] as const)
+  return out
+}
 
 /**
- * The model as the customer may see it: the allow-listed geometry keys only,
- * Colorbond codes taken off surface looks (colour:XYZ -> colour:), and null
- * when it is not a patio or fence model or its text carries a price or an
- * email address.
+ * The model as the customer may see it: a fresh copy of the declared geometry
+ * only (see above), Colorbond codes taken off surface looks, and null when it
+ * is not a patio or fence model of the declared shape.
  */
 export function customerSafeModel(raw: unknown): Record<string, unknown> | null {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
-  const src = raw as Row
-  if (src.what !== 'patio' && src.what !== 'fence') return null
-  const out: Record<string, unknown> = {}
-  for (const key of MODEL_KEYS) if (key in src) out[key] = src[key]
-  if (Array.isArray(out.surfaces)) {
-    out.surfaces = (out.surfaces as unknown[]).map((s) => {
-      if (s && typeof s === 'object' && typeof (s as Row).look === 'string' && (s as Row).look.startsWith('colour:')) {
-        return { ...(s as Row), look: 'colour:' }
-      }
-      return s
-    })
+  try {
+    const src = obj(raw)
+    const what = oneOf(src.what, ['patio', 'fence'] as const)
+    const shapes = list(src.shapes).map(shape)
+    const surfaces = list(src.surfaces).map(surface)
+    const out: Record<string, unknown> = {
+      what,
+      shapes,
+      surfaces,
+      pieces: list(src.pieces).map((p) => piece(p, shapes.length, surfaces.length)),
+      subject: nums(src.subject, 6),
+      house: numsOrNull(src.house, 6),
+      front: nums(src.front),
+      ground: numsOrNull(src.ground),
+      start: view(src.start),
+      views: list(src.views).map(view),
+    }
+    if (src.houseWalls !== undefined) {
+      out.houseWalls = list(src.houseWalls).map((w) => {
+        const s = obj(w)
+        return { from: nums(s.from, 3), to: nums(s.to, 3), out: nums(s.out, 3), height: num(s.height) }
+      })
+    }
+    if (src.houseStandIn !== undefined) {
+      out.houseStandIn = list(src.houseStandIn).map((w) => {
+        const s = obj(w)
+        return {
+          from: nums(s.from, 3), to: nums(s.to, 3), out: nums(s.out, 3),
+          kind: oneOf(s.kind, ['fascia', 'wall'] as const), lowY: num(s.lowY), topY: num(s.topY),
+        }
+      })
+    }
+    if (src.houseContext !== undefined) out.houseContext = oneOf(src.houseContext, ['sample', 'configured'] as const)
+    const note = safeText(src.contextNote)
+    if (note) out.contextNote = note
+    if (src.frontClearMm !== undefined) out.frontClearMm = src.frontClearMm === null ? null : num(src.frontClearMm)
+    if (src.runs !== undefined) {
+      out.runs = list(src.runs).map((r) => {
+        const s = obj(r)
+        const run: Row = { a: nums(s.a), b: nums(s.b), out: nums(s.out) }
+        if (s.gaps !== undefined) run.gaps = list(s.gaps).map((g) => nums(g, 2))
+        return run
+      })
+    }
+    return out
+  } catch (e) {
+    if (e instanceof Refused) return null
+    throw e
   }
-  const text = JSON.stringify(out)
-  if (MONEY_RE.test(text) || EMAIL_RE.test(text)) return null
-  return out
 }
 
 /** The first customer_model saved on a scope revision, null when none, 'error' when the read failed. */
@@ -263,8 +384,15 @@ export function customerModelWhat(jobType: string | null | undefined): 'patio' |
  * client document, so the other run documents (and every neighbour's) name no
  * release. When that email carried the 3D button, each document of the call is
  * stamped with the call's release (metadata.released_quote_revision_id) so its
- * own token reaches the model. A stamp already set is never moved. Never throws
- * and never changes the send; a failed stamp only leaves that link "not available".
+ * own token reaches the model.
+ *
+ * The stamp is set only while absent, as one conditional write: the update
+ * matches the row only while its metadata is still exactly what was read (so
+ * a key another writer added meanwhile is never lost) and still has no stamp.
+ * When it matches nothing, the row is read again: a stamp now present is never
+ * moved, whoever set it; otherwise the write is tried again, a few times. Never
+ * throws and never changes the send; a failed stamp only leaves that link "not
+ * available".
  */
 export async function stampRunDocumentsRelease(
   sb: any,
@@ -272,21 +400,43 @@ export async function stampRunDocumentsRelease(
   releaseId: string,
   ctx: { job_id: string },
 ): Promise<void> {
+  const log = (tag: string, fields: Row) => console.error(`[send-quote/model-stamp-${tag}]`, JSON.stringify({ job_id: ctx.job_id, ...fields }))
   for (const id of [...new Set(documentIds.filter((d) => typeof d === 'string' && d))]) {
     try {
-      const { data, error } = await sb.from('job_documents').select('id, metadata').eq('id', id).maybeSingle()
-      if (error || !data) {
-        console.error('[send-quote/model-stamp-skip]', JSON.stringify({ job_id: ctx.job_id, document_id: id, reason: error ? 'read_failed' : 'missing' }))
-        continue
+      for (let attempt = 1; ; attempt++) {
+        const { data, error } = await sb.from('job_documents').select('id, metadata').eq('id', id).maybeSingle()
+        if (error || !data) {
+          log('skip', { document_id: id, reason: error ? 'read_failed' : 'missing' })
+          break
+        }
+        const raw = data.metadata ?? null
+        if (raw !== null && (typeof raw !== 'object' || Array.isArray(raw))) {
+          log('skip', { document_id: id, reason: 'metadata_not_an_object' })
+          break
+        }
+        const meta = (raw ?? {}) as Row
+        if (meta[RELEASE_STAMP_KEY] != null) {
+          if (meta[RELEASE_STAMP_KEY] !== releaseId) log('kept', { document_id: id, reason: 'another_release_already_stamped' })
+          break
+        }
+        let write = sb.from('job_documents')
+          .update({ metadata: { ...meta, [RELEASE_STAMP_KEY]: releaseId } })
+          .eq('id', id)
+          .is(`metadata->>${RELEASE_STAMP_KEY}`, null)
+        write = raw === null ? write.is('metadata', null) : write.eq('metadata', JSON.stringify(raw))
+        const { data: won, error: upErr } = await write.select('id')
+        if (upErr) {
+          log('fail', { document_id: id, error: upErr.message ?? String(upErr) })
+          break
+        }
+        if (Array.isArray(won) && won.length > 0) break
+        if (attempt >= 3) {
+          log('fail', { document_id: id, error: 'metadata kept changing; not stamped' })
+          break
+        }
       }
-      const meta = data.metadata && typeof data.metadata === 'object' && !Array.isArray(data.metadata) ? data.metadata as Row : {}
-      if (meta[RELEASE_STAMP_KEY]) continue
-      const { error: upErr } = await sb.from('job_documents')
-        .update({ metadata: { ...meta, [RELEASE_STAMP_KEY]: releaseId } })
-        .eq('id', id)
-      if (upErr) console.error('[send-quote/model-stamp-fail]', JSON.stringify({ job_id: ctx.job_id, document_id: id, error: upErr.message ?? String(upErr) }))
     } catch (e: any) {
-      console.error('[send-quote/model-stamp-fail]', JSON.stringify({ job_id: ctx.job_id, document_id: id, error: e?.message ?? String(e) }))
+      log('fail', { document_id: id, error: e?.message ?? String(e) })
     }
   }
 }

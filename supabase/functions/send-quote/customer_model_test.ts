@@ -33,8 +33,8 @@ function modelOf(label: string): Row {
     what: "patio",
     revision: "frozen-rev-id-should-not-leave",
     shapes: [{ kind: "run", outer: [0, 0, 1, 0, 1, 1], holes: [], length: 3.2 }],
-    surfaces: [{ look: "colour:Monument", color: "#333", roughness: 0.5, metalness: 0, clearcoat: 0, clearcoatRoughness: 0, doubleSided: false, lawn: false }],
-    pieces: [{ shape: 0, surface: 0, matrix: [1, 0, 0, 0], clip: [], notches: [] }],
+    surfaces: [{ look: "colour:Monument", color: "#333333", roughness: 0.5, metalness: 0, clearcoat: 0, clearcoatRoughness: 0, doubleSided: false, lawn: false }],
+    pieces: [{ shape: 0, surface: 0, matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], clip: [], notches: [] }],
     subject: [0, 0, 0, 1, 1, 1],
     house: null,
     front: [0, 1],
@@ -44,9 +44,27 @@ function modelOf(label: string): Row {
   }
 }
 
-/** A small PostgREST + Storage fake: equality filters, order, limit, maybeSingle, update. */
+const sameJson = (a: unknown, b: unknown): boolean => {
+  if (a === b) return true
+  if (!a || !b || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b)) return false
+  const ka = Object.keys(a as Row), kb = Object.keys(b as Row)
+  return ka.length === kb.length && ka.every((k) => sameJson((a as Row)[k], (b as Row)[k]))
+}
+/** A column filter's value: a plain column, or a jsonb text path (metadata->>key). */
+const colValue = (r: Row, c: string): unknown => {
+  const [col, key] = c.split("->>")
+  if (key === undefined) return r[col] ?? null
+  const v = r[col]
+  return v && typeof v === "object" && v[key] != null ? String(v[key]) : null
+}
+
+/**
+ * A small PostgREST + Storage fake: equality filters (a jsonb column compares
+ * by value, as Postgres does), is-null on a column or a metadata->>key path,
+ * order, limit, maybeSingle, update (returning the rows it matched).
+ */
 function fakeClient(tables: Record<string, Row[]>, files: Record<string, Uint8Array>, fail: Set<string> = new Set()) {
-  const updates: Array<{ table: string; values: Row; id: unknown }> = []
+  const updates: Array<{ table: string; values: Row; id: unknown; matched: number }> = []
   const from = (table: string) => {
     const filters: Array<(r: Row) => boolean> = []
     const orders: Array<{ col: string; asc: boolean }> = []
@@ -63,7 +81,7 @@ function fakeClient(tables: Record<string, Row[]>, files: Record<string, Uint8Ar
       if (lim != null) rows = rows.slice(0, lim)
       if (mode === "update") {
         for (const r of rows) Object.assign(r, values)
-        updates.push({ table, values, id: eqId })
+        updates.push({ table, values, id: eqId, matched: rows.length })
         return { data: rows, error: null }
       }
       return { data: rows, error: null }
@@ -71,8 +89,12 @@ function fakeClient(tables: Record<string, Row[]>, files: Record<string, Uint8Ar
     const q: any = {
       select: () => q,
       update: (v: Row) => { mode = "update"; values = v; return q },
-      eq: (c: string, v: unknown) => { if (c === "id") eqId = v; filters.push((r) => r[c] === v); return q },
-      is: (c: string, v: unknown) => { filters.push((r) => (r[c] ?? null) === v); return q },
+      eq: (c: string, v: unknown) => {
+        if (c === "id") eqId = v
+        filters.push(c === "metadata" && typeof v === "string" ? (r) => sameJson(r[c], JSON.parse(v)) : (r) => r[c] === v)
+        return q
+      },
+      is: (c: string, v: unknown) => { filters.push((r) => colValue(r, c) === v); return q },
       order: (c: string, o?: { ascending?: boolean }) => { orders.push({ col: c, asc: o?.ascending !== false }); return q },
       limit: (n: number) => { lim = n; return q },
       maybeSingle: async () => {
@@ -198,14 +220,77 @@ Deno.test("model route: the answer carries no revision id, product code, price, 
   assert(!text.includes("frozen-rev-id-should-not-leave"))
   assert(!text.includes("Monument"))
   assertEquals(Object.keys(r.body).sort(), ["model", "rev_label"])
-  // Keys the tool never sends are dropped; text with a price or an email refuses the model.
+  // Unknown top-level keys are dropped; text that is not plain words is dropped or blanked.
   const extra = customerSafeModel({ ...modelOf("x"), clientName: "A Person", site_address: "1 Some St", price: 9 }) as Row
   assertEquals(extra.clientName, undefined)
   assertEquals(extra.site_address, undefined)
   assertEquals(extra.price, undefined)
-  assertEquals(customerSafeModel({ ...modelOf("x"), contextNote: "Total $4,500" }), null)
-  assertEquals(customerSafeModel({ ...modelOf("x"), notes: ["call someone@example.com"] }), null)
+  assertEquals((customerSafeModel({ ...modelOf("x"), contextNote: "Total $4,500" }) as Row).contextNote, undefined)
+  assertEquals((customerSafeModel({ ...modelOf("x"), contextNote: "Call 0400 000 000" }) as Row).contextNote, undefined)
+  assertEquals((customerSafeModel({ ...modelOf("x"), contextNote: "The house and surroundings are indicative." }) as Row).contextNote,
+    "The house and surroundings are indicative.")
+  assertEquals((customerSafeModel(modelOf("someone@example.com")) as Row).start, { key: "start", label: "", eye: [1, 2, 3], at: [0, 0, 0], fov: 40 })
   assertEquals(customerSafeModel({ what: "deck" }), null)
+})
+
+Deno.test("model route: planted fields at every level never reach the public answer", async () => {
+  // Stored bytes with a valid hash but extra content: notes, unknown keys, and a
+  // price, token or supplier nested under allowed keys. The route rebuilds the
+  // declared geometry and none of it leaves.
+  const planted = modelOf("Your patio") as Row
+  planted.notes = ["Hardware kit from a named supplier, 1 Some St"]
+  planted.secretTop = "tok-planted-top"
+  planted.surfaces[0].price = 412.5
+  planted.surfaces[0].token = "tok-planted-surface"
+  planted.pieces[0].supplier = "Named Supplier Pty Ltd"
+  planted.shapes[0].cost = { ex: 99 }
+  planted.start.owner = "A Person"
+  planted.houseWalls = [{ from: [0, 0, 0], to: [1, 0, 0], out: [0, 0, 1], height: 2.4, address: "1 Some St" }]
+  planted.runs = [{ a: [0, 0], b: [1, 0], out: [0, 1], gaps: [[0.2, 1.1]], gate_price: 800 }]
+  const { tables, files } = await world({ modelOnB: false })
+  const bytes = new TextEncoder().encode(JSON.stringify(planted))
+  const sha = await sha256Hex(bytes)
+  Object.assign(tables.scope_artifacts[0], { sha256: sha, storage_path: `${REV_A}/${sha}.json` })
+  files[`scope-artifacts/${REV_A}/${sha}.json`] = bytes
+  const res = await handleCustomerModelRequest(
+    new Request(`https://x.supabase.co/functions/v1/send-quote/model?token=${TOKEN}`),
+    fakeClient(tables, files),
+    CUSTOMER_3D_PAGE_DEFAULT_URL,
+  )
+  assertEquals(res.status, 200)
+  const body = await res.json()
+  const text = JSON.stringify(body)
+  for (const leak of ["notes", "Hardware", "secretTop", "tok-planted", "price", "412.5", "token", "supplier", "Supplier", "cost", "owner", "A Person", "address", "Some St", "gate_price", "revision", "Monument"]) {
+    assert(!text.includes(leak), `leaked: ${leak}`)
+  }
+  const m = body.model
+  assertEquals(Object.keys(m.surfaces[0]).sort(), ["clearcoat", "clearcoatRoughness", "color", "doubleSided", "lawn", "look", "metalness", "roughness"])
+  assertEquals(m.surfaces[0].look, "colour:")
+  assertEquals(Object.keys(m.pieces[0]).sort(), ["clip", "matrix", "notches", "shape", "surface"])
+  assertEquals(m.houseWalls, [{ from: [0, 0, 0], to: [1, 0, 0], out: [0, 0, 1], height: 2.4 }])
+  assertEquals(m.runs, [{ a: [0, 0], b: [1, 0], out: [0, 1], gaps: [[0.2, 1.1]] }])
+  assertEquals(m.start.label, "Your patio")
+})
+
+Deno.test("model route: a model not of the declared shape is refused, never half-served", () => {
+  const bad: Array<[string, (m: Row) => void]> = [
+    ["text in a number list", (m) => { m.subject = [0, 0, 0, 1, 1, "tok"] }],
+    ["object in a number list", (m) => { m.shapes[0].outer = [0, { price: 1 }] }],
+    ["a surface colour that is not a colour", (m) => { m.surfaces[0].color = "tok-abc" }],
+    ["a piece naming a shape that is not there", (m) => { m.pieces[0].shape = 4 }],
+    ["an unknown shape kind", (m) => { m.shapes[0] = { kind: "text", value: "hello" } }],
+    ["a view key that is not a key", (m) => { m.start.key = "a b c $5" }],
+    ["a wall connection outside the list", (m) => { m.pieces[0].wallConnection = "supplier" }],
+  ]
+  for (const [why, plant] of bad) {
+    const m = structuredClone(modelOf("x"))
+    plant(m)
+    assertEquals(customerSafeModel(m), null, why)
+  }
+  // An unknown look passes as blank, never as its text.
+  const odd = structuredClone(modelOf("x"))
+  odd.surfaces[0].look = "sku:ABC-123"
+  assertEquals((customerSafeModel(odd) as Row).surfaces, [{ ...odd.surfaces[0], look: "" }])
 })
 
 Deno.test("model route: cross-site reads only from the hosted page's origin, no-store", async () => {
@@ -267,6 +352,63 @@ Deno.test("fence runs: a stamped run document reaches the call's release; a stam
   // A stamp naming a non-runs release is not followed.
   tables.quote_revisions[0].released_via = "send-quote/send"
   assertEquals((await readCustomerModelForToken(c, "tok-neighbour")).status, 404)
+})
+
+/** Two stamping calls that both read the document before either writes. */
+function racingClient(tables: Record<string, Row[]>, files: Record<string, Uint8Array>, readers = 2, between?: () => void) {
+  const c = fakeClient(tables, files)
+  let reads = 0
+  let open!: () => void
+  const gate = new Promise<void>((resolve) => { open = resolve })
+  const from = (table: string) => {
+    const q = c.from(table)
+    if (table !== "job_documents") return q
+    const maybeSingle = q.maybeSingle
+    q.maybeSingle = async () => {
+      const r = await maybeSingle()
+      reads++
+      if (reads <= readers) {
+        if (reads === readers) { between?.(); open() }
+        await gate
+      }
+      return r
+    }
+    return q
+  }
+  return { ...c, from }
+}
+
+Deno.test("fence runs: two calls racing on one document never write two release ids", async () => {
+  const runDoc = "66666666-6666-4666-8666-666666666666"
+  const OTHER = "77777777-7777-4777-8777-777777777777"
+  const { tables, files } = await world()
+  tables.job_documents.push({ id: runDoc, job_id: JOB, type: "quote", share_token: "tok-n", sent_to_client: true, quote_revision_id: null, superseded_at: null, metadata: { other: 1 } })
+  const c = racingClient(tables, files)
+  await Promise.all([
+    stampRunDocumentsRelease(c, [runDoc], REL, { job_id: JOB }),
+    stampRunDocumentsRelease(c, [runDoc], OTHER, { job_id: JOB }),
+  ])
+  const doc = tables.job_documents.find((d) => d.id === runDoc)!
+  // Exactly one write landed; the loser re-read, saw a stamp, and left it.
+  const writes = c.updates.filter((u) => u.table === "job_documents")
+  assertEquals(writes.length, 2) // both tried
+  assertEquals(writes.filter((u) => u.matched > 0).length, 1) // one landed
+  assertEquals(doc.metadata.other, 1)
+  assert(doc.metadata.released_quote_revision_id === REL || doc.metadata.released_quote_revision_id === OTHER)
+  const winner = doc.metadata.released_quote_revision_id
+  // Run again with the other id: still never moved.
+  await stampRunDocumentsRelease(fakeClient(tables, files), [runDoc], winner === REL ? OTHER : REL, { job_id: JOB })
+  assertEquals(doc.metadata.released_quote_revision_id, winner)
+})
+
+Deno.test("fence runs: a key another writer adds between the read and the stamp is kept", async () => {
+  const runDoc = "66666666-6666-4666-8666-666666666666"
+  const { tables, files } = await world()
+  const row: Row = { id: runDoc, job_id: JOB, type: "quote", share_token: "tok-n", sent_to_client: true, quote_revision_id: null, superseded_at: null, metadata: null }
+  tables.job_documents.push(row)
+  const c = racingClient(tables, files, 1, () => { row.metadata = { viewed_at: "2026-11-12T12:00:00Z" } })
+  await stampRunDocumentsRelease(c, [runDoc], REL, { job_id: JOB })
+  assertEquals(row.metadata, { viewed_at: "2026-11-12T12:00:00Z", released_quote_revision_id: REL })
 })
 
 Deno.test("email button: shown only when the sealed revision has a model", async () => {
