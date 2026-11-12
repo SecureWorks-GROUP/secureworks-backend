@@ -24,9 +24,15 @@ export function buildTradeInvoiceAuditText(
     "TAX INVOICE - labour at submitted amounts, super 12% remittance, worker withhold on the minus line",
     `${tradeName}  ${invoiceNumber}`,
     `Submitted total ${moneyLabel(model.header.submitted_total)}`,
-    `Super ${
-      (model.super_rate * 100).toFixed(2)
-    }% remittance of submitted total ${moneyLabel(model.header.super_amount)}`,
+    model.super_base_ex !== null && model.super_base_ex !== undefined
+      ? `Super ${
+        (model.super_rate * 100).toFixed(2)
+      }% remittance of submitted total less commission (${
+        moneyLabel(model.super_base_ex)
+      }) ${moneyLabel(model.header.super_amount)}`
+      : `Super ${
+        (model.super_rate * 100).toFixed(2)
+      }% remittance of submitted total ${moneyLabel(model.header.super_amount)}`,
     `Amount payable ${moneyLabel(model.header.amount_payable)}`,
     "Lines (submitted amounts - not reduced per line for super)",
   ];

@@ -8,8 +8,10 @@
 // details are made up; the PDFs are tiny made-up files.
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  dispatchDocIsSideFile,
   dispatchDocStoragePath,
   dispatchSupplierDocumentKind,
+  pickLatestSupplierDocument,
   dispatchSupplierDocumentName,
   hasPdfMagic,
   isDispatchPdfCandidate,
@@ -299,14 +301,198 @@ Deno.test("save: a later invoice is saved too; the statement guess never is", as
   });
   const r = await save(t.client);
   assertEquals(r.saved.map((s) => s.name), ["Stratco invoice.pdf"]);
-  assertEquals(t.tables.job_documents.map((d) => d.file_name), [
-    "Stratco order confirmation.pdf",
-    "Stratco invoice.pdf",
+  // Latest only (11 Nov): the later invoice replaces the confirmation.
+  assertEquals(t.tables.job_documents.map((d) => d.file_name), ["Stratco invoice.pdf"]);
+  assertEquals(r.replaced.map((x) => x.name), ["Stratco order confirmation.pdf"]);
+  assertEquals(t.tables.job_documents[0].metadata.latest_only, true);
+  // The confirmation is remembered as saved, with no document, so it never comes back.
+  const conf = t.tables.dispatch_v2_order_documents.find((d) => d.content_sha256 === t.shas.confirmation)!;
+  assertEquals([conf.state, conf.job_document_id], ["saved", null]);
+  assertEquals(t.tables.job_events.map((e) => e.event_type), [
+    "dispatch_v2_order_document_saved",
+    "dispatch_v2_order_document_saved",
+    "dispatch_v2_order_document_replaced",
   ]);
+  const again = await save(t.client);
+  assertEquals([again.saved.length, again.replaced.length, t.tables.job_documents.length], [0, 0, 1]);
   assertEquals(
     t.tables.dispatch_v2_order_documents.some((d) => d.content_sha256 === t.shas.statement),
     false,
   );
+});
+
+// ── Latest only (Shaun, 11 Nov 2026) ────────────────────────────────────────
+
+Deno.test("latest only: side files by their own name, never by the email's words", () => {
+  for (
+    const name of [
+      "SecureWorks WA Price List - November 2026.pdf",
+      "Pricelist_2026.pdf",
+      "Shop drawings rev B.pdf",
+      "Terms and Conditions of Sale.pdf",
+      "Credit Application Form.pdf",
+      "Statement 31-10-2026.pdf",
+      "Product brochure.pdf",
+      "Colorbond colour chart.pdf",
+    ]
+  ) assertEquals(dispatchDocIsSideFile(name), true, name);
+  for (
+    const name of [
+      "QUOTATION - 1465370 20261110 1144.pdf",
+      "Pro Forma Invoice - 2026-11-11T093619.065.pdf",
+      "Sales Order 241702.pdf",
+      "ORDER CONFIRMATION - 1465370 20261111 1131.pdf",
+      "SW-123-R1 REV A.pdf",
+      "IMG_20261109_0003.pdf",
+      null,
+    ]
+  ) assertEquals(dispatchDocIsSideFile(name), false, String(name));
+});
+
+Deno.test("latest only: the newest email wins; in it a named invoice, then confirmation, then quote", () => {
+  const c = (file_name: string | null, received_at: string, kind: any) => ({ file_name, received_at, kind });
+  // SWP-261405's CMI thread, 6 to 11 Nov: the 11 Nov pro forma is kept.
+  const cmi = [
+    c("SW-123-R1 REV A.pdf", "2026-11-06T07:49:00Z", "order_confirmation"),
+    c("SW-123-R2 REV A.pdf", "2026-11-06T07:49:00Z", "order_confirmation"),
+    c("IMG_20261109_0003.pdf", "2026-11-09T00:32:00Z", "order_confirmation"),
+    c("Pro Forma Invoice - 2026-11-10T135757.206.pdf", "2026-11-10T05:58:00Z", "invoice"),
+    c("Sales Order 241702.pdf", "2026-11-11T00:33:00Z", "order_confirmation"),
+    c("Pro Forma Invoice - 2026-11-11T093619.065.pdf", "2026-11-11T01:38:00Z", "invoice"),
+  ];
+  assertEquals(pickLatestSupplierDocument(cmi)?.file_name, "Pro Forma Invoice - 2026-11-11T093619.065.pdf");
+  // Bondor's quote email carried a price list too ("please see attached quote"): the quote.
+  const bondor = [
+    c("QUOTATION - 1465370 20261110 1144.pdf", "2026-11-10T01:50:00Z", "quote"),
+    c("SecureWorks WA Price List - November 2026.pdf", "2026-11-10T01:50:00Z", "quote"),
+  ];
+  assertEquals(pickLatestSupplierDocument(bondor)?.file_name, "QUOTATION - 1465370 20261110 1144.pdf");
+  // Price list listed first makes no difference.
+  assertEquals(pickLatestSupplierDocument([...bondor].reverse())?.file_name, "QUOTATION - 1465370 20261110 1144.pdf");
+  // Two in one email: invoice beats confirmation beats quote; a named file beats an unnamed one.
+  const same = "2026-11-12T01:00:00Z";
+  assertEquals(
+    pickLatestSupplierDocument([
+      c("Quote 55.pdf", same, "invoice"),
+      c("Order confirmation 55.pdf", same, "invoice"),
+      c("Tax Invoice 55.pdf", same, "invoice"),
+    ])?.file_name,
+    "Tax Invoice 55.pdf",
+  );
+  assertEquals(
+    pickLatestSupplierDocument([c("scan001.pdf", same, "invoice"), c("Quote 55.pdf", same, "invoice")])?.file_name,
+    "Quote 55.pdf",
+  );
+  // Only side files: nothing.
+  assertEquals(pickLatestSupplierDocument([c("Price list.pdf", same, "quote")]), null);
+});
+
+// A matched reply on ORDER carrying the given PDFs (stored by the capture reader).
+async function addReply(
+  t: any,
+  id: string,
+  receivedAt: string,
+  subject: string,
+  files: string[],
+) {
+  const msg = `email:${id}`;
+  t.tables.dispatch_v2_supplier_emails.push({
+    id,
+    org_id: ORG,
+    order_id: ORDER,
+    job_id: JOB,
+    state: "matched",
+    provider_message_id: msg,
+    subject,
+    snippet: "",
+    received_at: receivedAt,
+    updated_at: receivedAt,
+  });
+  const shas: Record<string, string> = {};
+  for (const name of files) {
+    const bytes = pdf(`${id} ${name}`);
+    const sha = await sha256HexOf(bytes);
+    shas[name] = sha;
+    t.objects.set(`${CAPTURE}/${id}/${name}`, bytes);
+    t.tables.context_email_attachments.push({
+      id: `att-${id}-${name}`,
+      provider_message_id: msg,
+      file_name: name,
+      content_type: "application/pdf",
+      sha256: sha,
+      storage_bucket: CAPTURE,
+      storage_path: `${id}/${name}`,
+      status: "stored",
+    });
+  }
+  return shas;
+}
+
+// The fixture without its confirmation reply, so only the replies added count.
+async function bare() {
+  const t = await setup();
+  t.tables.dispatch_v2_supplier_emails.length = 0;
+  t.tables.context_email_attachments.length = 0;
+  return t;
+}
+
+Deno.test("latest only: a quote and a price list in one email saves the quote only", async () => {
+  const t = await bare();
+  await addReply(t, "q1", "2026-11-02T01:00:00Z", "RE: Material Order Ref SWP-90001", [
+    "QUOTATION - 1465370.pdf",
+    "SecureWorks WA Price List - November 2026.pdf",
+  ]);
+  const r = await save(t.client);
+  assertEquals(r.found, 1);
+  assertEquals(r.saved.map((s) => s.name), ["Stratco quote.pdf"]);
+  assertEquals(r.skipped.map((s) => s.reason), ["side_file"]);
+  assertEquals(t.tables.job_documents.length, 1);
+  assertEquals(t.tables.dispatch_v2_order_documents.length, 1);
+});
+
+Deno.test("latest only: only a price list counts as no document, so the order sheet is still made", async () => {
+  const t = await bare();
+  await addReply(t, "p1", "2026-11-02T01:00:00Z", "Price list", ["Price List 2026.pdf"]);
+  const r = await save(t.client);
+  assertEquals([r.read, r.found, r.saved.length, t.tables.job_documents.length], ["ok", 0, 0, 0]);
+});
+
+Deno.test("latest only: a document saved before the rule, or one the office deleted, is left alone", async () => {
+  const t = await bare();
+  const first = await addReply(t, "o1", "2026-11-01T01:00:00Z", "RE: order", ["Order confirmation 9.pdf"]);
+  await save(t.client);
+  // As saved before 11 Nov: no latest_only mark.
+  delete t.tables.job_documents[0].metadata.latest_only;
+  await addReply(t, "o2", "2026-11-02T01:00:00Z", "RE: order", ["Tax Invoice 9.pdf"]);
+  const r = await save(t.client);
+  assertEquals(r.replaced, []);
+  assertEquals(t.tables.job_documents.map((d) => d.file_name), [
+    "Stratco order confirmation.pdf",
+    "Stratco invoice.pdf",
+  ]);
+  // The office deletes the invoice: it is never saved back.
+  const inv = t.tables.job_documents.find((d) => d.file_name === "Stratco invoice.pdf")!;
+  t.tables.job_documents.splice(t.tables.job_documents.indexOf(inv), 1);
+  for (const m of t.tables.dispatch_v2_order_documents) {
+    if (m.job_document_id === inv.id) m.job_document_id = null;
+  }
+  const again = await save(t.client);
+  assertEquals(again.saved, []);
+  assertEquals(again.skipped.find((s) => s.reason === "already_saved") !== undefined, true);
+  assertEquals(t.tables.job_documents.map((d) => d.file_name), ["Stratco order confirmation.pdf"]);
+  assertEquals(first["Order confirmation 9.pdf"].length, 64);
+});
+
+Deno.test("latest only: a failed save of the newest keeps the older one on the job", async () => {
+  const t = await bare();
+  await addReply(t, "f1", "2026-11-01T01:00:00Z", "RE: order", ["Order confirmation 7.pdf"]);
+  await save(t.client);
+  await addReply(t, "f2", "2026-11-02T01:00:00Z", "RE: order", ["Tax Invoice 7.pdf"]);
+  t.objects.delete(`${CAPTURE}/f2/Tax Invoice 7.pdf`);
+  const r = await save(t.client);
+  assertEquals(r.saved, []);
+  assertEquals(r.replaced, []);
+  assertEquals(t.tables.job_documents.map((d) => d.file_name), ["Stratco order confirmation.pdf"]);
 });
 
 Deno.test("save: bytes that are not the file recorded, or not a PDF, are refused and the claim given back", async () => {

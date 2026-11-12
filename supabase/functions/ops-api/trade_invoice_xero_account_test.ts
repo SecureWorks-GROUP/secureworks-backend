@@ -27,16 +27,17 @@ Deno.test("no trade push path still hardcodes AccountCode '620'", () => {
   );
 });
 
-Deno.test("all seven trade ACCPAY line-item sites use the shared constant", () => {
+Deno.test("all five trade ACCPAY line-item sites use the shared constant", () => {
   // push_trade_invoice_to_xero (1), submit_work_order_invoice (2),
-  // generate_trade_invoice labour+extras (2), submitTradeInvoice per-metre+hourly (2).
+  // generate_trade_invoice labour+extras (2). submitTradeInvoice is retired
+  // (410 use_weekly_invoice, 11 Nov 2026) and builds no bill.
   const uses = INDEX_SRC.match(
     /AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE,/g,
   );
   assertEquals(
     uses?.length ?? 0,
-    7,
-    "expected exactly 7 trade line-item sites on the shared constant; a new trade push path must reuse it and a removed one must update this count",
+    5,
+    "expected exactly 5 trade line-item sites on the shared constant; a new trade push path must reuse it and a removed one must update this count",
   );
 });
 
