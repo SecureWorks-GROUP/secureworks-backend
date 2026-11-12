@@ -26,7 +26,9 @@
 // "Roof Reports" (+ "EXTERNAL"), "Assessment Report & Quote" (+ "INTERNAL"),
 // "Temporary Fencing" + "Make Safe", "Restoration" + "Make Safe"
 // (MLB-27093, Ruling 9: the restoration label corroborates only — the type is
-// make safe), "Scaffolding/Access Equipment" (MLB-25147 PO-56236,
+// make safe), "Restoration" + "Restoration" (MLR-41228 PO-64545 and MLB-40707
+// PO-64727, owner's word 12 Nov 2026: restoration work is accepted through
+// ses@ and that header declares it), "Scaffolding/Access Equipment" (MLB-25147 PO-56236,
 // Ruling 8: its own repair deliverable), a standalone "Rapid Repair"
 // declared-type line, and "Fencing EXTERNAL" (MLB-24319 PO-56427, ruled
 // 2026-08-28: a fence REPLACEMENT allocation, repair family).
@@ -37,7 +39,12 @@
 // and the classifier ladder falls through to the scope-based signals — the
 // unsure lane is never force-classified.
 
-export type PdfDeclaredType = "assessment" | "roof" | "makesafe" | "repair";
+export type PdfDeclaredType =
+  | "assessment"
+  | "roof"
+  | "makesafe"
+  | "repair"
+  | "restoration";
 
 export interface PdfDeclaredTypeResult {
   /** The family the header declares, or null when no unambiguous header line. */
@@ -45,12 +52,14 @@ export interface PdfDeclaredTypeResult {
   /** True when the makesafe declaration is the temporary-fencing allocation. */
   fenceSubtype: boolean;
   /**
-   * True when a standalone "Restoration" label rides next to the type line.
-   * Ruling 9: it corroborates only and never moves the family; Ruling 15 parks
-   * text-only restoration in the deterministic decision, so a restoration label
-   * ALONE yields null. Sealing the restoration PACK recipe (Captain 2026-08-02)
-   * changed what a typed restoration card assembles, not what a label may
-   * classify.
+   * True when a standalone "Restoration" label rides in the header region.
+   * Ruling 9: beside another type line or a "Make Safe" sub-line it
+   * corroborates only and never moves the family. Owner's word 12 Nov 2026
+   * (restoration work is accepted through ses@): under the "Allocation Work
+   * Order" anchor, with NO other type line and NO "Make Safe" sub-line, the
+   * label IS the declaration and `declaredType` is "restoration". Unanchored
+   * it still yields null, and Ruling 15 still parks restoration read from
+   * scope prose alone: only the builder's own header may declare it.
    */
   restorationLabel: boolean;
   /** The verbatim header line the type was read from (evidence trail). */
@@ -189,6 +198,17 @@ export function extractPdfDeclaredType(
       fenceSubtype: false,
       restorationLabel,
       headerLine: bareMakeSafeLine,
+      anchored,
+    };
+  }
+  // Anchored "Restoration" with nothing else declared (MLB issues it as
+  // "Restoration" + "Restoration"): the builder's restoration allocation.
+  if (anchored && restorationLabel) {
+    return {
+      declaredType: "restoration",
+      fenceSubtype: false,
+      restorationLabel,
+      headerLine: "Restoration",
       anchored,
     };
   }

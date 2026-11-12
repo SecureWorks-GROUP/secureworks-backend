@@ -293,6 +293,16 @@ import {
   type QuoteBuilderActor,
 } from './quote_builder.ts'
 import {
+  decideRestorationQuoteAction,
+  getRestorationPlan,
+  isRestorationQuoteDocument,
+  markRestorationQuoteSentAction,
+  saveRestorationQuoteAction,
+  setRestorationPlanAction,
+  type RestorationCaller,
+} from './restoration_workflow_store.ts'
+import { RestorationWorkflowError } from './restoration_workflow.ts'
+import {
   BUILDER_WORK_ORDER_VALUE_NOT_READ as _BUILDER_WORK_ORDER_VALUE_NOT_READ,
   INSURANCE_REPAIR_STAGES,
   insuranceRepairStage,
@@ -6277,6 +6287,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // revision/hash + frozen release manifest + audit). Read-only; composes the
       // existing routine-allowed readers, writes nothing.
       'inspect_ses_pack',
+      // Restoration plan READ only (docs/restoration-workflow-v1.md): the mode,
+      // the quote revisions, the builder's decision and the invoice hand-off
+      // object. The four restoration WRITES are deliberately not listed here.
+      'restoration_plan',
       // Review & Send Revise Pack loop — notes and draft-refresh requests only.
       'list_draft_notes',
       // add_draft_note is intentionally privileged-human only: the routine may
@@ -10132,6 +10146,34 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           if (e instanceof DepositGateOverrideError) throw new ApiError(e.message, e.status, e.body)
           throw e
         }
+      }
+      // Restoration work on the SES board (docs/restoration-workflow-v1.md):
+      // the plan, the quote and the builder's decision. The read is open to a
+      // staff session, the ops key and the reporting routine; the four writes
+      // need a staff session or the ops key and are absent from
+      // ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and the trade list.
+      // None of them sends anything, touches Xero or writes an invoice: the
+      // priced quote must never reach a trade, and the hand-off to money is an
+      // object in the READ that prepare_ses_invoice_obligation then judges.
+      case 'restoration_plan':
+      case 'restoration_set_plan':
+      case 'restoration_save_quote':
+      case 'restoration_mark_quote_sent':
+      case 'restoration_record_quote_decision': {
+        const restorationRead = action === 'restoration_plan'
+        if (
+          !_opsApiCallerIsStaffOperator(authMode, authUser) &&
+          !(restorationRead && authMode === 'routine')
+        ) {
+          return json({ error: 'An authorised operator session is required.', code: 'operator_access_required' }, 403)
+        }
+        return await dispatchRestorationAction(client, action, req.method, url.searchParams, body, {
+          label: authMode === 'jwt'
+            ? authUser?.email || null
+            : cleanReviewedString(body?.operator_email) || cleanReviewedString(url.searchParams.get('operator_email')) || null,
+          userId: authMode === 'jwt' ? authUser?.id || null : null,
+          orgId: authMode === 'jwt' ? authUser?.orgId || null : null,
+        })
       }
       // Quote builder (docs/quote-builder-contract.md). Staff JWT or the
       // privileged ops key only: absent from ROUTINE_ALLOWED_ACTIONS,
@@ -23424,7 +23466,7 @@ function knownMakesafeReportRecipient(args: {
   const ref = String(args.externalRef || '').trim().toUpperCase()
   if (
     slug === 'mlb' ||
-    /^MLB[-\s]?\d+/.test(ref) ||
+    /^ML[BR][-\s]?\d+/.test(ref) ||
     name === 'ml builders' ||
     name === 'major loss builders'
   ) return MAKESAFE_MLB_REPORT_RECIPIENT
@@ -24216,6 +24258,44 @@ async function updateMakesafeSubstatus(
 }
 // Test-only export alias (mirrors the `_`-prefixed convention for the other make-safe helpers).
 export const _updateMakesafeSubstatus = updateMakesafeSubstatus
+
+// Restoration actions (docs/restoration-workflow-v1.md). Rules live in
+// restoration_workflow.ts and the reads and writes in
+// restoration_workflow_store.ts; this only routes, and maps the module's own
+// error to its status and code.
+export async function dispatchRestorationAction(
+  client: any,
+  action: string,
+  method: string,
+  params: URLSearchParams,
+  body: any,
+  caller: RestorationCaller,
+): Promise<Response> {
+  try {
+    if (action === 'restoration_plan') {
+      if (method !== 'GET') return json({ error: `${action} requires GET`, code: 'method_not_allowed' }, 405)
+      return json(await getRestorationPlan(client, {
+        job_id: params.get('job_id'),
+        job_number: params.get('job_number'),
+        authorised_by: params.get('authorised_by'),
+      }, caller))
+    }
+    if (method !== 'POST') return json({ error: `${action} requires POST`, code: 'method_not_allowed' }, 405)
+    switch (action) {
+      case 'restoration_set_plan': return json(await setRestorationPlanAction(client, body, caller))
+      case 'restoration_save_quote':
+        return json(await saveRestorationQuoteAction(client, body, caller, { persistPdf: persistMakesafeDocumentPdfBytes }))
+      case 'restoration_mark_quote_sent': return json(await markRestorationQuoteSentAction(client, body, caller))
+      case 'restoration_record_quote_decision': return json(await decideRestorationQuoteAction(client, body, caller))
+      default: return json({ error: `Unknown action: ${action}` }, 400)
+    }
+  } catch (error) {
+    if (error instanceof RestorationWorkflowError) {
+      return json({ error: error.message, code: error.code }, error.status)
+    }
+    throw error
+  }
+}
 
 // ══════════════════════════════════════════════════════════════
 // Quote builder dispatch (quote_builder.ts owns the logic)
@@ -32392,7 +32472,7 @@ async function _reextractExtractFields(
   const isReportCapture = woGate.kind === 'report'
   const tagReportType = isReportCapture || (woGate as any).reportSubjectPattern === true
   if ((isReportCapture || tagReportType) && !matchedCompany?.slug) {
-    const refPrefixMatch = subject.match(/\b(mlb|wb|bw|bwc|bwcwa|kba)-?\s*\d+/i)
+    const refPrefixMatch = subject.match(/\b(mlb|mlr|wb|bw|bwc|bwcwa|kba)-?\s*\d+/i)
     const derivedSlug = _slugFromRefPrefix(refPrefixMatch?.[1] ?? null)
     if (derivedSlug) matchedCompany = { slug: derivedSlug, name: derivedSlug }
   }
@@ -35330,7 +35410,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
     // human review rather than silently continuing.
     const aiNotWorkOrder = missingFields.includes('not_a_work_order')
     const deterministicRefEvidence =
-      /\b(ajbr|ajs|mlb|bwc|bwcwa|wb|kba)[-\s#]*\d{3,}\b/i.test(`${subject}\n${bodyPreview}`)
+      /\b(ajbr|ajs|mlb|mlr|bwc|bwcwa|wb|kba)[-\s#]*\d{3,}\b/i.test(`${subject}\n${bodyPreview}`)
     const deterministicWorkOrderEvidence =
       availableWoCount > 0 ||
       _subjectLooksLikeNewWorkOrder(subject) ||
@@ -35428,7 +35508,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
       // (MLB-25769 was the twin-draft incident). Non-destructive: no job/invoice mutation.
       if (woGate.reason === 'cancelled_work_order') {
         cancellationsDetected++
-        const refMatch = subject.match(/\b((?:mlb|wb|bw|bwc|bwcwa|kba)-?\s*\d+)/i)
+        const refMatch = subject.match(/\b((?:mlb|mlr|wb|bw|bwc|bwcwa|kba)-?\s*\d+)/i)
         const cancelledRef = refMatch?.[1] || null
         skippedItems.push({ id: msg.id, subject, external_ref: cancelledRef, reason: woGate.reason })
         try {
@@ -35463,7 +35543,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
     // BWCWA make-safe-AND-report, or a roof report that happened to attach a PDF).
     const tagReportType = isReportCapture || woGate.reportSubjectPattern === true
     if ((isReportCapture || tagReportType) && !matchedCompany?.slug) {
-      const refPrefixMatch = subject.match(/\b(mlb|wb|bw|bwc|bwcwa|kba)-?\s*\d+/i)
+      const refPrefixMatch = subject.match(/\b(mlb|mlr|wb|bw|bwc|bwcwa|kba)-?\s*\d+/i)
       const derivedSlug = _slugFromRefPrefix(refPrefixMatch?.[1] ?? null)
       if (derivedSlug) {
         matchedCompany = { slug: derivedSlug, name: derivedSlug }
@@ -55182,6 +55262,20 @@ async function toggleDocumentVisibility(client: any, body: any) {
   const dId = documentId || document_id
   if (!dId || visible_to_trades == null) throw new Error('documentId and visible_to_trades required')
 
+  // A restoration quote is priced, and a trade sees no money: it can never be
+  // switched on for trades (docs/restoration-workflow-v1.md). Only a switch ON
+  // is checked, and an unreadable document refuses rather than guesses.
+  if (visible_to_trades === true || visible_to_trades === 'true') {
+    const { data: target, error: targetErr } = await client.from('job_documents')
+      .select('id, type, metadata')
+      .eq('id', dId)
+      .maybeSingle()
+    if (targetErr) throw new ApiError('The document could not be read, so it was not shown to trades.', 503)
+    if (isRestorationQuoteDocument(target)) {
+      throw new ApiError('A restoration quote carries prices and cannot be shown to trades.', 409)
+    }
+  }
+
   const { error } = await client.from('job_documents')
     .update({ visible_to_trades: visible_to_trades })
     .eq('id', dId)
@@ -55189,6 +55283,8 @@ async function toggleDocumentVisibility(client: any, body: any) {
   if (error) throw error
   return { success: true }
 }
+
+export const _toggleDocumentVisibilityForTest = toggleDocumentVisibility
 
 async function deleteDocument(client: any, body: any) {
   const dId = body.documentId || body.document_id
