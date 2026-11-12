@@ -27,7 +27,7 @@ export function quoteEmailSubject(jobType: string | null | undefined): string {
   return `Your ${jobType || 'project'} quote from SecureWorks Group`
 }
 
-/** What the accept page calls the work: "Your <this> at <address> is confirmed." */
+/** What the accept page and the deposit invoice email call the work: "Your <this> at <address> is confirmed." */
 export function nextStepsProjectLabel(projectType: string | null | undefined): string {
   if (projectType === 'general') return 'project'
   const typeName = projectType === 'fencing' ? 'fencing' : projectType === 'decking' ? 'decking' : 'patio'

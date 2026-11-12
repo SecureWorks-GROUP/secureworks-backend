@@ -1637,6 +1637,7 @@ import {
 } from './job_deposit_advance.ts'
 import { captureTradeReportEvidence } from './trade_report_evidence.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
+import { customerSiteLine } from '../_shared/customer_site_line.ts'
 import { voidMirrorPatch } from './xero_void_mirror.ts'
 import { readAllOpenInvoices, sentToContactOf, summarizeOpenInvoices } from './invoice_read_truth.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
@@ -11128,7 +11129,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               asClientEmail = body.email_override || asJob.client_email || ''
               asClientName = asJob.client_name || ''
               asJobType = asJob.type || ''
-              asAddress = [asJob.site_address, asJob.site_suburb].filter(Boolean).join(', ')
+              asAddress = customerSiteLine(asJob.site_address, asJob.site_suburb)
             }
           }
 
@@ -42032,7 +42033,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
     <p>Thank you for your enquiry. Please find attached your quote for the following works:</p>
     <div style="background:#f8f6f3;padding:16px;border-radius:6px;margin:16px 0;">
       <p style="margin:0 0 8px;font-weight:600;color:#293C46;">Quote ${job.job_number || ''}</p>
-      <p style="margin:0;font-size:14px;color:#4C6A7C;">${job.site_address || ''} ${job.site_suburb || ''}</p>
+      <p style="margin:0;font-size:14px;color:#4C6A7C;">${customerSiteLine(job.site_address, job.site_suburb, ' ')}</p>
       <p style="margin:12px 0 0;font-size:24px;font-weight:700;color:#293C46;">$${Number(totalIncGST).toLocaleString('en-AU', { minimumFractionDigits: 2 })} <span style="font-size:12px;font-weight:400;color:#4C6A7C;">inc GST</span></p>
     </div>
     <p style="font-size:13px;color:#4C6A7C;">Payment terms: ${paymentTerms}<br>Valid until: ${validUntil}</p>
@@ -42874,7 +42875,7 @@ async function createUnifiedInvoice(client: any, body: any) {
     // Send branded invoice email
     if (invoiceClientEmail) {
       try {
-        const address = [job.site_address, job.site_suburb].filter(Boolean).join(', ')
+        const address = customerSiteLine(job.site_address, job.site_suburb)
         const emailRes = await fetch(`${SUPABASE_URL}/functions/v1/send-quote/send-invoice`, {
           method: 'POST',
           headers: {
@@ -48091,7 +48092,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;c
 <div class="section">
 <h3>Job Details</h3>
 <div class="info-row"><span class="info-label">Client</span><span>${esc(job.client_name || '')}</span></div>
-<div class="info-row"><span class="info-label">Address</span><span>${esc((job.site_address || '') + (job.site_suburb ? ', ' + job.site_suburb : ''))}</span></div>
+<div class="info-row"><span class="info-label">Address</span><span>${esc(customerSiteLine(job.site_address, job.site_suburb))}</span></div>
 <div class="info-row"><span class="info-label">Type</span><span style="text-transform:capitalize">${esc(job.type || 'patio')}</span></div>`
 
   if (report.submitted_at) {
@@ -58289,7 +58290,7 @@ async function sendAcceptanceInvoice(client: any, body: any) {
   const notifyClient = body.notify_client !== false
   if (notifyClient && invoiceClientEmail) {
     try {
-      const address = [job.site_address, job.site_suburb].filter(Boolean).join(', ')
+      const address = customerSiteLine(job.site_address, job.site_suburb)
       const emailRes = await fetch(`${SUPABASE_URL}/functions/v1/send-quote/send-invoice`, {
         method: 'POST',
         headers: {
