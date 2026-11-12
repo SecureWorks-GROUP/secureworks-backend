@@ -2220,6 +2220,92 @@ Deno.test("B3 fence fill: each row carries its sealed line and unit; Shaun's ema
   assertOnlyV2Writes(db);
 });
 
+// ── The sealed supplier split: Dispatch boxes equal the sealed supplier orders ──
+// Go-live walk, 12 Nov 2026: a fence sealed its gate hardware (stiles, latch,
+// rail) to one supplier and the panels, sheets and gate posts to another, but
+// the fill put every line in the box of the one supplier typed on the scope.
+
+Deno.test("supplier split: a fence's lines go in the box of their own sealed line's supplier, line for line", async () => {
+  const init = bdSeed();
+  const fw = { approved: uuid("c9", 1), contact: uuid("c9", 2) };
+  init.suppliers.push({
+    id: fw.contact,
+    org_id: ORG,
+    name: "Fencing Warehouse WA Pty Ltd",
+    email: "xero-sync-owns-this@example.test",
+    is_active: true,
+    xero_contact_id: "xc-fw",
+  });
+  init.dispatch_approved_supplier_emails.push({
+    id: fw.approved,
+    org_id: ORG,
+    name: "Fencing Warehouse WA",
+    used_for: "fencing",
+    to_emails: ["orders@fw.test"],
+    cc_emails: [],
+    active: true,
+    on_account: false,
+    approved_by: "Shaun",
+    approved_on: "2026-10-23",
+  });
+  init.dispatch_approved_supplier_email_links.push({ supplier_id: fw.contact, approved_id: fw.approved, org_id: ORG });
+  const RR = { supplierId: "r-and-r-fencing", supplierName: "R&R Fencing" };
+  const FW = { supplierId: "fencing-warehouse-wa", supplierName: "Fencing Warehouse WA" };
+  const sealedLines = [
+    { id: "SL-kit", description: "Panel kit 1800H + 2400H post (2380mm wide)", quantity: 2, unit: "each", category: "panels", ...RR },
+    { id: "SL-stile", description: "Gate 1: gate stile pair 1760mm, Monument", quantity: 1, unit: "each", category: "gates", ...FW },
+    { id: "SL-latch", description: "Gate 1: Lokklatch Deluxe latch and Truclose regular hinge pair", quantity: 1, unit: "each", category: "gates", ...FW },
+    { id: "SL-rail", description: "Gate 1: long rail 3125mm (gate frame)", quantity: 1, unit: "each", category: "gates", ...FW },
+    { id: "SL-sheet", description: "Gate 1: 1800mm infill sheet, Sameside, Monument ×2", quantity: 2, unit: "each", category: "gates", ...RR },
+    { id: "SL-gpost", description: "50x50mm SHS gate post, L2400mm ×2 (gate 1)", quantity: 2, unit: "each", category: "gates", ...RR },
+  ];
+  const scopeWith = (lines: any[]) => ({
+    ...fenceScope("RNR"),
+    tool: "fencing",
+    job: { ...fenceScope("RNR").job, gates: [{ type: "pedestrian", width: 900, height: 1800 }] },
+    lines,
+  });
+
+  const db = makeDb(structuredClone(init));
+  db.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = scopeWith(sealedLines);
+  await seal(db, JOB.fence);
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
+  assertEquals(out.added, 6);
+  const rows = [...db.tables.job_material_lines].sort((a: any, b: any) => a.position - b.position);
+  assertEquals(rows.map((r: any) => [r.description, r.source_line_id, r.supplier_id]), [
+    ["1800H standard width panels with 2400H posts", "SL-kit", BD.rr],
+    ["gate posts", "SL-gpost", BD.rr],
+    ["gate stiles pair", "SL-stile", fw.contact],
+    ["1800mm Colorbond infill sheets", "SL-sheet", BD.rr],
+    ["Lokklatch kit", "SL-latch", fw.contact],
+    ["long rail", "SL-rail", fw.contact],
+  ]);
+  assertEquals(
+    db.tables.job_material_suppliers.map((b: any) => b.supplier_id).sort(),
+    [BD.rr, fw.contact].sort(),
+  );
+
+  // A gate part the sealed order does not place is held on the draft list,
+  // not guessed into either box.
+  const db2 = makeDb(structuredClone(init));
+  db2.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = scopeWith(
+    sealedLines.map((l) => l.id === "SL-rail" ? { ...l, supplierId: null, supplierName: null } : l),
+  );
+  await seal(db2, JOB.fence);
+  const out2 = await call(db2, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
+  const rail = db2.tables.job_material_lines.find((r: any) => r.description === "long rail")!;
+  assertEquals([rail.source_line_id, rail.supplier_id], ["SL-rail", null]);
+  assert(
+    out2.notes.includes("1 line has no supplier in the sealed order, so it is on the draft list: long rail."),
+    JSON.stringify(out2.notes),
+  );
+  // Only Dispatch's own tables are written (the seed here adds contacts, so
+  // assertOnlyV2Writes' default-seed contact check does not apply).
+  for (const w of [...db.writes(), ...db2.writes()]) {
+    assert(V2_WRITABLE.has(w.table), `wrote ${w.kind} ${w.table}`);
+  }
+});
+
 // ── Boxes and the main tick ─────────────────────────────────────────────────
 
 Deno.test("boxes: add flags a supplier with no approved email; the X takes a box off with its lines", async () => {

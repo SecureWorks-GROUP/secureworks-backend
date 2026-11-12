@@ -1465,8 +1465,8 @@ type FillLine = DispatchSuggestedLine &
 
 // Fill the draft list from the job's frozen scope revision (T20). With auto
 // (the screen's own fill when a fencing job with no record is opened) it runs
-// once per job, ever. A fence scope names one supplier; a sealed patio line
-// names its own. A supplier with an approved order email and a linked contact
+// once per job, ever. A sealed line names its own supplier (patio, and fence
+// revisions that split the order); an older fence scope names one. A supplier with an approved order email and a linked contact
 // gets its lines in its box, made if it is not there yet; every other line
 // lands on the draft list. Each line carries the revision's id and number and,
 // on a patio job, the engine's own line id.
@@ -1603,13 +1603,29 @@ export async function suggestDispatchV2Draft(
       scope_revision: revision,
     };
   }
-  // The suppliers the scope names, in the order they first appear.
-  const fenceSupplier = fence ? dispatchV2ScopeSupplierName(sealedScope) : null;
+  // The suppliers the scope names, in the order they first appear. A sealed
+  // order that splits its lines by supplier (a sealed patio line, or a fence
+  // revision whose sealed lines name their supplier) puts each line in its own
+  // sealed line's supplier box, line for line. Only a fence scope with no
+  // supplier on its sealed lines (the older fence tool) uses the one supplier
+  // typed on the scope.
+  const perLine = !fence || fence.sealed_suppliers;
+  const fenceSupplier = fence && !perLine ? dispatchV2ScopeSupplierName(sealedScope) : null;
   const wanted = new Map<string, { names: string[]; shown: string; count: number }>();
   if (fenceSupplier) {
     wanted.set(fenceSupplier, { names: [fenceSupplier], shown: fenceSupplier, count: suggested.length });
   }
-  if (!fence) {
+  if (fence && perLine) {
+    // A line the sealed order does not place is held on the draft list, never
+    // put in a guessed supplier's box.
+    const held = suggested.filter((l) => !l.supplier_key);
+    if (held.length) {
+      notes.push(
+        `${held.length === 1 ? "1 line has" : `${held.length} lines have`} no supplier in the sealed order, so ${held.length === 1 ? "it is" : "they are"} on the draft list: ${held.map((l) => l.description).join(", ")}.`,
+      );
+    }
+  }
+  if (perLine) {
     for (const line of suggested) {
       const key = line.supplier_key;
       if (!key) continue;
@@ -1631,7 +1647,7 @@ export async function suggestDispatchV2Draft(
     auto,
     lines_added: suggested.length,
     supplier_id: null as string | null,
-    scope_supplier: fence
+    scope_supplier: !perLine
       ? fenceSupplier
       : wanted.size === 1 ? [...wanted.values()][0].shown : null,
     filled_at: nowIso(ctx),
@@ -1661,7 +1677,7 @@ export async function suggestDispatchV2Draft(
         want.names,
         want.shown,
         ctx,
-        fence
+        !perLine
           ? undefined
           : `Its ${linesWord(want.count)} ${want.count === 1 ? "is" : "are"} on the draft list: add a supplier and move ${want.count === 1 ? "it" : "them"} in.`,
       );
@@ -1680,7 +1696,7 @@ export async function suggestDispatchV2Draft(
     throw error;
   }
   const boxOf = (line: FillLine) =>
-    fence
+    !perLine
       ? (fenceSupplier ? boxes.get(fenceSupplier) ?? null : null)
       : (line.supplier_key ? boxes.get(line.supplier_key) ?? null : null);
   const used = [...new Set(suggested.map((l) => boxOf(l)?.supplier_id ?? null))];
