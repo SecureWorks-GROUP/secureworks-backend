@@ -34,6 +34,7 @@ import {
   mailerOpsPhotoFileName,
   mailerOpsRouteKindAllowsInvoice,
   parsePublicStorageUrl,
+  isRestorationCardForMailer,
   resolveMailerOpsRecipient,
   resolveMailerOpsSubject,
   resolvePhotoContentType,
@@ -1669,4 +1670,137 @@ Deno.test("mailer ops: edge schema gate declares the migration marker", async ()
     manifest,
     "ops-api|supabase/migrations/20260805020000_ses_mailer_ops_send_effect.sql|index|uq_ses_external_mailer_ops_send",
   );
+});
+
+// ── Restoration contacts (owner, 12 Nov 2026) ───────────────────────────────
+
+const RESTORATION_COMPANY = {
+  id: "company-mlb-1",
+  slug: "mlb",
+  name: "ML Builders",
+  sender_patterns: ["mlb.mailer@primeeco.tech"],
+  report_recipient: "makesafes@mlbuilders.com.au",
+  restoration_recipients: ["Restoration.Coordinator@mlbuilders.com.au"],
+};
+
+function restorationJob(metadata: Record<string, unknown>) {
+  return {
+    id: "job-1",
+    org_id: "00000000-0000-4000-8000-000000000001",
+    type: "makesafe",
+    job_number: "SWMS-261709",
+    status: "active",
+    metadata: {
+      builder_email_subject: "NEW WORK ORDER - MLR-41228 | 18 A DEVON WAY, Lynwood, WA 6147",
+      builder_reference: "MLR-41228",
+      ...metadata,
+    },
+    site_suburb: "Lynwood",
+    ses_money_sealed_at: "2026-11-12T00:00:00Z",
+  };
+}
+
+Deno.test("mailer ops: restoration contacts are confirmation-only and named as their own source", () => {
+  const picked = resolveMailerOpsRecipient({
+    senderPatterns: ["mlb.mailer@primeeco.tech"],
+    restorationRecipients: ["Restoration.Coordinator@mlbuilders.com.au"],
+    requestedTo: "restoration.coordinator@mlbuilders.com.au",
+  });
+  assertEquals(picked.to, "restoration.coordinator@mlbuilders.com.au");
+  assertEquals(picked.source, "company_restoration_recipient");
+  assertEquals(picked.card_bound, false);
+  // Still never auto-selected.
+  try {
+    resolveMailerOpsRecipient({
+      senderPatterns: [],
+      restorationRecipients: ["restoration.coordinator@mlbuilders.com.au"],
+    });
+    throw new Error("expected confirmation refusal");
+  } catch (err) {
+    assert(err instanceof SesActionError);
+    assertEquals((err.refusal as any).code, "mailer_recipient_confirmation_required");
+  }
+});
+
+Deno.test("mailer ops: only a restoration card reads as restoration", () => {
+  assertEquals(isRestorationCardForMailer(restorationJob({ makesafe_job_family: "restoration" })), true);
+  assertEquals(
+    isRestorationCardForMailer({ type: "insurance", metadata: { insurance_job_type: "restoration" } }),
+    true,
+  );
+  assertEquals(isRestorationCardForMailer(restorationJob({ makesafe_job_family: "general_makesafe" })), false);
+  assertEquals(isRestorationCardForMailer(restorationJob({})), false);
+  assertEquals(
+    isRestorationCardForMailer({ type: "repair", metadata: { makesafe_job_family: "restoration" } }),
+    false,
+  );
+});
+
+Deno.test("mailer ops action: a restoration card may send to the builder's restoration contact", async () => {
+  const result: any = await sendMailerOpsVisibilityAction(
+    makeClient({
+      job: restorationJob({ makesafe_job_family: "restoration" }),
+      company: RESTORATION_COMPANY,
+    }),
+    { mode: "api_key", user: null },
+    {
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "job-1",
+      kind: "report",
+      to: "restoration.coordinator@mlbuilders.com.au",
+      dry_run: true,
+    },
+    {
+      makeMailGateway: () => {
+        throw new Error("dry run must not build a gateway");
+      },
+      effectStore: new MemoryEffectStore(),
+    },
+  );
+  assertEquals(result.success, true);
+  assertEquals(result.to, ["restoration.coordinator@mlbuilders.com.au"]);
+  assertEquals(result.to_source, "company_restoration_recipient");
+  assertEquals(result.cc, [MAILER_OPS_CC]);
+});
+
+Deno.test("mailer ops action: a make-safe card never reaches the restoration contact", async () => {
+  const err = await assertRejects(
+    () =>
+      sendMailerOpsVisibilityAction(
+        makeClient({
+          job: restorationJob({ makesafe_job_family: "general_makesafe" }),
+          company: RESTORATION_COMPANY,
+        }),
+        { mode: "api_key", user: null },
+        {
+          org_id: "00000000-0000-4000-8000-000000000001",
+          job_id: "job-1",
+          kind: "report",
+          to: "restoration.coordinator@mlbuilders.com.au",
+          dry_run: true,
+        },
+        {
+          makeMailGateway: () => {
+            throw new Error("no");
+          },
+          effectStore: new MemoryEffectStore(),
+        },
+      ),
+    SesActionError,
+  );
+  assertEquals(((err as SesActionError).refusal as any).code, "mailer_recipient_not_allowlisted");
+  assertEquals(((err as SesActionError).refusal as any).evidence.restoration_recipients, []);
+});
+
+Deno.test("mailer ops: migration adds outbound restoration_recipients and the schema gate declares it", async () => {
+  const sql = await Deno.readTextFile(
+    new URL("../../migrations/20261112140000_makesafe_company_restoration_recipients.sql", import.meta.url),
+  );
+  assert(/ADD COLUMN IF NOT EXISTS restoration_recipients text\[\] NOT NULL DEFAULT '\{\}'/.test(sql));
+  const gate = await Deno.readTextFile(
+    new URL("../../../scripts/edge-function-schema-requirements.txt", import.meta.url),
+  );
+  assert(gate.includes(
+    "ops-api|supabase/migrations/20261112140000_makesafe_company_restoration_recipients.sql|column|makesafe_companies.restoration_recipients",
+  ));
 });
