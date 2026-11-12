@@ -1550,6 +1550,41 @@ and assemble on the physical labour/materials pack path — matrix rows in
 `job_type: physical_makesafe` (same pattern as temporary_fencing). Evidence
 ruler: `physicalShapedFamily()` for both. Do not invent a weaker pack shape.
 
+## Restoration Is An SES Card With A Quote Stage, And Its Prices Live Off The Job
+
+Owner's word, 12 Nov 2026: restoration work is accepted through ses@. Contract:
+`docs/restoration-workflow-v1.md`. A restoration job is a make-safe board card
+(`SWMS-`, family `restoration`) in one of two modes read off the work order:
+`do_and_charge` (the existing pack path, unchanged) or `assess_and_quote`
+(report + quote, wait for the builder's yes, works, invoice). Rules:
+`restoration_workflow.ts`; reads and writes: `restoration_workflow_store.ts`;
+actions `restoration_*`. What must not regress:
+
+- **Intake.** Only the builder's own header declares restoration: an anchored
+  `Restoration` with no other type line and no `Make Safe` sub-line
+  (`extractPdfDeclaredType`). `Restoration` + `Make Safe` stays a make-safe
+  (Ruling 9), prose alone still parks (Ruling 15), AJ stays a make-safe.
+  `MLR-` is ML Builders' restoration job-number series: a second claim prefix
+  of the one `MLB` scope (key stays `MLB:PO-n`). It is NOT in
+  `REF_PREFIX_FLOOR` or the company row yet; that needs a migration.
+- **No quote money where a trade can read.** `jobs.metadata.restoration` and
+  the `restoration_*` job events are price-free (`restorationPlanForStorage`).
+  Lines and totals live only on the quote's own `job_documents` row (`type =
+  'other'`, `metadata.restoration_document = 'quote'`, never trade-visible;
+  `toggle_document_visibility` refuses to switch it on). A content hash binds
+  record to document; a mismatch refuses (`restoration_quote_mismatch`), and
+  only an interrupted draft is repaired by saving again.
+- **It prices nothing and sends nothing.** An approved quote reaches an invoice
+  only as the `commercial_quantity_override` object in the `restoration_plan`
+  read, passed unchanged to `prepare_ses_invoice_obligation`. Do not add an
+  invoice basis, a quote email or a board stage here. A quote the override
+  cannot carry (no labour line, two labour rates) is refused with the reason.
+- An approval needs the builder's person and where it can be read. Never
+  record one from inference.
+
+Tests: `restoration_intake_test.ts`, `restoration_workflow_test.ts`,
+`restoration_workflow_store_test.ts`.
+
 ## Repair Mints As A Real SWR- Job Type, Supervised, With No Backfill
 
 `jobs.type = 'repair'` with SWR- numbering is live (PR #771, deployed 2026-08-28;
@@ -4623,7 +4658,12 @@ minus line. Captain 2026-09-18: `super_amount` stays 12% of gross (bookkeeper /
 fund); cash withheld from the trade is 6%; the company contributes the other
 6%. On $1,000: super $120, worker $60, company $60, `net_pay` $940, company
 total out $1,060. `total_inc` stays `gross + GST` (supply face, not company
-cost). Historical 12% carve-out rows remain valid and are not rewritten. Once
+cost). Historical 12% carve-out rows remain valid and are not rewritten.
+No super on commission (Marnin, 12 Nov 2026): commission lines stay in gross
+but leave the super base (`super_base_ex`, stored only on an invoice with
+commission; null = whole gross, as on every older row, which stays valid).
+Every read that validates money must select `super_base_ex`; migration
+`20261112090000` also patches the group unfreeze. Once
 Xero creates a bill, its ID is checkpointed locally before returned-line
 reconciliation; only a reconciled split may advance to `pushed_to_xero`. Every
 create/retry uses the persisted invoice ID as its Xero idempotency key, and any
@@ -4823,9 +4863,9 @@ time entry, invoice line or status change; `--apply --file` opens only the
 reviewed ids) and the crew-row retirement is `scripts/retire-crew-work-orders.ts`:
 both dry-run by default, neither is a migration or a cron, and both are on
 Marnin's go-live checklist. Turn `crew_invoice_line_office_review_v1` on
-before or with `crew_invoice_on_job_work_order_v1`: that 410s
-`submit_trade_invoice` and holds the other crew-invoice doors until every
-line is approved. The hard rule, when on, refuses an open job only, and
+before or with `crew_invoice_on_job_work_order_v1`: that holds the
+crew-invoice doors until every line is approved (`submit_trade_invoice` is
+retired whatever the flag, next section but one). The hard rule, when on, refuses an open job only, and
 Travel is exempt. With `retire_crew_work_orders_v1` on, `my_work_orders`
 returns approved job work orders with the money stripped and drops drafts.
 
@@ -4852,6 +4892,45 @@ is refused only when the picked card holds saved times for another day.
 Write paths, refusal codes, reads and the per-job list
 `job_trade_time_entries`:
 `docs/trade-invoice-time-entries-2026-10-12.md`.
+
+## A Trade May Book Only Themselves, Only To Invoice
+
+`self_allocate_for_invoice` (`ops-api/trade_self_allocation.ts`, Marnin
+11 Nov 2026) is the one door through which a plain trade writes a
+`job_assignments` row, and it is the exception to `_resolveAllocationAuthz`.
+It books only the caller, one day not after today, on a live job in their
+company, through `createAssignment` with no text, plus a
+`trade_self_allocated` job event. Being booked is what passes the invoice's
+`booked_on_job` rule; it also grants the allocated Trade App tier on that job.
+Never widen it to book anyone else or to reassign. The app calls it only after
+`generate_trade_invoice` refuses with `extra_job_not_allowed`. Contract:
+`docs/trade-self-allocation-v1.md`. Both it and `trade_invoice_job_modes` must
+stay on `OPS_API_PROFILE_SCOPED_JWT_ACTIONS`, or the front door 403s every
+plain trade before the route runs.
+
+## A Job Is Invoiced One Way, Decided By The Job
+
+`trade_invoice_mode.ts` (Marnin, 11 Nov 2026) is the one rule: live group work
+order, else per-metre trade -> work order, else patio -> group work order,
+fencing -> work order, everything else hourly (vertical via `_jobVertical`,
+repair family first). `my_hours` stamps `invoice_mode` /
+`can_claim_commission` on every card (null plus `invoice_mode_unavailable`
+when unreadable, never a guess); `trade_invoice_job_modes` answers any job in
+the caller's company. It decides and refuses nothing: fencing helpers still
+bill hours on fencing jobs, so never add an hourly refusal off it. Commission
+is a line, not a mode: only on a job the trade created, manages, or holds the
+invoice-any-job grant for (`trade_invoice_extra_job_authority.ts`; booking
+never allows it, refusal `commission_not_allowed`). The saved weekly draft is
+on unless `trade_details.runningInvoiceDraft` is exactly false
+(`runningInvoiceDraftEnabled`, one helper). `submit_trade_invoice` is retired:
+410 `use_weekly_invoice` before any read. Patio hours are refused only while
+`patio_pay_group_only_v1` AND `group_work_order_v1` are on. A work-order job
+with an APPROVED job work order bills its `agreed_labour_ex` (Marnin,
+12 Nov 2026): the mode answer carries `work_order_agreed_ex` /
+`job_work_order_id`, and `generate_trade_invoice` refuses any other
+work-order amount, or a second work-order line on that job, before any write
+(409 `work_order_amount_not_agreed`, `workOrderAmountRefusal`). Contract:
+`docs/trade-invoice-mode-v1.md`.
 
 ## A Recurring Deduction Comes Off The Payable, Never The Gross
 

@@ -4,7 +4,9 @@
 //
 //   * supplier domains: the domains of suppliers.email
 //     (context_email_supplier_domains) and of Dispatch's approved supplier
-//     order addresses (dispatch_approved_supplier_emails, active). Most
+//     order addresses (dispatch_approved_supplier_emails, active: To, CC
+//     and the recognise-only also_known_emails, such as Solarspan's address
+//     on Bondor's entry since 11 Nov 2026). Most
 //     suppliers rows carry no email (Xero sync), so on 3 Nov 2026 the first
 //     list held 10 domains and missed Metroll, Bondor, Stratco WA and others
 //     Dispatch orders from every day: their auto-replies and bounces were read
@@ -133,7 +135,7 @@ export async function loadTradingPartners(sb: PartnerClient): Promise<{
   const sup = await sb.rpc("context_email_supplier_domains");
   if (sup.error) throw new PartnerReadError("suppliers_unreadable");
   const approved = await sb.from("dispatch_approved_supplier_emails")
-    .select("to_emails,cc_emails").eq("active", true);
+    .select("to_emails,cc_emails,also_known_emails").eq("active", true);
   if (approved.error) throw new PartnerReadError("supplier_orders_unreadable");
   const builders = await sb.from("makesafe_companies").select("sender_patterns")
     .eq("active", true);
@@ -147,7 +149,11 @@ export async function loadTradingPartners(sb: PartnerClient): Promise<{
       ...list(sup.data),
       ...rows(approved.data).flatMap((
         r,
-      ) => [...list(r.to_emails), ...list(r.cc_emails)]),
+      ) => [
+        ...list(r.to_emails),
+        ...list(r.cc_emails),
+        ...list(r.also_known_emails),
+      ]),
     ]),
     builderSenders: builderSendersFrom(
       rows(builders.data).flatMap((r) => list(r.sender_patterns)),

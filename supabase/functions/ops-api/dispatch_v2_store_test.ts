@@ -218,6 +218,8 @@ const SCHEMA: Record<string, string[]> = {
     "updated_at",
     // 20261029120000_dispatch_v2_on_account_suppliers.sql
     "on_account",
+    // 20261111160000_dispatch_v2_solarspan_as_bondor.sql (recognise-only)
+    "also_known_emails",
   ],
   dispatch_approved_supplier_email_links: [
     "supplier_id",
@@ -2384,6 +2386,22 @@ Deno.test("make email: fencing main supplier, To and CC from the approved list p
   );
   assertEquals(metroll.cc, ["fencing@secureworkswa.com.au"]);
   assertOnlyV2Writes(db);
+});
+
+Deno.test("make email: a recognise-only address (Solarspan on Bondor, 11 Nov 2026) is never sent to or copied", async () => {
+  const db = makeDb();
+  const stratco = db.tables.dispatch_approved_supplier_emails.find((e) =>
+    e.id === APPROVED.stratco
+  )!;
+  stratco.also_known_emails = ["wasales@brand.stratco.test"];
+  await fencingJob(db);
+  const made = await makeEmail(db, JOB.fence, SUP.stratco);
+  assertEquals(made.email.to, ["tradewa@stratcowa.com.au"]);
+  assertEquals(made.email.cc, [
+    "tony.bacich@stratcowa.com.au",
+    "fencing@secureworkswa.com.au",
+  ]);
+  assert(!JSON.stringify(made).includes("brand.stratco.test"));
 });
 
 Deno.test("make email: patio CCs patios@, repair CCs ses@, decking CCs patios@ and says it is open", async () => {

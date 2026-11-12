@@ -245,7 +245,7 @@ export function isMakesafeMlbCompany(detail: any, job: any): boolean {
   ).toUpperCase();
   return slug.includes("mlb") || slug.includes("ml-builders") ||
     slug.includes("major-loss") || name.includes("ml builders") ||
-    name.includes("major loss") || /\bMLB[-\s]?\d/.test(ref);
+    name.includes("major loss") || /\bML[BR][-\s]?\d/.test(ref);
 }
 
 /**

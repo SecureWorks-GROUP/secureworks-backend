@@ -18,7 +18,9 @@ import {
   orderForStoredReply,
   OUR_SENT_ORDER_VIA,
   planSentOrderEmail,
+  postgrestOnSendStore,
   readOrderSubject,
+  replyIsFromEntry,
   scanSentOrderEmails,
   type StoredReply,
   storedRepliesToTie,
@@ -30,6 +32,7 @@ import {
   runDispatchV2OutlookCatchUp,
 } from "./dispatch_v2_outlook_catch_up.ts";
 import { readOutlookOrderBody } from "./dispatch_v2_outlook_order.ts";
+import { approvedMatchEmails } from "./dispatch_v2_replies_rules.ts";
 import {
   ADMIN,
   MemoryOnSendStore,
@@ -763,4 +766,137 @@ Deno.test("catch-up: a person's stage set after the order stays", async () => {
 Deno.test("catch-up: a since that is not a date is refused", async () => {
   const t = catchUpSetup();
   await assertRejects(() => t.run({ since: "last month" }), CatchUpRefused);
+});
+
+// ── Solarspan is Bondor (Shaun, 11 Nov 2026) ─────────────────────────────
+// Shaun emails Bondor's patio orders to wasales@solarspan.com.au (Solarspan
+// is Bondor's brand) and Bondor's staff reply from bondor.com.au. The
+// address sits on Bondor's entry as a recognise-only address
+// (also_known_emails): it matches, Dispatch never sends to it.
+
+const BONDOR_ID = "b6aacf3b-5ca7-400b-aa39-5c2eed2a465c";
+const BONDOR_E: OnSendEntry = {
+  approved_id: "9c7a294d-4569-41f0-afed-92f9583ff4bc",
+  supplier_key: "bondor",
+  supplier_name: "Bondor",
+  supplier_ids: [BONDOR_ID],
+  emails: approvedMatchEmails({
+    to_emails: ["wa@bondor.com.au"],
+    cc_emails: [],
+    also_known_emails: ["wasales@solarspan.com.au"],
+  }),
+  on_account: false,
+};
+
+Deno.test("solarspan: an order to wasales@solarspan.com.au, or anyone at solarspan.com.au, is Bondor's", () => {
+  const names = (to: string[]) =>
+    suppliersAddressed(to, [...ENTRIES, BONDOR_E]).map((a) => a.entry.supplier_name);
+  assertEquals(BONDOR_E.emails, ["wa@bondor.com.au", "wasales@solarspan.com.au"]);
+  assertEquals(names(["wasales@solarspan.com.au"]), ["Bondor"]);
+  assertEquals(names(["Sales <WASales@Solarspan.com.au>"]), ["Bondor"]);
+  assertEquals(names(["someone@solarspan.com.au"]), ["Bondor"]);
+  assertEquals(names(["wa@bondor.com.au", "wasales@solarspan.com.au"]), ["Bondor"]);
+  // A reply from Bondor's staff is from Bondor's entry, by its domain.
+  assert(replyIsFromEntry(
+    { supplier_key: null, from_email: "Natalia Kuschell <natalia.kuschell@bondor.com.au>" },
+    BONDOR_E,
+  ));
+  assert(replyIsFromEntry(
+    { supplier_key: null, from_email: "someone@solarspan.com.au" },
+    BONDOR_E,
+  ));
+  assert(!replyIsFromEntry(
+    { supplier_key: null, from_email: "perth@metroll.com.au" },
+    BONDOR_E,
+  ));
+});
+
+Deno.test("solarspan: the scan makes a Bondor order from an email to Solarspan, and Bondor's reply ties to it", async () => {
+  const t = scanSetup();
+  t.store.entries.push({ ...BONDOR_E });
+  t.store.since = "2026-11-01T00:00:00Z";
+  t.store.sent = [sentEmail(1, {
+    to: ["wasales@solarspan.com.au"],
+    cc: ["patios@secureworkswa.com.au"],
+    subject: "Material Order Ref SWP-261283",
+    body: VESNA_BODY,
+  })];
+  // Bondor's reply, stored by the reply scan against the job alone.
+  t.store.replies = [reply(1, {
+    job_id: LOUISE.job_id,
+    supplier_key: "bondor",
+    from_email: "natalia.kuschell@bondor.com.au",
+    subject: "RE: Material Order Ref SWP-261283 // Bondor #1465465",
+    match_reason: "Job number SWP-261283 in the email",
+  })];
+  const r = await t.run();
+  assertEquals([r.sent_orders, r.sent_to_sort, r.sent_replies_tied], [1, 0, 1]);
+  const c = t.store.calls[0];
+  assertEquals(
+    [c.job_id, c.supplier_id, c.related_supplier_ids, c.approved_email_id, c.work_type],
+    [LOUISE.job_id, BONDOR_ID, [BONDOR_ID], BONDOR_E.approved_id, "patio"],
+  );
+  // The order keeps who it really went to.
+  assertEquals(c.to_emails, ["wasales@solarspan.com.au"]);
+  assertEquals(t.store.boxes.length, 1);
+  assertEquals(t.store.replies[0].order_id, t.store.orders[0].order_id);
+});
+
+Deno.test("solarspan: the on-send store reads Bondor's recognise-only addresses into its match list", async () => {
+  const selects: string[] = [];
+  const rowsFor = (table: string) =>
+    table === "dispatch_approved_supplier_emails"
+      ? [{
+        id: BONDOR_E.approved_id,
+        name: "Bondor",
+        to_emails: ["wa@bondor.com.au"],
+        cc_emails: [],
+        also_known_emails: ["WASales@solarspan.com.au"],
+        active: true,
+        on_account: false,
+      }]
+      : [{ supplier_id: BONDOR_ID, approved_id: BONDOR_E.approved_id }];
+  const client = {
+    from(table: string) {
+      const q: any = {
+        select(cols: string) {
+          selects.push(`${table}:${cols}`);
+          return q;
+        },
+        eq: () => q,
+        then: (ok: (v: unknown) => unknown) =>
+          Promise.resolve({ data: rowsFor(table), error: null }).then(ok),
+      };
+      return q;
+    },
+  };
+  const entries = await postgrestOnSendStore(client).approvedEntries(ORG);
+  assertEquals(entries, [{ ...BONDOR_E }]);
+  assert(selects.some((s) =>
+    s.startsWith("dispatch_approved_supplier_emails:") && s.includes("also_known_emails")
+  ));
+});
+
+Deno.test("solarspan: the catch-up dry run lists an older order to Solarspan as Bondor's (like SWP-26100, 10 Nov)", async () => {
+  const t = scanSetup();
+  t.store.entries.push({ ...BONDOR_E });
+  // Sent before the on-send clock started, so only the catch-up finds it.
+  t.store.since = "2026-11-11T04:23:00Z";
+  t.store.sent = [sentEmail(1, {
+    to: ["wasales@solarspan.com.au"],
+    subject: "Material Order Ref SWP-261283",
+    body: VESNA_BODY,
+    sent_at: "2026-11-10T02:00:00Z",
+  })];
+  const r: any = await runDispatchV2OutlookCatchUp({}, {
+    orgId: ORG,
+    store: t.store,
+    replies: t.tray,
+    operator: { email: SHAUN, userId: "u-shaun" },
+    now: () => "2026-11-12T00:00:00Z",
+  });
+  assertEquals(r.dry_run, true);
+  assertEquals(r.orders.map((o: any) => [o.job_number, o.supplier]), [["SWP-261283", "Bondor"]]);
+  assertEquals(r.refused, []);
+  assertEquals(t.store.calls.length, 0);
 });

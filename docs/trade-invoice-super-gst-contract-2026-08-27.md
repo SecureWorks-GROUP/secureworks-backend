@@ -47,6 +47,44 @@ All values are rounded to cents:
 Historical split-aware rows written under the 2026-09-10 full 12% carve-out
 (`net_pay = gross_earned - super_amount`) remain valid and are not rewritten.
 
+## No super on commission (Marnin, 12 Nov 2026)
+
+A commission line (`trade_invoice_lines.line_type = 'commission'`, decided by
+`extraLineType` / `isCommissionLine`; summed by `commissionLinesTotalEx` in
+`trade_invoice_extra_job_authority.ts`) stays in `gross_earned` but carries no
+super. The super base is `gross_earned` less the commission lines, never below
+0 (`tradeInvoiceSuperBaseEx`):
+
+- `super_amount` is 12% of the super base, `worker_withhold` 6% of it,
+  `company_contribution` the rest, `net_pay = gross_earned - worker_withhold`.
+- `gst` and `total_inc` are unchanged (10% of the whole gross).
+- Worked example: $1,000 of hours + $200 commission: gross $1,200, super base
+  $1,000, super $120, withhold $60, net pay $1,140 (GST on: GST $120, trade
+  payable $1,260, total_inc $1,320).
+
+`trade_invoices.super_base_ex` (migration `20261112090000`) stores the base,
+ONLY when the invoice carries commission; responses carry `super_base_ex` the
+same way. Null means super is on the whole gross. That is how historic rows
+stay valid: every invoice priced before the change has a null base and is
+read by the old rules (both the current split and the full carve-out), so an
+older invoice with commission inside its super base is never flagged or
+re-priced. A row WITH a base is read only by the new rule. The database check
+`trade_invoices_super_gst_split_check` and `validatePersistedTradeInvoiceMoney`
+apply the same rule, so every read that validates money must select
+`super_base_ex` (a read without it sees the new figures as a broken old
+split). The Xero retry also refuses a stored base that no longer matches the
+lines' commission (`assertTradeInvoiceSuperBaseMatchesLines`). The withhold
+line on the bill and the audit PDF say "of submitted total less commission";
+an invoice without commission keeps the old wording byte for byte.
+
+Applied at submit (`generate_trade_invoice`). A saved draft
+(`save_trade_invoice_draft`) keeps the old figures: a dated draft is stored by
+`persist_weekly_trade_invoice_v3`, whose insert does not name the new column,
+and submit works the money out again. The running draft, the weekly
+work-order lane and `submit_work_order_invoice` carry no commission lines.
+The group unfreeze (`unfreeze_group_work_order_split`) recalculates with the
+same base (patched by the migration).
+
 GST is 10% of gross earned once. It is not calculated on gross and then again
 on super.
 

@@ -1050,6 +1050,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Dispatch v2 section 3g: an order sent from Outlook is
                       # recorded when it is sent (dispatch_v2_outlook_on_send.ts).
                       ("20261106120000", "dispatch_v2_outlook_order_on_send"),
+                      # Solarspan is Bondor (11 Nov 2026): the approved list's
+                      # recognise-only addresses (dispatch_v2_outlook_on_send.ts,
+                      # dispatch_v2_replies_sources.ts).
+                      ("20261111160000", "dispatch_v2_solarspan_as_bondor"),
                       ("20261106160000", "group_paid_by_hours_member"),
                       # Trade invoice money controls: events, extras limits, number index.
                       ("20261106163712", "trade_invoice_money_controls"),
@@ -1061,7 +1065,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # RQ-19.e: the deposit gate override record.
                       ("20261111110000", "job_deposit_gate_overrides"),
                       # RQ-17.c: sealed payers registered as job parties.
-                      ("20261111120000", "scope_payer_parties")]:
+                      ("20261111120000", "scope_payer_parties"),
+                      # No super on commission: trade_invoices.super_base_ex
+                      # and the widened split check (trade_invoice_money.ts).
+                      ("20261112090000", "trade_invoice_commission_super_base")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

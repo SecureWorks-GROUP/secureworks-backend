@@ -46,7 +46,9 @@ export type ApprovedSupplierSender = {
   supplier_name: string;
   // suppliers.id rows (Xero contacts) that are this supplier.
   supplier_ids: string[];
-  // Every approved To and CC address for the supplier, lower case.
+  // Every address the supplier is known by, lower case: its approved To and
+  // CC, and its recognise-only addresses (approvedMatchEmails). For matching
+  // only; Dispatch's own sends read to_emails and cc_emails, never this.
   emails: string[];
 };
 
@@ -177,6 +179,33 @@ export function emailAddressOf(value: unknown): string | null {
 
 export function domainOf(address: string): string {
   return address.slice(address.lastIndexOf("@") + 1);
+}
+
+/** Every address an approved order list entry is known by, lower case, once
+ * each: its To and CC (where Dispatch sends its own orders), then its
+ * recognise-only addresses (also_known_emails). Shaun, 11 Nov 2026: Solarspan
+ * is Bondor's brand, so an order emailed to wasales@solarspan.com.au is a
+ * Bondor order and a reply from solarspan.com.au is Bondor's. Use this only
+ * to match who an email went to or came from: Dispatch never sends to or
+ * copies a recognise-only address. */
+export function approvedMatchEmails(row: {
+  to_emails?: unknown;
+  cc_emails?: unknown;
+  also_known_emails?: unknown;
+}): string[] {
+  const list = (v: unknown) => (Array.isArray(v) ? v : []) as unknown[];
+  const out: string[] = [];
+  for (
+    const x of [
+      ...list(row.to_emails),
+      ...list(row.cc_emails),
+      ...list(row.also_known_emails),
+    ]
+  ) {
+    const a = String(x ?? "").trim().toLowerCase();
+    if (a && !out.includes(a)) out.push(a);
+  }
+  return out;
 }
 
 // Shared mail services: a domain here never identifies a supplier by itself,

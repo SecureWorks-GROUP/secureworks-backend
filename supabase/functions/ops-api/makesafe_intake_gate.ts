@@ -68,7 +68,7 @@ const REPLY_FORWARD_RE = /^\s*(re|fw|fwd)\s*:/i;
 // The MLB "Our Ref: MLB-XXXXX" format and the BWCWA "New Make Safe and Report
 // Request" format are the two live archetypes (8+ drops in 60 days confirmed).
 const REPORT_CAPTURE_PATTERNS: readonly RegExp[] = [
-  /\bour\s*ref\b.*\b(mlb|wb|bw|bwc|kba)-?\s*\d+/i, // "Our Ref: MLB-25795 ..."
+  /\bour\s*ref\b.*\b(mlb|mlr|wb|bw|bwc|kba)-?\s*\d+/i, // "Our Ref: MLB-25795 ..."
   /###\s*urgent\s*###.*our\s*ref/i, // "### URGENT ### Our Ref"
   /\burgent\b.*\bour\s*ref\b/i, // "URGENT ... Our Ref"
   /new\s*make\s*safe\s*and\s*report\s*request/i, // BWCWA format
@@ -498,6 +498,11 @@ export function decideMakeSafeJobFamily(
             : "general_makesafe",
           evidence: "pdf_declared_type_header",
         };
+      case "restoration":
+        // Owner's word 12 Nov 2026: restoration work is accepted through
+        // ses@. The builder's own "Restoration" allocation header declares
+        // it; Ruling 15 below still parks restoration read from prose alone.
+        return { family: "restoration", evidence: "pdf_declared_type_header" };
     }
   }
 
@@ -783,6 +788,7 @@ export function slugFromRefPrefix(
 ): string | null {
   switch ((prefix || "").toUpperCase()) {
     case "MLB":
+    case "MLR": // ML Builders' restoration job-number series
       return "mlb";
     case "BWC":
     case "BW":
@@ -1025,7 +1031,7 @@ export function isPureAckNoAction(
   // follows can be matched at the start of the remaining subject.
   const afterRef = s
     .replace(
-      /\bour\s*ref\b\s*:?[\s-]*\b(mlb|wb|bw|bwc|bwcwa|kba)-?\s*\d+\b/i,
+      /\bour\s*ref\b\s*:?[\s-]*\b(mlb|mlr|wb|bw|bwc|bwcwa|kba)-?\s*\d+\b/i,
       "",
     )
     .replace(/^[\s\-–—:]+/, "")

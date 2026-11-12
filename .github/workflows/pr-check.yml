@@ -374,6 +374,20 @@ jobs:
             supabase/functions/ops-api/insurance_repairs_pipeline_test.ts \
             supabase/functions/ops-api/quote_builder_test.ts
 
+      # Restoration work on the SES board (docs/restoration-workflow-v1.md): the
+      # work order header that declares it, the MLR- job numbers, the plan and
+      # quote rules, the hand-off to the invoice path, and the rule that no
+      # quote money is stored where a trade can read. Same --no-check reason as
+      # the step above.
+      - name: Check restoration intake and workflow contracts
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/restoration_intake_test.ts \
+            supabase/functions/ops-api/restoration_workflow_test.ts \
+            supabase/functions/ops-api/restoration_workflow_store_test.ts \
+            supabase/functions/ops-api/makesafe_pdf_declared_type_test.ts \
+            supabase/functions/ops-api/makesafe_intake_gate_test.ts
+
       # Builder mail read from a general company Group (swwa@) must never store
       # or download anyone else's mail, and one purchase order must stay one job
       # when it reaches both swwa@ and ses@. The runtime file is filtered because

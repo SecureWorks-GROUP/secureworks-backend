@@ -1235,9 +1235,25 @@ Migration: `20261105160000_dispatch_v2_order_crew_lines.sql` (rollback in
 
 ### 3e.2 The supplier's documents on the job
 
-On Accept and on the stage press (not on a by-hand date press), every PDF
+On Accept and on the stage press (not on a by-hand date press), the PDFs
 on the supplier replies **matched** to the order (`state 'matched'`, the
-order named) is saved to the job (`dispatch_v2_order_documents.ts`).
+order named) are considered for the job (`dispatch_v2_order_documents.ts`).
+
+**Latest only (Shaun, 11 Nov 2026).** One supplier document per order is
+kept on the job: from the newest matched reply that carries a proper
+document, the best one in it. A file whose own name says what it is beats
+one that does not; then invoice or pro forma, then sales order or order
+confirmation, then quote. Side files are never saved, judged by their own
+file name: price lists, drawings, terms and conditions, brochures,
+catalogues, credit or account applications, statements, spec or data
+sheets, SDS, warranties, install guides, colour charts, remittances. When a
+newer document arrives (the sweep below), it is saved and the older one
+this rule saved (`job_documents.metadata.latest_only`) is deleted from the
+job, with a `dispatch_v2_order_document_replaced` job event. Its memory row
+stays `saved`, so it never comes back. Documents saved before this rule, or
+added by hand, are never removed. A failed save of the newer one leaves the
+older one in place. An order whose replies carry only side files counts as
+having no documents, so it gets our order sheet (3e.3).
 
 1. **Matched replies only.** A reply waiting for a person to confirm a best
    guess carries an `order_id` too, but those are often statements, lead
@@ -1254,6 +1270,9 @@ order named) is saved to the job (`dispatch_v2_order_documents.ts`).
    content_sha256)`: the same file is saved to a job once, however many
    replies carry it. A claim is made first and given back on any failure; a
    claim older than ten minutes (a run that died) may be taken over.
+   The office may delete a saved file from the job (Shaun, 11 Nov 2026):
+   the row stays `saved` with `job_document_id` NULL, so the sweep never
+   saves that file again (migration 20261111150000).
 5. **Named for what it is**, from the file name, then the subject, then the
    email's first words (the earliest kind word in each wins):
    `Stratco order confirmation`, `B&D invoice`, `R&R quote`, else
@@ -1682,6 +1701,19 @@ Fencing (`info@westlinefencing.com.au`, pay first, fencing, approved by Shaun
 6 Nov 2026). On 6 Nov there is no Westline contact in Xero (no `suppliers`
 row), so it is not linked: its orders wait under Emails to sort until a
 Westline supplier contact exists in Xero and is linked to the entry.
+
+### 3g.4 Solarspan is Bondor (approved by Shaun 11 Nov 2026)
+
+Migration `20261111160000_dispatch_v2_solarspan_as_bondor.sql`. An approved
+entry can carry **recognise-only addresses** (`also_known_emails`): they count
+in 3g.1 rule 4 (who an order went to), in the reply scan (who a reply came
+from) and in the email reader's supplier domains, but Dispatch's own order
+emails still go To `to_emails` and CC `cc_emails` only. Bondor's entry carries
+`wasales@solarspan.com.au` (Solarspan is Bondor's brand), so an order sent to
+it from Outlook is a Bondor order and replies from bondor.com.au or
+solarspan.com.au tie to it. The old Solarspan entry is retired (kept, not
+active). An order sent before the on-send clock started (SWP-26100, 10 Nov) is
+picked up only by the catch-up (3g.2, dry run first).
 
 ## Tweak 4: the approved supplier names on the board (5 Nov 2026)
 
