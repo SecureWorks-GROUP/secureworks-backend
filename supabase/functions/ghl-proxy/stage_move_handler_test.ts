@@ -219,6 +219,28 @@ Deno.test('move_stage and move_to_complete send Execution stages only to an Exec
       eq(puts, [])
       eq(r.body.reason, 'execution_opportunity_ambiguous')
     })
+    await t.step('P4: a second live twin with an unreadable creation time holds the move, never hidden', async () => {
+      for (const createdAt of ['', 'not a date']) {
+        const undated = execOpp('fencing', 'exec-undated', createdAt)
+        reset([salesOpp('fencing', true), execOpp('fencing', 'exec-dated', '2026-11-03T00:00:00.000Z'), undated])
+        const r = await post('move_stage', { opportunityId: 'sales-opp', status: 'scheduled', jobType: 'fencing' })
+        eq(puts, [], `PUTs ${JSON.stringify(createdAt)}`)
+        eq([r.body.success, r.body.moved, r.body.reason], [false, false, 'execution_candidate_unreadable'], JSON.stringify(createdAt))
+      }
+      // The same row with no creation time at all, on move_to_complete.
+      const missing = execOpp('patio', 'exec-undated', '') as Partial<Opp>
+      delete missing.createdAt
+      reset([salesOpp('patio', true), execOpp('patio', 'exec-dated', '2026-11-03T00:00:00.000Z'), missing as Opp])
+      const r = await post('move_to_complete', { opportunityId: 'sales-opp', jobType: 'patio' })
+      eq(puts, [])
+      eq([r.body.stageMoved, r.body.reason], [false, 'execution_candidate_unreadable'])
+    })
+    await t.step('P4: a search row missing its creation time is re-read; an earlier job\'s twin found that way is skipped', async () => {
+      reset([salesOpp('patio', true), execOpp('patio', 'exec-opp', '2026-11-02T01:13:04.889Z'), execOpp('patio', 'old-exec', '2026-03-01T00:00:00.000Z')], ['createdAt'])
+      const r = await post('move_stage', { opportunityId: 'sales-opp', status: 'in_progress', jobType: 'patio' })
+      eq(puts, [{ id: 'exec-opp', stage: '4dfa654d-4d7c-491b-89dc-39717fc8e911', ok: true }])
+      eq([r.body.moved, r.body.opportunityId], [true, 'exec-opp'])
+    })
     await t.step('a lost Execution opportunity is not a target', async () => {
       reset([salesOpp('fencing', true), execOpp('fencing', 'lost-exec', '2026-11-02T01:13:04.000Z', 'lost')])
       const r = await post('move_stage', { opportunityId: 'sales-opp', status: 'invoiced', jobType: 'fencing' })

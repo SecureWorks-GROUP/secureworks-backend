@@ -59,9 +59,17 @@ Deno.test('rows for another contact (filter ignored) or another pipeline never c
   assertEquals(r.kind === 'not_moved' && r.reason, 'execution_opportunity_not_created')
 })
 
-Deno.test('a twin without a readable creation time is not trusted', () => {
-  const r = decide(sales(), [exec('e-1', 'not a date')])
-  assertEquals(r.kind === 'not_moved' && r.reason, 'execution_opportunity_not_created')
+Deno.test('a live twin without a readable creation time is never skipped: nothing moves', () => {
+  for (const createdAt of [undefined, '', 'not a date']) {
+    // Alone, and beside a readable later twin it would otherwise leave unique.
+    for (const rows of [[exec('e-1', createdAt as string)], [exec('e-ok', '2026-11-03T00:00:00Z'), exec('e-1', createdAt as string)]]) {
+      const r = decide(sales(), rows)
+      assertEquals(r.kind === 'not_moved' && r.reason, 'execution_candidate_unreadable', String(createdAt))
+    }
+  }
+  // An undated row proved dead, or proved to sit in another pipeline, is no candidate.
+  assertEquals(decide(sales(), [exec('e-ok', '2026-11-03T00:00:00Z'), exec('e-1', '', { status: 'lost' })]), { kind: 'move', opportunityId: 'e-ok', salesOpportunityId: 'sales-1' })
+  assertEquals(decide(sales(), [exec('e-ok', '2026-11-03T00:00:00Z'), exec('e-1', '', { pipelineId: SALES })]), { kind: 'move', opportunityId: 'e-ok', salesOpportunityId: 'sales-1' })
 })
 
 Deno.test('an unfinished search moves nothing, even with one match', () => {
@@ -115,4 +123,26 @@ Deno.test('the resolver re-reads a search row missing its pipeline or status bef
   const gone = await run([{ id: 'x-9', contactId: 'c-1', createdAt: '2026-11-03T00:00:00Z' }])
   assertEquals(gone.kind === 'not_moved' && gone.reason, 'execution_candidate_unreadable')
   assertEquals(reads, ['sales-1', 'e-1', 'sales-1', 's-2', 'sales-1', 'x-9'])
+})
+
+Deno.test('the resolver re-reads a search row missing its creation time; still unreadable moves nothing', async () => {
+  const reads: string[] = []
+  const stored: Record<string, unknown> = {
+    'sales-1': sales(),
+    'e-ok': exec('e-ok', '2026-11-03T00:00:00Z'),
+    'e-old': exec('e-old', '2026-03-01T00:00:00Z'),
+    'e-undated': exec('e-undated', ''),
+  }
+  const run = (rows: unknown[]) => resolveStageMoveTarget({
+    opportunityId: 'sales-1', jobType: 'fencing', executionPipelineId: EXEC, salesPipelineId: SALES,
+    readOpportunity: (id) => { reads.push(id); return Promise.resolve({ opportunity: stored[id] ?? null }) },
+    // deno-lint-ignore no-explicit-any
+    searchExecution: () => Promise.resolve({ opportunities: rows as any, exhausted: true }),
+  })
+  // The by-id read shows the undated row is an earlier job's: the twin moves.
+  assertEquals(await run([exec('e-ok', '2026-11-03T00:00:00Z'), exec('e-old', '')]), { kind: 'move', opportunityId: 'e-ok', salesOpportunityId: 'sales-1' })
+  // The by-id read still has no creation time: the whole selection holds.
+  const held = await run([exec('e-ok', '2026-11-03T00:00:00Z'), exec('e-undated', 'garbage')])
+  assertEquals(held.kind === 'not_moved' && held.reason, 'execution_candidate_unreadable')
+  assertEquals(reads, ['sales-1', 'e-old', 'sales-1', 'e-undated'])
 })

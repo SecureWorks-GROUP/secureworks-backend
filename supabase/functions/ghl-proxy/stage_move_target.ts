@@ -116,7 +116,8 @@ export function executionCreatedNotBefore(
  *   (executionCreatedNotBefore): move the ONE live Execution opportunity for
  *   the same contact created at or after that acceptance. A candidate counts
  *   only when its pipeline equals the Execution pipeline and its status is
- *   readable; an in-window candidate missing either moves nothing. No proved
+ *   readable; an in-window candidate missing either, or a live Execution
+ *   candidate with no readable creation time, moves nothing. No proved
  *   acceptance, none yet, several, or a search that did not reach its end: do
  *   not move anything.
  * - Any other pipeline: do not move anything.
@@ -170,25 +171,32 @@ export function chooseStageMoveTarget(input: {
     }
   }
   // Same contact (GoHighLevel may ignore the contact filter, so it must be
-  // proven) and created at or after this acceptance.
+  // proven). A row created before this acceptance belongs to an earlier job.
+  // A row whose creation time cannot be read cannot be placed outside the
+  // window, so it stays in: dropping it could hide a second live Execution
+  // opportunity and move the wrong one.
   const inWindow = (input.executionCandidates || []).filter((row) => {
     const id = text(row.id)
     if (!id || id === ownId) return false
     if (!contactId || opportunityContactId(row) !== contactId) return false
     const created = ms(row.createdAt)
-    return created !== null && created >= notBefore
+    return created === null || created >= notBefore
   })
   // An in-window row whose pipeline or status cannot be read could be a Sales
-  // opportunity or a dead one: send nothing rather than guess.
+  // opportunity or a dead one, and a live Execution row with no readable
+  // creation time could be this job's or an earlier one's: send nothing
+  // rather than guess. An undated row proved to be in another pipeline or
+  // dead is no candidate either way.
   const unverified = inWindow.filter((row) => {
     const status = statusOf(row)
-    return !opportunityPipelineId(row) || !(LIVE_OPPORTUNITY_STATUSES.has(status) || DEAD_OPPORTUNITY_STATUSES.has(status))
+    if (!opportunityPipelineId(row) || !(LIVE_OPPORTUNITY_STATUSES.has(status) || DEAD_OPPORTUNITY_STATUSES.has(status))) return true
+    return ms(row.createdAt) === null && opportunityPipelineId(row) === input.executionPipelineId && opportunityIsLive(row)
   })
   if (unverified.length > 0) {
     return {
       kind: 'not_moved',
       reason: 'execution_candidate_unreadable',
-      message: 'GoHighLevel did not say which pipeline or status a matching opportunity is in, so no stage was sent',
+      message: 'GoHighLevel did not say which pipeline, status or creation time a matching opportunity has, so no stage was sent',
     }
   }
   const matches = inWindow.filter((row) => opportunityPipelineId(row) === input.executionPipelineId && opportunityIsLive(row))
@@ -219,19 +227,20 @@ export function chooseStageMoveTarget(input: {
   return { kind: 'move', opportunityId: ids[0], salesOpportunityId: ownId }
 }
 
-// At most this many search rows are re-read for a pipeline or status the
-// search left out; any still unreadable after that moves nothing.
+// At most this many search rows are re-read for a pipeline, status or creation
+// time the search left out; any still unreadable after that moves nothing.
 const MAX_CANDIDATE_REREADS = 5
 
 function candidateNeedsReread(row: GhlOpportunityLike): boolean {
   const status = statusOf(row)
-  return !opportunityPipelineId(row) || !(LIVE_OPPORTUNITY_STATUSES.has(status) || DEAD_OPPORTUNITY_STATUSES.has(status))
+  return !opportunityPipelineId(row) || !(LIVE_OPPORTUNITY_STATUSES.has(status) || DEAD_OPPORTUNITY_STATUSES.has(status)) ||
+    ms(row.createdAt) === null
 }
 
 /**
  * Reads GoHighLevel and decides. `readOpportunity` is index.ts's ghl() (GET
- * only). A search row without a pipeline or a known status is re-read by id
- * before it can count.
+ * only). A search row without a pipeline, a known status or a readable
+ * creation time is re-read by id before it can count.
  */
 export async function resolveStageMoveTarget(args: {
   opportunityId: string
