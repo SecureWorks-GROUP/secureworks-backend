@@ -35,6 +35,7 @@ import {
   type JobHint,
   jobNumbersIn,
   learnableSupplierRefs,
+  looksLikeAccountsMail,
   matchEmail,
   type MatchResult,
   type RefLinkHint,
@@ -744,7 +745,10 @@ export async function scanDispatchV2Replies(
         supplier_key: sender.supplier_key,
         supplier_name: sender.supplier_name,
         sender_via: sender.via,
-        order_desk: sender.order_desk,
+        // Option B (12 Nov 2026): accounts and marketing mail from an order
+        // desk's domain never counts in the tray.
+        order_desk: sender.order_desk &&
+          !looksLikeAccountsMail(row.from_email, row.subject),
         job_numbers: jobNumbersIn(row.subject, row.body),
         supplier_refs: supplierRefsIn(row.subject, row.body),
         delivery_date: delivery?.date ?? null,

@@ -740,6 +740,38 @@ Deno.test("scan: two open orders and nothing to choose by goes to the tray with 
   assertEquals(bySeq(107)!.order_desk, false);
 });
 
+Deno.test("scan: accounts mail from an order desk's domain is not guessed and does not count (option B)", async () => {
+  const t = setup();
+  t.store.events = [
+    {
+      seq: 111,
+      from: "invoicing@cmiwa.com.au",
+      subject: "Combined Metal Industries - Sales Invoice PSI-225844",
+      body: "Please find your invoice attached.",
+    },
+    {
+      seq: 112,
+      from: "sales@fencingwarehousewa.au",
+      subject: "Tax Invoice 10095112 for Account 001185 - SECUREWORKS",
+      body: "Your tax invoice is attached.",
+    },
+  ].map(eventRow);
+  t.store.scan.cursor_sequence = 100;
+  await t.run("dispatch_v2_replies_scan");
+  const bySeq = (seq: number) =>
+    t.store.emails.find((e) => e.sequence_number === seq)!;
+  // CMI has one open order: an order reply would be a best guess (seq 104),
+  // an invoice is not.
+  assertEquals(bySeq(111).state, "unmatched");
+  assertEquals(bySeq(111).order_desk, false);
+  assertEquals(bySeq(112).state, "unmatched");
+  assertEquals(bySeq(112).order_desk, false);
+  const tray = await t.run("dispatch_v2_replies_unmatched");
+  assertEquals(tray.counts.needs_confirmation, 0);
+  assertEquals(tray.counts.unmatched_order_desk, 0);
+  assertEquals(tray.counts.unmatched_other, 2);
+});
+
 Deno.test("scan: a second run over the same rows stores nothing twice", async () => {
   const t = await scanned();
   const r = await t.run("dispatch_v2_replies_scan", { from_sequence: 100 });
