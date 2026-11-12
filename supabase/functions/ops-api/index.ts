@@ -513,6 +513,7 @@ import {
   selectCurrentCycleReport,
 } from './makesafe_cycle_evidence.ts'
 import { extractScopeMedia, selectTradeJobMedia } from './trade_scope_media.ts'
+import { readTradeCrewScopeOfWorks, withoutSealForTrade } from './trade_crew_scope_of_works.ts'
 import {
   currentMakesafeReceivableInvoicesByJobId,
   makesafeHasQualifyingCurrentDraftInvoice,
@@ -47091,8 +47092,14 @@ async function tradeJobDetail(
   // `quote`/`quotes` objects are allowlist-only. Quote packs keep
   // descriptions/qty/quote_number; unit prices are nulled for allocated viewers.
   if (!quoteVisible && tradeSafeJob && 'scope_json' in tradeSafeJob) {
-    tradeSafeJob.scope_json = redactTradeScopeQuote(tradeSafeJob.scope_json)
+    // A Scope Engine patio's seal never rides scope_json to a crew: its one
+    // crew page comes through crew_scope_of_works below, from the accepted
+    // revision only.
+    tradeSafeJob.scope_json = withoutSealForTrade(redactTradeScopeQuote(tradeSafeJob.scope_json))
   }
+  // The accepted, released revision's sealed crew scope of works (or why
+  // not). Null for every job not saved by the Scope Engine patio tool.
+  const crewScopeOfWorks = await readTradeCrewScopeOfWorks(client, jobId, jobRes.data?.scope_json)
   if (!quoteVisible && tradeSafeJob) {
     tradeSafeJob.notes = sanitizeTradeAllocatedJobNotes(tradeSafeJob.notes)
   }
@@ -47206,6 +47213,10 @@ async function tradeJobDetail(
       ? makesafeDetails
       : projectTradeAllocatedMakesafeDetails(makesafeDetails),
     quote_packs: tradeQuotePacks,
+    // Additive: a Scope Engine patio's crew scope of works, from the revision
+    // the accepted quote is bound to (never the latest save), or the reason it
+    // is not shown. Null for older-tool and fence jobs. trade_crew_scope_of_works.ts.
+    crew_scope_of_works: crewScopeOfWorks,
     // Additive: fencing completion evidence (photos + neighbour sign-off) the
     // invoice paths require. Non-fencing jobs: applies=false.
     completion_evidence: completionEvidence,
