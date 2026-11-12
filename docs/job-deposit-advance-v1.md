@@ -84,6 +84,14 @@ Where it goes (`depositPaidTargetStatus`):
 | patio | `false` or `null` (undecided) | `order_materials` |
 | patio | `true` | `approvals` |
 
+The move's own `status_changed` job event records the council mark as it stood
+at the move (`council_required`, `council_required_label`: needs council, no
+council or not answered). A hand change of the mark through `update_job_field`
+writes its own `council_required_set` job event (who, from, to;
+`ops-api/council_mark.ts`). Only this internal move can add the mark to a
+`status_changed` event: the HTTP `update_job_status` action drops any
+`event_detail` it is sent.
+
 After each run, xero-sync also posts `job_deposit_catch_up`. It makes the same
 paid move for every waiting card, which covers a deposit paid before the switch
 was on or before the card reached Accepted, and the Xero-sent landing for every

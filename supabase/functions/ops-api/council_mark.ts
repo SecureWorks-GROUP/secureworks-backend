@@ -19,8 +19,8 @@ export interface CouncilMarkChange {
 
 /** Reads the old mark, writes the new one, and records the change. Returns
  * the stored value. A job_events failure is logged and never undoes the write. */
-// deno-lint-ignore no-explicit-any
 export async function setCouncilRequired(
+  // deno-lint-ignore no-explicit-any
   client: any,
   change: CouncilMarkChange,
 ): Promise<
