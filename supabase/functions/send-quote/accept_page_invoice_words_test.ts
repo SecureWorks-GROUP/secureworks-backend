@@ -1,8 +1,8 @@
 // The accept page and quote email words: a deposit invoice that was not made is never
 // called emailed, and a general job's quote email never names its type.
 // Run: deno test --allow-read --allow-env supabase/functions/send-quote/accept_page_invoice_words_test.ts
-import { assert, assertStringIncludes } from 'https://deno.land/std@0.208.0/assert/mod.ts'
-import { buildNextStepsPage, buildQuoteEmail } from './index.ts'
+import { assert, assertEquals, assertStringIncludes } from 'https://deno.land/std@0.208.0/assert/mod.ts'
+import { buildNextStepsPage, buildQuoteEmail, buildRunAcceptedPage } from './index.ts'
 
 const PENDING = 'We will email your deposit invoice shortly.'
 
@@ -67,4 +67,27 @@ Deno.test('quote email: fence and patio words are unchanged', () => {
   assertStringIncludes(quoteEmail('fencing'), 'quote on your fencing project in Testville')
   assertStringIncludes(quoteEmail('patio'), 'Your patio quote is ready')
   assertStringIncludes(quoteEmail('patio'), 'quote on your patio project in Testville')
+})
+
+Deno.test('fence run page: a failed deposit invoice says it will be emailed, with no check-your-email line', () => {
+  const html = buildRunAcceptedPage({ job_number: 'SWF-TEST', site_suburb: 'Testville', type: 'fencing' }, { run_label: 'LHS' }, 'Test', { invoiceFailed: true })
+  assertStringIncludes(html, PENDING)
+  assert(!/check your email/i.test(html))
+  assert(!html.includes('being created now'))
+})
+
+Deno.test('fence run page: the success words are unchanged', () => {
+  const html = buildRunAcceptedPage({ job_number: 'SWF-TEST', site_suburb: 'Testville', type: 'fencing' }, { run_label: 'LHS' }, 'Test')
+  assertStringIncludes(html, "Deposit invoices are being created now. You'll receive yours by email shortly with a payment link.")
+  assertStringIncludes(html, 'Pay your deposit via the invoice link (check your email)')
+  assert(!html.includes(PENDING))
+})
+
+Deno.test('every deposit invoice request on the accept path reads its reply', async () => {
+  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
+  const calls = src.split('ops-api?action=send_acceptance_invoice').length - 1
+  const read = src.split('requestAcceptanceInvoice(fetch, `${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`').length - 1
+  assertEquals(calls, 2)
+  assertEquals(read, calls)
+  assert(!src.includes('bypass_preflight'))
 })

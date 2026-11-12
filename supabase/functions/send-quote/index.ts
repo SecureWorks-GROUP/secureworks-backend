@@ -115,7 +115,16 @@ import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from './quote
 import { depositHeldMessage, namedPartyDeposit, neighbourLetter, readAcceptedRelease, runDepositFromRelease } from './accepted_deposit.ts'
 import { buildCouncilKickoffEmail, councilKickoffApplies, sendCouncilKickoffEmail } from './council_kickoff_email.ts'
 import { setJobPriceToAcceptedQuote } from './accepted_job_price.ts'
-import { acceptanceInvoiceOutcome, alertAcceptanceInvoiceFailed, depositPaymentLine, noDepositAmountLine } from './acceptance_invoice_outcome.ts'
+import {
+  alertAcceptanceInvoiceFailed,
+  depositPaymentLine,
+  heldDepositFailure,
+  noDepositAmountLine,
+  requestAcceptanceInvoice,
+  runDepositLines,
+  uncertainFailure,
+  type AcceptanceInvoiceFailure,
+} from './acceptance_invoice_outcome.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
 // match_status + extraction enqueue). When OFF, legacy raw insert.
@@ -2194,9 +2203,28 @@ serve(async (req: Request) => {
             .eq('job_id', doc.job_id)
             .eq('status', 'active')
 
+          // Each payer whose deposit invoice does not go out: the office is told and
+          // the page says it will be emailed (acceptance_invoice_outcome.ts).
+          let runInvoiceFailed = false
+          const alertRunInvoice = async (failure: AcceptanceInvoiceFailure, jobContactId: string | null, jobDocumentId: string | null) => {
+            runInvoiceFailed = true
+            console.log(`[accept] Run deposit invoice failed: ${failure.reason}`)
+            await alertAcceptanceInvoiceFailed(sb, {
+              jobId: doc.job_id,
+              jobNumber: job?.job_number,
+              failure,
+              jobDocumentId,
+              jobContactId,
+              runLabel,
+            })
+          }
+
           for (const ra of depositAcceptances) {
             const contact = (contacts || []).find((c: any) => c.id === ra.job_contact_id)
-            if (!contact) continue
+            if (!contact) {
+              await alertRunInvoice(heldDepositFailure('the accepting party is not an active contact on the job'), ra.job_contact_id || null, (ra as any).job_document_id || doc.id)
+              continue
+            }
 
             const isClient = contact.is_primary
             // D1F-1: price the deposit from the version this party accepted,
@@ -2221,30 +2249,28 @@ serve(async (req: Request) => {
                 },
                 metadata: {},
               }).then(() => {}, () => {})
+              await alertRunInvoice(heldDepositFailure(deposit.reason), contact.id, acceptedDocId)
               continue
             }
             if (deposit.amount <= 0) continue
 
-            try {
-              await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
-                body: JSON.stringify({
-                  job_id: doc.job_id,
-                  job_contact_id: contact.id,
-                  job_document_id: acceptedDocId,
-                  deposit_amount: deposit.amount,
-                  deposit_percent: deposit.percent,
-                  run_label: runLabel,
-                }),
-              })
-            } catch (e: any) {
-              console.log(`[accept] Failed to create deposit for ${contact.client_name}:`, e.message)
-            }
+            const outcome = await requestAcceptanceInvoice(fetch, `${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
+              body: JSON.stringify({
+                job_id: doc.job_id,
+                job_contact_id: contact.id,
+                job_document_id: acceptedDocId,
+                deposit_amount: deposit.amount,
+                deposit_percent: deposit.percent,
+                run_label: runLabel,
+              }),
+            })
+            if (!outcome.ok) await alertRunInvoice(outcome, contact.id, acceptedDocId)
           }
 
           // Return "Next Steps" page for fully accepted run
-          return await htmlResponse(buildRunAcceptedPage(job, run, doc.job_contacts?.client_name || ''))
+          return await htmlResponse(buildRunAcceptedPage(job, run, doc.job_contacts?.client_name || '', { invoiceFailed: runInvoiceFailed }))
         } else {
           // ── WAITING FOR OTHER PARTY ──
           return await htmlResponse(buildWaitingPage(job, run, doc.job_contacts?.client_name || '', runLabel))
@@ -2253,9 +2279,9 @@ serve(async (req: Request) => {
 
       // Track invoice result for Next Steps page (existing non-run flow)
       let invoiceResult: any = null
-      // Why the deposit invoice was not made, when it was asked for and not made
-      // (acceptance_invoice_outcome.ts). Null when it was made or never asked for.
-      let invoiceFailureReason: string | null = null
+      // The deposit invoice was asked for and did not go out (acceptance_invoice_outcome.ts).
+      // Null when it went out or was never asked for.
+      let invoiceFailure: AcceptanceInvoiceFailure | null = null
 
       if (doc.job_id) {
         // Get full job data for notifications + invoicing
@@ -2523,35 +2549,35 @@ serve(async (req: Request) => {
               }
             }
 
-            if (depositHeld) throw new Error(`deposit_held:${depositHeld}`)
-            const depRes = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-              },
-              body: JSON.stringify(invoiceBody),
-            })
-            const outcome = acceptanceInvoiceOutcome(await depRes.json(), depRes.status)
+            const outcome = depositHeld
+              ? heldDepositFailure(depositHeld)
+              : await requestAcceptanceInvoice(fetch, `${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+                },
+                body: JSON.stringify(invoiceBody),
+              })
             if (outcome.ok) {
               invoiceResult = outcome.result
               console.log(`[send-quote] Acceptance invoice sent: ${invoiceResult.invoice_number} — payment URL: ${invoiceResult.payment_url}`)
             } else {
               console.log(`[send-quote] Acceptance invoice failed: ${outcome.reason}`)
               invoiceResult = null
-              invoiceFailureReason = outcome.reason
+              invoiceFailure = outcome
             }
           } catch (e) {
             console.log('[send-quote] Acceptance invoice failed (non-blocking):', (e as Error).message)
             invoiceResult = null
-            invoiceFailureReason = (e as Error).message || 'the invoice request failed'
+            invoiceFailure = uncertainFailure((e as Error).message)
           }
           // The office is told once; the customer is told it will be emailed shortly.
-          if (invoiceFailureReason) {
+          if (invoiceFailure) {
             await alertAcceptanceInvoiceFailed(sb, {
               jobId: job.id,
               jobNumber: job.job_number,
-              reason: invoiceFailureReason,
+              failure: invoiceFailure,
               jobDocumentId: doc.id,
               jobContactId: doc.job_contact_id || null,
             })
@@ -2615,7 +2641,7 @@ serve(async (req: Request) => {
           shareToken: token,
           isPatio,
           jobId: job?.id || '',
-          invoiceFailed: !!invoiceFailureReason,
+          invoiceFailed: !!invoiceFailure,
         })
         return new Response(nextStepsHtml, {
           status: 200,
@@ -4842,7 +4868,8 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
 // PER-RUN ACCEPTANCE CONFIRMATION PAGES
 // ════════════════════════════════════════════════════════════
 
-function buildRunAcceptedPage(job: any, run: any, acceptorName: string): string {
+export function buildRunAcceptedPage(job: any, run: any, acceptorName: string, opts: { invoiceFailed?: boolean } = {}): string {
+  const deposit = runDepositLines(opts)
   const jobNumber = job?.job_number || ''
   const runName = run?.run_name || run?.run_label || 'Fence'
   const suburb = job?.site_suburb || ''
@@ -4860,12 +4887,12 @@ function buildRunAcceptedPage(job: any, run: any, acceptorName: string): string 
     <p style="color:#4C6A7C;font-size:15px;margin-bottom:24px">${jobNumber}${suburb ? ', ' + suburb : ''}</p>
     <div style="background:#34C75915;border:1px solid #34C75930;border-radius:8px;padding:16px;margin-bottom:24px;">
       <p style="color:#34C759;font-weight:600;font-size:15px;">Both parties have confirmed this run.</p>
-      <p style="color:#4C6A7C;font-size:13px;margin-top:8px;">Deposit invoices are being created now. You'll receive yours by email shortly with a payment link.</p>
+      <p style="color:#4C6A7C;font-size:13px;margin-top:8px;">${deposit.note}</p>
     </div>
     <div style="text-align:left;background:#f8f9fa;padding:16px;border-radius:8px;">
       <p style="font-weight:600;color:#293C46;margin-bottom:8px;">What happens next?</p>
       <ol style="color:#4C6A7C;font-size:14px;line-height:2;padding-left:20px;">
-        <li>Pay your deposit via the invoice link (check your email)</li>
+        <li>${deposit.firstStep}</li>
         <li>We'll order materials once deposits are received</li>
         <li>Our team will be in touch to schedule the installation</li>
       </ol>
