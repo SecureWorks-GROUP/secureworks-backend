@@ -1606,6 +1606,14 @@ actions `restoration_*`. What must not regress:
   card's restoration quote document, to a listed restoration contact with ses@
   copied, dry run by default. It never mints, authorises or changes money.
 
+- **Its own board** (owner, 12 Nov 2026): restoration cards leave the ops
+  make-safe board (`excludeRestoration`) for `restoration_board`, seven stages
+  stored in `jobs.metadata.restoration_stage` with the job status, moved by
+  `restoration_set_stage` or forward-only by the quote-sent, quote-approved and
+  invoice-sent actions. Rules: `restoration_stage.ts`; contract:
+  `docs/restoration-board-v1.md`. A restoration report submit no longer
+  cancels the rest of the crew.
+
 Tests: `restoration_intake_test.ts`, `restoration_workflow_test.ts`,
 `restoration_workflow_store_test.ts`, the SWRESTO cases in
 `makesafe_intake_auto_allocate_test.ts`.
