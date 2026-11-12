@@ -1050,6 +1050,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Dispatch v2 section 3g: an order sent from Outlook is
                       # recorded when it is sent (dispatch_v2_outlook_on_send.ts).
                       ("20261106120000", "dispatch_v2_outlook_order_on_send"),
+                      # Solarspan is Bondor (11 Nov 2026): the approved list's
+                      # recognise-only addresses (dispatch_v2_outlook_on_send.ts,
+                      # dispatch_v2_replies_sources.ts).
+                      ("20261111160000", "dispatch_v2_solarspan_as_bondor"),
                       ("20261106160000", "group_paid_by_hours_member"),
                       # Trade invoice money controls: events, extras limits, number index.
                       ("20261106163712", "trade_invoice_money_controls"),
