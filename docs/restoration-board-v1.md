@@ -61,6 +61,37 @@ stay for 30 days after their last change; `include_closed=1` returns every
 card including cancelled and lost. `job_id` or `job_number` narrows it to one.
 It is staff-only because it carries invoice amounts.
 
+## Trade pay
+
+A restoration job's trade is paid against the job's work order (the one
+`work_orders` row of kind `job`), with an agreed labour amount the office sets:
+
+- `POST ops-api?action=restoration_set_work_order` `{job_id | job_number,
+  agreed_labour_ex, breakdown}` sets the amount (dollars ex GST) and what it is
+  for (e.g. "Jean Crous: 2 h on site + 2 h travel at $40/h", shown on the work
+  order) and approves it through `approve_job_work_order`. A signed-in approver
+  (`owner_approval_authority`) may call it; an agent with the server key names
+  the approver with `owner_email` + `owner_statement` under the owner-directed
+  fence (`ses_owner_directed_approval.ts`). An approved work order is sealed:
+  the same amount again is `unchanged`, a different one is refused
+  (`work_order_sealed`). Rules: `restoration_work_order.ts`.
+- `trade_invoice_mode.ts`: a restoration job whose job work order is approved
+  with its agreed labour is invoiced as a work order (reason
+  `restoration_work_order`), billed at that amount like any work-order job.
+  With none it stays hourly at the trade's office rate.
+- The agreed amount is the trade's gross labour, as hours x rate would be.
+  Super is worked out on it by the trade invoice money rules, never taken out
+  of it.
+
+## Xero
+
+SWRESTO- jobs book to their own Business Unit tracking option, `SW - RESTORATION`
+(`trackingCategoryForJob`). `POST ops-api?action=ensure_xero_tracking_option
+{option: "SW - RESTORATION"}` (server key, allow-listed names only) adds the
+option in Xero when it is missing. xero-sync's builder-reference matcher reads
+it as make-safe-side work. Older restoration cards numbered SWMS- still book to
+`SW - MAKESAFE` by their number.
+
 ## What changed elsewhere
 
 - The ops make-safe board (`makesafe_board`, ops projection) leaves restoration

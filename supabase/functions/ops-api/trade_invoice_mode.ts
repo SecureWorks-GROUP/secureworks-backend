@@ -3,6 +3,9 @@
 // chosen by the trade on the screen:
 //
 //   1. the job has a live (not void) group work order -> group work order
+//   1b. a restoration job with an approved job work order carrying its agreed
+//      labour -> work order (owner, 12 Nov 2026: restoration_work_order.ts;
+//      with none it stays hourly)
 //   2. the trade is per metre (users.invoice_type = 'per_metre') -> work order
 //   3. a patio job -> group work order
 //   4. a fencing job -> work order
@@ -30,6 +33,7 @@
 // Contract: docs/trade-invoice-mode-v1.md.
 // deno-lint-ignore-file no-explicit-any
 
+import { isRestorationCard } from "./restoration_workflow_store.ts";
 import {
   extraLineType,
   tradeMayClaimCommission,
@@ -42,6 +46,7 @@ export type TradeInvoiceModeReason =
   | "per_metre_trade"
   | "patio_job"
   | "fencing_job"
+  | "restoration_work_order"
   | "other_job";
 
 export type TradeInvoiceModeDecision = {
@@ -64,12 +69,17 @@ export function decideTradeInvoiceMode(input: {
   hasLiveGroupWorkOrder: boolean;
   tradeInvoiceType: string | null | undefined;
   jobVertical: string | null | undefined;
+  /** A restoration job whose approved job work order has its agreed labour. */
+  restorationWorkOrder?: boolean;
 }): TradeInvoiceModeDecision {
   if (input.hasLiveGroupWorkOrder) {
     return {
       invoice_mode: "group_work_order",
       invoice_mode_reason: "live_group_work_order",
     };
+  }
+  if (input.restorationWorkOrder === true) {
+    return { invoice_mode: "work_order", invoice_mode_reason: "restoration_work_order" };
   }
   if (String(input.tradeInvoiceType || "").trim().toLowerCase() === "per_metre") {
     return { invoice_mode: "work_order", invoice_mode_reason: "per_metre_trade" };
@@ -162,27 +172,36 @@ export async function loadTradeInvoiceJobModes(
   }
 
   // The approved job work order of every work-order job: its agreed labour is
-  // what the trade bills. Read only for jobs invoiced as a work order. More
-  // than one approved job work order on a job is never guessed between.
-  const decided = new Map<string, TradeInvoiceModeDecision & { vertical: string }>();
-  for (const id of ids) {
-    const row = jobs.get(id);
-    if (!row) continue;
-    const vertical = input.jobVertical(row);
-    decided.set(id, {
-      ...decideTradeInvoiceMode({
-        hasLiveGroupWorkOrder: liveGroupJobs.has(id),
-        tradeInvoiceType: user.invoice_type,
-        jobVertical: vertical,
-      }),
-      vertical,
-    });
-  }
-  const workOrderJobIds = [...decided.entries()]
-    .filter(([, d]) => d.invoice_mode === "work_order")
-    .map(([id]) => id);
+  // what the trade bills. Read only for jobs invoiced as a work order, and for
+  // restoration jobs (whose mode it decides). More than one approved job work
+  // order on a job is never guessed between.
   const agreedByJob = new Map<string, { id: string; agreed: number }>();
-  for (const part of chunks(workOrderJobIds)) {
+  const readAgreed = async (jobIds: string[]) => {
+    for (const part of chunks(jobIds.filter((id) => !agreedReadFor.has(id)))) {
+      for (const id of part) agreedReadFor.add(id);
+      await readAgreedPart(part);
+    }
+  };
+  const agreedReadFor = new Set<string>();
+  const restorationJobIds = ids.filter((id) => jobs.has(id) && isRestorationCard(jobs.get(id)));
+  const decided = new Map<string, TradeInvoiceModeDecision & { vertical: string }>();
+  const decideAll = () => {
+    for (const id of ids) {
+      const row = jobs.get(id);
+      if (!row) continue;
+      const vertical = input.jobVertical(row);
+      decided.set(id, {
+        ...decideTradeInvoiceMode({
+          hasLiveGroupWorkOrder: liveGroupJobs.has(id),
+          tradeInvoiceType: user.invoice_type,
+          jobVertical: vertical,
+          restorationWorkOrder: restorationJobIds.includes(id) && agreedByJob.has(id),
+        }),
+        vertical,
+      });
+    }
+  };
+  const readAgreedPart = async (part: string[]) => {
     const { data, error } = await client.from("work_orders")
       .select("id, job_id, agreed_labour_ex")
       .eq("org_id", orgId)
@@ -202,7 +221,12 @@ export async function loadTradeInvoiceJobModes(
         agreedByJob.set(jobId, { id: String(row.id), agreed: Math.round(agreed * 100) / 100 });
       }
     }
-  }
+  };
+  await readAgreed(restorationJobIds);
+  decideAll();
+  await readAgreed(
+    [...decided.entries()].filter(([, d]) => d.invoice_mode === "work_order").map(([id]) => id),
+  );
 
   const trade = {
     id: String(user.id),

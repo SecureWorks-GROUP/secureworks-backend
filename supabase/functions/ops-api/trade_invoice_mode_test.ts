@@ -46,6 +46,8 @@ const VOID_GROUP_PATIO = "7a1e0a52-0000-4000-8000-00000000b006";
 const CREATED_MAKESAFE = "7a1e0a52-0000-4000-8000-00000000b007";
 const FOREIGN = "7a1e0a52-0000-4000-8000-00000000b008";
 const SWMS_NUMBERED = "7a1e0a52-0000-4000-8000-00000000b009";
+const RESTO_AGREED = "7a1e0a52-0000-4000-8000-00000000b00a";
+const RESTO_HOURLY = "7a1e0a52-0000-4000-8000-00000000b00b";
 
 const job = (id: string, type: string, over: Record<string, unknown> = {}) => ({
   id,
@@ -67,6 +69,8 @@ const JOBS = [
   job(CREATED_MAKESAFE, "makesafe", { created_by: TRADE }),
   job(FOREIGN, "fencing", { org_id: OTHER_ORG, created_by: TRADE }),
   job(SWMS_NUMBERED, "general", { job_number: "SWMS-1234" }),
+  job(RESTO_AGREED, "makesafe", { job_number: "SWRESTO-261718", metadata: { makesafe_job_family: "restoration" } }),
+  job(RESTO_HOURLY, "makesafe", { job_number: "SWRESTO-261719", metadata: { makesafe_job_family: "restoration" } }),
 ];
 
 const GROUPS = [
@@ -84,6 +88,8 @@ const WORK_ORDERS = [
   { id: "7a1e0a52-0000-4000-8000-00000000c002", org_id: ORG, job_id: PATIO, kind: "job", status: "approved", agreed_labour_ex: 900 },
   { id: "7a1e0a52-0000-4000-8000-00000000c003", org_id: ORG, job_id: GROUPED_FENCE, kind: "job", status: "draft", agreed_labour_ex: 700 },
   { id: "7a1e0a52-0000-4000-8000-00000000c004", org_id: ORG, job_id: FENCE, kind: "crew", status: "accepted", agreed_labour_ex: null },
+  { id: "7a1e0a52-0000-4000-8000-00000000c005", org_id: ORG, job_id: RESTO_AGREED, kind: "job", status: "approved", agreed_labour_ex: 160 },
+  { id: "7a1e0a52-0000-4000-8000-00000000c006", org_id: ORG, job_id: RESTO_HOURLY, kind: "job", status: "draft", agreed_labour_ex: 80 },
 ];
 
 type World = {
@@ -662,4 +668,20 @@ Deno.test("agreed amount: billed at the agreed figure passes, any other figure i
     { ref: "SWF-123", jobId: FENCE, woAllocated: 1850.5 },
   ], modes);
   assertEquals(twice?.jobs.length, 1);
+});
+
+Deno.test("mode rule: a restoration job with an agreed work order is billed as that work order; without one it is hourly", async () => {
+  assertEquals(
+    decideTradeInvoiceMode({ hasLiveGroupWorkOrder: false, tradeInvoiceType: "hourly", jobVertical: "makesafe", restorationWorkOrder: true }),
+    { invoice_mode: "work_order", invoice_mode_reason: "restoration_work_order" },
+  );
+  const { jobs } = await load(fakeClient(), [RESTO_AGREED, RESTO_HOURLY]);
+  const agreed = jobs.find((j) => j.job_id === RESTO_AGREED)!;
+  assertEquals(
+    [agreed.invoice_mode, agreed.invoice_mode_reason, agreed.work_order_agreed_ex, agreed.job_work_order_id],
+    ["work_order", "restoration_work_order", 160, "7a1e0a52-0000-4000-8000-00000000c005"],
+  );
+  // A draft work order agrees nothing: the job stays hourly.
+  const hourly = jobs.find((j) => j.job_id === RESTO_HOURLY)!;
+  assertEquals([hourly.invoice_mode, hourly.work_order_agreed_ex], ["hourly", null]);
 });
