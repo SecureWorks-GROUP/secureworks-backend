@@ -33,3 +33,15 @@ export function nextStepsProjectLabel(projectType: string | null | undefined): s
   const typeName = projectType === 'fencing' ? 'fencing' : projectType === 'decking' ? 'decking' : 'patio'
   return `${typeName} project`
 }
+
+/** The quote email's heading: a general job's never names its type (director, 12 Nov 2026, item 1d). */
+export function quoteEmailHeading(projectType: string | null | undefined): string {
+  if (projectType === 'general') return 'Your quote is ready'
+  return `Your ${projectType || 'project'} quote is ready`
+}
+
+/** "...the opportunity to quote on your <this>": a general job's says "project", never "general project". */
+export function quoteEmailProjectWords(projectType: string | null | undefined): string {
+  if (projectType === 'general') return 'project'
+  return `${projectType || 'project'} project`
+}
