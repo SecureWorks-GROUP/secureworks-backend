@@ -2,6 +2,13 @@ import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, r
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
 import { SelfAllocationRefusal, selfAllocateForInvoice } from './trade_self_allocation.ts'
 import {
+  loadTradeInvoiceJobModes,
+  parseTradeInvoiceJobModeIds,
+  TradeInvoiceJobModesRequestError,
+  TradeInvoiceModeReadError,
+  type TradeInvoiceJobMode,
+} from './trade_invoice_mode.ts'
+import {
   assertTradeMayBillExtraJobs,
   ExtraJobBillingRefusal,
   extraLineType,
@@ -5159,6 +5166,11 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'get_service_report',
   'update_my_assignment',
   'my_hours',
+  // How each job is invoiced (trade_invoice_mode.ts) and the trade's own
+  // self-booking from their invoice (trade_self_allocation.ts). Both act only
+  // for the signed-in trade, inside their company.
+  'trade_invoice_job_modes',
+  'self_allocate_for_invoice',
   'submit_trade_invoice',
   'my_trade_invoices',
   'get_trade_invoice',
@@ -12558,6 +12570,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'waive_neighbour_signoff':
       case 'log_my_job_hours':
       case 'self_allocate_for_invoice':
+      case 'trade_invoice_job_modes':
       case 'create_group_work_order':
       case 'join_group_work_order':
       case 'sign_group_work_order':
@@ -12722,6 +12735,39 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             } catch (error) {
               if (error instanceof SelfAllocationRefusal) {
                 return json({ ok: false, error: error.message, code: error.code }, error.status)
+              }
+              throw error
+            }
+          }
+          // How each job is invoiced (Marnin, 11 Nov 2026): group work order,
+          // work order or hourly, decided by the job (trade_invoice_mode.ts),
+          // and whether the trade may add a commission line on it. Jobs
+          // outside the caller's company are listed in not_found, never
+          // decided.
+          case 'trade_invoice_job_modes': {
+            if (req.method !== 'GET') return json({ error: 'trade_invoice_job_modes requires GET' }, 405)
+            let modeJobIds: string[]
+            try {
+              modeJobIds = parseTradeInvoiceJobModeIds(url.searchParams.get('job_ids'))
+            } catch (error) {
+              if (error instanceof TradeInvoiceJobModesRequestError) {
+                return json({ ok: false, error: error.message, code: error.code }, 400)
+              }
+              throw error
+            }
+            try {
+              const modes = await loadTradeInvoiceJobModes(client, {
+                tradeId: tradeUser.id,
+                orgId: tradeUser.orgId,
+                jobIds: modeJobIds,
+                jobVertical: _jobVertical,
+                normaliseManagedVerticals: _normalizeManagedVerticals,
+              })
+              return json({ ok: true, jobs: modes.jobs, not_found: modes.not_found })
+            } catch (error) {
+              if (error instanceof TradeInvoiceModeReadError) {
+                console.error('[ops-api] trade_invoice_job_modes: unreadable:', error.message)
+                return json({ ok: false, error: error.message, code: 'invoice_mode_unavailable' }, 503)
               }
               throw error
             }
@@ -14423,6 +14469,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                       saved: false,
                       code: error.code,
                       jobs: error.jobs,
+                      // Commission lines refused (only on a job they created,
+                      // manage, or hold the grant for). Adding themselves to
+                      // these jobs does not help.
+                      commission_jobs: error.commissionJobs,
                       error: error.message,
                       userMessage: error.message,
                     })
@@ -56709,6 +56759,40 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   }
   const gst = previewMoney.gst_amount
 
+  // How each job is invoiced (trade_invoice_mode.ts: group work order, work
+  // order or hourly, decided by the job) and whether this trade may add a
+  // commission line on it. A failed read never fails the hours view: every
+  // card then says invoice_mode null and the reply says
+  // invoice_mode_unavailable, so the app never guesses a mode.
+  let invoiceModeUnavailable = false
+  let invoiceModeByJob = new Map<string, TradeInvoiceJobMode>()
+  const invoiceModeJobIds = [...new Set<string>([
+    ...enriched.map((a: any) => String(a.jobs?.id || '')),
+    ...groupRouteJobs.map((r: any) => String(r.job_id || '')),
+  ].filter(Boolean))]
+  if (invoiceModeJobIds.length > 0) {
+    try {
+      const modes = await loadTradeInvoiceJobModes(client, {
+        tradeId: userId,
+        jobIds: invoiceModeJobIds,
+        jobVertical: _jobVertical,
+        normaliseManagedVerticals: _normalizeManagedVerticals,
+      })
+      invoiceModeByJob = new Map(modes.jobs.map((m) => [m.job_id, m]))
+    } catch (modeErr) {
+      console.error('[ops-api] my_hours: invoice mode unreadable:', (modeErr as Error)?.message)
+      invoiceModeUnavailable = true
+    }
+  }
+  const stampInvoiceMode = (row: any, jobId: string) => {
+    const mode = invoiceModeUnavailable ? undefined : invoiceModeByJob.get(jobId)
+    row.invoice_mode = mode?.invoice_mode ?? null
+    row.invoice_mode_reason = mode?.invoice_mode_reason ?? null
+    row.can_claim_commission = mode ? mode.can_claim_commission : null
+  }
+  for (const a of enriched) stampInvoiceMode(a, String(a.jobs?.id || ''))
+  for (const r of groupRouteJobs) stampInvoiceMode(r, String(r.job_id || ''))
+
   // Check verification state across assignments
   const pendingVerification = enriched.some((a: any) => a.status === 'submitted')
   const allVerified = enriched.length > 0 && enriched.every((a: any) => a.status === 'verified' || a.status === 'complete')
@@ -56730,6 +56814,9 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     total: previewMoney.total_inc,
     already_submitted: !!existingInvoice,
     running_invoice_draft: runningInvoiceDraftEnabled(userRow?.trade_details),
+    // True when how each job is invoiced could not be read; every card's
+    // invoice_mode and can_claim_commission are then null.
+    invoice_mode_unavailable: invoiceModeUnavailable,
     xero_bill_number: existingInvoice?.xero_bill_number || null,
     pending_verification: pendingVerification,
     all_verified: allVerified,
@@ -56738,614 +56825,24 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   }
 }
 
-// ── submit_trade_invoice: build + push ACCPAY bill to Xero ──
-export async function submitTradeInvoice(client: any, userId: string, body: any) {
-  const { week_ending, notes, items } = body
-  if (!week_ending) throw new Error('Something went wrong submitting. Reload and try again, and tell the office if it keeps happening.')
-  // While line review is on, this door is retired. A failed flag read does
-  // not retire it: the saved-stamp check below still holds a line the
-  // trigger already stamped awaiting.
-  if (await readFlag(client, CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG)) {
-    throw new ApiError(
-      'This invoice door is switched off. Send the invoice from the work order.',
-      410,
-      {
-        error: 'This invoice door is switched off. Send the invoice from the work order.',
-        code: 'submit_trade_invoice_retired',
-      },
-    )
-  }
+// ── submit_trade_invoice: RETIRED (Marnin, 11 Nov 2026) ──
+// The old one-press weekly submit built a bill from clocked cards and inserted
+// the invoice straight as `approved`, skipping the office's line review. No
+// live screen calls it (trade.html's submitTradeHours has no button), so it
+// answers 410 `use_weekly_invoice` before reading or writing anything. Trades
+// send every invoice from the Weekly Invoice (generate_trade_invoice), which
+// the office reviews. Contract: docs/trade-invoice-mode-v1.md.
+export const SUBMIT_TRADE_INVOICE_RETIRED_MESSAGE = 'Send your invoice from the Weekly Invoice in the Trade App.'
 
-  const weekStart = weekStartFromEnd(week_ending)
-
-  // Billing mode comes from the users row, never the request. The client may
-  // still send invoice_type / rate_per_metre; both are ignored and the
-  // response says where the mode came from.                    [audit 2026-09]
-  const { data: tradeUser } = await client
-    .from('users')
-    .select('name, email, xero_contact_id, trade_details, invoice_type')
-    .eq('id', userId)
-    .single()
-  const serverInvoiceType = tradeUser?.invoice_type === 'per_metre' ? 'per_metre' : 'hourly'
-  const isPerMetre = serverInvoiceType === 'per_metre'
-  // Time entries (trade_invoice_time_entry.ts). Metres are not time, so the
-  // flag is only read for the hourly lane. Nobody types a line on that lane,
-  // so its lines carry no entry: while the flag is off they are saved as
-  // before, and when it is on every card is refused by name.
-  const stTimeEntryRequired = isPerMetre ? false : await tradeInvoiceTimeEntryRequired(client)
-
-  // Prevent double-submit
-  // week_end is the live column (trade_invoices was rebuilt in
-  // 20260325000003_timer_invoice_system); week_ending does not exist.
-  const { data: existing } = await client
-    .from('trade_invoices')
-    .select('id')
-    .eq('user_id', userId)
-    .eq('week_end', week_ending)
-    .maybeSingle()
-  if (existing) throw new Error(`You already submitted an invoice for week ending ${week_ending}. Contact the office if it needs changing.`)
-
-  // Re-query assignments server-side (prevents tampering). Every assignment the
-  // trade holds for the week is fetched: hourly billing uses the completed
-  // subset, per-metre billing scopes against the full set because metres are
-  // billable regardless of whether the assignment has been closed out.
-  const { data: weekAssignments, error } = await client
-    .from('job_assignments')
-    .select(`
-      id, scheduled_date, started_at, completed_at, role, assignment_type, status, invoiced_in,
-      jobs:job_id (
-        id, type, job_number, client_name, site_address, site_suburb, metadata
-      )
-    `)
-    .eq('user_id', userId)
-    .gte('scheduled_date', weekStart)
-    .lte('scheduled_date', week_ending)
-    .order('scheduled_date', { ascending: true })
-
-  if (error) throw error
-  // Assignment lock (Layer B), same rule as my_hours and generate_trade_invoice:
-  // a job card held by a LIVE invoice is refused here. This lane auto-collects
-  // (the trade never ticks these cards and cannot deselect one), so a held card
-  // is dropped rather than 409-ing; the stamp below fails closed if anything
-  // changes concurrently.                                       [audit 2026-09]
-  const stHeldRefIds = [...new Set((weekAssignments || []).map((a: any) => a.invoiced_in).filter(Boolean))]
-  let stLiveInvoiceIds = new Set<string>()
-  if (stHeldRefIds.length > 0) {
-    const { data: stRefInvoices, error: stRefErr } = await client
-      .from('trade_invoices')
-      .select('id, status')
-      .in('id', stHeldRefIds)
-    if (stRefErr) throw new Error('Failed to check which job cards are already on a live invoice: ' + stRefErr.message)
-    stLiveInvoiceIds = new Set<string>((stRefInvoices || [])
-      .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
-      .map((ti: any) => String(ti.id)))
-  }
-  const stUnlockedAssignments = selectUnlockedAssignments((weekAssignments || []) as any[], stLiveInvoiceIds)
-  const stHeldCount = (weekAssignments || []).length - stUnlockedAssignments.length
-  const assignments = stUnlockedAssignments.filter((a: any) =>
-    a.status === 'complete' && a.started_at && a.completed_at)
-  // Per-metre scope: every assignment the trade still holds for the week,
-  // minus cancelled ones (a cancelled assignment is not work they can bill).
-  const billableAssignments = (weekAssignments || []).filter((a: any) => a.status !== 'cancelled')
-
-  if (isPerMetre) {
-    if (billableAssignments.length === 0) throw new Error('No jobs assigned to you for this week')
-  } else if (assignments.length === 0) {
-    throw new Error(stHeldCount > 0
-      ? 'Every completed job card for this week is already on a live invoice. Contact the office if this looks wrong.'
-      : 'No completed hours found for this week')
-  }
-
-  if (stTimeEntryRequired) {
-    refuseJobCardsNeedingTimes(assignments.map((a: any) => ({
-      assignment_id: String(a.id),
-      job_id: a.jobs?.id ? String(a.jobs.id) : null,
-      job_number: a.jobs?.job_number || null,
-      work_date: a.scheduled_date || null,
-    })))
-  }
-
-  const stGstOn = tradeInvoiceGstOn(body)
-  const stTaxType = stGstOn ? 'INPUT' : 'NONE'
-
-  const tradeName = tradeUser?.name || 'Trade'
-
-  // Build line items
-  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
-  const lineItems: any[] = []
-  // Per-job aggregation for the relational trade_invoice_lines write below.
-  const jobLines: Record<string, {
-    job_id: string
-    job_number: string
-    client_name: string | null
-    total_hours: number
-    hourly_rate: number
-    line_total_ex: number
-    quantity: number | null
-    unit_rate: number | null
-    assignment_ids: string[]
-    days: Set<string>
-  }> = {}
-  let billedHours = 0
-  const addJobLine = (
-    jobId: string,
-    job: any,
-    hours: number,
-    lineRate: number,
-    amount: number,
-    assignmentId?: string,
-    day?: string,
-    quantity?: number,
-    unitRate?: number,
-  ) => {
-    billedHours += hours
-    if (!jobId) {
-      console.error('Trade invoice line has no job attribution — hours billed to Xero but omitted from trade_invoice_lines:', { userId, week_ending, hours, amount, assignmentId })
-      return
-    }
-    const l = jobLines[jobId] ||= {
-      job_id: jobId,
-      job_number: job?.job_number || '',
-      client_name: job?.client_name || null,
-      total_hours: 0,
-      hourly_rate: lineRate,
-      line_total_ex: 0,
-      quantity: null,
-      unit_rate: null,
-      assignment_ids: [],
-      days: new Set<string>(),
-    }
-    l.total_hours += hours
-    l.line_total_ex += amount
-    if (Number.isFinite(quantity) && Number(quantity) > 0) {
-      l.quantity = (l.quantity || 0) + Number(quantity)
-      l.unit_rate = Number(unitRate)
-    }
-    if (assignmentId) l.assignment_ids.push(assignmentId)
-    if (day) l.days.add(day)
-  }
-  let subtotal = 0
-
-  if (isPerMetre) {
-    // ── Per-metre invoice: use client-sent items with per-metre rate ──
-    if (!items || !Array.isArray(items) || items.length === 0) throw new Error('Enter the metres installed on at least one job before submitting.')
-    const pmRate = _resolvePerMetreRate(tradeUser?.trade_details)
-
-    const jobMap: Record<string, any> = {}
-    for (const a of billableAssignments) {
-      const job = a.jobs as any
-      if (job?.id) jobMap[job.id] = job
-    }
-
-    await assertFencingCompletionEvidence(
-      client,
-      items
-        .filter((item: any) => (Number(item?.metres) || 0) > 0 && jobMap[item.job_id])
-        .map((item: any) => ({
-          id: String(item.job_id),
-          vertical: completionEvidenceVertical(jobMap[item.job_id]),
-          label: jobMap[item.job_id]?.job_number || null,
-        })),
-    )
-    await assertClientSignoffForInvoice(
-      client,
-      items
-        .filter((item: any) => (Number(item?.metres) || 0) > 0 && jobMap[item.job_id])
-        .map((item: any) => ({ id: String(item.job_id), label: jobMap[item.job_id]?.job_number || null })),
-    )
-
-    for (const item of items) {
-      const metres = Number(item.metres) || 0
-      if (metres <= 0) continue
-      const job = jobMap[item.job_id]
-      if (!job) throw new Error(`Job ${item.job_number || item.job_id} is not assigned to you for the week ending ${week_ending}, so it cannot be invoiced. Ask the office to add the assignment, then remove that job and submit the rest.`)
-
-      const amount = Math.round(metres * pmRate * 100) / 100
-      subtotal += amount
-
-      // Change 4: include builder ref in Xero description when present
-      const pmBuilderRef = job?.metadata?.external_ref
-      const desc = [
-        (job.job_number || '') + ' | ' + (trackingCategoryForJob(job.job_number || '', job.type) || 'Construction'),
-        pmBuilderRef ? 'Builder Ref: ' + pmBuilderRef : null,
-        [job.client_name, job.site_address, job.site_suburb].filter(Boolean).join(', '),
-        `Fencing installation — ${metres}m @ $${pmRate}/m`,
-      ].filter(Boolean).join('\n')
-
-      lineItems.push({
-        Description: desc,
-        Quantity: metres,
-        UnitAmount: pmRate,
-        AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // expense account for trade ACCPAY bills (matches generate_trade_invoice + push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
-        TaxType: stTaxType,
-        Tracking: xeroTracking(job.job_number || '', job.type),
-      })
-      // Per-metre work has no hours — record the cost and job attribution only,
-      // so reconciliation never reads metres as if they were hours.
-      addJobLine(item.job_id, job, 0, 0, amount, undefined, undefined, metres, pmRate)
-    }
-
-    if (lineItems.length === 0) throw new Error('All metre amounts are zero. Enter the metres you installed on each job.')
-
-  } else {
-    // ── Hourly invoice: existing path ──
-    const { data: rateRow } = await client
-      .from('trade_rates')
-      .select('hourly_rate')
-      .eq('user_id', userId)
-      .lte('effective_from', week_ending)
-      .or(`effective_to.is.null,effective_to.gte.${weekStart}`)
-      .order('effective_from', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-
-    if (!rateRow) throw new Error('No hourly rate set — update your rate in Profile before submitting')
-    const rate = Number(rateRow.hourly_rate)
-
-    for (const a of assignments) {
-      const hours = Math.round(((new Date(a.completed_at).getTime() - new Date(a.started_at).getTime()) / 3600000) * 100) / 100
-      const amount = Math.round(hours * rate * 100) / 100
-      subtotal += amount
-
-      const job = a.jobs as any
-      const d = new Date(a.scheduled_date + 'T00:00:00Z')
-      const dayLabel = `${dayNames[d.getUTCDay()]} ${d.getUTCDate()} ${monthNames[d.getUTCMonth()]}`
-      const division = trackingCategoryForJob(job?.job_number || '', job?.type)
-      const roleLabel = a.role ? ` (${a.role})` : ''
-      // Change 4: include builder ref in Xero description when present
-      const hrBuilderRef = job?.metadata?.external_ref
-
-      const desc = [
-        (job?.job_number || '') + ' | ' + (division || 'Construction'),
-        hrBuilderRef ? 'Builder Ref: ' + hrBuilderRef : null,
-        `Install${roleLabel} — ${dayLabel} — ${hours}hrs @ $${rate}/hr`,
-        [job?.client_name, job?.site_address, job?.site_suburb].filter(Boolean).join(', '),
-      ].filter(Boolean).join('\n')
-
-      lineItems.push({
-        Description: desc,
-        Quantity: hours,
-        UnitAmount: rate,
-        AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // expense account for trade ACCPAY bills (matches generate_trade_invoice + push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
-        TaxType: stTaxType,
-        Tracking: xeroTracking(job?.job_number || '', job?.type),
-      })
-      addJobLine(job?.id, job, hours, rate, amount, a.id, a.scheduled_date)
-    }
-  }
-
-  // ── M0 LEGACY GUARD (2026-06-12) ──
-  if (lineItems.length === 0) {
-    throw new Error('Invoice rejected: no valid line items to submit.')
-  }
-  if (subtotal <= 0) {
-    throw new Error('Invoice rejected: invoice subtotal is zero or negative. Check hours and rates.')
-  }
-  // ── END M0 LEGACY GUARD ──
-  // Recurring deduction (for example Ute hire): taken off the amount payable
-  // of this weekly invoice, after super and GST.
-  const { money: stMoney, decision: stRecurringDeduction } = await applyTradeRecurringDeduction(
-    client,
-    tradeInvoiceMoney(subtotal, stGstOn, week_ending),
-    { userId, weekStart },
-  )
-  const gst = stMoney.gst_amount
-  const total = stMoney.total_inc
-  const stXeroLineItems = splitTradeInvoiceXeroLines(
-    lineItems,
-    stMoney,
-    {
-      tradeName,
-      superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE,
-    },
-  )
-
-  const persistedLineSubtotal = Object.values(jobLines).reduce(
-    (sum, line) => sum + Math.round(line.line_total_ex * 100) / 100,
-    0,
-  )
-  if (Object.keys(jobLines).length === 0 || Math.abs(persistedLineSubtotal - stMoney.gross_earned) > 0.01) {
-    throw new Error(
-      'Invoice rejected: persisted job lines do not match gross earned. Reload and ask the office to check the affected job assignment.',
-    )
-  }
-  const jobWorkOrderRefusal = await loadCrewInvoiceJobWorkOrderRefusal(
-    client,
-    Object.values(jobLines).map((line) => ({ job_id: line.job_id, line_type: 'labour' })),
-  )
-  if (jobWorkOrderRefusal) {
-    throw new ApiError(
-      jobWorkOrderRefusal.error,
-      jobWorkOrderRefusal.code === 'job_work_order_unreadable' ? 503 : 409,
-      {
-        error: jobWorkOrderRefusal.error,
-        code: jobWorkOrderRefusal.code,
-        ...(jobWorkOrderRefusal.job_id ? { job_id: jobWorkOrderRefusal.job_id } : {}),
-      },
-    )
-  }
-
-  // While group_work_order_v1 is off this reads feature_flags only and
-  // returns before any group table. The invoice-line trigger is the net.
-  await assertLegacyInvoiceNotOnGroupJob(client, {
-    jobIds: Object.keys(jobLines),
-    lines: [
-      ...(Array.isArray(body.items) ? body.items : []),
-      ...(Array.isArray(body.lines) ? body.lines : []),
-      ...Object.values(jobLines),
-    ],
-  }).catch((error) => groupWorkOrderApiError(error))
-
-  // Own the complete invoice and relational line truth before contacting Xero.
-  // A contact/bill failure remains recoverable through the ops retry route; an
-  // insert failure cannot leave an external bill with no local owner.
-  const totalHours = billedHours
-  const invoiceRecord = {
-    org_id: DEFAULT_ORG_ID,
-    user_id: userId,
-    week_start: weekStart,
-    week_end: week_ending,
-    total_hours: Math.round(totalHours * 100) / 100,
-    subtotal_ex: stMoney.gross_earned,
-    gst: stMoney.gst_amount,
-    total_inc: stMoney.total_inc,
-    ...tradeInvoiceMoneyFields(stMoney),
-    ...tradeRecurringDeductionInvoiceFields(stRecurringDeduction),
-    notes: notes || null,
-    invoice_source: isPerMetre ? 'per_metre' : 'hourly',
-    xero_bill_id: null,
-    status: 'approved',
-    // A deduction that covered the week but was not taken is said here too.
-    query_note: ['Validated invoice awaiting Xero ACCPAY creation.', stRecurringDeduction.note]
-      .filter(Boolean).join(' | '),
-  }
-  const { data: insertedInvoice, error: invInsertErr } = await client
-    .from('trade_invoices').insert(invoiceRecord).select('id').single()
-  if (invInsertErr || !insertedInvoice?.id) {
-    throw new Error('Failed to save trade invoice before Xero: ' + (invInsertErr?.message || 'no invoice id returned'))
-  }
-
-  const lineRows = Object.values(jobLines).map((l) => ({
-    trade_invoice_id: insertedInvoice.id,
-    job_id: l.job_id,
-    job_number: l.job_number,
-    client_name: l.client_name,
-    total_hours: Math.round(l.total_hours * 100) / 100,
-    hourly_rate: l.hourly_rate,
-    quantity: l.quantity,
-    unit_rate: l.unit_rate,
-    line_total_ex: Math.round(l.line_total_ex * 100) / 100,
-    days_worked: l.days.size || null,
-    assignment_ids: l.assignment_ids.length ? l.assignment_ids : null,
-  }))
-  const { error: lineInsertErr } = await client.from('trade_invoice_lines').insert(lineRows)
-  if (lineInsertErr) {
-    const { error: cleanupErr } = await client.from('trade_invoices').delete().eq('id', insertedInvoice.id)
-    throw new Error(
-      'Failed to save trade invoice lines before Xero: ' + lineInsertErr.message +
-        (cleanupErr ? '; invoice cleanup also failed: ' + cleanupErr.message : ''),
-    )
-  }
-
-  // ── Layer B: stamp invoiced_in on every covered assignment, before Xero ──
-  // Same decide-before-write lock as generate_trade_invoice: refuse if any
-  // covered card is held by a LIVE invoice, roll back a partial claim, and
-  // release this invoice to 'draft' (CHECK-legal, released) on failure so the
-  // cards are never wedged.                                    [audit 2026-09]
-  const stCoveredAssignmentIds = [...new Set(Object.values(jobLines).flatMap((l) => l.assignment_ids))]
-  if (stCoveredAssignmentIds.length > 0) {
-    const stReleaseInvoice = async (stampMsg: string) => {
-      const { error: markErr } = await client.from('trade_invoices').update({
-        status: 'draft',
-        query_note: ('Invoice assignment stamp failed before Xero push: ' + stampMsg).slice(0, 500),
-      }).eq('id', insertedInvoice.id)
-      if (markErr) console.error('[ops-api] Failed to mark assignment-stamp failure:', markErr.message)
-      throw new Error('Failed to lock invoiced job cards before Xero push: ' + stampMsg)
-    }
-    const { data: stStampCandidates, error: stStampReadErr } = await client.from('job_assignments')
-      .select('id, invoiced_in')
-      .eq('user_id', userId)
-      .in('id', stCoveredAssignmentIds)
-    if (stStampReadErr) await stReleaseInvoice(stStampReadErr.message)
-    const stStampRefIds = [...new Set((stStampCandidates || []).map((a: any) => a.invoiced_in).filter(Boolean))]
-    let stReleasedInvoiceIds: string[] = []
-    if (stStampRefIds.length > 0) {
-      const { data: stStampRefInvoices, error: stStampRefErr } = await client.from('trade_invoices')
-        .select('id, status')
-        .in('id', stStampRefIds)
-      if (stStampRefErr) await stReleaseInvoice(stStampRefErr.message)
-      stReleasedInvoiceIds = (stStampRefInvoices || [])
-        .filter((ti: any) => RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
-        .map((ti: any) => String(ti.id))
-    }
-    const stLockPlan = planAssignmentLock({
-      expectedIds: stCoveredAssignmentIds,
-      candidates: (stStampCandidates || []) as any,
-      releasedInvoiceIds: stReleasedInvoiceIds,
-    })
-    if (!stLockPlan.ok) {
-      const stJobLabels: Record<string, string> = {}
-      for (const l of Object.values(jobLines)) {
-        for (const aid of l.assignment_ids) stJobLabels[String(aid)] = l.job_number || String(aid)
-      }
-      await stReleaseInvoice(describeAssignmentLockBlock(stLockPlan, stJobLabels))
-    }
-    const stStampFilter = stReleasedInvoiceIds.length > 0
-      ? 'invoiced_in.is.null,invoiced_in.in.(' + stReleasedInvoiceIds.join(',') + ')'
-      : 'invoiced_in.is.null'
-    const { data: stStamped, error: stStampErr } = await client.from('job_assignments')
-      .update({ invoiced_in: insertedInvoice.id })
-      .eq('user_id', userId)
-      .in('id', stCoveredAssignmentIds)
-      .or(stStampFilter)
-      .select('id')
-    const stStampedIds = [...new Set((stStamped || []).map((a: any) => String(a.id)))]
-    if (stStampErr || stStampedIds.length !== stCoveredAssignmentIds.length) {
-      if (stStampedIds.length > 0) {
-        const { error: stRollbackErr } = await client.from('job_assignments')
-          .update({ invoiced_in: null })
-          .eq('invoiced_in', insertedInvoice.id)
-          .in('id', stStampedIds)
-        if (stRollbackErr) console.error('[ops-api] Assignment stamp rollback failed:', stRollbackErr.message)
-      }
-      await stReleaseInvoice(stStampErr
-        ? stStampErr.message
-        : 'Only stamped ' + stStampedIds.length + ' of ' + stCoveredAssignmentIds.length +
-          ' assignments (concurrent submission; claim rolled back)')
-    }
-  }
-
-  // Saved line stamps hold the bill whether or not the review flag can be
-  // read. Status stays approved. Nothing reaches Xero.
-  const stOfficeReview = await readInvoiceOfficeReview(client, insertedInvoice.id)
-  if (!stOfficeReview.ok) {
-    await markTradeInvoiceRetryable(
-      client,
-      insertedInvoice.id,
-      OFFICE_REVIEW_UNREADABLE_RETRY_NOTE,
-    )
-    return {
-      ok: false,
-      success: true,
-      code: 'XERO_PUSH_FAILED',
-      userMessage: 'Your invoice was saved and the office has been notified, but it could not be sent to Xero automatically. The office will push it manually — no action needed from you.',
-      invoice_id: insertedInvoice.id,
-      xero_bill_id: null,
-      xero_bill_number: null,
-      total,
-      ...tradeInvoiceMoneyResponse(stMoney),
-      ...tradeRecurringDeductionResponse(stRecurringDeduction),
-      invoice_type: serverInvoiceType,
-      invoice_type_source: 'user',
-      pdf_attached: false,
-    }
-  }
-  if (stOfficeReview.hold) {
-    const { data: stHoldInv } = await client.from('trade_invoices')
-      .select('query_note').eq('id', insertedInvoice.id).maybeSingle()
-    const stHoldNote = [stHoldInv?.query_note, stOfficeReview.hold.error].filter(Boolean).join(' | ').slice(0, 2000)
-    await client.from('trade_invoices').update({ query_note: stHoldNote }).eq('id', insertedInvoice.id)
-    return {
-      ok: false,
-      success: true,
-      office_review: 'held',
-      code: stOfficeReview.hold.code,
-      invoice_id: insertedInvoice.id,
-      xero_bill_id: null,
-      xero_bill_number: null,
-      total,
-      ...tradeInvoiceMoneyResponse(stMoney),
-      ...tradeRecurringDeductionResponse(stRecurringDeduction),
-      invoice_type: serverInvoiceType,
-      invoice_type_source: 'user',
-      pdf_attached: false,
-      error: stOfficeReview.hold.error,
-    }
-  }
-
-  // Resolve Xero supplier contact only after line construction, money
-  // calculation, split validation, and local persistence all succeed.
-  const { accessToken: stAt, tenantId: stTi } = await getToken(client)
-  const stXeroContactId = await resolveTradeXeroSupplierContact(client, {
-    userId,
-    name: tradeUser?.name || '',
-    email: tradeUser?.email || '',
-    cachedContactId: tradeUser?.xero_contact_id || null,
-    source: 'submit_trade_invoice',
-    actor: userId,
-    accessToken: stAt,
-    tenantId: stTi,
+export async function submitTradeInvoice(_client: any, _userId: string, _body: any): Promise<never> {
+  throw new ApiError(SUBMIT_TRADE_INVOICE_RETIRED_MESSAGE, 410, {
+    ok: false,
+    success: false,
+    saved: false,
+    code: 'use_weekly_invoice',
+    error: SUBMIT_TRADE_INVOICE_RETIRED_MESSAGE,
+    userMessage: SUBMIT_TRADE_INVOICE_RETIRED_MESSAGE,
   })
-  if (!stXeroContactId) throw new Error('Could not create Xero supplier contact')
-
-  // Build Xero payload
-  const dueDate = new Date(new Date(week_ending + 'T00:00:00Z').getTime() + 14 * 86400000)
-    .toISOString().slice(0, 10)
-
-  const xeroPayload = {
-    Invoices: [{
-      Type: 'ACCPAY',
-      Contact: { ContactID: stXeroContactId },
-      Reference: `${tradeName} | WE ${week_ending} | ${[...new Set(Object.values(jobLines).map((l) => l.job_number).filter(Boolean))].join(', ')}`,
-      InvoiceNumber: tradeBillInvoiceNumber(`${tradeName} | WE ${week_ending} | ${[...new Set(Object.values(jobLines).map((l) => l.job_number).filter(Boolean))].join(', ')}`),
-      DueDate: dueDate,
-      Status: 'DRAFT',
-      LineAmountTypes: stGstOn ? 'Exclusive' : 'NoTax',
-      LineItems: stXeroLineItems,
-    }],
-  }
-
-  // Push to Xero (reuse token from contact resolution above)
-  const idempotencyKey = tradeInvoiceXeroIdempotencyKey(insertedInvoice.id)
-  const { result } = await createTradeXeroBillOnce(client, {
-    accessToken: stAt, tenantId: stTi, tradeInvoiceId: insertedInvoice.id, payload: xeroPayload,
-    idempotencyKey, actor: 'submit_trade_invoice',
-  }).catch((error) => tradeXeroBillSearchApiError(error))
-
-  const xeroInv = result?.Invoices?.[0]
-  const xeroIdentity = await checkpointAndAssertReturnedTradeInvoiceXeroSplit({
-    bill: xeroInv,
-    money: stMoney,
-    checkpointIdentity: (identity) =>
-      checkpointTradeInvoiceXeroIdentity(
-        client,
-        insertedInvoice.id,
-        identity,
-        'submit_trade_invoice',
-      ),
-  }).catch((error) => tradeInvoiceMoneyApiError(error))
-  const pdfAttached = await attachTradeInvoicePdfsThenMarkReconciled(
-    client,
-    insertedInvoice.id,
-    xeroIdentity,
-    {
-      accessToken: stAt,
-      tenantId: stTi,
-      filename: xeroIdentity.xeroBillNumber || `${tradeName}-WE-${week_ending}`,
-      clientPdfBase64: body.pdf_base64,
-      submittedLines: lineItems,
-      money: stMoney,
-      tradeName,
-    },
-  )
-  const billNumber = xeroIdentity.xeroBillNumber
-
-  // Cache in xero_invoices table
-  try {
-    await client.from('xero_invoices').upsert({
-      org_id: DEFAULT_ORG_ID,
-      xero_invoice_id: xeroIdentity.xeroBillId,
-      xero_contact_id: stXeroContactId,
-      contact_name: tradeName,
-      invoice_number: billNumber,
-      invoice_type: 'ACCPAY',
-      status: 'DRAFT',
-      reference: `${tradeName} | WE ${week_ending}`,
-      sub_total: tradeInvoiceXeroBillSubtotal(stMoney),
-      total_tax: gst,
-      total: stMoney.trade_payable,
-      amount_due: stMoney.trade_payable,
-      amount_paid: 0,
-      invoice_date: new Date().toISOString().slice(0, 10),
-      due_date: dueDate,
-      synced_at: new Date().toISOString(),
-    }, { onConflict: 'org_id,xero_invoice_id' })
-  } catch (e: any) {
-    console.error('Non-blocking: failed to cache trade bill:', e.message)
-  }
-
-  return {
-    success: true,
-    xero_bill_number: billNumber,
-    total,
-    ...tradeInvoiceMoneyResponse(stMoney),
-    ...tradeRecurringDeductionResponse(stRecurringDeduction),
-    invoice_type: serverInvoiceType,
-    invoice_type_source: 'user',
-    pdf_attached: pdfAttached,
-  }
 }
 
 // ── my_trade_invoices: invoice history for a trade ──

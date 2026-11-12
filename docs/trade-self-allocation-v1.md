@@ -40,7 +40,13 @@ Answers `{ ok: true, mode: "created" | "existing", assignment }`, or
 
 Being booked on the job is the invoice's `booked_on_job` rule
 (`trade_invoice_extra_job_authority.ts`), so the refused invoice goes through
-on the next send. The office still reviews every invoice as before; rates and
+on the next send. It never allows a commission line: commission is only for a
+job the trade created, manages, or holds the invoice-any-job grant for
+(`commission_not_allowed`, `docs/trade-invoice-mode-v1.md`).
+
+The action is on `OPS_API_PROFILE_SCOPED_JWT_ACTIONS` (11 Nov 2026): without
+it the front door refused every plain trade with `operator_access_required`
+before the route ran. The office still reviews every invoice as before; rates and
 time entry rules are unchanged.
 
 It also gives the trade the allocated tier on that job in the Trade App

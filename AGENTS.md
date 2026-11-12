@@ -4823,9 +4823,9 @@ time entry, invoice line or status change; `--apply --file` opens only the
 reviewed ids) and the crew-row retirement is `scripts/retire-crew-work-orders.ts`:
 both dry-run by default, neither is a migration or a cron, and both are on
 Marnin's go-live checklist. Turn `crew_invoice_line_office_review_v1` on
-before or with `crew_invoice_on_job_work_order_v1`: that 410s
-`submit_trade_invoice` and holds the other crew-invoice doors until every
-line is approved. The hard rule, when on, refuses an open job only, and
+before or with `crew_invoice_on_job_work_order_v1`: that holds the
+crew-invoice doors until every line is approved (`submit_trade_invoice` is
+retired whatever the flag, next section but one). The hard rule, when on, refuses an open job only, and
 Travel is exempt. With `retire_crew_work_orders_v1` on, `my_work_orders`
 returns approved job work orders with the money stripped and drops drafts.
 
@@ -4864,7 +4864,28 @@ company, through `createAssignment` with no text, plus a
 `booked_on_job` rule; it also grants the allocated Trade App tier on that job.
 Never widen it to book anyone else or to reassign. The app calls it only after
 `generate_trade_invoice` refuses with `extra_job_not_allowed`. Contract:
-`docs/trade-self-allocation-v1.md`.
+`docs/trade-self-allocation-v1.md`. Both it and `trade_invoice_job_modes` must
+stay on `OPS_API_PROFILE_SCOPED_JWT_ACTIONS`, or the front door 403s every
+plain trade before the route runs.
+
+## A Job Is Invoiced One Way, Decided By The Job
+
+`trade_invoice_mode.ts` (Marnin, 11 Nov 2026) is the one rule: live group work
+order, else per-metre trade -> work order, else patio -> group work order,
+fencing -> work order, everything else hourly (vertical via `_jobVertical`,
+repair family first). `my_hours` stamps `invoice_mode` /
+`can_claim_commission` on every card (null plus `invoice_mode_unavailable`
+when unreadable, never a guess); `trade_invoice_job_modes` answers any job in
+the caller's company. It decides and refuses nothing: fencing helpers still
+bill hours on fencing jobs, so never add an hourly refusal off it. Commission
+is a line, not a mode: only on a job the trade created, manages, or holds the
+invoice-any-job grant for (`trade_invoice_extra_job_authority.ts`; booking
+never allows it, refusal `commission_not_allowed`). The saved weekly draft is
+on unless `trade_details.runningInvoiceDraft` is exactly false
+(`runningInvoiceDraftEnabled`, one helper). `submit_trade_invoice` is retired:
+410 `use_weekly_invoice` before any read. Patio hours are refused only while
+`patio_pay_group_only_v1` AND `group_work_order_v1` are on. Contract:
+`docs/trade-invoice-mode-v1.md`.
 
 ## A Recurring Deduction Comes Off The Payable, Never The Gross
 

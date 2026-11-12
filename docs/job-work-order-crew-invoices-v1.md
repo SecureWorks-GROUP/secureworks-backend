@@ -155,10 +155,10 @@ is the retry. `submit_work_order_invoice` still throws 503
 `office_review_unreadable` only when a held invoice cannot be moved from
 `draft` to `pending_acknowledgment`.
 
-While the review flag is on, `submit_trade_invoice` is 410
-`submit_trade_invoice_retired` before it writes. A failed flag read does
-not 410; the saved-status check still holds a line the trigger stamped
-awaiting. `submit_work_order_invoice` saves the local invoice, then moves
+`submit_trade_invoice` is retired whatever this flag says (Marnin,
+11 Nov 2026): it answers 410 `use_weekly_invoice` before it reads or writes
+anything (`docs/trade-invoice-mode-v1.md`). It used to answer
+`submit_trade_invoice_retired` only while the review flag was on. `submit_work_order_invoice` saves the local invoice, then moves
 it from `draft` to `pending_acknowledgment` and returns
 `office_review: 'held'` without calling Xero.
 

@@ -5,7 +5,7 @@ export const TRADE_PREVIEW_READS = new Set([
   'trade_job_detail', 'my_work_orders', 'my_job_work_order',
   'my_group_work_orders', 'group_work_order_my_share', 'my_hours', 'my_money', 'my_trade_invoices',
   'get_trade_invoice', 'get_running_invoice_draft', 'my_invoices',
-  'crew_charges_on_my_jobs',
+  'crew_charges_on_my_jobs', 'trade_invoice_job_modes',
 ])
 
 type Caller = { id: string; email: string; orgId: string; role: string }

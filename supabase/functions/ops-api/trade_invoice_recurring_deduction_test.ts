@@ -20,7 +20,7 @@
  *   6. every read shows it, and an invoice with none reads as it always did;
  *   7. the write paths, through the REAL request handler against a
  *      PostgREST-shaped fetch stub: generate_trade_invoice,
- *      save_trade_invoice_draft, submit_trade_invoice and my_hours. A path
+ *      save_trade_invoice_draft and my_hours (submit_trade_invoice is retired: 410). A path
  *      that stops calling the rule fails here, not just a helper.
  */
 // deno-lint-ignore-file no-explicit-any no-import-prefix
@@ -1460,34 +1460,16 @@ handlerTest(
 );
 
 handlerTest(
-  "submit_trade_invoice: the legacy weekly submit carries it too",
+  "submit_trade_invoice: the legacy weekly submit is retired, so nothing is saved there",
   async () => {
-    // 8 clocked hours at $50
     const out = await callTradeAction(
       "submit_trade_invoice",
       { week_ending: "2026-10-18", gst_on: false },
       { user: UTE_TRADE },
     );
-    assertEquals(out.invoiceInserts.length, 1, JSON.stringify(out.body));
-    assertEquals(carriedOn(out.invoiceInserts[0]), {
-      id: RULE_100,
-      label: "Ute hire",
-      amount: 100,
-      note: null,
-    });
-    assertEquals(out.invoiceInserts[0].net_pay, 376);
-
-    const other = await callTradeAction(
-      "submit_trade_invoice",
-      { week_ending: "2026-10-18", gst_on: false },
-      { user: OTHER_TRADE },
-    );
-    assertEquals(other.invoiceInserts.length, 1, JSON.stringify(other.body));
-    assert(!("recurring_deduction_amount" in other.invoiceInserts[0]));
-    assertEquals(
-      other.invoiceInserts[0].query_note,
-      "Validated invoice awaiting Xero ACCPAY creation.",
-    );
+    assertEquals(out.status, 410, JSON.stringify(out.body));
+    assertEquals(out.body.code, "use_weekly_invoice");
+    assertEquals(out.invoiceInserts.length, 0);
   },
 );
 
