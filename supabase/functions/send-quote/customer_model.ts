@@ -83,8 +83,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // model.ts CustomerModel). The public route rebuilds it from scratch, field by
 // field and type by type, at every level: `revision` and `notes` are never
 // copied, an unknown key at any depth is dropped, and a field of the wrong type
-// refuses the whole model. Text is limited to the view names and the house
-// note, in plain words with no digits, so no price, name, address, token or
+// refuses the whole model. No stored text is passed through: view keys, view
+// labels and the house note are rebuilt from the tool's own closed lists below,
+// and anything not on them is dropped, so no price, name, address, token or
 // product code can ride along, however the stored bytes were made.
 
 type Num = number
@@ -119,24 +120,57 @@ function oneOf<T extends string>(v: unknown, allowed: readonly T[]): T {
   return typeof v === 'string' && (allowed as readonly string[]).includes(v) ? v as T : refuse()
 }
 
-// Words only: letters, spaces and light punctuation, no digits, no $ or @.
-const SAFE_TEXT_RE = /^[A-Za-z ,.;:'()\-]{0,200}$/
-const safeText = (v: unknown): string | null => (typeof v === 'string' && SAFE_TEXT_RE.test(v) ? v : null)
-const VIEW_KEY_RE = /^[a-z][a-z0-9_-]{0,31}$/i
+// The tool's closed lists (scope-engine-v2 at 4f3c8f72, PR 1219's merge):
+// - the opening view: key 'start', label `Your ${what}`
+//   (patio/scoper/src/present/model.ts:156, fencemodel3d.ts:85);
+// - the set views and their labels (patio/scoper/src/present/shots.ts:146-160,
+//   FRAME_VIEW 'frame' at shots.ts:30; the fence's extra 'yard' view at
+//   fencemodel3d.ts:91). 'under' is 'Wall fixing (cutaway)' when it carries the
+//   cutaway mark (model.ts:157), else 'Standing under it'.
+// A label is never read from the stored bytes: it is rebuilt from the key.
+// A view whose key is not on the list is dropped.
+const VIEW_LABELS: Record<string, string> = {
+  front: 'Straight on',
+  along: 'Along the fence',
+  back: 'From next door',
+  above: 'From above',
+  yard: 'From the yard',
+  frame: 'The frame, before the roof',
+  side: 'From the side',
+}
+const viewLabel = (key: string, cutaway: boolean): string | null =>
+  key === 'under' ? (cutaway ? 'Wall fixing (cutaway)' : 'Standing under it') : VIEW_LABELS[key] ?? null
+
+// The house note: exactly one of housePictureNote's four texts
+// (patio/scoper/src/present/connection-view.ts:45-46), else dropped.
+const HOUSE_NOTE_BASE = [
+  'House edges use the configured heights; the house outline remains indicative.',
+  'The house and surroundings are indicative.',
+]
+const HOUSE_NOTE_CUTAWAY = ' Wall fixing shown in cutaway; anchor heads, washers and order lengths are to confirm.'
+const HOUSE_NOTES = new Set(HOUSE_NOTE_BASE.flatMap((n) => [n, n + HOUSE_NOTE_CUTAWAY]))
+
 const LOOK_RE = /^(lawn|(finish|context):[a-z-]{1,32})$/
 const COLOR_RE = /^#[0-9a-f]{6}$/i
 
-function view(v: unknown): Row {
+function camera(s: Row): Row {
+  return { eye: nums(s.eye, 3), at: nums(s.at, 3), fov: num(s.fov) }
+}
+
+function startView(v: unknown, what: 'patio' | 'fence'): Row {
   const s = obj(v)
-  const out: Row = {
-    key: typeof s.key === 'string' && VIEW_KEY_RE.test(s.key) ? s.key : refuse(),
-    label: safeText(s.label) ?? '',
-    eye: nums(s.eye, 3),
-    at: nums(s.at, 3),
-    fov: num(s.fov),
-  }
-  if (s.cutaway !== undefined) out.cutaway = s.cutaway === true ? true : refuse()
-  return out
+  if (s.key !== 'start') refuse()
+  return { key: 'start', label: `Your ${what}`, ...camera(s) }
+}
+
+/** A set view rebuilt from its key, or null (dropped) when the key is not on the list. */
+function setView(v: unknown): Row | null {
+  const s = obj(v)
+  if (s.cutaway !== undefined && s.cutaway !== true) refuse()
+  const cutaway = s.cutaway === true
+  const label = typeof s.key === 'string' ? viewLabel(s.key, cutaway) : null
+  if (label === null) return null
+  return { key: s.key, label, ...camera(s), ...(cutaway ? { cutaway: true } : {}) }
 }
 
 function shape(v: unknown): Row {
@@ -200,8 +234,8 @@ export function customerSafeModel(raw: unknown): Record<string, unknown> | null 
       house: numsOrNull(src.house, 6),
       front: nums(src.front),
       ground: numsOrNull(src.ground),
-      start: view(src.start),
-      views: list(src.views).map(view),
+      start: startView(src.start, what),
+      views: list(src.views).map(setView).filter((w): w is Row => w !== null),
     }
     if (src.houseWalls !== undefined) {
       out.houseWalls = list(src.houseWalls).map((w) => {
@@ -219,8 +253,7 @@ export function customerSafeModel(raw: unknown): Record<string, unknown> | null 
       })
     }
     if (src.houseContext !== undefined) out.houseContext = oneOf(src.houseContext, ['sample', 'configured'] as const)
-    const note = safeText(src.contextNote)
-    if (note) out.contextNote = note
+    if (typeof src.contextNote === 'string' && HOUSE_NOTES.has(src.contextNote)) out.contextNote = src.contextNote
     if (src.frontClearMm !== undefined) out.frontClearMm = src.frontClearMm === null ? null : num(src.frontClearMm)
     if (src.runs !== undefined) {
       out.runs = list(src.runs).map((r) => {

@@ -28,7 +28,8 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("")
 }
 
-function modelOf(label: string): Row {
+/** A stored model; `label` is what the bytes claim (never served), `fov` tells revisions apart. */
+function modelOf(label: string, fov = 40): Row {
   return {
     what: "patio",
     revision: "frozen-rev-id-should-not-leave",
@@ -39,7 +40,7 @@ function modelOf(label: string): Row {
     house: null,
     front: [0, 1],
     ground: null,
-    start: { key: "start", label, eye: [1, 2, 3], at: [0, 0, 0], fov: 40 },
+    start: { key: "start", label, eye: [1, 2, 3], at: [0, 0, 0], fov },
     views: [],
   }
 }
@@ -122,7 +123,7 @@ function fakeClient(tables: Record<string, Row[]>, files: Record<string, Uint8Ar
 async function world(opts: { modelOnA?: boolean; modelOnB?: boolean; superseded?: boolean; link?: boolean } = {}) {
   const { modelOnA = true, modelOnB = true, superseded = false, link = true } = opts
   const bytesA = new TextEncoder().encode(JSON.stringify(modelOf("rev A view")))
-  const bytesB = new TextEncoder().encode(JSON.stringify(modelOf("rev B view")))
+  const bytesB = new TextEncoder().encode(JSON.stringify(modelOf("rev B view", 41)))
   const shaA = await sha256Hex(bytesA)
   const shaB = await sha256Hex(bytesB)
   const artifacts: Row[] = []
@@ -153,7 +154,7 @@ Deno.test("model route: a sent quote answers 200 with its released revision's mo
   assertEquals(r.status, 200)
   if (r.status !== 200) return
   assertEquals(r.body.rev_label, "Rev 1")
-  assertEquals((r.body.model.start as Row).label, "rev A view")
+  assertEquals((r.body.model.start as Row).fov, 40)
 })
 
 Deno.test("model route: wrong-revision trap, a later draft's model is never shown", async () => {
@@ -164,7 +165,7 @@ Deno.test("model route: wrong-revision trap, a later draft's model is never show
   const both = await world()
   const r2 = await readCustomerModelForToken(fakeClient(both.tables, both.files), TOKEN)
   assertEquals(r2.status, 200)
-  if (r2.status === 200) assertEquals((r2.body.model.start as Row).label, "rev A view")
+  if (r2.status === 200) assertEquals((r2.body.model.start as Row).fov, 40)
 })
 
 Deno.test("model route: a replaced quote answers 410 { current: true }", async () => {
@@ -229,7 +230,11 @@ Deno.test("model route: the answer carries no revision id, product code, price, 
   assertEquals((customerSafeModel({ ...modelOf("x"), contextNote: "Call 0400 000 000" }) as Row).contextNote, undefined)
   assertEquals((customerSafeModel({ ...modelOf("x"), contextNote: "The house and surroundings are indicative." }) as Row).contextNote,
     "The house and surroundings are indicative.")
-  assertEquals((customerSafeModel(modelOf("someone@example.com")) as Row).start, { key: "start", label: "", eye: [1, 2, 3], at: [0, 0, 0], fov: 40 })
+  assertEquals((customerSafeModel({ ...modelOf("x"), contextNote: "The house and surroundings are indicative. Wall fixing shown in cutaway; anchor heads, washers and order lengths are to confirm." }) as Row).contextNote,
+    "The house and surroundings are indicative. Wall fixing shown in cutaway; anchor heads, washers and order lengths are to confirm.")
+  // Labels are rebuilt from the key, never read from the bytes.
+  assertEquals((customerSafeModel(modelOf("someone@example.com")) as Row).start, { key: "start", label: "Your patio", eye: [1, 2, 3], at: [0, 0, 0], fov: 40 })
+  assertEquals((customerSafeModel({ ...modelOf("x"), what: "fence" }) as Row).start.label, "Your fence")
   assertEquals(customerSafeModel({ what: "deck" }), null)
 })
 
@@ -247,6 +252,15 @@ Deno.test("model route: planted fields at every level never reach the public ans
   planted.start.owner = "A Person"
   planted.houseWalls = [{ from: [0, 0, 0], to: [1, 0, 0], out: [0, 0, 1], height: 2.4, address: "1 Some St" }]
   planted.runs = [{ a: [0, 0], b: [1, 0], out: [0, 1], gaps: [[0.2, 1.1]], gate_price: 800 }]
+  // Planted text in the three text places: the house note, a known view's
+  // label, and a view under a key the tool never makes.
+  planted.contextNote = "Arranged by Jo Bloggs, mobile 0400 111 222, deposit paid"
+  planted.start.label = "Quote for Jo Bloggs"
+  planted.views = [
+    { key: "side", label: "Jo Bloggs side yard, 12 Example Rd", eye: [4, 2, 0], at: [0, 0, 0], fov: 42 },
+    { key: "under", label: "Kit price list", eye: [1, 1, 1], at: [0, 0, 0], fov: 42, cutaway: true },
+    { key: "invoice", label: "Balance owing", eye: [2, 2, 2], at: [0, 0, 0], fov: 42 },
+  ]
   const { tables, files } = await world({ modelOnB: false })
   const bytes = new TextEncoder().encode(JSON.stringify(planted))
   const sha = await sha256Hex(bytes)
@@ -260,7 +274,7 @@ Deno.test("model route: planted fields at every level never reach the public ans
   assertEquals(res.status, 200)
   const body = await res.json()
   const text = JSON.stringify(body)
-  for (const leak of ["notes", "Hardware", "secretTop", "tok-planted", "price", "412.5", "token", "supplier", "Supplier", "cost", "owner", "A Person", "address", "Some St", "gate_price", "revision", "Monument"]) {
+  for (const leak of ["Jo Bloggs", "0400", "deposit", "Quote for", "Example Rd", "Kit price", "invoice", "Balance owing", "contextNote", "notes", "Hardware", "secretTop", "tok-planted", "price", "412.5", "token", "supplier", "Supplier", "cost", "owner", "A Person", "address", "Some St", "gate_price", "revision", "Monument"]) {
     assert(!text.includes(leak), `leaked: ${leak}`)
   }
   const m = body.model
@@ -270,6 +284,10 @@ Deno.test("model route: planted fields at every level never reach the public ans
   assertEquals(m.houseWalls, [{ from: [0, 0, 0], to: [1, 0, 0], out: [0, 0, 1], height: 2.4 }])
   assertEquals(m.runs, [{ a: [0, 0], b: [1, 0], out: [0, 1], gaps: [[0.2, 1.1]] }])
   assertEquals(m.start.label, "Your patio")
+  assertEquals(m.views, [
+    { key: "side", label: "From the side", eye: [4, 2, 0], at: [0, 0, 0], fov: 42 },
+    { key: "under", label: "Wall fixing (cutaway)", eye: [1, 1, 1], at: [0, 0, 0], fov: 42, cutaway: true },
+  ])
 })
 
 Deno.test("model route: a model not of the declared shape is refused, never half-served", () => {
