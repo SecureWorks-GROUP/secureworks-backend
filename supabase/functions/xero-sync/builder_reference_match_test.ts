@@ -508,3 +508,8 @@ Deno.test("Matcher: customer invoices are read with their date and lines; bills 
   assert(sales.select!.includes("invoice_date") && sales.select!.includes("line_items"), sales.select);
   assert(!bills.select!.includes("line_items"), bills.select);
 });
+
+Deno.test("a restoration card is make-safe work by its SWRESTO- number", () => {
+  assertEquals(jobTrade({ type: null as unknown as string, job_number: "SWRESTO-261800" }), "makesafe");
+  assertEquals(jobTrade({ type: "makesafe", job_number: "SWRESTO-261800" }), "makesafe");
+});

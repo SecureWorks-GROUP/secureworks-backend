@@ -1554,7 +1554,7 @@ ruler: `physicalShapedFamily()` for both. Do not invent a weaker pack shape.
 
 Owner's word, 12 Nov 2026: restoration work is accepted through ses@. Contract:
 `docs/restoration-workflow-v1.md`. A restoration job is a make-safe board card
-(`SWMS-`, family `restoration`) in one of two modes read off the work order:
+(family `restoration`, `jobs.type` still `makesafe`) in one of two modes read off the work order:
 `do_and_charge` (the existing pack path, unchanged) or `assess_and_quote`
 (report + quote, wait for the builder's yes, works, invoice). Rules:
 `restoration_workflow.ts`; reads and writes: `restoration_workflow_store.ts`;
@@ -1581,9 +1581,28 @@ actions `restoration_*`. What must not regress:
   cannot carry (no labour line, two labour rates) is refused with the reason.
 - An approval needs the builder's person and where it can be read. Never
   record one from inference.
+- **Owner-directed invoice approval** (owner, 12 Nov 2026):
+  `approve_ses_invoice_revision_owner_directed` lets an agent with the server
+  key record an SES invoice approval for a NAMED active `admin_owner`/`captain`
+  operator, quoting their words, behind `feature_flags.ses_owner_directed_approval_v1`
+  (missing or unreadable is off). Same action and guards as the cockpit press;
+  recorded as `identity_provenance: owner_directed_via_agent`. Any server-key
+  holder can use it while the switch is on, so it is weaker than a session:
+  `ses_owner_directed_approval.ts` states the trust.
+
+- **Numbering.** A restoration mint is numbered `SWRESTO-` (owner, 12 Nov 2026;
+  `next_job_number('restoration')`, `20261112150000`, same yearly counter); its
+  type stays `makesafe`, so type-keyed reads still find it. Cards minted before
+  keep their `SWMS-` numbers. Code that reads a make-safe off the number accepts
+  both prefixes (Xero tracking `SW - MAKESAFE`, the xero-sync and PO reference
+  grammars, text approvals); `trackingCategoryForJob` must read `SWRESTO-` before
+  its `SWR` slice, which answers ''. Restoration reports and photos may go to a
+  builder's `makesafe_companies.restoration_recipients` (outbound only) through
+  `send_mailer_ops_visibility`, restoration cards only, named by the operator.
 
 Tests: `restoration_intake_test.ts`, `restoration_workflow_test.ts`,
-`restoration_workflow_store_test.ts`.
+`restoration_workflow_store_test.ts`, the SWRESTO cases in
+`makesafe_intake_auto_allocate_test.ts`.
 
 ## Repair Mints As A Real SWR- Job Type, Supervised, With No Backfill
 

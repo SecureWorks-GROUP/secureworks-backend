@@ -1173,6 +1173,7 @@ import {
   submitSesEchoCodeApprovalAction,
 } from './ses_echo_code_approval.ts'
 import { createSesGraphMailGateway } from './ses_graph_mail_gateway.ts'
+import { resolveSesOwnerDirectedApproval } from './ses_owner_directed_approval.ts'
 import {
   sendMailerOpsVisibilityAction,
   isMailerOpsRouteKind,
@@ -11895,6 +11896,57 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           },
         ))
       }
+      // Owner-directed approval (owner, 12 Nov 2026): an agent with the server
+      // key relays a named admin_owner/captain operator's own words. Same action,
+      // same guards on WHAT, recorded with identity_provenance
+      // owner_directed_via_agent. Contract: ses_owner_directed_approval.ts.
+      case 'approve_ses_invoice_revision_owner_directed': {
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id ? [body.job_id] : [],
+          'approve_ses_invoice_revision_owner_directed',
+        )
+        const expectedDocketRevisionId = body.expected_docket_revision_id
+        const expectedObligationRevisionId =
+          body.expected_invoice_obligation_revision_id
+        const expectedOutputContentHash = body.expected_output_content_hash
+        if (
+          !expectedDocketRevisionId || !expectedObligationRevisionId ||
+          !expectedOutputContentHash
+        ) {
+          return json({
+            state: 'refused',
+            code: 'exact_review_coordinates_required',
+            fact:
+              'approve_ses_invoice_revision_owner_directed requires the echoed review coordinates expected_docket_revision_id, expected_invoice_obligation_revision_id and expected_output_content_hash from the inspected pack (action=inspect_ses_pack).',
+          }, 400)
+        }
+        const directed = await resolveSesOwnerDirectedApproval(
+          client,
+          authMode,
+          { owner_email: body.owner_email, owner_statement: body.owner_statement },
+          requestActor.missing ? null : requestActor.actor,
+        )
+        if (!directed.ok) return json(directed.refusal, directed.status)
+        return json(await approveSesInvoiceRevisionAction(
+          client,
+          directed.auth,
+          {
+            org_id: body.org_id || DEFAULT_ORG_ID,
+            job_id: body.job_id,
+            includes_authorise: body.includes_authorise === true,
+            evidence_refs: [
+              ...(Array.isArray(body.evidence_refs) ? body.evidence_refs : []),
+              directed.evidence_ref,
+            ],
+            expected_docket_revision_id: expectedDocketRevisionId,
+            expected_invoice_obligation_revision_id: expectedObligationRevisionId,
+            expected_output_content_hash: expectedOutputContentHash,
+            expected_draft_pdf_content_hash:
+              body.expected_draft_pdf_content_hash,
+          },
+        ))
+      }
       case 'execute_ses_invoice_revision':
         await assertNoSyntheticLivefireJobs(
           client,
@@ -14471,7 +14523,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               {
                 const unresolvedExternalRefs = requestedJobNumbers.filter(ref => {
                   if (/^[0-9a-f-]{36}$/i.test(ref)) return false   // UUID — handled by jobById path
-                  if (/^SWMS-/i.test(ref)) return false              // SWMS ref — not a builder ref
+                  if (/^(SWMS|SWRESTO)-/i.test(ref)) return false     // our own SWMS/SWRESTO number, not a builder ref
                   if (ambiguousJobNumbers.has(ref)) return false     // several jobs: stays unresolved
                   return !jobByNumber[ref]                           // not already resolved
                 })
@@ -14859,11 +14911,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   if (!line.job_id && !line.job_number) {
                     throw new ApiError(`Invoice rejected: line "${line.description || lt || 'unknown'}" is missing job attribution. Assign a job number to every line.`, 422)
                   }
-                  // Make-safe lines must reference a SWMS- job
+                  // Make-safe lines must reference a SWMS- job, or a SWRESTO- restoration
+                  // job (a make-safe board card numbered on its own since 12 Nov 2026).
                   if (lt === 'make safe') {
                     const jn = String(line.job_number || '').toUpperCase()
-                    if (!jn.match(/^SWMS-\d+$/)) {
-                      throw new ApiError(`Invoice rejected: make-safe line "${line.description || 'unknown'}" must reference a valid SWMS- job number (got: "${line.job_number || 'none'}").`, 422)
+                    if (!jn.match(/^(SWMS|SWRESTO)-\d+$/)) {
+                      throw new ApiError(`Invoice rejected: make-safe line "${line.description || 'unknown'}" must reference a valid SWMS- or SWRESTO- job number (got: "${line.job_number || 'none'}").`, 422)
                     }
                   }
                 }
@@ -21227,7 +21280,7 @@ async function createJobAction(client: any, body: any) {
   if (!category && resolvedJobNumber) {
     if (resolvedJobNumber.startsWith('SWF-')) cat = 'fencing'
     else if (resolvedJobNumber.startsWith('SWP-')) cat = 'patio'
-    else if (resolvedJobNumber.startsWith('SWMS-')) cat = 'makesafes'
+    else if (resolvedJobNumber.startsWith('SWMS-') || resolvedJobNumber.startsWith('SWRESTO-')) cat = 'makesafes'
   }
   if (!sub_category && title) {
     const t = title.toLowerCase()
@@ -22040,6 +22093,30 @@ async function createMakesafeJob(
     companyData = co
   }
 
+  // Build metadata
+  const reviewedCompanyName = requesting_company_name || companyData?.name || null
+  const reviewedMakeSafeType = makesafe_type || job_type_detail || makesafe_type_detail || null
+  const reviewedSafety = safety_requirements || companyData?.safety_requirements || null
+  const reviewedSpecialInstructions = special_instructions || companyData?.special_instructions || null
+  // On the repair route the ROUTE is the family declaration. A hand-created
+  // repair would otherwise be handed to the text classifier, which abstains on
+  // generic repair prose (ambiguous_scope) or reads it as general_makesafe — and
+  // a job that is type='repair' while its metadata says general_makesafe is a
+  // card whose two board-authority markers disagree with each other. The intake
+  // path already passes 'repair' here, so this only ever settles manual input.
+  const reviewedJobFamily = isRepairRoute
+    ? 'repair'
+    : makesafe_job_family || _classifyMakeSafeJobFamily(
+      external_ref || null,
+      description || reviewedMakeSafeType || null,
+      null,
+      internalOptions.familyClassifierContext || {
+        builder: requesting_company_slug || requesting_company_name || null,
+        pdfDeclaredType: null,
+      },
+    )
+  const reviewedJobFamilyLabel = makesafe_job_family_label || _makeSafeJobFamilyLabel(reviewedJobFamily)
+
   // Generate job number through the shared database helper once the make-safe
   // contract migration is applied. Fallback preserves the previous SWMS-26001
   // behaviour for review/test environments that have not run the migration yet.
@@ -22070,7 +22147,25 @@ async function createMakesafeJob(
     }
     jobNumber = repairCandidate
   } else {
-  try {
+  if (reviewedJobFamily === 'restoration') {
+    // Restoration is not a make-safe (owner, 12 Nov 2026): it is numbered
+    // SWRESTO- from the same yearly counter, while jobs.type stays 'makesafe' so
+    // every board and money fence that reads the type still finds the card.
+    // Before 20261112150000 is applied the RPC answers SW-; the card then takes
+    // an ordinary SWMS- number below rather than a made-up one.
+    try {
+      const { data: jnData } = await client.rpc('next_job_number', { job_type: 'restoration' })
+      const candidate = String(jnData || '')
+      if (candidate.toUpperCase().startsWith('SWRESTO-')) {
+        jobNumber = candidate
+      } else if (candidate) {
+        console.log('[ops-api] next_job_number(restoration) returned non-SWRESTO prefix; using SWMS:', candidate)
+      }
+    } catch (e) {
+      console.log('[ops-api] next_job_number(restoration) failed; using SWMS:', (e as Error)?.message)
+    }
+  }
+  if (!jobNumber) try {
     const { data: jnData } = await client.rpc('next_job_number', { job_type: 'makesafe' })
     const candidate = String(jnData || '')
     if (candidate.toUpperCase().startsWith('SWMS-')) {
@@ -22097,29 +22192,6 @@ async function createMakesafeJob(
   }
   }
 
-  // Build metadata
-  const reviewedCompanyName = requesting_company_name || companyData?.name || null
-  const reviewedMakeSafeType = makesafe_type || job_type_detail || makesafe_type_detail || null
-  const reviewedSafety = safety_requirements || companyData?.safety_requirements || null
-  const reviewedSpecialInstructions = special_instructions || companyData?.special_instructions || null
-  // On the repair route the ROUTE is the family declaration. A hand-created
-  // repair would otherwise be handed to the text classifier, which abstains on
-  // generic repair prose (ambiguous_scope) or reads it as general_makesafe — and
-  // a job that is type='repair' while its metadata says general_makesafe is a
-  // card whose two board-authority markers disagree with each other. The intake
-  // path already passes 'repair' here, so this only ever settles manual input.
-  const reviewedJobFamily = isRepairRoute
-    ? 'repair'
-    : makesafe_job_family || _classifyMakeSafeJobFamily(
-      external_ref || null,
-      description || reviewedMakeSafeType || null,
-      null,
-      internalOptions.familyClassifierContext || {
-        builder: requesting_company_slug || requesting_company_name || null,
-        pdfDeclaredType: null,
-      },
-    )
-  const reviewedJobFamilyLabel = makesafe_job_family_label || _makeSafeJobFamilyLabel(reviewedJobFamily)
   // The builder's own ex-GST work order value, as read off its PDF. Recorded on
   // a repair card only, beside its purchase order; it is the builder's figure,
   // never our price, so it stays in metadata and out of pricing_json. A caller
@@ -42140,6 +42212,9 @@ function trackingCategoryForJob(jobNumber: string, jobType?: string | null): str
   if (type === 'roofing' || type === 'renovation') return 'SW - PRIVATE ROOFING'
   if (!jobNumber) return ''
   const upper = jobNumber.toUpperCase()
+  // SWRESTO- (restoration, a make-safe board card) books where SES insurance work
+  // books; it must be read before the 'SWR' slice below, which answers ''.
+  if (upper.startsWith('SWRESTO-')) return 'SW - MAKESAFE'
   if (upper.startsWith('SWMS-') || upper.startsWith('AJBR') || upper.startsWith('MS1') || upper.startsWith('BWCWA') || upper.startsWith('WB6')) return 'SW - MAKESAFE'
   const prefix = upper.slice(0, 3)
   if (prefix === 'SWP') return 'SW - PATIOS'
@@ -43097,7 +43172,7 @@ function isMakesafeAccessJob(job: any): boolean {
   if (type === 'makesafe') return true
   // Some imported MakeSafes are identifiable by their SWMS job number even if
   // the legacy/placeholder job type has not been normalised to `makesafe` yet.
-  if (/^SWMS-/i.test(String(job.job_number || ''))) return true
+  if (/^(SWMS|SWRESTO)-/i.test(String(job.job_number || ''))) return true
   return false
 }
 
