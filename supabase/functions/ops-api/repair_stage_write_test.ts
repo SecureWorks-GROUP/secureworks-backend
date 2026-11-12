@@ -580,8 +580,8 @@ Deno.test("the client-revenue invoice paths resolve their category by job type",
   assertEquals(source.includes("trackingCategoryForJob(updateRef)"), false);
 });
 
-Deno.test("an SWRESTO- restoration number books as make-safe insurance work, never the SWR- blank", () => {
-  assertEquals(_trackingCategoryForJob("SWRESTO-261800"), "SW - MAKESAFE");
-  assertEquals(_trackingCategoryForJob("swresto-261800"), "SW - MAKESAFE");
+Deno.test("an SWRESTO- restoration number books to its own Restoration option, never the SWR- blank", () => {
+  assertEquals(_trackingCategoryForJob("SWRESTO-261800"), "SW - RESTORATION");
+  assertEquals(_trackingCategoryForJob("swresto-261800"), "SW - RESTORATION");
   assertEquals(_trackingCategoryForJob("SWR-261400"), "");
 });

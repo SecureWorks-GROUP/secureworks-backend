@@ -1594,7 +1594,7 @@ actions `restoration_*`. What must not regress:
   `next_job_number('restoration')`, `20261112150000`, same yearly counter); its
   type stays `makesafe`, so type-keyed reads still find it. Cards minted before
   keep their `SWMS-` numbers. Code that reads a make-safe off the number accepts
-  both prefixes (Xero tracking `SW - MAKESAFE`, the xero-sync and PO reference
+  both prefixes (the xero-sync and PO reference
   grammars, text approvals); `trackingCategoryForJob` must read `SWRESTO-` before
   its `SWR` slice, which answers ''. Restoration reports and photos may go to a
   builder's `makesafe_companies.restoration_recipients` (outbound only) through
@@ -1612,7 +1612,11 @@ actions `restoration_*`. What must not regress:
   `restoration_set_stage` or forward-only by the quote-sent, quote-approved and
   invoice-sent actions. Rules: `restoration_stage.ts`; contract:
   `docs/restoration-board-v1.md`. A restoration report submit no longer
-  cancels the rest of the crew.
+  cancels the rest of the crew. Trade pay is the job's work order:
+  `restoration_set_work_order` sets and approves its agreed labour, and the
+  trade invoice mode bills a restoration job with one as a work order
+  (`restoration_work_order.ts`). SWRESTO- books to Xero option
+  `SW - RESTORATION`, which `ensure_xero_tracking_option` adds.
 
 Tests: `restoration_intake_test.ts`, `restoration_workflow_test.ts`,
 `restoration_workflow_store_test.ts`, the SWRESTO cases in

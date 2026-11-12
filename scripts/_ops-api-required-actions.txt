@@ -243,6 +243,8 @@ restoration_mark_quote_sent       # probe=source-only
 restoration_record_quote_decision # probe=source-only
 restoration_board                 # probe=source-only
 restoration_set_stage             # probe=source-only
+restoration_set_work_order        # probe=source-only
+ensure_xero_tracking_option       # probe=source-only
 
 # ── Trade authenticated surface ──
 # Post-deploy recognition uses API-key-only GET requests and must fail closed at

@@ -48,7 +48,7 @@ export const BUILDER_REFERENCE_FROM = "2026-07-01";
 /** The sync-time reference link's job number pattern (index.ts upsert loop). */
 export const REFERENCE_JOB_NUMBER = /SWMS-\d{4,6}(?!\d)|SWRESTO-\d{4,6}(?!\d)|SW[A-Z]?-?\d{3,6}(?!\d)/i;
 
-const MAKESAFE_UNITS = new Set(["SW - MAKESAFE", "ROOF REPORTS", "ASSESSMENT REPORTS"]);
+const MAKESAFE_UNITS = new Set(["SW - MAKESAFE", "SW - RESTORATION", "ROOF REPORTS", "ASSESSMENT REPORTS"]);
 const WORKS_UNITS = new Set(["SW - INSURANCE WORK", "SW - FENCING", "SW - PATIOS"]);
 const MAKESAFE_TEXT =
   /make[\s-]?safe|temp(?:orary)?\.?\s*fenc|fence hire|roof report|assessment report|inspection report|drying equipment|dehumidif|air mover|moisture|mould|restoration|attendance|re-?attend|\btrades? x \d/i;

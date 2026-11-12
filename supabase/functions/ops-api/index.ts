@@ -321,6 +321,7 @@ import {
   restorationBoardAction,
   setRestorationStageAction,
 } from './restoration_stage_store.ts'
+import { setRestorationWorkOrderAction } from './restoration_work_order.ts'
 import { RestorationWorkflowError } from './restoration_workflow.ts'
 import {
   BUILDER_WORK_ORDER_VALUE_NOT_READ as _BUILDER_WORK_ORDER_VALUE_NOT_READ,
@@ -10200,6 +10201,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // None of them sends anything, touches Xero or writes an invoice: the
       // priced quote must never reach a trade, and the hand-off to money is an
       // object in the READ that prepare_ses_invoice_obligation then judges.
+      case 'restoration_set_work_order': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser) && authMode !== 'api_key') {
+          return json({ error: 'An authorised operator session is required.', code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') return json({ error: 'restoration_set_work_order requires POST', code: 'method_not_allowed' }, 405)
+        try {
+          return json(await setRestorationWorkOrderAction(client, body, {
+            authMode,
+            userId: authMode === 'jwt' ? authUser?.id || null : null,
+            orgId: authMode === 'jwt' ? authUser?.orgId || null : null,
+            relayedBy: requestActor?.actor || null,
+          }))
+        } catch (error) {
+          if (error instanceof RestorationWorkflowError) {
+            return json({ error: error.message, code: error.code }, error.status)
+          }
+          if (error instanceof JobWorkOrderError) {
+            return json({ error: error.message, code: (error as any).code }, (error as any).status || 400)
+          }
+          throw error
+        }
+      }
       case 'restoration_plan':
       case 'restoration_set_plan':
       case 'restoration_save_quote':
@@ -12273,6 +12296,31 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           )
         }
         return json(restorationSendResult)
+      }
+      // Restoration's Xero tracking option (owner, 12 Nov 2026). Adds an
+      // option to the Business Unit tracking category when it is missing.
+      // Server key only, and only a name on this list: nothing else in Xero.
+      case 'ensure_xero_tracking_option': {
+        if (authMode !== 'api_key' || !serverSecretPresented) {
+          return json({ error: 'ensure_xero_tracking_option requires the ops server key', code: 'server_key_required' }, 403)
+        }
+        if (req.method !== 'POST') return json({ error: 'ensure_xero_tracking_option requires POST', code: 'method_not_allowed' }, 405)
+        const optionName = String(body?.option || '').trim()
+        if (!XERO_TRACKING_OPTIONS_WE_MAY_ADD.includes(optionName)) {
+          return json({ error: `Only these options may be added: ${XERO_TRACKING_OPTIONS_WE_MAY_ADD.join(', ')}`, code: 'option_not_allowed' }, 400)
+        }
+        const { accessToken, tenantId } = await getToken(client)
+        const cats = await xeroGet('/TrackingCategories', accessToken, tenantId)
+        const unit = (cats?.TrackingCategories || []).find((tc: any) => tc.Name === 'Business Unit' && tc.Status === 'ACTIVE')
+        if (!unit?.TrackingCategoryID) return json({ error: 'No active Business Unit tracking category in Xero', code: 'tracking_category_missing' }, 409)
+        const existing = (unit.Options || []).find((o: any) => String(o.Name || '').trim().toLowerCase() === optionName.toLowerCase())
+        if (existing) {
+          return json({ success: true, created: false, option: { id: existing.TrackingOptionID, name: existing.Name, status: existing.Status } })
+        }
+        if (body?.dry_run === true) return json({ success: true, dry_run: true, would_create: optionName })
+        const out = await xeroPost(`/TrackingCategories/${unit.TrackingCategoryID}/Options`, accessToken, tenantId, { Name: optionName }, 'PUT')
+        const made = (out?.Options || [])[0] || null
+        return json({ success: true, created: true, option: made ? { id: made.TrackingOptionID, name: made.Name, status: made.Status } : null })
       }
       case 'query_ses_proof_ledger': {
         const releaseRevisionId = url.searchParams.get('release_revision_id') ||
@@ -42305,6 +42353,9 @@ async function addPOEvent(client: any, body: any) {
 // insurance work, not the 'repair' label. (Closes what this comment carried as
 // OPEN RISK #2; OPEN RISK #1, captain signoff on the money-seal path, is a
 // different question and stays open in the 20260826000001 migration header.)
+// The only Business Unit options ensure_xero_tracking_option may add.
+const XERO_TRACKING_OPTIONS_WE_MAY_ADD = ['SW - RESTORATION']
+
 function trackingCategoryForJob(jobNumber: string, jobType?: string | null): string {
   // An explicit type always wins, including when the job has no number yet.
   const type = String(jobType || '').trim().toLowerCase()
@@ -42314,9 +42365,9 @@ function trackingCategoryForJob(jobNumber: string, jobType?: string | null): str
   if (type === 'roofing' || type === 'renovation') return 'SW - PRIVATE ROOFING'
   if (!jobNumber) return ''
   const upper = jobNumber.toUpperCase()
-  // SWRESTO- (restoration, a make-safe board card) books where SES insurance work
-  // books; it must be read before the 'SWR' slice below, which answers ''.
-  if (upper.startsWith('SWRESTO-')) return 'SW - MAKESAFE'
+  // SWRESTO- (restoration) has its own Business Unit option (owner, 12 Nov
+  // 2026); it must be read before the 'SWR' slice below, which answers ''.
+  if (upper.startsWith('SWRESTO-')) return 'SW - RESTORATION'
   if (upper.startsWith('SWMS-') || upper.startsWith('AJBR') || upper.startsWith('MS1') || upper.startsWith('BWCWA') || upper.startsWith('WB6')) return 'SW - MAKESAFE'
   const prefix = upper.slice(0, 3)
   if (prefix === 'SWP') return 'SW - PATIOS'
