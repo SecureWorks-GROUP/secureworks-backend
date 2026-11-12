@@ -70,7 +70,7 @@ const REFUSED_SHAPES: Array<{ type: 'fencing' | 'patio'; status: string; stage: 
   { type: 'fencing', status: 'complete', stage: 'f622844c-2fac-4627-81d4-978a6a864c72' },
 ]
 
-type Opp = { id: string; pipelineId: string; pipelineStageId: string; contactId: string; status: string; createdAt: string; lastStageChangeAt: string }
+type Opp = { id: string; pipelineId: string; pipelineStageId: string; contactId: string; status?: string; createdAt: string; lastStageChangeAt: string | null }
 
 Deno.test('move_stage and move_to_complete send Execution stages only to an Execution opportunity', async (t) => {
   const env = {
@@ -90,13 +90,19 @@ Deno.test('move_stage and move_to_complete send Execution stages only to an Exec
 
   let opps = new Map<string, Opp>()
   let puts: Array<{ id: string; stage: string; ok: boolean }> = []
+  // Fields the fake search leaves out of its rows (a response-shape fault);
+  // the by-id read still returns them.
+  let searchOmits: Array<keyof Opp> = []
+  // Rows the fake search returns whatever the pipeline filter says.
+  let searchAlways: string[] = []
   globalThis.fetch = async (input, init) => {
     const req = new Request(input, init), u = new URL(req.url)
     if (u.origin !== 'https://services.leadconnectorhq.com') throw Error('Unexpected request: ' + req.method + ' ' + u.href)
     if (u.pathname === '/opportunities/search' && req.method === 'GET') {
       const pipelineId = u.searchParams.get('pipelineId'), contactId = u.searchParams.get('contactId')
-      const rows = [...opps.values()].filter((o) => (!pipelineId || o.pipelineId === pipelineId) && (!contactId || o.contactId === contactId))
-      return Response.json({ opportunities: rows, meta: { total: rows.length } })
+      const rows = [...opps.values()].filter((o) => (!pipelineId || o.pipelineId === pipelineId || searchAlways.includes(o.id)) && (!contactId || o.contactId === contactId))
+      const shaped = rows.map((o) => { const row: Record<string, unknown> = { ...o }; for (const k of searchOmits) delete row[k]; return row })
+      return Response.json({ opportunities: shaped, meta: { total: rows.length } })
     }
     const m = u.pathname.match(/^\/opportunities\/([^/]+)$/)
     if (m && req.method === 'GET') {
@@ -123,7 +129,7 @@ Deno.test('move_stage and move_to_complete send Execution stages only to an Exec
     }))
     return { status: res.status, body: await res.json() }
   }
-  const reset = (rows: Opp[]) => { opps = new Map(rows.map((o) => [o.id, { ...o }])); puts = [] }
+  const reset = (rows: Opp[], omit: Array<keyof Opp> = []) => { opps = new Map(rows.map((o) => [o.id, { ...o }])); puts = []; searchOmits = omit; searchAlways = [] }
   const salesOpp = (type: 'fencing' | 'patio', atAccepted: boolean): Opp => ({
     id: 'sales-opp', pipelineId: SALES[type], pipelineStageId: atAccepted ? SALES_ACCEPTED[type] : SALES_MID[type],
     contactId: 'contact-a', status: atAccepted ? 'won' : 'open',
@@ -140,8 +146,8 @@ Deno.test('move_stage and move_to_complete send Execution stages only to an Exec
 
     for (const shape of REFUSED_SHAPES) {
       const label = `${shape.type} ${shape.status}`
-      await t.step(`${label}: Sales opportunity with no Execution opportunity yet is not moved and says so`, async () => {
-        reset([salesOpp(shape.type, false)])
+      await t.step(`${label}: accepted Sales opportunity with no Execution opportunity yet is not moved and says so`, async () => {
+        reset([salesOpp(shape.type, true)])
         const r = await post('move_stage', { opportunityId: 'sales-opp', status: shape.status, jobType: shape.type })
         eq(puts, [], `${label} PUTs`)
         eq([r.status, r.body.success, r.body.moved, r.body.reason], [200, false, false, 'execution_opportunity_not_created'], label)
@@ -160,6 +166,52 @@ Deno.test('move_stage and move_to_complete send Execution stages only to an Exec
       const r = await post('move_stage', { opportunityId: 'sales-opp', status: 'scheduled', jobType: 'fencing' })
       eq(puts, [])
       eq(r.body.reason, 'execution_opportunity_not_created')
+    })
+    await t.step('P1: an unreadable acceptance arrival never falls back to the Sales creation date', async () => {
+      const s = salesOpp('fencing', true)
+      s.lastStageChangeAt = null
+      reset([s, execOpp('fencing', 'earlier-job-exec', '2026-10-15T00:00:00.000Z')])
+      const r = await post('move_stage', { opportunityId: 'sales-opp', status: 'scheduled', jobType: 'fencing' })
+      eq(puts, [])
+      eq([r.body.success, r.body.moved, r.body.reason], [false, false, 'sales_acceptance_unproven'])
+    })
+    await t.step('P1: a Sales opportunity not at its accepted stage is not moved and is never pushed there', async () => {
+      reset([salesOpp('patio', false), execOpp('patio', 'earlier-job-exec', '2026-10-15T00:00:00.000Z')])
+      const r = await post('move_stage', { opportunityId: 'sales-opp', status: 'scheduled', jobType: 'patio' })
+      eq(puts, [])
+      eq(r.body.reason, 'sales_acceptance_unproven')
+      eq(opps.get('sales-opp')!.pipelineStageId, SALES_MID.patio)
+    })
+    await t.step('P2: a search row without its pipeline is re-read; a Sales opportunity found that way gets nothing', async () => {
+      const other: Opp = { ...salesOpp('fencing', false), id: 'sales-opp-2', createdAt: '2026-11-03T00:00:00.000Z' }
+      reset([salesOpp('fencing', true), other], ['pipelineId'])
+      // The provider ignores the pipeline filter for this row and leaves out its pipeline.
+      searchAlways = ['sales-opp-2']
+      const r = await post('move_stage', { opportunityId: 'sales-opp', status: 'scheduled', jobType: 'fencing' })
+      eq(puts, [])
+      eq(r.body.reason, 'execution_opportunity_not_created')
+    })
+    await t.step('P2: a twin the search returned without pipeline and status is re-read and moved', async () => {
+      reset([salesOpp('patio', true), execOpp('patio', 'exec-opp', '2026-11-02T01:13:04.889Z')], ['pipelineId', 'status'])
+      const r = await post('move_stage', { opportunityId: 'sales-opp', status: 'scheduled', jobType: 'patio' })
+      eq(puts, [{ id: 'exec-opp', stage: '48f6871b-2d6c-4679-86a6-5b7bd602a6a8', ok: true }])
+      eq([r.body.moved, r.body.opportunityId], [true, 'exec-opp'])
+    })
+    await t.step('P3: a twin whose status cannot be read even by id moves nothing', async () => {
+      const twin = execOpp('fencing', 'exec-opp', '2026-11-02T01:13:04.889Z')
+      delete twin.status
+      reset([salesOpp('fencing', true), twin])
+      const r = await post('move_stage', { opportunityId: 'sales-opp', status: 'invoiced', jobType: 'fencing' })
+      eq(puts, [])
+      eq(r.body.reason, 'execution_candidate_unreadable')
+    })
+    await t.step('P3: a job pointing at a lost or abandoned Execution opportunity moves nothing', async () => {
+      for (const status of ['lost', 'abandoned']) {
+        reset([execOpp('patio', 'exec-own', '2026-11-02T01:13:04.000Z', status)])
+        const r = await post('move_stage', { opportunityId: 'exec-own', status: 'in_progress', jobType: 'patio' })
+        eq(puts, [], status)
+        eq([r.body.success, r.body.moved, r.body.reason], [false, false, 'opportunity_not_live'], status)
+      }
     })
     await t.step('two matching Execution opportunities are ambiguous and nothing moves', async () => {
       reset([salesOpp('patio', true), execOpp('patio', 'exec-1', '2026-11-02T01:13:04.000Z'), execOpp('patio', 'exec-2', '2026-11-03T00:00:00.000Z')])
@@ -188,8 +240,8 @@ Deno.test('move_stage and move_to_complete send Execution stages only to an Exec
       eq(r.body.success, true)
       delete EXEC_STAGES['sales-any']
     })
-    await t.step('move_to_complete: Sales opportunity with no Execution opportunity sends nothing and says why', async () => {
-      reset([salesOpp('patio', false)])
+    await t.step('move_to_complete: accepted Sales opportunity with no Execution opportunity sends nothing and says why', async () => {
+      reset([salesOpp('patio', true)])
       const r = await post('move_to_complete', { opportunityId: 'sales-opp', jobType: 'patio' })
       eq(puts, [])
       eq([r.body.stageMoved, r.body.reason], [false, 'execution_opportunity_not_created'])

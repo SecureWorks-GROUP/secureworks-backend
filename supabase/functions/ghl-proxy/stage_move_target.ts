@@ -28,6 +28,9 @@ export type GhlOpportunityLike = {
 export type StageMoveNotMovedReason =
   | 'opportunity_unreadable'
   | 'opportunity_in_other_pipeline'
+  | 'opportunity_not_live'
+  | 'sales_acceptance_unproven'
+  | 'execution_candidate_unreadable'
   | 'execution_opportunity_not_created'
   | 'execution_opportunity_ambiguous'
   | 'execution_search_incomplete'
@@ -49,8 +52,19 @@ export const SALES_ACCEPTED_STAGE_BY_TYPE: Record<string, string> = {
   patio: 'a0f3002f-db71-4b69-842a-12930bdd7591', // Job Won / Move to Execution
 }
 
-// Execution opportunities that are no longer live work are never a target.
+// GoHighLevel's opportunity statuses are open, won, lost and abandoned. Only
+// open and won are live work; lost, abandoned, a missing or an unknown status
+// is never moved.
+const LIVE_OPPORTUNITY_STATUSES = new Set(['open', 'won'])
 const DEAD_OPPORTUNITY_STATUSES = new Set(['lost', 'abandoned'])
+
+function statusOf(opp: GhlOpportunityLike | null | undefined): string {
+  return text(opp?.status).toLowerCase()
+}
+
+export function opportunityIsLive(opp: GhlOpportunityLike | null | undefined): boolean {
+  return LIVE_OPPORTUNITY_STATUSES.has(statusOf(opp))
+}
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
@@ -73,31 +87,38 @@ export function opportunityContactId(opp: GhlOpportunityLike | null | undefined)
 
 /**
  * The earliest instant an Execution opportunity made for THIS Sales
- * opportunity can carry. While the Sales opportunity sits at its accepted
- * stage, that is when it arrived there (the workflow fires on arrival).
- * Otherwise it is the Sales opportunity's creation: an Execution opportunity
- * created before that belongs to an earlier job for the same contact.
+ * opportunity can carry: when it arrived at its accepted stage (GoHighLevel's
+ * workflow makes the Execution opportunity on that arrival). Proved only while
+ * the Sales opportunity still sits at that stage with a readable arrival time.
+ * Anything else is null: the Sales creation time is NOT a substitute, because
+ * a same-contact Execution opportunity created between that creation and an
+ * unknown acceptance can belong to an earlier job.
  */
 export function executionCreatedNotBefore(
   sales: GhlOpportunityLike,
   jobType: string,
 ): number | null {
-  const created = ms(sales.createdAt)
   const acceptedStage = SALES_ACCEPTED_STAGE_BY_TYPE[jobType]
-  const atAccepted = !!acceptedStage && text(sales.pipelineStageId) === acceptedStage
-  const arrived = atAccepted ? ms(sales.lastStageChangeAt) : null
-  if (arrived !== null && (created === null || arrived >= created)) return arrived
-  return created
+  if (!acceptedStage || text(sales.pipelineStageId) !== acceptedStage) return null
+  const arrived = ms(sales.lastStageChangeAt)
+  if (arrived === null) return null
+  const created = ms(sales.createdAt)
+  if (created !== null && arrived < created) return null
+  return arrived
 }
 
 /**
  * Decide where an Execution-pipeline stage may be sent.
  *
- * - The job's opportunity is already in the Execution pipeline: move it.
- * - It is in the trade's Sales pipeline: move the ONE live Execution
- *   opportunity for the same contact created at or after the Sales accept
- *   (see executionCreatedNotBefore). None yet, several, or a search that did
- *   not reach its end: do not move anything.
+ * - The job's opportunity is already in the Execution pipeline: move it while
+ *   it is live (open or won).
+ * - It is in the trade's Sales pipeline and its acceptance time is proved
+ *   (executionCreatedNotBefore): move the ONE live Execution opportunity for
+ *   the same contact created at or after that acceptance. A candidate counts
+ *   only when its pipeline equals the Execution pipeline and its status is
+ *   readable; an in-window candidate missing either moves nothing. No proved
+ *   acceptance, none yet, several, or a search that did not reach its end: do
+ *   not move anything.
  * - Any other pipeline: do not move anything.
  */
 export function chooseStageMoveTarget(input: {
@@ -121,6 +142,13 @@ export function chooseStageMoveTarget(input: {
     }
   }
   if (pipelineId === input.executionPipelineId) {
+    if (!opportunityIsLive(opp)) {
+      return {
+        kind: 'not_moved',
+        reason: 'opportunity_not_live',
+        message: `The job's Execution opportunity is ${statusOf(opp) || 'of unknown status'}, not open or won, so no stage was sent`,
+      }
+    }
     return { kind: 'move', opportunityId: ownId, salesOpportunityId: null }
   }
   if (pipelineId !== input.salesPipelineId) {
@@ -133,18 +161,37 @@ export function chooseStageMoveTarget(input: {
 
   const contactId = opportunityContactId(opp)
   const notBefore = executionCreatedNotBefore(opp, input.jobType)
-  const matches = (input.executionCandidates || []).filter((row) => {
+  if (notBefore === null) {
+    return {
+      kind: 'not_moved',
+      reason: 'sales_acceptance_unproven',
+      message:
+        "The job's Sales opportunity is not at its accepted stage with a readable arrival time, so its Execution opportunity cannot be told apart from an earlier job's and no stage was sent",
+    }
+  }
+  // Same contact (GoHighLevel may ignore the contact filter, so it must be
+  // proven) and created at or after this acceptance.
+  const inWindow = (input.executionCandidates || []).filter((row) => {
     const id = text(row.id)
     if (!id || id === ownId) return false
-    const rowPipeline = opportunityPipelineId(row)
-    if (rowPipeline && rowPipeline !== input.executionPipelineId) return false
-    // GoHighLevel may ignore the contact filter: the contact must be proven.
     if (!contactId || opportunityContactId(row) !== contactId) return false
-    if (DEAD_OPPORTUNITY_STATUSES.has(text(row.status).toLowerCase())) return false
     const created = ms(row.createdAt)
-    if (created === null || notBefore === null) return false
-    return created >= notBefore
+    return created !== null && created >= notBefore
   })
+  // An in-window row whose pipeline or status cannot be read could be a Sales
+  // opportunity or a dead one: send nothing rather than guess.
+  const unverified = inWindow.filter((row) => {
+    const status = statusOf(row)
+    return !opportunityPipelineId(row) || !(LIVE_OPPORTUNITY_STATUSES.has(status) || DEAD_OPPORTUNITY_STATUSES.has(status))
+  })
+  if (unverified.length > 0) {
+    return {
+      kind: 'not_moved',
+      reason: 'execution_candidate_unreadable',
+      message: 'GoHighLevel did not say which pipeline or status a matching opportunity is in, so no stage was sent',
+    }
+  }
+  const matches = inWindow.filter((row) => opportunityPipelineId(row) === input.executionPipelineId && opportunityIsLive(row))
   const ids = [...new Set(matches.map((row) => text(row.id)))]
 
   if (ids.length > 1) {
@@ -172,7 +219,20 @@ export function chooseStageMoveTarget(input: {
   return { kind: 'move', opportunityId: ids[0], salesOpportunityId: ownId }
 }
 
-/** Reads GoHighLevel and decides. `read` is index.ts's ghl() (GET only). */
+// At most this many search rows are re-read for a pipeline or status the
+// search left out; any still unreadable after that moves nothing.
+const MAX_CANDIDATE_REREADS = 5
+
+function candidateNeedsReread(row: GhlOpportunityLike): boolean {
+  const status = statusOf(row)
+  return !opportunityPipelineId(row) || !(LIVE_OPPORTUNITY_STATUSES.has(status) || DEAD_OPPORTUNITY_STATUSES.has(status))
+}
+
+/**
+ * Reads GoHighLevel and decides. `readOpportunity` is index.ts's ghl() (GET
+ * only). A search row without a pipeline or a known status is re-read by id
+ * before it can count.
+ */
 export async function resolveStageMoveTarget(args: {
   opportunityId: string
   jobType: string
@@ -193,12 +253,26 @@ export async function resolveStageMoveTarget(args: {
   const search = needsSearch
     ? await args.searchExecution({ pipelineId: args.executionPipelineId, contactId })
     : { opportunities: [], exhausted: true }
+  let rereads = 0
+  const candidates: GhlOpportunityLike[] = []
+  for (const row of search.opportunities || []) {
+    const id = text(row?.id)
+    if (!id || id === text(opportunity?.id) || !candidateNeedsReread(row) || rereads >= MAX_CANDIDATE_REREADS) {
+      candidates.push(row)
+      continue
+    }
+    rereads++
+    const fresh: GhlOpportunityLike | null = (await args.readOpportunity(id))?.opportunity ?? null
+    // Only the opportunity asked for replaces the row; anything else leaves the
+    // row unreadable, so it moves nothing.
+    candidates.push(fresh && text(fresh.id) === id ? fresh : row)
+  }
   return chooseStageMoveTarget({
     opportunity,
     jobType: args.jobType,
     executionPipelineId: args.executionPipelineId,
     salesPipelineId: args.salesPipelineId,
-    executionCandidates: search.opportunities,
+    executionCandidates: candidates,
     executionSearchComplete: search.exhausted,
   })
 }

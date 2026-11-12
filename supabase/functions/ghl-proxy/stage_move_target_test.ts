@@ -19,14 +19,35 @@ const decide = (opportunity: unknown, candidates: unknown[], complete = true) =>
   executionCandidates: candidates as any, executionSearchComplete: complete,
 })
 
-Deno.test('the accept-stage arrival bounds the Execution twin; otherwise the Sales creation does', () => {
+Deno.test('only a proved accept-stage arrival bounds the Execution twin; the Sales creation never does', () => {
   assertEquals(executionCreatedNotBefore(sales(), 'fencing'), Date.parse('2026-11-02T01:12:59Z'))
-  assertEquals(executionCreatedNotBefore(sales({ pipelineStageId: 'other' }), 'fencing'), Date.parse('2026-10-01T00:00:00Z'))
-  assertEquals(executionCreatedNotBefore(sales({ lastStageChangeAt: null }), 'fencing'), Date.parse('2026-10-01T00:00:00Z'))
+  assertEquals(executionCreatedNotBefore(sales({ pipelineStageId: 'other' }), 'fencing'), null)
+  assertEquals(executionCreatedNotBefore(sales({ lastStageChangeAt: null }), 'fencing'), null)
+  assertEquals(executionCreatedNotBefore(sales({ lastStageChangeAt: '2026-09-01T00:00:00Z' }), 'fencing'), null)
+  assertEquals(executionCreatedNotBefore(sales(), 'decking'), null)
 })
 
-Deno.test('an opportunity already in Execution is moved itself', () => {
-  assertEquals(decide({ id: 'e-0', pipelineId: EXEC }, []), { kind: 'move', opportunityId: 'e-0', salesOpportunityId: null })
+Deno.test('an unproved acceptance moves nothing, even with one same-contact twin after the Sales creation', () => {
+  for (const s of [sales({ lastStageChangeAt: null }), sales({ pipelineStageId: 'other' })]) {
+    const r = decide(s, [exec('e-old', '2026-10-15T00:00:00Z')])
+    assertEquals(r.kind === 'not_moved' && r.reason, 'sales_acceptance_unproven')
+  }
+})
+
+Deno.test('an opportunity already in Execution is moved itself only while live', () => {
+  assertEquals(decide({ id: 'e-0', pipelineId: EXEC, status: 'open' }, []), { kind: 'move', opportunityId: 'e-0', salesOpportunityId: null })
+  assertEquals(decide({ id: 'e-0', pipelineId: EXEC, status: 'won' }, []), { kind: 'move', opportunityId: 'e-0', salesOpportunityId: null })
+  for (const status of ['lost', 'abandoned', undefined, 'mystery']) {
+    const r = decide({ id: 'e-0', pipelineId: EXEC, status }, [])
+    assertEquals(r.kind === 'not_moved' && r.reason, 'opportunity_not_live')
+  }
+})
+
+Deno.test('an in-window candidate with no pipeline or no known status moves nothing', () => {
+  for (const over of [{ pipelineId: undefined }, { pipelineId: '' }, { status: undefined }, { status: 'mystery' }]) {
+    const r = decide(sales(), [exec('e-1', '2026-11-02T01:13:04Z', over)])
+    assertEquals(r.kind === 'not_moved' && r.reason, 'execution_candidate_unreadable')
+  }
 })
 
 Deno.test('the one live twin created after the accept is the target', () => {
@@ -66,8 +87,32 @@ Deno.test('the resolver searches only for a Sales opportunity, by its own contac
   assertEquals(r, { kind: 'move', opportunityId: 'e-1', salesOpportunityId: 'sales-1' })
   const own = await resolveStageMoveTarget({
     opportunityId: 'e-0', jobType: 'fencing', executionPipelineId: EXEC, salesPipelineId: SALES,
-    readOpportunity: () => Promise.resolve({ opportunity: { id: 'e-0', pipelineId: EXEC } }),
+    readOpportunity: () => Promise.resolve({ opportunity: { id: 'e-0', pipelineId: EXEC, status: 'open' } }),
     searchExecution: () => { throw Error('must not search') },
   })
   assertEquals(own, { kind: 'move', opportunityId: 'e-0', salesOpportunityId: null })
+})
+
+Deno.test('the resolver re-reads a search row missing its pipeline or status before it can count', async () => {
+  const reads: string[] = []
+  const stored: Record<string, unknown> = {
+    'sales-1': sales(),
+    'e-1': exec('e-1', '2026-11-02T01:13:04Z'),
+    's-2': { id: 's-2', pipelineId: SALES, contactId: 'c-1', status: 'open', createdAt: '2026-11-03T00:00:00Z' },
+  }
+  const run = (rows: unknown[]) => resolveStageMoveTarget({
+    opportunityId: 'sales-1', jobType: 'fencing', executionPipelineId: EXEC, salesPipelineId: SALES,
+    readOpportunity: (id) => { reads.push(id); return Promise.resolve({ opportunity: stored[id] ?? null }) },
+    // deno-lint-ignore no-explicit-any
+    searchExecution: () => Promise.resolve({ opportunities: rows as any, exhausted: true }),
+  })
+  // A twin the search returned without pipeline or status is read and moved.
+  assertEquals(await run([{ id: 'e-1', contactId: 'c-1', createdAt: '2026-11-02T01:13:04Z' }]), { kind: 'move', opportunityId: 'e-1', salesOpportunityId: 'sales-1' })
+  // A Sales opportunity the search returned without its pipeline is read and dropped.
+  const salesRow = await run([{ id: 's-2', contactId: 'c-1', status: 'open', createdAt: '2026-11-03T00:00:00Z' }])
+  assertEquals(salesRow.kind === 'not_moved' && salesRow.reason, 'execution_opportunity_not_created')
+  // A row that cannot be re-read stays unreadable and moves nothing.
+  const gone = await run([{ id: 'x-9', contactId: 'c-1', createdAt: '2026-11-03T00:00:00Z' }])
+  assertEquals(gone.kind === 'not_moved' && gone.reason, 'execution_candidate_unreadable')
+  assertEquals(reads, ['sales-1', 'e-1', 'sales-1', 's-2', 'sales-1', 'x-9'])
 })
