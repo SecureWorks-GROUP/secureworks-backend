@@ -1,6 +1,6 @@
 // deno test --allow-read supabase/functions/send-quote/division_routing_test.ts
 import { assert, assertEquals } from 'https://deno.land/std@0.208.0/assert/mod.ts'
-import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailSubject } from './division_routing.ts'
+import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailHeading, quoteEmailProjectWords, quoteEmailSubject } from './division_routing.ts'
 
 // The rules as they stood before general jobs were split out, copied verbatim, so every
 // non-general type is proved byte-identical.
@@ -62,4 +62,13 @@ Deno.test('index.ts uses the shared rules, with no local copies left behind', as
   assert(!src.includes("`Your ${doc.jobs?.type || 'project'} quote from SecureWorks Group`"), 'inline subject left in index.ts')
   assertEquals((src.match(/customSubject \|\| quoteEmailSubject\(doc\.jobs\?\.type\)/g) || []).length, 2)
   assert(src.includes('<p>Your ${projectLabel}${opts.address'), 'accept page does not use nextStepsProjectLabel')
+})
+
+Deno.test('general job: quote email heading and body never name the type', () => {
+  assertEquals(quoteEmailHeading('general'), 'Your quote is ready')
+  assertEquals(quoteEmailProjectWords('general'), 'project')
+  for (const t of ['fencing', 'patio', 'decking']) {
+    assertEquals(quoteEmailHeading(t), `Your ${t} quote is ready`)
+    assertEquals(quoteEmailProjectWords(t), `${t} project`)
+  }
 })

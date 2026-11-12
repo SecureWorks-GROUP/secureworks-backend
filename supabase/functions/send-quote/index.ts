@@ -115,6 +115,7 @@ import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from './quote
 import { depositHeldMessage, namedPartyDeposit, neighbourLetter, readAcceptedRelease, runDepositFromRelease } from './accepted_deposit.ts'
 import { buildCouncilKickoffEmail, councilKickoffApplies, sendCouncilKickoffEmail } from './council_kickoff_email.ts'
 import { setJobPriceToAcceptedQuote } from './accepted_job_price.ts'
+import { acceptanceInvoiceOutcome, alertAcceptanceInvoiceFailed, depositPaymentLine, noDepositAmountLine } from './acceptance_invoice_outcome.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
 // match_status + extraction enqueue). When OFF, legacy raw insert.
@@ -140,7 +141,7 @@ import {
   type SendQuoteAuthUser,
 } from './quote_send_auth.ts'
 import { ghlEmailNoteRequest, ghlMoveStageOutcome, quoteAcceptedStageId, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
-import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailSubject } from './division_routing.ts'
+import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailHeading, quoteEmailProjectWords, quoteEmailSubject } from './division_routing.ts'
 import {
   customer3dLink,
   customer3dPageUrl,
@@ -2252,6 +2253,9 @@ serve(async (req: Request) => {
 
       // Track invoice result for Next Steps page (existing non-run flow)
       let invoiceResult: any = null
+      // Why the deposit invoice was not made, when it was asked for and not made
+      // (acceptance_invoice_outcome.ts). Null when it was made or never asked for.
+      let invoiceFailureReason: string | null = null
 
       if (doc.job_id) {
         // Get full job data for notifications + invoicing
@@ -2528,16 +2532,29 @@ serve(async (req: Request) => {
               },
               body: JSON.stringify(invoiceBody),
             })
-            invoiceResult = await depRes.json()
-            if (invoiceResult.success) {
+            const outcome = acceptanceInvoiceOutcome(await depRes.json(), depRes.status)
+            if (outcome.ok) {
+              invoiceResult = outcome.result
               console.log(`[send-quote] Acceptance invoice sent: ${invoiceResult.invoice_number} — payment URL: ${invoiceResult.payment_url}`)
             } else {
-              console.log(`[send-quote] Acceptance invoice failed: ${invoiceResult.error || 'unknown'}`)
+              console.log(`[send-quote] Acceptance invoice failed: ${outcome.reason}`)
               invoiceResult = null
+              invoiceFailureReason = outcome.reason
             }
           } catch (e) {
             console.log('[send-quote] Acceptance invoice failed (non-blocking):', (e as Error).message)
             invoiceResult = null
+            invoiceFailureReason = (e as Error).message || 'the invoice request failed'
+          }
+          // The office is told once; the customer is told it will be emailed shortly.
+          if (invoiceFailureReason) {
+            await alertAcceptanceInvoiceFailed(sb, {
+              jobId: job.id,
+              jobNumber: job.job_number,
+              reason: invoiceFailureReason,
+              jobDocumentId: doc.id,
+              jobContactId: doc.job_contact_id || null,
+            })
           }
         }
 
@@ -2598,6 +2615,7 @@ serve(async (req: Request) => {
           shareToken: token,
           isPatio,
           jobId: job?.id || '',
+          invoiceFailed: !!invoiceFailureReason,
         })
         return new Response(nextStepsHtml, {
           status: 200,
@@ -4253,13 +4271,13 @@ export function buildQuoteEmail(opts: {
 
     <!-- Body -->
     <tr><td style="padding:32px;">
-      <h1 style="margin:0 0 16px;color:#293C46;font-size:22px;">Your ${opts.projectType} quote is ready</h1>
+      <h1 style="margin:0 0 16px;color:#293C46;font-size:22px;">${quoteEmailHeading(opts.projectType)}</h1>
       <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">
         Hi ${opts.clientName},
       </p>
       ${opts.customMessage ? `<p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 16px;">${opts.customMessage}</p>` : ''}
       <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 24px;">
-        Thank you for giving us the opportunity to quote on your ${opts.projectType} project${opts.suburb ? ' in ' + opts.suburb : ''}.
+        Thank you for giving us the opportunity to quote on your ${quoteEmailProjectWords(opts.projectType)}${opts.suburb ? ' in ' + opts.suburb : ''}.
         You can view your detailed quote online, or download it as a PDF, using the buttons below.
       </p>
 
@@ -5266,7 +5284,7 @@ export const _createXeroQuoteForTest = createXeroQuote
 // NEXT STEPS PAGE (shown after quote acceptance)
 // ════════════════════════════════════════════════════════════
 
-function buildNextStepsPage(opts: {
+export function buildNextStepsPage(opts: {
   clientName: string
   projectType: string
   address: string
@@ -5280,6 +5298,8 @@ function buildNextStepsPage(opts: {
   bankName?: string
   isPatio?: boolean
   jobId?: string
+  // The deposit invoice was asked for and not made: say it will be emailed, never that it was.
+  invoiceFailed?: boolean
 }): string {
   const firstName = opts.clientName?.split(' ')[0] || 'there'
   const projectLabel = nextStepsProjectLabel(opts.projectType)
@@ -5287,9 +5307,7 @@ function buildNextStepsPage(opts: {
     ? '$' + opts.depositAmount.toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
     : ''
 
-  const payButton = opts.paymentUrl
-    ? `<a href="${opts.paymentUrl}" class="btn btn-pay" target="_blank">Pay Now - Card or Bank Transfer</a>`
-    : '<p style="color:#4C6A7C;font-size:14px;">Your deposit invoice has been emailed to you. You can pay by card or bank transfer.</p>'
+  const payButton = depositPaymentLine({ paymentUrl: opts.paymentUrl, invoiceFailed: opts.invoiceFailed })
 
   // "I've paid" secondary button — links to payment-confirmed handler
   const paidButton = opts.shareToken
@@ -5372,7 +5390,7 @@ function buildNextStepsPage(opts: {
     </div>
     ` : `
     <div class="card">
-      <p style="color:#4C6A7C;font-size:14px;">Your deposit invoice will be sent to you shortly. You can pay by card or bank transfer.</p>
+      ${noDepositAmountLine({ invoiceFailed: opts.invoiceFailed })}
     </div>
     `}
 
