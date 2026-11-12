@@ -1,6 +1,6 @@
 -- Rollback for 20261112150000_next_job_number_restoration: removes the
 -- 'restoration' branch, so a restoration request answers SW- again (ops-api then
--- numbers the card SWMS-). Numbers already minted SWREST- are left as they are.
+-- numbers the card SWMS-). Numbers already minted SWRESTO- are left as they are.
 
 CREATE OR REPLACE FUNCTION public.next_job_number(job_type text DEFAULT 'patio'::text)
  RETURNS text

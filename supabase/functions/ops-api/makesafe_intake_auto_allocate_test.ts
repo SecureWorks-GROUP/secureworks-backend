@@ -174,7 +174,7 @@ function makeClient(store: Store, opts: { restorationPrefixApplied?: boolean } =
         }
         if (String(args.job_type || "") === "restoration") {
           // Before 20261112150000 the live function answers SW- for an unknown type.
-          return { data: restorationPrefixApplied ? `SWREST-${n}` : `SW-${n}`, error: null };
+          return { data: restorationPrefixApplied ? `SWRESTO-${n}` : `SW-${n}`, error: null };
         }
         return { data: `SWMS-${n}`, error: null };
       }
@@ -354,7 +354,7 @@ Deno.test("restoration crew lookup skips a missing member and books the other", 
   assertEquals(crew.map((member) => member.id), [JEAN.id]);
 });
 
-Deno.test("restoration mint is numbered SWREST-, not SWMS-, and stays a make-safe board card", async () => {
+Deno.test("restoration mint is numbered SWRESTO-, not SWMS-, and stays a make-safe board card", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch =
     (() =>
@@ -368,14 +368,14 @@ Deno.test("restoration mint is numbered SWREST-, not SWMS-, and stays a make-saf
     );
     assertEquals(result.ok, true);
     const job = store.tables.jobs.find((row) => row.id === result.job.id)!;
-    assert(String(job.job_number).startsWith("SWREST-"), String(job.job_number));
+    assert(String(job.job_number).startsWith("SWRESTO-"), String(job.job_number));
     assertEquals(job.type, "makesafe");
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-Deno.test("restoration mint falls back to SWMS- when the SWREST migration is not applied", async () => {
+Deno.test("restoration mint falls back to SWMS- when the SWRESTO migration is not applied", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch =
     (() =>

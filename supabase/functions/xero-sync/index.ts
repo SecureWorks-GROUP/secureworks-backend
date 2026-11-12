@@ -859,7 +859,7 @@ async function syncInvoices(sb: any) {
           const ref = inv.Reference || ''
           // Job numbers grew to six digits in 2026 (SWP-261376); the old
           // \d{3,5} cap matched the first five and never found the job.
-          const swMatch = ref.match(/SWMS-\d{4,6}(?!\d)|SWREST-\d{4,6}(?!\d)|SW[A-Z]?-?\d{3,6}(?!\d)/i)
+          const swMatch = ref.match(/SWMS-\d{4,6}(?!\d)|SWRESTO-\d{4,6}(?!\d)|SW[A-Z]?-?\d{3,6}(?!\d)/i)
           if (swMatch) {
             const swNumber = swMatch[0].toUpperCase()
             const { data: job } = await sb.from('jobs')
@@ -3488,7 +3488,7 @@ async function matchInvoicesByReference(sb: any) {
   }
 
   // Filter to only those with SW-like references
-  const swPattern = /SWMS-\d{4,6}(?!\d)|SWREST-\d{4,6}(?!\d)|SW[A-Z]?-?\d{3,6}(?!\d)/i
+  const swPattern = /SWMS-\d{4,6}(?!\d)|SWRESTO-\d{4,6}(?!\d)|SW[A-Z]?-?\d{3,6}(?!\d)/i
   const candidates = invoices.filter((inv: any) => swPattern.test(inv.reference || ''))
 
   if (candidates.length === 0) {

@@ -46,7 +46,7 @@ export const BUILDER_REFERENCE_RULE = "builder_reference_v1";
 export const BUILDER_REFERENCE_FROM = "2026-07-01";
 
 /** The sync-time reference link's job number pattern (index.ts upsert loop). */
-export const REFERENCE_JOB_NUMBER = /SWMS-\d{4,6}(?!\d)|SWREST-\d{4,6}(?!\d)|SW[A-Z]?-?\d{3,6}(?!\d)/i;
+export const REFERENCE_JOB_NUMBER = /SWMS-\d{4,6}(?!\d)|SWRESTO-\d{4,6}(?!\d)|SW[A-Z]?-?\d{3,6}(?!\d)/i;
 
 const MAKESAFE_UNITS = new Set(["SW - MAKESAFE", "ROOF REPORTS", "ASSESSMENT REPORTS"]);
 const WORKS_UNITS = new Set(["SW - INSURANCE WORK", "SW - FENCING", "SW - PATIOS"]);
@@ -200,7 +200,7 @@ export function jobTrade(job: Pick<BuilderRefJob, "type" | "job_number">): JobTr
   if (["repair", "fencing", "patio", "decking"].includes(type)) return "works";
   if (type === "insurance") return "any";
   const prefix = String(job.job_number ?? "").toUpperCase().match(/^[A-Z]+/)?.[0] ?? "";
-  if (prefix === "SWMS" || prefix === "SWREST") return "makesafe";
+  if (prefix === "SWMS" || prefix === "SWRESTO") return "makesafe";
   if (["SWR", "SWF", "SWP", "SWB", "SWD"].includes(prefix)) return "works";
   return "other";
 }

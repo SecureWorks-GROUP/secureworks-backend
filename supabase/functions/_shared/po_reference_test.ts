@@ -185,7 +185,7 @@ Deno.test("PO notes: address on a later line is still found", () => {
   );
 });
 
-Deno.test("canonicalJobRef: an SWREST- restoration job number keeps its own ref", () => {
-  assertEquals(canonicalJobRef("SWREST-261800"), "SWREST-261800");
-  assertEquals(canonicalJobRef("swrest-261800-01"), "SWREST-261800-01");
+Deno.test("canonicalJobRef: an SWRESTO- restoration job number keeps its own ref", () => {
+  assertEquals(canonicalJobRef("SWRESTO-261800"), "SWRESTO-261800");
+  assertEquals(canonicalJobRef("swresto-261800-01"), "SWRESTO-261800-01");
 });

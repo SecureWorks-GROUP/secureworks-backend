@@ -1,7 +1,7 @@
--- Restoration jobs are numbered SWREST- (owner, 12 Nov 2026: restoration work
+-- Restoration jobs are numbered SWRESTO- (owner, 12 Nov 2026: restoration work
 -- is not a make-safe and should not read as one).
 --
--- Adds one branch to next_job_number: 'restoration' -> 'SWREST-'. It draws from
+-- Adds one branch to next_job_number: 'restoration' -> 'SWRESTO-'. It draws from
 -- the same yearly counter as every other prefix, so numbers never collide across
 -- prefixes. jobs.type is NOT widened: a restoration card stays jobs.type
 -- 'makesafe' (family 'restoration'), so every board, money fence and view that
@@ -31,7 +31,7 @@ BEGIN
     WHEN 'general'        THEN 'SWG-'
     WHEN 'makesafe'       THEN 'SWMS-'
     WHEN 'repair'        THEN 'SWR-'
-    WHEN 'restoration'    THEN 'SWREST-'
+    WHEN 'restoration'    THEN 'SWRESTO-'
     ELSE 'SW-'
   END;
   yr := (EXTRACT(YEAR FROM now()) % 100)::smallint;
