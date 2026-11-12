@@ -12,7 +12,8 @@ function words(v: string): string {
   return v.replace(/\s+/g, ' ').trim().toLowerCase()
 }
 
-const TRAILING_STATE_POSTCODE = /(?:\s+(?:WA|NSW|VIC|QLD|SA|TAS|NT|ACT))?(?:\s+\d{4})?\s*$/i
+// A state and/or postcode at the end, with or without a space between them ("WA 6171", "WA6171").
+const TRAILING_STATE_POSTCODE = /(?:(?:^|\s+)(?:WA|NSW|VIC|QLD|SA|TAS|NT|ACT))?(?:\s*\d{4})?\s*$/i
 
 /** Whether the street line's last comma part is the suburb (optionally followed by state and postcode). */
 function endsWithSuburb(street: string, suburb: string): boolean {

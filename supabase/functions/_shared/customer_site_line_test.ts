@@ -23,6 +23,11 @@ Deno.test('site line: a last comma part that is the suburb prints it once, any c
   assertEquals(customerSiteLine('  3 Test St, BALDIVIS  ', ' Baldivis '), '3 Test St, BALDIVIS')
   assertEquals(customerSiteLine('3 Test St, Baldivis, WA 6171', 'Baldivis'), '3 Test St, Baldivis, WA 6171')
   assertEquals(customerSiteLine('3 Test St, Baldivis 6171', 'Baldivis'), '3 Test St, Baldivis 6171')
+  assertEquals(customerSiteLine('3 Test St, Baldivis WA6171', 'Baldivis'), '3 Test St, Baldivis WA6171')
+  assertEquals(customerSiteLine('3 Test St, baldivis wa6171', 'Baldivis'), '3 Test St, baldivis wa6171')
+  assertEquals(customerSiteLine('3 Test St, Baldivis, WA6171', 'Baldivis'), '3 Test St, Baldivis, WA6171')
+  assertEquals(customerSiteLine('3 Test St, Baldivis,WA 6171', 'Baldivis'), '3 Test St, Baldivis,WA 6171')
+  assertEquals(customerSiteLine('3 Test St, Baldivis WA', 'Baldivis'), '3 Test St, Baldivis WA')
   assertEquals(customerSiteLine('3 Test St, Port  Kennedy WA', 'Port Kennedy'), '3 Test St, Port  Kennedy WA')
 })
 
