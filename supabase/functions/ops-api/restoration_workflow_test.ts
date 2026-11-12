@@ -20,8 +20,11 @@ import {
   readRestorationScope,
   restorationInvoiceHandoff,
   type RestorationInvoiceHandoffContext,
+  restorationBoardStatus,
   restorationPhase,
   type RestorationPlan,
+  restorationPlanForStorage,
+  restorationScopeText,
   RestorationWorkflowError,
   saveRestorationQuote,
   setRestorationPlan,
@@ -383,4 +386,75 @@ Deno.test("restoration plan: every refusal is the module's own error with a stat
   );
   assertEquals(error.status, 400);
   assertEquals(error.code, "quote_lines_required");
+});
+
+// The board card reads the PRICE-FREE record the job carries
+// (restorationPlanForStorage), never the priced quote document.
+function storedMetadata(plan: RestorationPlan): Record<string, unknown> {
+  const hashes = new Map(plan.quotes.map((quote) => [quote.revision, `sha256:${quote.revision}`]));
+  return { restoration: restorationPlanForStorage(plan, hashes) };
+}
+
+Deno.test("restoration board card: a sent quote reads as waiting on the builder, with no money", () => {
+  const saved = saveRestorationQuote(freshPlan(ASSESS_SCOPE), { lines: DRYING_LINES }, "SWMS-261709", ACTOR);
+  const sent = markRestorationQuoteSent(saved.plan, { revision: 1, sent_to: "coordinator@builder.example" }, LATER);
+  const status = restorationBoardStatus(storedMetadata(sent.plan), "");
+  assertEquals(status, {
+    version: "restoration-workflow/v1",
+    readable: true,
+    reason: null,
+    stored: true,
+    mode: "assess_and_quote",
+    phase: "awaiting_approval",
+    phase_label: "Quote with builder",
+    next_step: "Quote SWMS-261709-Q1 is with the builder. Do not start the quoted works until their approval is recorded.",
+    quote_number: "SWMS-261709-Q1",
+    quote_status: "sent",
+    quote_sent_at: LATER.now,
+    approved_quote_number: null,
+  });
+  // Same phase and next step as the priced read.
+  const described = describeRestorationPlan(sent.plan, true);
+  assertEquals(status.phase, described.phase);
+  assertEquals(status.next_step, described.next_step);
+  // Nothing priced reaches the card: no dollar figure, no total, no limit.
+  const json = JSON.stringify(status);
+  assert(!/\$|total|subtotal|gst|limit|price|lines|pdf/i.test(json), json);
+});
+
+Deno.test("restoration board card: every phase comes from the one phase rule", () => {
+  // Nothing stored: the mode is read off the work order.
+  assertEquals(restorationBoardStatus({}, ASSESS_SCOPE).phase, "assess");
+  assertEquals(restorationBoardStatus({}, DO_AND_CHARGE_SCOPE).phase, "attend_and_charge");
+  assertEquals(restorationBoardStatus(null, DO_AND_CHARGE_SCOPE).stored, false);
+  const saved = saveRestorationQuote(freshPlan(ASSESS_SCOPE), { lines: DRYING_LINES }, "SWMS-261709", ACTOR);
+  assertEquals(restorationBoardStatus(storedMetadata(saved.plan), "").phase, "quote_drafted");
+  const approved = decideRestorationQuote(saved.plan, { revision: 1, decision: "approved", decided_by: "Builder Coordinator", evidence_ref: "email 12 Nov" }, LATER);
+  const approvedStatus = restorationBoardStatus(storedMetadata(approved.plan), "");
+  assertEquals(approvedStatus.phase, "approved_works");
+  assertEquals(approvedStatus.approved_quote_number, "SWMS-261709-Q1");
+  const declined = decideRestorationQuote(saved.plan, { revision: 1, decision: "declined", decided_by: "Builder Coordinator" }, LATER);
+  assertEquals(restorationBoardStatus(storedMetadata(declined.plan), "").phase, "declined");
+});
+
+Deno.test("restoration board card: a record this version cannot read is reported, never thrown", () => {
+  const status = restorationBoardStatus({ restoration: { version: "restoration-workflow/v9", mode: "assess_and_quote" } }, "");
+  assertEquals(status.readable, false);
+  assertEquals(status.reason, "restoration_plan_unreadable");
+  assertEquals(status.phase, null);
+  const badQuote = restorationBoardStatus({
+    restoration: { version: "restoration-workflow/v1", mode: "assess_and_quote", quotes: [{ revision: 1, status: "lost" }] },
+  }, "");
+  assertEquals(badQuote.readable, false);
+});
+
+Deno.test("restoration scope text: notes and both special instructions, in that order", () => {
+  assertEquals(
+    restorationScopeText(
+      { notes: " a ", metadata: { special_instructions: "b" } },
+      { special_instructions: "c" },
+    ),
+    "a\nb\nc",
+  );
+  assertEquals(restorationScopeText(null, null), "");
 });

@@ -188,14 +188,35 @@ SecureSuite tools (secureworks-jarvis): `sw_restoration_plan`,
 `sw_restoration_set_plan`, `sw_restoration_save_quote`,
 `sw_restoration_mark_quote_sent`, `sw_restoration_record_quote_decision`.
 
+## On the board card
+
+Every restoration card on the ops `makesafe_board` feed (card and full shape)
+carries `restoration`, from `restorationBoardStatus` over the price-free
+record on `jobs.metadata.restoration` (or the work order's words when nothing
+is stored). It uses the same phase and next step rules as `restoration_plan`:
+
+```json
+"restoration": { "version": "restoration-workflow/v1", "readable": true,
+  "reason": null, "stored": true, "mode": "assess_and_quote",
+  "phase": "awaiting_approval", "phase_label": "Quote with builder",
+  "next_step": "Quote SWMS-261709-Q1 is with the builder. ...",
+  "quote_number": "SWMS-261709-Q1", "quote_status": "sent",
+  "quote_sent_at": "2026-11-12T03:00:00.000Z", "approved_quote_number": null }
+```
+
+Every other card carries `restoration: null`. It holds no line, price, total,
+authority limit or PDF link. A stored record the reader cannot read is
+`readable: false` with its `reason`, never a failed board. It is presentation
+only: it never feeds `canonical_stage` or any gate, and the trade projection
+leaves it out.
+
 ## Not built yet
 
 - Sending the quote from this system (an audited quote route).
 - A report titled for restoration: the pack's report is still the make-safe
   report. Its renderer refuses money wording, which is why the quote is its own
   document and not a section of the report.
-- The plan on the board card or in the Ops and Trade screens. The board read
-  model is unchanged.
+- The plan in the Trade screens. (The Ops board card carries it: see below.)
 - One invoice at the end with an uninvoiced first report (see above).
 - Equipment-day cap enforcement. The cap is read and returned; nothing checks a
   quote against it.

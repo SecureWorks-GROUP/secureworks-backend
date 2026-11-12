@@ -75,6 +75,12 @@ function object(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/** The quote number a filed quote's name carries ("... - SWMS-261709-Q1 - 64545.pdf"). */
+export function restorationQuoteNumberFromFileName(fileName: string): string {
+  const match = /\b(SW[A-Z]*-\d+-Q\d+)\b/i.exec(fileName || "");
+  return match ? match[1].toUpperCase() : "";
+}
+
 export function normaliseRestorationRecipients(values: unknown[]): string[] {
   const out: string[] = [];
   for (const value of values) {
@@ -390,6 +396,7 @@ export async function sendRestorationDocumentAction(
     documentId = text(docRow.id);
     const meta = object(docRow.metadata);
     documentLabel = text(meta.quote_number) || text(meta.restoration_quote_number) ||
+      restorationQuoteNumberFromFileName(text(docRow.file_name)) ||
       text(docRow.file_name).replace(/\.pdf$/i, "");
     fileName = text(docRow.file_name) || `${documentLabel}.pdf`;
     const url = text(docRow.pdf_url) || text(docRow.storage_url);

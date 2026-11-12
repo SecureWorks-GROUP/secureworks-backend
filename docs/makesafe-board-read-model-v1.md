@@ -182,6 +182,10 @@ Every card originates as one canonical job row with:
 - `pack.presentation_kind` / `presentation_reason` / `legacy_pack_status`: the
   ops pack-honesty channel (see below)
 - `contact`: current client name, phone, full address and linked Call/Text/Navigate actions
+- `restoration` (ops only, card and full shape): a restoration card's mode,
+  phase and next step from the one restoration reader, price-free; `null` on
+  every other card. Presentation only; never a placement input. Contract:
+  `docs/restoration-workflow-v1.md`, "On the board card".
 - U2-S1 additive spine (nullable-safe before/without migration apply):
   `attendance_cycle_id`, `cycle_number`, `cycle_attribution_flags[]`,
   `readiness_revision` (pure fingerprint; not yet an approval-invalidation gate),

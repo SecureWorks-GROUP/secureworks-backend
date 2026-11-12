@@ -253,7 +253,10 @@ function storedLine(value: unknown): RestorationQuoteLine | null {
   };
 }
 
-function storedQuote(value: unknown): RestorationQuote | null {
+function storedQuote(
+  value: unknown,
+  statusOnly = false,
+): RestorationQuote | null {
   const row = record(value);
   const revision = finiteNumber(row.revision);
   const status = text(row.status) as RestorationQuoteStatus;
@@ -261,9 +264,14 @@ function storedQuote(value: unknown): RestorationQuote | null {
     revision === null || revision < 1 ||
     !["draft", "sent", "approved", "declined"].includes(status)
   ) return null;
-  const lines = (Array.isArray(row.lines) ? row.lines : [])
-    .map(storedLine);
-  if (!lines.length || lines.some((line) => line === null)) return null;
+  // A status-only read (the board card) reads the price-free record the job
+  // carries: it never has lines, and it never returns any.
+  const lines = statusOnly
+    ? []
+    : (Array.isArray(row.lines) ? row.lines : []).map(storedLine);
+  if (!statusOnly && (!lines.length || lines.some((line) => line === null))) {
+    return null;
+  }
   const totals = quoteTotals(lines as RestorationQuoteLine[]);
   const sent = record(row.sent);
   const decision = record(row.decision);
@@ -317,6 +325,7 @@ function storedQuote(value: unknown): RestorationQuote | null {
 export function readRestorationPlan(
   metadata: unknown,
   scopeText: string | null | undefined,
+  options: { statusOnly?: boolean } = {},
 ): { plan: RestorationPlan; stored: boolean } {
   const stored = record(metadata).restoration;
   const scope = readRestorationScope(scopeText);
@@ -350,7 +359,9 @@ export function readRestorationPlan(
       409,
     );
   }
-  const quotes = (Array.isArray(row.quotes) ? row.quotes : []).map(storedQuote);
+  const quotes = (Array.isArray(row.quotes) ? row.quotes : []).map((quote) =>
+    storedQuote(quote, options.statusOnly === true)
+  );
   if (quotes.some((quote) => quote === null)) {
     fail(
       "restoration_plan_unreadable",
@@ -928,6 +939,73 @@ export function restorationNextStep(plan: RestorationPlan): string {
     case "declined":
       return `Quote ${quote!.quote_number} was declined. Only the attendance already made can be invoiced.`;
   }
+}
+
+// ── The board card ───────────────────────────────────────────────────────────
+
+/**
+ * The work order text the plan's mode is read from when nothing is stored:
+ * the job's notes and both special instructions. One definition, shared by
+ * the restoration reads and the make-safe board.
+ */
+export function restorationScopeText(job: unknown, detail: unknown): string {
+  const row = record(job);
+  return [
+    text(row.notes),
+    text(record(row.metadata).special_instructions),
+    text(record(detail).special_instructions),
+  ].filter(Boolean).join("\n");
+}
+
+/**
+ * What the make-safe board card shows for a restoration job: the mode, the
+ * phase and the next step, computed by the same rules as `restoration_plan`
+ * from the price-free record the job carries. It holds no line, price, total,
+ * limit or link to the priced PDF, so it is safe on any ops card. A stored
+ * record this version cannot read is reported, never guessed and never a
+ * reason for the board to fail.
+ */
+export function restorationBoardStatus(
+  metadata: unknown,
+  scopeText: string | null | undefined,
+): Record<string, unknown> {
+  let read: { plan: RestorationPlan; stored: boolean };
+  try {
+    read = readRestorationPlan(metadata, scopeText, { statusOnly: true });
+  } catch (error) {
+    if (!(error instanceof RestorationWorkflowError)) throw error;
+    return {
+      version: RESTORATION_WORKFLOW_VERSION,
+      readable: false,
+      reason: error.code,
+      stored: true,
+      mode: null,
+      phase: null,
+      phase_label: null,
+      next_step: error.message,
+      quote_number: null,
+      quote_status: null,
+      quote_sent_at: null,
+      approved_quote_number: null,
+    };
+  }
+  const { plan, stored } = read;
+  const phase = restorationPhase(plan);
+  const quote = currentQuote(plan);
+  return {
+    version: plan.version,
+    readable: true,
+    reason: null,
+    stored,
+    mode: plan.mode,
+    phase,
+    phase_label: RESTORATION_PHASE_LABELS[phase],
+    next_step: restorationNextStep(plan),
+    quote_number: quote?.quote_number || null,
+    quote_status: quote?.status || null,
+    quote_sent_at: quote?.sent?.at || null,
+    approved_quote_number: approvedQuote(plan)?.quote_number || null,
+  };
 }
 
 // ── The hand-off to money ────────────────────────────────────────────────────

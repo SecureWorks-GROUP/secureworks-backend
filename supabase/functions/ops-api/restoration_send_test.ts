@@ -14,6 +14,7 @@ import {
   assertRestorationInvoiceSendable,
   resolveRestorationRecipient,
   restorationSendBody,
+  restorationQuoteNumberFromFileName,
   restorationSendSubject,
   sendRestorationDocumentAction,
 } from "./restoration_send.ts";
@@ -272,3 +273,9 @@ Deno.test("restoration send: subject and body are plain and carry the builder re
 function refusalCode(error: unknown): string | undefined {
   return ((error as SesActionError).refusal as { code?: string }).code;
 }
+
+Deno.test("restoration send: a filed quote's number is read from its file name", () => {
+  assertEquals(restorationQuoteNumberFromFileName("Restoration Quote - SWMS-261709-Q1 - 64545.pdf"), "SWMS-261709-Q1");
+  assertEquals(restorationQuoteNumberFromFileName("Restoration Quote - SWRESTO-261800-Q2.pdf"), "SWRESTO-261800-Q2");
+  assertEquals(restorationQuoteNumberFromFileName("quote.pdf"), "");
+});
