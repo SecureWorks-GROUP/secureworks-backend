@@ -805,6 +805,19 @@ export async function readDispatchV2Materials(
         },
       };
     }),
+    // Sent order emails whose supplier box was taken off the job with the X
+    // (Shaun, 12 Nov 2026). The email went and is kept, so the Emails panel
+    // still lists it. Oldest first, as the boxes' emails are.
+    unboxed_sent_emails: emails
+      .filter((e) =>
+        e.status === "sent" &&
+        !supplierIds.includes(String(e.supplier_id ?? ""))
+      )
+      .map((e) => ({
+        supplier_id: e.supplier_id ? String(e.supplier_id) : null,
+        supplier_name: e.supplier_name ?? null,
+        email: projectDispatchV2Email(e, nowMs),
+      })),
   };
 }
 
@@ -1939,8 +1952,20 @@ async function insertBox(
   return { box: inserted, raced: false };
 }
 
-// A box goes only when it is empty (no line, no photo) and has no order email
-// that is held, sending or sent.
+// The X on a supplier box (Shaun, 12 Nov 2026): take the supplier off the job
+// at any time, whatever the box holds. The screen asks first. Removing:
+//   - discards the box's held (unsent) order email;
+//   - deletes the box's lines;
+//   - deletes the box's photos, except a photo that went out on a sent order
+//     email, which is kept and moves to the draft list;
+//   - deletes the box.
+// A sent order email is kept: it stays on the job (the Emails panel lists it
+// under unboxed_sent_emails) and its replies stay matched. Nothing is sent to
+// the supplier, and no job status, purchase order or Xero record changes.
+// With the ticked main supplier gone, the main supplier default applies again.
+// The one refusal: an order email to this supplier is sending right now, or
+// may have gone (send_unknown). Check admin@ Sent Items first.
+// Each step can be repeated, so a press that fails part way finishes on Retry.
 export async function removeDispatchV2Supplier(
   client: any,
   body: any,
@@ -1951,46 +1976,126 @@ export async function removeDispatchV2Supplier(
   if (!isDispatchUuid(supplierId)) badRequest("supplier_id must be a uuid");
   const box = await readBox(client, job.id, supplierId);
   if (!box) return { success: true, unchanged: true };
-  const [lineRes, photoRes, emailRes] = await Promise.all([
-    client.from("job_material_lines").select("id").eq("job_id", job.id).eq(
-      "supplier_id",
-      supplierId,
-    ).limit(1),
-    client.from("dispatch_material_photos").select("id").eq("job_id", job.id)
-      .eq("supplier_id", supplierId).limit(1),
-    client.from("dispatch_supplier_order_emails").select("id").eq(
-      "job_id",
-      job.id,
-    ).eq("supplier_id", supplierId).neq("status", "discarded").limit(1),
+
+  const [emailRes, photoRes, lineRes] = await Promise.all([
+    client.from("dispatch_supplier_order_emails")
+      .select("id, status, photo_ids")
+      .eq("job_id", job.id)
+      .eq("supplier_id", supplierId)
+      .neq("status", "discarded"),
+    client.from("dispatch_material_photos")
+      .select("id, storage_path")
+      .eq("job_id", job.id)
+      .eq("supplier_id", supplierId),
+    client.from("job_material_lines")
+      .select("id")
+      .eq("job_id", job.id)
+      .eq("supplier_id", supplierId),
   ]);
-  if (lineRes.error) readFailed("box lines read", lineRes.error);
-  if (photoRes.error) readFailed("box photos read", photoRes.error);
   if (emailRes.error) readFailed("box emails read", emailRes.error);
-  const hasLines = () =>
+  if (photoRes.error) readFailed("box photos read", photoRes.error);
+  if (lineRes.error) readFailed("box lines read", lineRes.error);
+  const emails: any[] = emailRes.data || [];
+  const photos: any[] = photoRes.data || [];
+  const lineCount = (lineRes.data || []).length;
+
+  const inFlight = emails.find((e) =>
+    e.status === "sending" || e.status === "send_unknown"
+  );
+  if (inFlight) {
     refuse(
       409,
-      "supplier_has_lines",
-      "Move this supplier's lines and photos out first",
-    );
-  if ((lineRes.data || []).length > 0 || (photoRes.data || []).length > 0) {
-    hasLines();
-  }
-  if ((emailRes.data || []).length > 0) {
-    refuse(
-      409,
-      "supplier_has_emails",
-      "This supplier has an order email on this job",
+      "supplier_email_sending",
+      inFlight.status === "sending"
+        ? "An order email to this supplier is sending right now. Wait a moment, then try again."
+        : "An order email to this supplier may have gone. Check admin@ Sent Items first.",
     );
   }
+
+  // 1. The held email: discarded, as Discard does. Only a draft is touched,
+  // so a send that claimed it meanwhile is left alone.
+  const drafts = emails.filter((e) => e.status === "draft");
+  if (drafts.length > 0) {
+    const { error } = await client.from("dispatch_supplier_order_emails")
+      .update({
+        status: "discarded",
+        updated_at: nowIso(ctx),
+        updated_by_email: ctx.actor.email,
+      })
+      .in("id", drafts.map((e) => String(e.id)))
+      .eq("status", "draft");
+    if (error) writeFailed("held email discard", error);
+  }
+
+  // 2. Photos: one that went out on a sent email is kept (to the draft list);
+  // the rest are deleted with their files.
+  const sentPhotoIds = new Set<string>();
+  for (const e of emails) {
+    if (e.status !== "sent") continue;
+    for (const id of e.photo_ids || []) sentPhotoIds.add(String(id));
+  }
+  const keep = photos.filter((p) => sentPhotoIds.has(String(p.id)));
+  const drop = photos.filter((p) => !sentPhotoIds.has(String(p.id)));
+  if (keep.length > 0) {
+    const { error } = await client.from("dispatch_material_photos")
+      .update({ supplier_id: null })
+      .eq("job_id", job.id)
+      .in("id", keep.map((p) => String(p.id)));
+    if (error) writeFailed("sent photo keep", error);
+  }
+  if (drop.length > 0) {
+    const { error } = await client.from("dispatch_material_photos")
+      .delete()
+      .eq("job_id", job.id)
+      .in("id", drop.map((p) => String(p.id)));
+    if (error) writeFailed("box photos delete", error);
+    const paths = drop.map((p) => String(p.storage_path ?? "")).filter(Boolean);
+    if (paths.length > 0) {
+      const removed = await client.storage.from(DISPATCH_V2_PHOTO_BUCKET)
+        .remove(paths);
+      if (removed?.error) {
+        // The rows are gone; a stray file is harmless and private.
+        console.error("[dispatch_v2] box photo files remove failed:", removed.error);
+      }
+    }
+  }
+
+  // 3. The lines.
+  if (lineCount > 0) {
+    const { error } = await client.from("job_material_lines")
+      .delete()
+      .eq("job_id", job.id)
+      .eq("supplier_id", supplierId);
+    if (error) writeFailed("box lines delete", error);
+  }
+
+  // 4. The box.
   const { error } = await client.from("job_material_suppliers")
     .delete()
     .eq("job_id", job.id)
     .eq("supplier_id", supplierId);
   if (error) {
-    if (errorCode(error) === "23503") hasLines();
+    // A line or photo landed in the box meanwhile: the foreign key refuses,
+    // and the box stays. Pressing X again takes it too.
+    if (errorCode(error) === "23503") {
+      refuse(
+        409,
+        "box_changed",
+        "Something was added to this box while it was being removed. Press X again.",
+      );
+    }
     writeFailed("supplier box delete", error);
   }
-  return { success: true };
+  return {
+    success: true,
+    removed: {
+      lines: lineCount,
+      photos_deleted: drop.length,
+      photos_kept: keep.length,
+      held_emails_discarded: drafts.length,
+      sent_emails_kept: emails.filter((e) => e.status === "sent").length,
+    },
+  };
 }
 
 // Tick a box as the job's main supplier (supplier_id null clears the tick, so
