@@ -92,6 +92,15 @@ option in Xero when it is missing. xero-sync's builder-reference matcher reads
 it as make-safe-side work. Older restoration cards numbered SWMS- still book to
 `SW - MAKESAFE` by their number.
 
+## Who restoration mail goes to
+
+To the builder's restoration contact (`restoration_recipients`, named by the
+operator), with ses@ and every address in the builder's `restoration_cc`
+copied, on both routes: the report and photos (`send_mailer_ops_visibility` on
+a restoration card) and the invoice and quote (`send_restoration_document`).
+ML Builders: To Amber Rollo, copied to its Prime mailer and ses@ (owner,
+12 Nov 2026). Rule: `restorationCcFor` in `ses_mailer_ops_send.ts`.
+
 ## What changed elsewhere
 
 - The ops make-safe board (`makesafe_board`, ops projection) leaves restoration
