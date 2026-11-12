@@ -124,6 +124,9 @@ export function buildGhlOpportunitySearchRequest(args: {
   pipelineId?: string
   contactId?: string
   q?: string
+  // GoHighLevel's status filter (open, won, lost, abandoned, all). Unset keeps
+  // the provider default, as every existing caller does.
+  status?: string
   limit: number
   startAfter?: string | number | null
   startAfterId?: string | null
@@ -135,6 +138,7 @@ export function buildGhlOpportunitySearchRequest(args: {
   if (args.pipelineId) params.set('pipelineId', args.pipelineId)
   if (args.contactId) params.set('contactId', args.contactId)
   if (args.q) params.set('q', args.q)
+  if (args.status) params.set('status', args.status)
   if (args.startAfter != null) params.set('startAfter', String(args.startAfter))
   if (args.startAfterId) params.set('startAfterId', args.startAfterId)
   return {
