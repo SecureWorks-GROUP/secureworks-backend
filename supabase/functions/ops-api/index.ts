@@ -1,3 +1,6 @@
+// JWT flag: --no-verify-jwt. Keep this line at the top: the deploy workflow reads
+// only the first 30 lines for it, and without it ops-api is deployed with JWT
+// verification on, which refuses every x-api-key caller at the gateway (401).
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
 import { SelfAllocationRefusal, selfAllocateForInvoice } from './trade_self_allocation.ts'
