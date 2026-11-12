@@ -60,7 +60,8 @@ function makeStore(users: Row[] = [SHAUN, HUGO, MARNIN, JEAN]): Store {
   };
 }
 
-function makeClient(store: Store) {
+function makeClient(store: Store, opts: { restorationPrefixApplied?: boolean } = {}) {
+  const restorationPrefixApplied = opts.restorationPrefixApplied !== false;
   function builder(table: string) {
     let operation: "select" | "insert" | "update" | "delete" = "select";
     let insertValue: Row | Row[] | null = null;
@@ -170,6 +171,10 @@ function makeClient(store: Store) {
         const n = 29001 + store.tables.jobs.length;
         if (String(args.job_type || "") === "repair") {
           return { data: `SWR-${n}`, error: null };
+        }
+        if (String(args.job_type || "") === "restoration") {
+          // Before 20261112150000 the live function answers SW- for an unknown type.
+          return { data: restorationPrefixApplied ? `SWREST-${n}` : `SW-${n}`, error: null };
         }
         return { data: `SWMS-${n}`, error: null };
       }
@@ -347,4 +352,65 @@ Deno.test("restoration crew lookup skips a missing member and books the other", 
     makeClient(makeStore([SHAUN, HUGO, JEAN])),
   );
   assertEquals(crew.map((member) => member.id), [JEAN.id]);
+});
+
+Deno.test("restoration mint is numbered SWREST-, not SWMS-, and stays a make-safe board card", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch =
+    (() =>
+      Promise.resolve(new Response("{}", { status: 200 }))) as typeof fetch;
+  try {
+    const store = makeStore();
+    const result = await _createMakesafeJob(
+      makeClient(store),
+      { ...physicalInput(), makesafe_job_family: "restoration" },
+      { suppressGeocoding: true },
+    );
+    assertEquals(result.ok, true);
+    const job = store.tables.jobs.find((row) => row.id === result.job.id)!;
+    assert(String(job.job_number).startsWith("SWREST-"), String(job.job_number));
+    assertEquals(job.type, "makesafe");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("restoration mint falls back to SWMS- when the SWREST migration is not applied", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch =
+    (() =>
+      Promise.resolve(new Response("{}", { status: 200 }))) as typeof fetch;
+  try {
+    const store = makeStore();
+    const result = await _createMakesafeJob(
+      makeClient(store, { restorationPrefixApplied: false }),
+      { ...physicalInput(), makesafe_job_family: "restoration" },
+      { suppressGeocoding: true },
+    );
+    assertEquals(result.ok, true);
+    const job = store.tables.jobs.find((row) => row.id === result.job.id)!;
+    assert(String(job.job_number).startsWith("SWMS-"), String(job.job_number));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("a general make-safe mint is still numbered SWMS-", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch =
+    (() =>
+      Promise.resolve(new Response("{}", { status: 200 }))) as typeof fetch;
+  try {
+    const store = makeStore();
+    const result = await _createMakesafeJob(
+      makeClient(store),
+      physicalInput(),
+      { suppressGeocoding: true },
+    );
+    assertEquals(result.ok, true);
+    const job = store.tables.jobs.find((row) => row.id === result.job.id)!;
+    assert(String(job.job_number).startsWith("SWMS-"), String(job.job_number));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

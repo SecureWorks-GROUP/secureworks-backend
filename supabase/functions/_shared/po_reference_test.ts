@@ -184,3 +184,8 @@ Deno.test("PO notes: address on a later line is still found", () => {
     "9 Berriman Dr, Wangara",
   );
 });
+
+Deno.test("canonicalJobRef: an SWREST- restoration job number keeps its own ref", () => {
+  assertEquals(canonicalJobRef("SWREST-261800"), "SWREST-261800");
+  assertEquals(canonicalJobRef("swrest-261800-01"), "SWREST-261800-01");
+});

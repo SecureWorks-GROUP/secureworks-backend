@@ -45,11 +45,11 @@
 // valid ref rather than being mangled.
 // 2026-09-10: five OR six digits. Job numbers rolled to six (SWP-261376) and the
 // five-digit form truncated them to a wrong ref (SWP-26137).
-const CANONICAL_REF = /^SW(?:MS-\d{4,6}|[PFDRIM]-\d{5,6})(?:-[A-Za-z0-9]+)*$/i;
+const CANONICAL_REF = /^SW(?:MS-\d{4,6}|REST-\d{4,6}|[PFDRIM]-\d{5,6})(?:-[A-Za-z0-9]+)*$/i;
 
 // The same canonical token embedded anywhere in a longer string
 // ("Job SWF-25010 Bunnings order", "PO-SWF-25010").
-const EMBEDDED_REF = /SW(?:MS-\d{4,6}|[PFDRIM]-\d{5,6})(?!\d)(?:-[A-Za-z0-9]+)*/i;
+const EMBEDDED_REF = /SW(?:MS-\d{4,6}|REST-\d{4,6}|[PFDRIM]-\d{5,6})(?!\d)(?:-[A-Za-z0-9]+)*/i;
 
 /**
  * Coerce a raw stored PO reference to the canonical outbound job reference.
