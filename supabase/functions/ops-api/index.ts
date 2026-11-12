@@ -21916,6 +21916,64 @@ async function autoAllocateMakesafeIntakeToHugo(
   })
 }
 export const _isMakesafeHugoAssigneeForTest = isMakesafeHugoAssignee
+
+// Restoration work is its own crew, separate from make-safe (owner, 12 Nov
+// 2026): every new restoration card books Marnin and Jean, never Hugo. Matched
+// by exact sign-in email, like Hugo above; a missing user is skipped and logged.
+export const RESTORATION_INTAKE_CREW_EMAILS: readonly string[] = [
+  'marnin@secureworkswa.com.au',
+  'jeancrous44@gmail.com',
+]
+
+async function resolveRestorationIntakeCrew(
+  client: any,
+): Promise<Array<{ id: string; name: string }>> {
+  const { data, error } = await client.from('users').select('id, name, email, role')
+  if (error) {
+    console.error(
+      '[ops-api] restoration crew lookup failed:',
+      error.message || error,
+    )
+    return []
+  }
+  const rows = Array.isArray(data) ? data : (data ? [data] : [])
+  const crew: Array<{ id: string; name: string }> = []
+  for (const email of RESTORATION_INTAKE_CREW_EMAILS) {
+    const user = rows.find((u: any) =>
+      String(u?.email || '').trim().toLowerCase() === email
+    )
+    if (!user?.id) {
+      console.error(`[ops-api] restoration crew member not found: ${email}`)
+      continue
+    }
+    crew.push({ id: String(user.id), name: String(user.name || email) })
+  }
+  return crew
+}
+
+async function autoAllocateRestorationIntake(
+  client: any,
+  job: any,
+): Promise<void> {
+  if (!job?.id) return
+  const crew = await resolveRestorationIntakeCrew(client)
+  for (const member of crew) {
+    await createAssignment(client, {
+      jobId: job.id,
+      userId: member.id,
+      crewName: member.name,
+      scheduledDate: getAWSTDate(),
+      startTime: '07:00',
+      endTime: '15:00',
+      assignmentType: 'install',
+      role: 'lead_installer',
+      notes: 'Auto-allocated at intake (restoration crew)',
+      confirmation_status: 'confirmed',
+      suppress_notifications: true,
+    })
+  }
+}
+export const _resolveRestorationIntakeCrewForTest = resolveRestorationIntakeCrew
 export const _resolveMakesafeDefaultAssigneeForTest = resolveMakesafeDefaultAssignee
 
 async function createMakesafeJob(
@@ -22378,7 +22436,8 @@ async function createMakesafeJob(
   })
 
   // SES make-safe / roof / assessment cards mint onto Hugo so they land in
-  // Allocated instead of sitting in New. Repair cards stay unassigned for
+  // Allocated instead of sitting in New; restoration cards mint onto the
+  // restoration crew (Marnin and Jean). Repair cards stay unassigned for
   // manual allocation. Historical backfill and synthetic live-fire never get
   // a live crew row. Failure here must not roll back the minted job.
   if (
@@ -22388,7 +22447,11 @@ async function createMakesafeJob(
     !reviewedSyntheticLivefireMarker
   ) {
     try {
-      await autoAllocateMakesafeIntakeToHugo(client, job)
+      if (reviewedJobFamily === 'restoration') {
+        await autoAllocateRestorationIntake(client, job)
+      } else {
+        await autoAllocateMakesafeIntakeToHugo(client, job)
+      }
     } catch (e: any) {
       console.error(
         '[ops-api] make-safe intake auto-allocate failed for',
