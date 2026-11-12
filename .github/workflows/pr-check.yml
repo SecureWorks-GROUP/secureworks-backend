@@ -469,6 +469,17 @@ jobs:
             supabase/functions/ops-api/debt_autotexts_off_test.ts \
             supabase/functions/daily-digest/deposit_autotexts_off_test.ts
 
+      # Supplier price checks (daily digest price drift, ops AI
+      # check_supplier_pricing) never read a staff_only scope default, such as
+      # the commission percentage, as a material price
+      # (_shared/supplier_price_defaults.ts). Drives the real daily-digest
+      # handler, so the same --no-check reason as above.
+      - name: Test supplier price checks skip staff-only rows
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/_shared/supplier_price_defaults_test.ts \
+            supabase/functions/daily-digest/staff_only_price_drift_test.ts
+
       # The Dispatch tab's list read is opt-in on `pipeline`: the plain read must
       # stay exactly as it was, and the list must never drop a job past the
       # 1000-row ceiling or select the whole scope blob. These files type-check,
