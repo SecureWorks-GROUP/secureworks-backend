@@ -309,12 +309,18 @@ import {
 import {
   decideRestorationQuoteAction,
   getRestorationPlan,
+  isRestorationCard,
   isRestorationQuoteDocument,
   markRestorationQuoteSentAction,
   saveRestorationQuoteAction,
   setRestorationPlanAction,
   type RestorationCaller,
 } from './restoration_workflow_store.ts'
+import {
+  advanceRestorationStageAfter,
+  restorationBoardAction,
+  setRestorationStageAction,
+} from './restoration_stage_store.ts'
 import { RestorationWorkflowError } from './restoration_workflow.ts'
 import {
   BUILDER_WORK_ORDER_VALUE_NOT_READ as _BUILDER_WORK_ORDER_VALUE_NOT_READ,
@@ -5739,6 +5745,7 @@ async function makesafeBoardAction(
       archiveLimit: columnScope === 'archive' ? archiveLimit : null,
       archiveOffset: columnScope === 'archive' ? archiveOffset : 0,
       excludeInsuranceRepairs: true,
+      excludeRestoration: true,
       censusOut,
     }),
     _loadIntakeExceptionProjectionForBoard(client, generatedAt),
@@ -10197,8 +10204,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'restoration_set_plan':
       case 'restoration_save_quote':
       case 'restoration_mark_quote_sent':
-      case 'restoration_record_quote_decision': {
-        const restorationRead = action === 'restoration_plan'
+      case 'restoration_record_quote_decision':
+      case 'restoration_board':
+      case 'restoration_set_stage': {
+        const restorationRead = action === 'restoration_plan' || action === 'restoration_board'
         if (
           !_opsApiCallerIsStaffOperator(authMode, authUser) &&
           !(restorationRead && authMode === 'routine')
@@ -12218,7 +12227,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           body.job_id ? [body.job_id] : [],
           'send_restoration_document',
         )
-        return json(await sendRestorationDocumentAction(
+        const restorationSendResult = await sendRestorationDocumentAction(
           client,
           sesActionAuth(authMode, authUser),
           {
@@ -12242,12 +12251,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               return await _fetchXeroInvoicePdfBytes(accessToken, tenantId, xeroInvoiceId)
             },
             fetchDocumentBytes: async (url) => {
-              const response = await fetch(url)
+              // A re-saved quote keeps its public URL; read past any cached copy.
+              const fresh = url + (url.includes('?') ? '&' : '?') + 'v=' + Date.now()
+              const response = await fetch(fresh)
               if (!response.ok) throw new Error(`document fetch failed: HTTP ${response.status}`)
               return new Uint8Array(await response.arrayBuffer())
             },
           },
-        ))
+        )
+        // An invoice that went out moves the Restoration board card on
+        // (docs/restoration-board-v1.md). Forward only; never fails the send.
+        if (
+          body.kind === 'invoice' && restorationSendResult?.success === true &&
+          restorationSendResult?.dry_run !== true && body.job_id
+        ) {
+          restorationSendResult.board_stage = await advanceRestorationStageAfter(
+            client,
+            String(body.job_id),
+            'invoice_sent',
+            authUser?.email || body.actor || 'restoration-send-operator',
+          )
+        }
+        return json(restorationSendResult)
       }
       case 'query_ses_proof_ledger': {
         const releaseRevisionId = url.searchParams.get('release_revision_id') ||
@@ -24608,13 +24633,40 @@ export async function dispatchRestorationAction(
         authorised_by: params.get('authorised_by'),
       }, caller))
     }
+    if (action === 'restoration_board') {
+      if (method !== 'GET') return json({ error: `${action} requires GET`, code: 'method_not_allowed' }, 405)
+      return json(await restorationBoardAction(client, {
+        include_closed: params.get('include_closed'),
+        job_id: params.get('job_id'),
+        job_number: params.get('job_number'),
+      }, caller))
+    }
     if (method !== 'POST') return json({ error: `${action} requires POST`, code: 'method_not_allowed' }, 405)
     switch (action) {
       case 'restoration_set_plan': return json(await setRestorationPlanAction(client, body, caller))
       case 'restoration_save_quote':
         return json(await saveRestorationQuoteAction(client, body, caller, { persistPdf: persistMakesafeDocumentPdfBytes }))
-      case 'restoration_mark_quote_sent': return json(await markRestorationQuoteSentAction(client, body, caller))
-      case 'restoration_record_quote_decision': return json(await decideRestorationQuoteAction(client, body, caller))
+      case 'restoration_mark_quote_sent': {
+        const result: any = await markRestorationQuoteSentAction(client, body, caller)
+        const jobId = result?.job?.id
+        if (jobId) {
+          result.board_stage = await advanceRestorationStageAfter(
+            client, String(jobId), 'quote_sent', caller.label || 'restoration action',
+          )
+        }
+        return json(result)
+      }
+      case 'restoration_record_quote_decision': {
+        const result: any = await decideRestorationQuoteAction(client, body, caller)
+        const jobId = result?.job?.id
+        if (jobId && result?.quote?.status === 'approved' && !result?.unchanged) {
+          result.board_stage = await advanceRestorationStageAfter(
+            client, String(jobId), 'quote_approved', caller.label || 'restoration action',
+          )
+        }
+        return json(result)
+      }
+      case 'restoration_set_stage': return json(await setRestorationStageAction(client, body, caller))
       default: return json({ error: `Unknown action: ${action}` }, 400)
     }
   } catch (error) {
@@ -26449,6 +26501,8 @@ async function loadCanonicalMakesafeBoard(
     fields?: MakesafeBoardFields
     /** Repairs are a sibling ops pipeline and never belong on MakeSafe. */
     excludeInsuranceRepairs?: boolean
+    /** Restoration has its own board (restoration_board, owner 12 Nov 2026). */
+    excludeRestoration?: boolean
     /** Ops board only. Internal callers leave this unset (defaults to all). */
     columnScope?: MakesafeBoardColumnScope
     archiveLimit?: number | null
@@ -26931,9 +26985,10 @@ async function loadCanonicalMakesafeBoard(
 
   // Keep family authority intact for internal SES readers, but enforce the
   // product boundary on the two MakeSafe board projections that opt in.
-  const boardRows = opts?.excludeInsuranceRepairs
-    ? built.filter((row) => !isInsuranceRepairFamily(row))
-    : built
+  const boardRows = built.filter((row) =>
+    !(opts?.excludeInsuranceRepairs && isInsuranceRepairFamily(row)) &&
+    !(opts?.excludeRestoration && String(row?.ses_family || '').toLowerCase() === 'restoration')
+  )
 
   // Honest full-board census. Release 12 builds every base row in every scope,
   // so the counts fall straight out of the built rows.
@@ -28697,6 +28752,12 @@ async function overrideMakesafeAllocationToSubmitter(
   submitterId: string,
   nowIso: string,
 ): Promise<{ cancelled: any[]; blocked: any[] }> {
+  // Restoration work is done by a crew together (owner, 12 Nov 2026): the
+  // trade who files the report does not take the job off the others.
+  try {
+    const { data: jobRow } = await client.from('jobs').select('id, type, metadata').eq('id', jobId).maybeSingle()
+    if (jobRow && isRestorationCard(jobRow)) return { cancelled: [], blocked: [] }
+  } catch (_e) { /* fall through to the make-safe rule */ }
   const { data: others, error } = await client.from('job_assignments')
     .select('id, user_id, status, role, assignment_type, invoiced_in, notes, is_lead, scheduled_date')
     .eq('job_id', jobId)
