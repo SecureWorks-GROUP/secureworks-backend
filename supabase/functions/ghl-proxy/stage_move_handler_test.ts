@@ -95,13 +95,22 @@ Deno.test('move_stage and move_to_complete send Execution stages only to an Exec
   let searchOmits: Array<keyof Opp> = []
   // Rows the fake search returns whatever the pipeline filter says.
   let searchAlways: string[] = []
+  // Fields the fake search leaves out of one named row only.
+  let rowOmits = new Map<string, Array<keyof Opp>>()
+  // Rows the fake search returns whatever the contact filter says (GoHighLevel
+  // may ignore it).
+  let searchAnyContact: string[] = []
   globalThis.fetch = async (input, init) => {
     const req = new Request(input, init), u = new URL(req.url)
     if (u.origin !== 'https://services.leadconnectorhq.com') throw Error('Unexpected request: ' + req.method + ' ' + u.href)
     if (u.pathname === '/opportunities/search' && req.method === 'GET') {
       const pipelineId = u.searchParams.get('pipelineId'), contactId = u.searchParams.get('contactId')
-      const rows = [...opps.values()].filter((o) => (!pipelineId || o.pipelineId === pipelineId || searchAlways.includes(o.id)) && (!contactId || o.contactId === contactId))
-      const shaped = rows.map((o) => { const row: Record<string, unknown> = { ...o }; for (const k of searchOmits) delete row[k]; return row })
+      const rows = [...opps.values()].filter((o) => (!pipelineId || o.pipelineId === pipelineId || searchAlways.includes(o.id)) && (!contactId || o.contactId === contactId || searchAnyContact.includes(o.id)))
+      const shaped = rows.map((o) => {
+        const row: Record<string, unknown> = { ...o }
+        for (const k of [...searchOmits, ...(rowOmits.get(o.id) || [])]) delete row[k]
+        return row
+      })
       return Response.json({ opportunities: shaped, meta: { total: rows.length } })
     }
     const m = u.pathname.match(/^\/opportunities\/([^/]+)$/)
@@ -129,7 +138,7 @@ Deno.test('move_stage and move_to_complete send Execution stages only to an Exec
     }))
     return { status: res.status, body: await res.json() }
   }
-  const reset = (rows: Opp[], omit: Array<keyof Opp> = []) => { opps = new Map(rows.map((o) => [o.id, { ...o }])); puts = []; searchOmits = omit; searchAlways = [] }
+  const reset = (rows: Opp[], omit: Array<keyof Opp> = []) => { opps = new Map(rows.map((o) => [o.id, { ...o }])); puts = []; searchOmits = omit; searchAlways = []; rowOmits = new Map(); searchAnyContact = [] }
   const salesOpp = (type: 'fencing' | 'patio', atAccepted: boolean): Opp => ({
     id: 'sales-opp', pipelineId: SALES[type], pipelineStageId: atAccepted ? SALES_ACCEPTED[type] : SALES_MID[type],
     contactId: 'contact-a', status: atAccepted ? 'won' : 'open',
@@ -240,6 +249,57 @@ Deno.test('move_stage and move_to_complete send Execution stages only to an Exec
       const r = await post('move_stage', { opportunityId: 'sales-opp', status: 'in_progress', jobType: 'patio' })
       eq(puts, [{ id: 'exec-opp', stage: '4dfa654d-4d7c-491b-89dc-39717fc8e911', ok: true }])
       eq([r.body.moved, r.body.opportunityId], [true, 'exec-opp'])
+    })
+    await t.step('P5: a second twin the search returns without its contact is re-read; the same contact found that way is ambiguous', async () => {
+      // Control: both rows intact are ambiguous.
+      reset([salesOpp('fencing', true), execOpp('fencing', 'exec-1', '2026-11-02T01:13:04.000Z'), execOpp('fencing', 'exec-2', '2026-11-03T00:00:00.000Z')])
+      let r = await post('move_stage', { opportunityId: 'sales-opp', status: 'scheduled', jobType: 'fencing' })
+      eq([puts, r.body.reason], [[], 'execution_opportunity_ambiguous'], 'control')
+      reset([salesOpp('fencing', true), execOpp('fencing', 'exec-1', '2026-11-02T01:13:04.000Z'), execOpp('fencing', 'exec-2', '2026-11-03T00:00:00.000Z')])
+      rowOmits.set('exec-2', ['contactId'])
+      r = await post('move_stage', { opportunityId: 'sales-opp', status: 'scheduled', jobType: 'fencing' })
+      eq(puts, [], 'omitted contact')
+      eq([r.body.success, r.body.moved, r.body.reason], [false, false, 'execution_opportunity_ambiguous'], 'omitted contact')
+    })
+    await t.step('P5: a second twin whose contact cannot be read even by id holds the move', async () => {
+      const noContact = execOpp('patio', 'exec-2', '2026-11-03T00:00:00.000Z') as Partial<Opp>
+      delete noContact.contactId
+      reset([salesOpp('patio', true), execOpp('patio', 'exec-1', '2026-11-02T01:13:04.000Z'), noContact as Opp])
+      searchAnyContact = ['exec-2']
+      let r = await post('move_stage', { opportunityId: 'sales-opp', status: 'in_progress', jobType: 'patio' })
+      eq(puts, [])
+      eq([r.body.success, r.body.moved, r.body.reason], [false, false, 'execution_candidate_unreadable'])
+      reset([salesOpp('patio', true), execOpp('patio', 'exec-1', '2026-11-02T01:13:04.000Z'), noContact as Opp])
+      searchAnyContact = ['exec-2']
+      r = await post('move_to_complete', { opportunityId: 'sales-opp', jobType: 'patio' })
+      eq(puts, [])
+      eq([r.body.stageMoved, r.body.reason], [false, 'execution_candidate_unreadable'])
+    })
+    await t.step('P5: a second twin the search returns without its id cannot be re-read and holds the move', async () => {
+      for (const action of ['move_stage', 'move_to_complete']) {
+        reset([salesOpp('fencing', true), execOpp('fencing', 'exec-1', '2026-11-02T01:13:04.000Z'), execOpp('fencing', 'exec-2', '2026-11-03T00:00:00.000Z')])
+        rowOmits.set('exec-2', ['id'])
+        const r = await post(action, { opportunityId: 'sales-opp', status: 'invoiced', jobType: 'fencing' })
+        eq(puts, [], action)
+        eq([r.body.moved ?? r.body.stageMoved, r.body.reason], [false, 'execution_candidate_unreadable'], action)
+      }
+    })
+    await t.step('P5: a row with no id or contact that another field proves irrelevant does not hold the move', async () => {
+      // No id, created before this acceptance: an earlier job's.
+      reset([salesOpp('fencing', true), execOpp('fencing', 'exec-1', '2026-11-02T01:13:04.000Z'), execOpp('fencing', 'old-exec', '2026-03-01T00:00:00.000Z')])
+      rowOmits.set('old-exec', ['id'])
+      let r = await post('move_stage', { opportunityId: 'sales-opp', status: 'scheduled', jobType: 'fencing' })
+      eq(puts, [{ id: 'exec-1', stage: 'c0e34aa5-c113-4485-a962-33eadd7be4de', ok: true }], 'earlier job')
+      eq([r.body.moved, r.body.opportunityId], [true, 'exec-1'], 'earlier job')
+      // No contact in the search, another contact by id (filter ignored).
+      const other = execOpp('fencing', 'exec-other', '2026-11-03T00:00:00.000Z')
+      other.contactId = 'contact-b'
+      reset([salesOpp('fencing', true), execOpp('fencing', 'exec-1', '2026-11-02T01:13:04.000Z'), other])
+      rowOmits.set('exec-other', ['contactId'])
+      searchAnyContact = ['exec-other']
+      r = await post('move_stage', { opportunityId: 'sales-opp', status: 'scheduled', jobType: 'fencing' })
+      eq(puts, [{ id: 'exec-1', stage: 'c0e34aa5-c113-4485-a962-33eadd7be4de', ok: true }], 'other contact')
+      eq([r.body.moved, r.body.opportunityId], [true, 'exec-1'], 'other contact')
     })
     await t.step('a lost Execution opportunity is not a target', async () => {
       reset([salesOpp('fencing', true), execOpp('fencing', 'lost-exec', '2026-11-02T01:13:04.000Z', 'lost')])

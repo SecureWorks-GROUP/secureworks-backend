@@ -107,6 +107,17 @@ export function executionCreatedNotBefore(
   return arrived
 }
 
+// A search row whose id or contact cannot be read is still no candidate when a
+// field it does carry proves so: created before this acceptance, in another
+// pipeline, or lost or abandoned.
+function provedNoCandidate(row: GhlOpportunityLike, notBefore: number, executionPipelineId: string): boolean {
+  const created = ms(row.createdAt)
+  if (created !== null && created < notBefore) return true
+  const pipelineId = opportunityPipelineId(row)
+  if (pipelineId && pipelineId !== executionPipelineId) return true
+  return DEAD_OPPORTUNITY_STATUSES.has(statusOf(row))
+}
+
 /**
  * Decide where an Execution-pipeline stage may be sent.
  *
@@ -116,8 +127,9 @@ export function executionCreatedNotBefore(
  *   (executionCreatedNotBefore): move the ONE live Execution opportunity for
  *   the same contact created at or after that acceptance. A candidate counts
  *   only when its pipeline equals the Execution pipeline and its status is
- *   readable; an in-window candidate missing either, or a live Execution
- *   candidate with no readable creation time, moves nothing. No proved
+ *   readable; an in-window candidate missing either, a live Execution
+ *   candidate with no readable creation time, or a row whose id or contact
+ *   cannot be read and is not proved irrelevant, moves nothing. No proved
  *   acceptance, none yet, several, or a search that did not reach its end: do
  *   not move anything.
  * - Any other pipeline: do not move anything.
@@ -174,11 +186,21 @@ export function chooseStageMoveTarget(input: {
   // proven). A row created before this acceptance belongs to an earlier job.
   // A row whose creation time cannot be read cannot be placed outside the
   // window, so it stays in: dropping it could hide a second live Execution
-  // opportunity and move the wrong one.
+  // opportunity and move the wrong one. A row whose id or contact cannot be
+  // read (after the by-id re-read) cannot be told apart from a second twin
+  // either, so it holds the move unless another readable field proves it is
+  // no candidate (created before this acceptance, another pipeline, dead).
+  const identityUnknown: GhlOpportunityLike[] = []
   const inWindow = (input.executionCandidates || []).filter((row) => {
     const id = text(row.id)
-    if (!id || id === ownId) return false
-    if (!contactId || opportunityContactId(row) !== contactId) return false
+    if (id && id === ownId) return false
+    if (!contactId) return false
+    const rowContact = opportunityContactId(row)
+    if (rowContact && rowContact !== contactId) return false
+    if (!id || !rowContact) {
+      if (!provedNoCandidate(row, notBefore, input.executionPipelineId)) identityUnknown.push(row)
+      return false
+    }
     const created = ms(row.createdAt)
     return created === null || created >= notBefore
   })
@@ -192,11 +214,11 @@ export function chooseStageMoveTarget(input: {
     if (!opportunityPipelineId(row) || !(LIVE_OPPORTUNITY_STATUSES.has(status) || DEAD_OPPORTUNITY_STATUSES.has(status))) return true
     return ms(row.createdAt) === null && opportunityPipelineId(row) === input.executionPipelineId && opportunityIsLive(row)
   })
-  if (unverified.length > 0) {
+  if (unverified.length > 0 || identityUnknown.length > 0) {
     return {
       kind: 'not_moved',
       reason: 'execution_candidate_unreadable',
-      message: 'GoHighLevel did not say which pipeline, status or creation time a matching opportunity has, so no stage was sent',
+      message: 'GoHighLevel did not say which opportunity, contact, pipeline, status or creation time a matching opportunity has, so no stage was sent',
     }
   }
   const matches = inWindow.filter((row) => opportunityPipelineId(row) === input.executionPipelineId && opportunityIsLive(row))
@@ -227,20 +249,21 @@ export function chooseStageMoveTarget(input: {
   return { kind: 'move', opportunityId: ids[0], salesOpportunityId: ownId }
 }
 
-// At most this many search rows are re-read for a pipeline, status or creation
-// time the search left out; any still unreadable after that moves nothing.
+// At most this many search rows are re-read for a contact, pipeline, status or
+// creation time the search left out; any still unreadable after that moves
+// nothing. A row with no id cannot be re-read.
 const MAX_CANDIDATE_REREADS = 5
 
 function candidateNeedsReread(row: GhlOpportunityLike): boolean {
   const status = statusOf(row)
-  return !opportunityPipelineId(row) || !(LIVE_OPPORTUNITY_STATUSES.has(status) || DEAD_OPPORTUNITY_STATUSES.has(status)) ||
-    ms(row.createdAt) === null
+  return !opportunityContactId(row) || !opportunityPipelineId(row) ||
+    !(LIVE_OPPORTUNITY_STATUSES.has(status) || DEAD_OPPORTUNITY_STATUSES.has(status)) || ms(row.createdAt) === null
 }
 
 /**
  * Reads GoHighLevel and decides. `readOpportunity` is index.ts's ghl() (GET
- * only). A search row without a pipeline, a known status or a readable
- * creation time is re-read by id before it can count.
+ * only). A search row without a contact, a pipeline, a known status or a
+ * readable creation time is re-read by id before it can count.
  */
 export async function resolveStageMoveTarget(args: {
   opportunityId: string

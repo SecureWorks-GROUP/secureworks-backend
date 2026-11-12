@@ -72,6 +72,40 @@ Deno.test('a live twin without a readable creation time is never skipped: nothin
   assertEquals(decide(sales(), [exec('e-ok', '2026-11-03T00:00:00Z'), exec('e-1', '', { pipelineId: SALES })]), { kind: 'move', opportunityId: 'e-ok', salesOpportunityId: 'sales-1' })
 })
 
+Deno.test('a row whose id or contact cannot be read holds the move unless another field proves it irrelevant', () => {
+  for (const over of [{ id: undefined }, { id: '' }, { contactId: undefined }, { contactId: '' }]) {
+    const r = decide(sales(), [exec('e-1', '2026-11-02T01:13:04Z'), exec('e-2', '2026-11-03T00:00:00Z', over)])
+    assertEquals(r.kind === 'not_moved' && r.reason, 'execution_candidate_unreadable', JSON.stringify(over))
+  }
+  for (const over of [
+    { id: undefined, createdAt: '2026-03-01T00:00:00Z' },
+    { contactId: undefined, pipelineId: SALES },
+    { id: undefined, status: 'lost' },
+    { contactId: undefined, status: 'abandoned' },
+  ]) {
+    const r = decide(sales(), [exec('e-1', '2026-11-02T01:13:04Z'), exec('e-2', '2026-11-03T00:00:00Z', over)])
+    assertEquals(r, { kind: 'move', opportunityId: 'e-1', salesOpportunityId: 'sales-1' }, JSON.stringify(over))
+  }
+})
+
+Deno.test('the resolver re-reads a search row missing its contact; no id means no re-read', async () => {
+  const store: Record<string, unknown> = { 'sales-1': sales(), 'e-1': exec('e-1', '2026-11-02T01:13:04Z'), 'e-2': exec('e-2', '2026-11-03T00:00:00Z') }
+  const reads: string[] = []
+  const run = (rows: unknown[]) => resolveStageMoveTarget({
+    opportunityId: 'sales-1', jobType: 'fencing', executionPipelineId: EXEC, salesPipelineId: SALES,
+    readOpportunity: (id) => { reads.push(id); return Promise.resolve(store[id] ? { opportunity: store[id] } : null) },
+    // deno-lint-ignore no-explicit-any
+    searchExecution: () => Promise.resolve({ opportunities: rows as any, exhausted: true }),
+  })
+  let r = await run([store['e-1'], exec('e-2', '2026-11-03T00:00:00Z', { contactId: undefined })])
+  assertEquals(r.kind === 'not_moved' && r.reason, 'execution_opportunity_ambiguous')
+  assertEquals(reads, ['sales-1', 'e-2'])
+  reads.length = 0
+  r = await run([store['e-1'], exec('', '2026-11-03T00:00:00Z')])
+  assertEquals(r.kind === 'not_moved' && r.reason, 'execution_candidate_unreadable')
+  assertEquals(reads, ['sales-1'])
+})
+
 Deno.test('an unfinished search moves nothing, even with one match', () => {
   const r = decide(sales(), [exec('e-1', '2026-11-02T01:13:04Z')], false)
   assertEquals(r.kind === 'not_moved' && r.reason, 'execution_search_incomplete')
