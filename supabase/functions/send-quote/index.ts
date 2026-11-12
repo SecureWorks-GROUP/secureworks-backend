@@ -141,6 +141,15 @@ import {
 } from './quote_send_auth.ts'
 import { ghlEmailNoteRequest, ghlMoveStageOutcome, quoteAcceptedStageId, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
 import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailSubject } from './division_routing.ts'
+import {
+  customer3dLink,
+  customer3dPageUrl,
+  customerModelEmailBlock,
+  customerModelWhat,
+  handleCustomerModelRequest,
+  scopeRevisionHasCustomerModel,
+  stampRunDocumentsRelease,
+} from './customer_model.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -150,6 +159,8 @@ const FROM_EMAIL = Deno.env.get('FROM_EMAIL') || 'quotes@secureworksgroup.app'
 const FROM_NAME = Deno.env.get('FROM_NAME') || 'SecureWorks Group'
 const BASE_URL = Deno.env.get('PUBLIC_URL') || SUPABASE_URL
 const QUOTE_VIEWER_BASE = Deno.env.get('QUOTE_VIEWER_URL') || 'https://secureworks-website.pages.dev/quote.html'
+// The hosted customer 3D page (customer_model.ts); its origin is the only one allowed to read send-quote/model.
+const CUSTOMER_3D_PAGE_URL = customer3dPageUrl(Deno.env.get('CUSTOMER_3D_PAGE_URL'))
 const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
 let _xeroAppKey: Promise<string> | null = null
@@ -807,6 +818,13 @@ serve(async (req: Request) => {
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
   }
 
+  // Customer 3D view: public, by the quote link's token, readable cross-site
+  // only from the hosted 3D page (customer_model.ts). Before the shared
+  // OPTIONS answer, which allows every origin.
+  if (path === 'model') {
+    return await handleCustomerModelRequest(req, createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY), CUSTOMER_3D_PAGE_URL)
+  }
+
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders })
   }
@@ -1030,9 +1048,17 @@ serve(async (req: Request) => {
         })
       }
       {
+        // Customer 3D view: a third button only when the sealed revision this
+        // send releases has a saved customer model (customer_model.ts).
+        const model3dUrl = sealedSource.kind === 'sealed' && doc.share_token &&
+            await scopeRevisionHasCustomerModel(sb, sealedSource.revision_id)
+          ? customer3dLink(CUSTOMER_3D_PAGE_URL, doc.share_token)
+          : null
         const emailHtml = buildQuoteEmail({
           clientName: client_name,
           viewUrl,
+          model3dUrl,
+          model3dWhat: customerModelWhat(doc.jobs?.type),
           pdfUrl: doc.pdf_url,
           projectType: doc.jobs?.type || 'project',
           suburb: doc.jobs?.site_suburb || '',
@@ -2795,9 +2821,12 @@ serve(async (req: Request) => {
       // pricing, not from the live job. An unprovable named revision refuses
       // here, before any claim or email.
       let ownerPriceRuns: OwnerPriceGate
+      // No type annotation: send_runs_request_test runs this prelude as plain JS.
+      let runsSealedRevisionId = null
       let approvedRunPdfs: Map<string, Uint8Array> = new Map()
       {
         const sealedRuns = sealedSendSource(await sourceScopeRevisionReadRuns, job.id)
+        if (sealedRuns.kind === 'sealed') runsSealedRevisionId = sealedRuns.revision_id
         if (sealedRuns.kind === 'refused') {
           console.log('[send-quote] send-runs sealed revision refused', JSON.stringify({
             job_id: job.id, code: sealedRuns.body.code, reason: sealedRuns.body.reason,
@@ -3142,6 +3171,9 @@ serve(async (req: Request) => {
 
       // Send emails grouped by recipient
       const viewBaseUrl = `${SUPABASE_URL}/functions/v1/send-quote/view`
+      // Customer 3D view: a third button only when the sealed revision this
+      // send releases has a saved customer model (customer_model.ts).
+      const runsHasModel = await scopeRevisionHasCustomerModel(sb, runsSealedRevisionId)
       let emailsSent = 0
       let primarySent = false
       const successfulEmails: string[] = []
@@ -3152,30 +3184,16 @@ serve(async (req: Request) => {
           const run = recipient.runs[i]
           return `<a href="${viewBaseUrl}?token=${doc.share_token}" style="display:block;padding:12px 16px;margin:8px 0;background:#f8f9fa;border-radius:8px;border-left:3px solid #F15A29;text-decoration:none;color:#293C46;font-weight:600;">${run.run_name || run.run_label || 'Fence run'} - View &amp; Accept &rarr;</a>`
         }).join('')
-
-        const emailHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-<body style="margin:0;padding:0;background:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#fff;">
-<tr><td style="background:#F15A29;height:4px;"></td></tr>
-<tr><td style="background:#293C46;padding:20px 32px;">
-  <span style="color:#fff;font-size:18px;font-weight:700;">SecureWorks</span>
-  <span style="color:rgba(255,255,255,0.6);font-size:16px;font-weight:400;margin-left:4px;">Group</span>
-</td></tr>
-<tr><td style="padding:32px;">
-  <h1 style="margin:0 0 16px;color:#293C46;font-size:22px;">Your fencing quote is ready</h1>
-  <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Hi ${recipient.name},</p>
-  ${message ? `<p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 16px;">${message}</p>` : ''}
-  <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">
-    Thank you for giving us the opportunity to quote on your fencing project${job.site_suburb ? ' in ' + job.site_suburb : ''}.
-    This job has ${recipient.runs.length} fence run${recipient.runs.length > 1 ? 's' : ''} - each with its own quote below.
-  </p>
-  ${runLinks}
-  <p style="color:#4C6A7C;font-size:13px;margin-top:24px;">Each quote is valid for 30 days. You can accept or decline each run independently.</p>
-</td></tr>
-<tr><td style="padding:16px 32px;border-top:1px solid #eee;text-align:center;">
-  <p style="color:#999;font-size:12px;">SecureWorks Group Pty Ltd | ABN 64 689 223 416</p>
-</td></tr>
-</table></body></html>`
+        // The recipient's own first quote token: never another party's link.
+        const model3dToken = runsHasModel ? recipient.docs.find((d: any) => d?.share_token)?.share_token : null
+        const emailHtml = buildRunsQuoteEmail({
+          recipientName: recipient.name,
+          message: message || '',
+          suburb: job.site_suburb || '',
+          runCount: recipient.runs.length,
+          runLinks,
+          model3dUrl: model3dToken ? customer3dLink(CUSTOMER_3D_PAGE_URL, model3dToken) : null,
+        })
 
         try {
           // Build attachments from PDFs (if available)
@@ -3611,6 +3629,16 @@ serve(async (req: Request) => {
             v2_inputs: v2InputsRuns,
             source_scope_revision: sourceScopeRevisionReadRuns,
           }, { handler: 'send-quote/send-runs', job_id: job.id })
+        }
+        // Customer 3D view: every run document of this call names the call's
+        // release, so each recipient's own token reaches the sealed model.
+        if (runsHasModel && releasedRevisionIdRuns) {
+          await stampRunDocumentsRelease(
+            sb,
+            [...createdDocs, ...publishedExistingDocs].map((d: any) => d?.id),
+            releasedRevisionIdRuns,
+            { job_id: job.id },
+          )
         }
 
         // N2 — see send-quote/send above. Structured body_preview so the
@@ -4165,9 +4193,46 @@ async function htmlResponse(html: string) {
 // EMAIL TEMPLATE
 // ════════════════════════════════════════════════════════════
 
-function buildQuoteEmail(opts: {
+// The fence runs quote email (/send-runs), one per recipient.
+export function buildRunsQuoteEmail(opts: {
+  recipientName: string
+  message: string
+  suburb: string
+  runCount: number
+  runLinks: string
+  model3dUrl?: string | null
+}): string {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#fff;">
+<tr><td style="background:#F15A29;height:4px;"></td></tr>
+<tr><td style="background:#293C46;padding:20px 32px;">
+  <span style="color:#fff;font-size:18px;font-weight:700;">SecureWorks</span>
+  <span style="color:rgba(255,255,255,0.6);font-size:16px;font-weight:400;margin-left:4px;">Group</span>
+</td></tr>
+<tr><td style="padding:32px;">
+  <h1 style="margin:0 0 16px;color:#293C46;font-size:22px;">Your fencing quote is ready</h1>
+  <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Hi ${opts.recipientName},</p>
+  ${opts.message ? `<p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 16px;">${opts.message}</p>` : ''}
+  <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">
+    Thank you for giving us the opportunity to quote on your fencing project${opts.suburb ? ' in ' + opts.suburb : ''}.
+    This job has ${opts.runCount} fence run${opts.runCount > 1 ? 's' : ''} - each with its own quote below.
+  </p>
+  ${opts.runLinks}
+  ${customerModelEmailBlock({ what: 'fence', url: opts.model3dUrl })}
+  <p style="color:#4C6A7C;font-size:13px;margin-top:24px;">Each quote is valid for 30 days. You can accept or decline each run independently.</p>
+</td></tr>
+<tr><td style="padding:16px 32px;border-top:1px solid #eee;text-align:center;">
+  <p style="color:#999;font-size:12px;">SecureWorks Group Pty Ltd | ABN 64 689 223 416</p>
+</td></tr>
+</table></body></html>`
+}
+
+export function buildQuoteEmail(opts: {
   clientName: string
   viewUrl: string
+  model3dUrl?: string | null
+  model3dWhat?: 'patio' | 'fence'
   pdfUrl: string
   projectType: string
   suburb: string
@@ -4215,6 +4280,7 @@ function buildQuoteEmail(opts: {
           </a>
         </td></tr>
       </table>` : ''}
+      ${customerModelEmailBlock({ what: opts.model3dWhat ?? 'patio', url: opts.model3dUrl })}
 
       <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
 
