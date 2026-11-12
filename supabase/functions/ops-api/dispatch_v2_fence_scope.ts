@@ -31,11 +31,22 @@ export type DispatchV2FenceLine = {
    * each part "<id>#k/n". Null on a scope with no sealed lines, or when no sealed line matches (a note says so).
    */
   scope_line_id?: string | null;
+  /**
+   * The supplier the sealed order sends this line to (its sealed line's supplierId and supplierName). Null when the
+   * line names no sealed line, or its sealed line names no supplier: the line is held on the draft list.
+   */
+  supplier_key?: string | null;
+  supplier_name?: string | null;
 };
 
 export type DispatchV2FenceFill = {
   lines: DispatchV2FenceLine[];
   notes: string[];
+  /**
+   * True when the sealed order splits the lines by supplier (a sealed line names one). Each line then goes to its
+   * own sealed line's supplier, line for line, and never to the scope's one typed supplier.
+   */
+  sealed_suppliers: boolean;
 };
 
 // 1800H fencing: retaining height (mm) to post height (mm).
@@ -202,8 +213,9 @@ export function dispatchV2FenceLinesFromScope(
     part("rails", rails === 1 ? "long rail" : "long rails", rails, null, false, false);
   }
 
-  nameSealedLines(sealedFenceLines(scopeJson), lines, from, notes);
-  return { lines, notes };
+  const sealed = sealedFenceLines(scopeJson);
+  nameSealedLines(sealed, lines, from, notes);
+  return { lines, notes, sealed_suppliers: sealed.some((l) => l.supplier_key !== null) };
 }
 
 // ── B3: the sealed line each fill line came from ────────────────────────────
@@ -215,7 +227,9 @@ export function dispatchV2FenceLinesFromScope(
 //   - a panel group: the "Panel kit <height>H + <post>H post" line;
 //   - the plinths: the standard "Retaining plinth 150mm" line;
 //   - a gate's posts: that gate's own post line ("... (gate N)"), else its kit line;
-//   - a gate's other parts: that gate's kit line ("Gate N: ...").
+//   - a gate sealed in parts (a "Gate N:" stile, latch, rail or infill sheet line, each with its own supplier): each
+//     part its own line, and a part the sealed gate has no line for names none (it is held, never sent to a guess);
+//   - a gate sealed as one kit line ("Gate N: pedestrian gate parts"): its other parts that kit line.
 // A sealed line that more than one fill line comes from is named on each as "<id>#k/n" (the production index
 // job_material_lines_source_line_once allows one row per id and revision), so a reader sees it was split into n parts.
 // The unit is the sealed line's; a sealed line with none (a revision sealed before #732) takes the unit Shaun's order
@@ -227,7 +241,23 @@ type FenceLineFrom =
   | { kind: "plinths" }
   | { kind: "gate"; gate: number; piece: GatePiece };
 
-type SealedFenceLine = { id: string; description: string; unit: string | null; category: string };
+type SealedFenceLine = {
+  id: string;
+  description: string;
+  unit: string | null;
+  category: string;
+  supplier_key: string | null;
+  supplier_name: string | null;
+};
+
+// A gate sealed in parts names each part in its "Gate N:" line (the stile pair, the latch and hinges, the long rail,
+// the infill sheets; live revisions, Nov 2026).
+const GATE_PART: Record<Exclude<GatePiece, "posts">, RegExp> = {
+  stiles: /\bstiles?\b/i,
+  latch: /latch/i,
+  rails: /\brails?\b/i,
+  sheets: /\binfill sheets?\b/i,
+};
 
 // The unit Shaun's order table counts each of his lines in.
 const SHAUN_UNIT: Record<string, string> = {
@@ -252,7 +282,14 @@ function sealedFenceLines(scopeJson: unknown): SealedFenceLine[] {
   const raw = scope && typeof scope === "object" && Array.isArray(scope.lines) ? scope.lines : [];
   return raw.flatMap((l: any) =>
     l && typeof l.id === "string" && l.id && typeof l.description === "string"
-      ? [{ id: l.id, description: l.description, unit: text(l.unit), category: String(l.category ?? "") }]
+      ? [{
+        id: l.id,
+        description: l.description,
+        unit: text(l.unit),
+        category: String(l.category ?? ""),
+        supplier_key: text(l.supplierId) ?? text(l.supplierName),
+        supplier_name: text(l.supplierName),
+      }]
       : []
   );
 }
@@ -267,8 +304,15 @@ function sealedLineFor(sealed: SealedFenceLine[], f: FenceLineFrom): SealedFence
   if (f.kind === "plinths") {
     return sealed.find((l) => /^Retaining plinth 150mm/.test(l.description) && !/, long/.test(l.description)) ?? null;
   }
-  const kit = sealed.find((l) => l.category === "gates" && l.description.startsWith(`Gate ${f.gate}:`)) ?? null;
-  if (f.piece !== "posts") return kit;
+  const own = sealed.filter((l) => l.category === "gates" && l.description.startsWith(`Gate ${f.gate}:`));
+  const parts = Object.values(GATE_PART);
+  const inParts = own.some((l) => parts.some((re) => re.test(l.description)));
+  const kit = inParts ? null : own[0] ?? null;
+  if (f.piece !== "posts") {
+    if (!inParts) return kit;
+    const re = GATE_PART[f.piece];
+    return own.find((l) => re.test(l.description)) ?? null;
+  }
   return sealed.find((l) =>
     l.category === "gates" && !l.description.startsWith("Gate ") && l.description.includes(`(gate ${f.gate})`)
   ) ?? kit;
@@ -297,9 +341,13 @@ function nameSealedLines(
     if (!s) {
       l.scope_line_id = null;
       l.unit = shaun;
+      l.supplier_key = null;
+      l.supplier_name = null;
       none.push(l.description);
       return;
     }
+    l.supplier_key = s.supplier_key;
+    l.supplier_name = s.supplier_name;
     const n = parts.get(s.id)!;
     const k = (seen.get(s.id) ?? 0) + 1;
     seen.set(s.id, k);

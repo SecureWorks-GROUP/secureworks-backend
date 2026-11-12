@@ -228,3 +228,44 @@ Deno.test("B3 fence fill: a fill line with no sealed line to name keeps a null i
   const old = dispatchV2FenceLinesFromScope(scope({ runs: [{ panels: [panel()] }] }))!;
   assertEquals(old.lines.map((l: any) => [l.scope_line_id ?? null, l.unit]), [[null, null]]);
 });
+
+// ── The sealed supplier split: each line follows its own sealed line's supplier ──
+// A live fence revision seals its gate in parts, each with its own supplier: the stile pair, the latch and hinges and
+// the long rail to one supplier, the infill sheets and the gate posts to another. The fill names each part's own
+// sealed line and its supplier, line for line, never the scope's one typed supplier.
+const SPLIT = [
+  { id: "SL-kit", description: "Panel kit 1800H + 2400H post (2380mm wide)", quantity: 9, unit: "each", category: "panels", supplierId: "r-and-r-fencing", supplierName: "R&R Fencing" },
+  { id: "SL-stile", description: "Gate 1: gate stile pair 1760mm, Monument", quantity: 1, unit: "each", category: "gates", supplierId: "fencing-warehouse-wa", supplierName: "Fencing Warehouse WA" },
+  { id: "SL-latch", description: "Gate 1: Lokklatch Deluxe latch and Truclose regular hinge pair", quantity: 1, unit: "each", category: "gates", supplierId: "fencing-warehouse-wa", supplierName: "Fencing Warehouse WA" },
+  { id: "SL-rail", description: "Gate 1: long rail 3125mm (gate frame)", quantity: 1, unit: "each", category: "gates", supplierId: "fencing-warehouse-wa", supplierName: "Fencing Warehouse WA" },
+  { id: "SL-sheet", description: "Gate 1: 1800mm infill sheet, Sameside, Monument ×2", quantity: 2, unit: "each", category: "gates", supplierId: "r-and-r-fencing", supplierName: "R&R Fencing" },
+  { id: "SL-gpost", description: "50x50mm SHS gate post, L2400mm ×2 (gate 1)", quantity: 2, unit: "each", category: "gates", supplierId: "r-and-r-fencing", supplierName: "R&R Fencing" },
+];
+
+Deno.test("supplier split: a gate sealed in parts names each part's own line and supplier", () => {
+  const fill = dispatchV2FenceLinesFromScope(sealedFence(SPLIT))!;
+  assertEquals(fill.sealed_suppliers, true);
+  assertEquals(fill.lines.map((l: any) => [l.description, l.scope_line_id, l.supplier_key]), [
+    ["1800H standard width panels with 2400H posts", "SL-kit", "r-and-r-fencing"],
+    ["gate posts", "SL-gpost", "r-and-r-fencing"],
+    ["gate stiles pair", "SL-stile", "fencing-warehouse-wa"],
+    ["1800mm Colorbond infill sheets", "SL-sheet", "r-and-r-fencing"],
+    ["Lokklatch kit", "SL-latch", "fencing-warehouse-wa"],
+    ["long rail", "SL-rail", "fencing-warehouse-wa"],
+  ]);
+  assertEquals(fill.notes, []);
+});
+
+Deno.test("supplier split: a part the sealed gate has no line for is held, never given the kit's supplier", () => {
+  const fill = dispatchV2FenceLinesFromScope(sealedFence(SPLIT.filter((l) => l.id !== "SL-rail")))!;
+  const rail = fill.lines.find((l: any) => l.description === "long rail")!;
+  assertEquals([rail.scope_line_id, rail.supplier_key], [null, null]);
+  assertEquals(fill.notes, ["1 line names no sealed line of the scope: long rail."]);
+});
+
+Deno.test("supplier split: sealed lines with no supplier leave the scope's one supplier in charge", () => {
+  const bare = SPLIT.map(({ supplierId: _i, supplierName: _n, ...l }) => l);
+  const fill = dispatchV2FenceLinesFromScope(sealedFence(bare))!;
+  assertEquals(fill.sealed_suppliers, false);
+  assertEquals(fill.lines.every((l: any) => l.supplier_key === null), true);
+});
