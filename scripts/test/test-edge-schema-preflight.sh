@@ -1066,7 +1066,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261111110000", "job_deposit_gate_overrides"),
                       # No super on commission: trade_invoices.super_base_ex
                       # and the widened split check (trade_invoice_money.ts).
-                      ("20261112090000", "trade_invoice_commission_super_base")]:
+                      ("20261112090000", "trade_invoice_commission_super_base"),
+                      # Restoration report and photo recipients on a builder
+                      # (ses_mailer_ops_send.ts).
+                      ("20261112140000", "makesafe_company_restoration_recipients")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

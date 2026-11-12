@@ -60,6 +60,7 @@ import {
   sesPhotoMailVolumeRefusal,
 } from "./ses_photo_mail_volume_guard.ts";
 import { type SesActionAuth, SesActionError } from "./ses_reporting_actions.ts";
+import { canonicalSesFamilyFromCard } from "./ses_family_matrix.ts";
 import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
 
 /** Local refusal builder — mailer-ops codes are not on the shared FACTS table. */
@@ -188,6 +189,26 @@ export function extractMailerAddressesFromSenderPatterns(
   return out;
 }
 
+/**
+ * A restoration card on the SES board, by the one canonical family reader
+ * (the same test restoration_workflow_store's isRestorationCard applies).
+ */
+export function isRestorationCardForMailer(job: unknown): boolean {
+  const row = (job && typeof job === "object" ? job : {}) as Record<
+    string,
+    unknown
+  >;
+  const type = String(row.type || "").trim().toLowerCase();
+  if (type !== "makesafe" && type !== "insurance") return false;
+  const metadata = (row.metadata && typeof row.metadata === "object"
+    ? row.metadata
+    : {}) as Record<string, unknown>;
+  return canonicalSesFamilyFromCard({
+    makesafe_job_family: metadata.makesafe_job_family,
+    insurance_job_type: metadata.insurance_job_type,
+  }) === "restoration";
+}
+
 /** Normalise a candidate destination list (full addresses, lowercased, unique). */
 function normaliseAddressList(
   values: readonly (string | null | undefined)[] | undefined,
@@ -199,7 +220,12 @@ export type MailerOpsRecipientSource =
   /** The address that actually sent this card's own work order (card-bound). */
   | "card_intake_work_order_sender"
   /** Configured on the company row. Inbound trust list, so confirmation-only. */
-  | "company_sender_patterns";
+  | "company_sender_patterns"
+  /**
+   * The company's outbound restoration contacts (restoration_recipients).
+   * Offered only for a restoration card; still confirmation-only.
+   */
+  | "company_restoration_recipient";
 
 /**
  * Destination resolution. `sender_patterns` is an INBOUND trust list (who we
@@ -211,18 +237,28 @@ export function resolveMailerOpsRecipient(args: {
   senderPatterns: unknown;
   cardIntakeSenders?: readonly (string | null | undefined)[];
   requestedTo?: string | null;
+  /**
+   * The company's restoration contacts. The caller passes them ONLY for a
+   * restoration card (an empty list otherwise), so a make-safe can never be
+   * sent to them through this route.
+   */
+  restorationRecipients?: unknown;
 }): {
   to: string;
   source: MailerOpsRecipientSource;
   card_bound: boolean;
   card_intake_senders: string[];
   configured_senders: string[];
+  restoration_recipients: string[];
 } {
   const configured = extractMailerAddressesFromSenderPatterns(
     args.senderPatterns,
   );
   const cardBound = normaliseAddressList(args.cardIntakeSenders);
-  const allowlisted = [...new Set([...cardBound, ...configured])];
+  const restoration = extractMailerAddressesFromSenderPatterns(
+    args.restorationRecipients,
+  );
+  const allowlisted = [...new Set([...cardBound, ...configured, ...restoration])];
   if (allowlisted.length === 0) {
     throw new SesActionError(
       409,
@@ -249,6 +285,7 @@ export function resolveMailerOpsRecipient(args: {
           evidence: {
             card_intake_senders: cardBound,
             configured_senders: configured,
+            restoration_recipients: restoration,
           },
         },
       ),
@@ -259,14 +296,15 @@ export function resolveMailerOpsRecipient(args: {
       409,
       mailerRefusal(
         "mailer_recipient_not_allowlisted",
-        "The requested To address is neither this card's own work-order sender nor a configured company mailer address.",
+        "The requested To address is neither this card's own work-order sender nor a configured company mailer address (nor, on a restoration card, one of the company's restoration contacts).",
         {
           recovery_action:
-            "Pass a To that matches this card's intake sender or a full-email sender_patterns entry for the company.",
+            "Pass a To that matches this card's intake sender, a full-email sender_patterns entry for the company, or (restoration cards only) an address in makesafe_companies.restoration_recipients.",
           evidence: {
             requested,
             card_intake_senders: cardBound,
             configured_senders: configured,
+            restoration_recipients: restoration,
           },
         },
       ),
@@ -276,10 +314,13 @@ export function resolveMailerOpsRecipient(args: {
     to: requested,
     source: cardBound.includes(requested)
       ? "card_intake_work_order_sender"
-      : "company_sender_patterns",
+      : configured.includes(requested)
+      ? "company_sender_patterns"
+      : "company_restoration_recipient",
     card_bound: cardBound.includes(requested),
     card_intake_senders: cardBound,
     configured_senders: configured,
+    restoration_recipients: restoration,
   };
 }
 
@@ -1289,13 +1330,14 @@ export async function sendMailerOpsVisibilityAction(
     name?: string | null;
     sender_patterns?: unknown;
     report_recipient?: string | null;
+    restoration_recipients?: unknown;
   };
   const readCompanyBy = async (
     column: "id" | "slug",
     value: string,
   ): Promise<MailerOpsCompanyRow | null> => {
     const res = await client.from("makesafe_companies")
-      .select("id,slug,name,sender_patterns,report_recipient")
+      .select("id,slug,name,sender_patterns,report_recipient,restoration_recipients")
       .eq(column, value)
       .maybeSingle();
     if (res.error) {
@@ -1339,10 +1381,20 @@ export async function sendMailerOpsVisibilityAction(
     metadata,
   );
 
+  // A restoration card may also go to the builder's restoration contacts
+  // (owner, 12 Nov 2026). Every other card never sees that list.
+  const restorationCard = isRestorationCardForMailer(job);
   const recipient = resolveMailerOpsRecipient({
     senderPatterns,
     cardIntakeSenders: subjectInputs.intakeSenders,
     requestedTo: args.to,
+    restorationRecipients: restorationCard
+      ? companiesConsulted.flatMap((row) =>
+        Array.isArray(row.restoration_recipients)
+          ? row.restoration_recipients
+          : []
+      )
+      : [],
   });
 
   // Structural: never use report_recipient (makesafes@) as To on this path.
