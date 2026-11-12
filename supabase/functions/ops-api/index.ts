@@ -40691,13 +40691,18 @@ async function createInvoice(
   // path, so guessing from the prefix would misfile a repair invoice as private
   // roofing. Non-SWR references are unaffected either way.
   let invoiceJobType: string | null = null
+  // A restoration card books to its own Business Unit option whatever its
+  // reference says (owner, 12 Nov 2026): the reference is usually the
+  // builder's (MLR-41228), which names no division.
+  let invoiceJobIsRestoration = false
   if (jIdForGate) {
     const { data: invoiceJobRow } = await client.from('jobs')
-      .select('type')
+      .select('type, metadata')
       .eq('id', jIdForGate)
       .eq('org_id', DEFAULT_ORG_ID)
       .maybeSingle()
     invoiceJobType = invoiceJobRow?.type || null
+    invoiceJobIsRestoration = !!invoiceJobRow && isRestorationCard(invoiceJobRow)
   }
 
   // Validate tracking category exists in Xero before including it
@@ -40706,7 +40711,9 @@ async function createInvoice(
     const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
     const divisionCat = (trackingCats?.TrackingCategories || []).find((tc: any) => tc.Name === 'Business Unit' && tc.Status === 'ACTIVE')
     if (divisionCat) {
-      const optionName = trackingCategoryForJob(ref, invoiceJobType)
+      const optionName = invoiceJobIsRestoration
+        ? 'SW - RESTORATION'
+        : trackingCategoryForJob(ref, invoiceJobType)
       const validOption = (divisionCat.Options || []).find((o: any) => o.Name === optionName && o.Status === 'ACTIVE')
       if (validOption) tracking = [{ Name: 'Business Unit', Option: optionName }]
     }
