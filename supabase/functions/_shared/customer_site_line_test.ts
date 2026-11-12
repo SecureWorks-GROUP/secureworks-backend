@@ -54,3 +54,22 @@ Deno.test('site line: an ordinary fence or patio address is byte for byte the ol
     assertEquals(customerSiteLine(street, suburb, ' '), `${street || ''} ${suburb || ''}`.trim())
   }
 })
+
+// The shared case list both repos must pass (director, 13 Nov 2026, 03:29).
+Deno.test('site line: the shared ten-case list', () => {
+  const cases: Array<[string, string, string]> = [
+    ['5 Baldivis Road', 'Baldivis', '5 Baldivis Road, Baldivis'],
+    ['ZZTEST 3 Test St, Baldivis', 'Baldivis', 'ZZTEST 3 Test St, Baldivis'],
+    ['3 Test St, Baldivis WA 6171', 'Baldivis', '3 Test St, Baldivis WA 6171'],
+    ['12 Smith St', 'Rockingham', '12 Smith St, Rockingham'],
+    ['', 'Baldivis', 'Baldivis'],
+    ['8 Lake Rd', '', '8 Lake Rd'],
+    ['ZZTEST 3 Test St,Baldivis,WA 6171', 'Baldivis', 'ZZTEST 3 Test St,Baldivis,WA 6171'],
+    ['ZZTEST 3 Test St,Baldivis,6171', 'Baldivis', 'ZZTEST 3 Test St,Baldivis,6171'],
+    ['3 Test St, Baldivis, WA 6171', 'Baldivis', '3 Test St, Baldivis, WA 6171'],
+    ['3 Test St, Baldivis, 6171', 'Baldivis', '3 Test St, Baldivis, 6171'],
+  ]
+  for (const [street, suburb, printed] of cases) {
+    assertEquals(customerSiteLine(street, suburb), printed, `${street} + ${suburb}`)
+  }
+})
