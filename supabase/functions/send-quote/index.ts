@@ -138,6 +138,7 @@ import {
   type SendQuoteAuthUser,
 } from './quote_send_auth.ts'
 import { ghlEmailNoteRequest, ghlMoveStageOutcome, quoteAcceptedStageId, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
+import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailSubject } from './division_routing.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -153,17 +154,7 @@ let _xeroAppKey: Promise<string> | null = null
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 
-// ── Reply-to routing: fencing jobs → fencing@, everything else → patios@ ──
-function getClientReplyTo(jobType: string | null, jobNumber?: string | null): string {
-  const dept = jobType === 'fencing' ? 'fencing' : 'patios'
-  const tag = jobNumber ? `+${jobNumber}` : ''
-  return `${dept}${tag}@secureworkswa.com.au`
-}
-
-// ── Division CC: fencing jobs → fencing@, everything else → patios@ ──
-function getDivisionInbox(jobType: string | null | undefined): string {
-  return jobType === 'fencing' ? 'fencing@secureworkswa.com.au' : 'patios@secureworkswa.com.au'
-}
+// Reply-to and division copy (getClientReplyTo, getDivisionInbox): ./division_routing.ts
 
 // ── Division phone (Marnin ruling 2026-06-12): fencing client-facing → 0489 267 772.
 // 0489 267 771 is the admin line — patio + general templates keep 771 as the default. ──
@@ -945,7 +936,7 @@ serve(async (req: Request) => {
         doc.jobs?.type === 'patio' ? 'patio' : 'misc'
 
       // Send email via Resend
-      const emailSubject = customSubject || `Your ${doc.jobs?.type || 'project'} quote from SecureWorks Group`
+      const emailSubject = customSubject || quoteEmailSubject(doc.jobs?.type)
       if (!RESEND_API_KEY) {
         return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
@@ -1294,7 +1285,7 @@ serve(async (req: Request) => {
               media: mediaRows ?? [],
               quote_pdf_url: doc.pdf_url || '',
               quote_pdf_size_bytes: null,
-              email_subject: customSubject || `Your ${doc.jobs?.type || 'project'} quote from SecureWorks Group`,
+              email_subject: customSubject || quoteEmailSubject(doc.jobs?.type),
               email_custom_message: message || '',
               email_template_version: 'v1',
               scoper_name: scoper_name || 'The SecureWorks Team',
@@ -5297,7 +5288,7 @@ function buildNextStepsPage(opts: {
   jobId?: string
 }): string {
   const firstName = opts.clientName?.split(' ')[0] || 'there'
-  const typeName = opts.projectType === 'fencing' ? 'fencing' : opts.projectType === 'decking' ? 'decking' : 'patio'
+  const projectLabel = nextStepsProjectLabel(opts.projectType)
   const depositFormatted = opts.depositAmount > 0
     ? '$' + opts.depositAmount.toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
     : ''
@@ -5373,7 +5364,7 @@ function buildNextStepsPage(opts: {
         <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
       </div>
       <h1>Quote Accepted!</h1>
-      <p>Your ${typeName} project${opts.address ? ' at ' + opts.address : ''} is confirmed.</p>
+      <p>Your ${projectLabel}${opts.address ? ' at ' + opts.address : ''} is confirmed.</p>
     </div>
 
     ${depositFormatted ? `
