@@ -16,6 +16,7 @@ import {
   jobNumbersIn,
   LEARNABLE_REF_MIN_DIGITS,
   learnableSupplierRefs,
+  looksLikeAccountsMail,
   matchEmail,
   type MatchInputs,
   perthDay,
@@ -721,4 +722,95 @@ Deno.test("rung 3: a short number already in the table is not used", () => {
     NOW,
   );
   assert(r.rung !== "supplier_ref");
+});
+
+// ── Option B (12 Nov 2026): accounts and marketing mail ──────────────────
+
+Deno.test("accounts mail: subjects from the cleared tray read as accounts", () => {
+  for (
+    const subject of [
+      "Tax Invoice 10095112 for Account 001185 - SECUREWORKS",
+      "Receipt 13008202 for account 001185 - SECUREWORKS",
+      "Customer Monthly Statement",
+      "Thank you for your payment",
+      "Upcoming Invoice Due – Courtesy Reminder from KVS (WA) PTY LTD",
+      "Stratco Lead Assignment (234402) - 29/10/2026",
+      "Bondor Pricing Update",
+      "Christmas Closure dates",
+      "Stratco Invoice 2873038.",
+      "Combined Metal Industries - Sales Invoice PSI-225844 - Your Ref: JAN",
+      "Invoice I6025 from Fencemakers",
+      "Credit Link",
+    ]
+  ) {
+    assert(
+      looksLikeAccountsMail("sales@fencingwarehousewa.au", subject),
+      subject,
+    );
+  }
+});
+
+Deno.test("accounts mail: accounts senders read as accounts whatever the subject", () => {
+  for (
+    const from of [
+      "accounts@randrfencing.com.au",
+      "remittance@stratcowa.com.au",
+      "invoicing@cmiwa.com.au",
+      "leads@stratcowa.com.au",
+      "Do Not Reply <donotreply@fansonline.com.au>",
+      "noreply@supplier.com.au",
+    ]
+  ) {
+    assert(looksLikeAccountsMail(from, "Hello"), from);
+  }
+});
+
+Deno.test("accounts mail: order replies are not accounts mail", () => {
+  for (
+    const subject of [
+      "Customer Order 11041784 for Account 001185 - SECUREWORKS",
+      "RE: Advice",
+      "Please advise",
+      "RE: Material Order Quote Ref",
+      "Quote# 1058914",
+      "Metroll Confirmation SO#1058914 SECUREWORKS WA ETA Pickup 05/11/2026",
+      "W2SO 92250 - OXWORKS ORDER CONFIRMATION - SECUREWORKS WA",
+      "RE: Purchase Order required",
+      "RE: Pick Up",
+      "RE: Domain lead time",
+      "Pricing/Quoting/Lead Times",
+      "Bondor Order Form",
+    ]
+  ) {
+    assert(
+      !looksLikeAccountsMail("sales@fencingwarehousewa.au", subject),
+      subject,
+    );
+  }
+  assert(!looksLikeAccountsMail("tony.bacich@stratcowa.com.au", "Aluminium Slats"));
+  assert(!looksLikeAccountsMail(null, ""));
+});
+
+Deno.test("rung 4: accounts mail is never guessed, it waits with the open order as a candidate", () => {
+  const r = matchEmail(
+    inputs({
+      email: email({ subject: "Tax Invoice 10095112 for Account 001185", body: "" }),
+    }),
+    APPROVED,
+    NOW,
+  );
+  assertEquals(r.state, "unmatched");
+  assertEquals(r.rung, null);
+  if (r.state === "unmatched") {
+    assertEquals(r.candidates.map((c) => c.order_id), ["ord-1"]);
+  }
+});
+
+Deno.test("rung 4: an order reply with the same open order is still guessed", () => {
+  const r = matchEmail(
+    inputs({ email: email({ subject: "RE: Advice", body: "Ready Thursday" }) }),
+    APPROVED,
+    NOW,
+  );
+  assertEquals(r.state, "needs_confirmation");
 });
