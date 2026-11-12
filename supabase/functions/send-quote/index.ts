@@ -137,7 +137,7 @@ import {
   resolveSendInvoiceDelivery,
   type SendQuoteAuthUser,
 } from './quote_send_auth.ts'
-import { ghlEmailNoteRequest, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
+import { ghlEmailNoteRequest, ghlMoveStageOutcome, quoteAcceptedStageId, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -2325,10 +2325,15 @@ serve(async (req: Request) => {
           },
         })
 
-        // Push GHL stage (only to 'accepted' when fully accepted)
-        if (newStatus === 'accepted' && job?.ghl_opportunity_id) {
+        // Push GHL stage (only when fully accepted): the sales pipeline's accepted stage, where
+        // GHL's own workflow takes the job on to Execution. Non-blocking; a refusal is logged as one.
+        const acceptedStageId = quoteAcceptedStageId(job?.type)
+        if (newStatus === 'accepted' && job?.ghl_opportunity_id && !acceptedStageId) {
+          console.log(`[send-quote] GHL stage not moved: no accepted sales stage for job type ${job?.type || 'unknown'}`)
+        }
+        if (newStatus === 'accepted' && job?.ghl_opportunity_id && acceptedStageId) {
           try {
-            await fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=move_stage`, {
+            const stageRes = await fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=move_stage`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -2336,11 +2341,16 @@ serve(async (req: Request) => {
               },
               body: JSON.stringify({
                 opportunityId: job.ghl_opportunity_id,
-                status: 'accepted',
+                stageId: acceptedStageId,
                 jobType: job.type,
               }),
             })
-            console.log(`[send-quote] GHL stage pushed to accepted for ${job.ghl_opportunity_id}`)
+            const stageOutcome = ghlMoveStageOutcome(stageRes.status, await stageRes.json().catch(() => null))
+            if (stageOutcome.moved) {
+              console.log(`[send-quote] GHL stage moved to accepted for ${job.ghl_opportunity_id}`)
+            } else {
+              console.log(`[send-quote] GHL stage move to accepted refused for ${job.ghl_opportunity_id} (non-blocking): ${stageOutcome.reason}`)
+            }
           } catch (e) {
             console.log('[send-quote] GHL stage push failed (non-blocking):', (e as Error).message)
           }
