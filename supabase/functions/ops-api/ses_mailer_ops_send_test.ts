@@ -23,6 +23,7 @@ import {
 import {
   assertMailerOpsAttachmentRoles,
   assertMailerOpsCcInvariant,
+  restorationCcFor,
   assertNotMoneyDocumentType,
   extractMailerAddressesFromSenderPatterns,
   isMailerOpsRouteKind,
@@ -78,6 +79,21 @@ Deno.test("mailer ops: CC invariant is exact ses@secureworkswa.com.au", () => {
   assertRejectsSync(() => assertMailerOpsCcInvariant([]));
   assertRejectsSync(() =>
     assertMailerOpsCcInvariant([MAILER_OPS_CC, "other@x.com"])
+  );
+  // A restoration card copies exactly its builder's restoration_cc after ses@.
+  assertMailerOpsCcInvariant([MAILER_OPS_CC, "mailer@x.com"], ["mailer@x.com"]);
+  assertRejectsSync(() =>
+    assertMailerOpsCcInvariant(["mailer@x.com", MAILER_OPS_CC], ["mailer@x.com"])
+  );
+  assertRejectsSync(() =>
+    assertMailerOpsCcInvariant([MAILER_OPS_CC, "other@x.com"], ["mailer@x.com"])
+  );
+});
+
+Deno.test("mailer ops: restoration CC is full addresses, lower case, never ses@ or the To", () => {
+  assertEquals(
+    restorationCcFor(["MLB.Mailer@PrimeEco.tech", "ses@secureworkswa.com.au", "amber@b.com", "x", "mlb.mailer@primeeco.tech"], "AMBER@b.com"),
+    ["mlb.mailer@primeeco.tech"],
   );
 });
 

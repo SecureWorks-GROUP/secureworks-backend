@@ -401,8 +401,37 @@ export function assertNotMoneyDocumentType(docType: unknown): void {
   }
 }
 
-export function assertMailerOpsCcInvariant(cc: readonly string[]): void {
-  if (cc.length !== 1 || cc[0] !== MAILER_OPS_CC) {
+/**
+ * The builder's restoration_cc addresses a restoration send copies beside ses@
+ * (owner, 12 Nov 2026: ML Builders copies its Prime work-order mailer). Full
+ * addresses only, lower case, never ses@ or the To address twice. Shared by
+ * both restoration send routes.
+ */
+export function restorationCcFor(restorationCc: unknown[], to: string): string[] {
+  const out: string[] = [];
+  const skip = new Set([MAILER_OPS_CC.toLowerCase(), text(to).toLowerCase()]);
+  for (const value of restorationCc) {
+    const address = text(value).toLowerCase();
+    if (!address || !address.includes("@") || skip.has(address) || out.includes(address)) continue;
+    out.push(address);
+  }
+  return out;
+}
+
+/**
+ * ses@ is always copied first. A restoration card may copy exactly the
+ * builder's restoration_cc addresses after it (allowedExtra); nothing else.
+ */
+export function assertMailerOpsCcInvariant(
+  cc: readonly string[],
+  allowedExtra: readonly string[] = [],
+): void {
+  const extra = cc.slice(1);
+  if (
+    cc[0] !== MAILER_OPS_CC ||
+    extra.length !== allowedExtra.length ||
+    extra.some((address, i) => address !== allowedExtra[i])
+  ) {
     throw new SesActionError(
       409,
       mailerRefusal(
@@ -1333,13 +1362,14 @@ export async function sendMailerOpsVisibilityAction(
     sender_patterns?: unknown;
     report_recipient?: string | null;
     restoration_recipients?: unknown;
+    restoration_cc?: unknown;
   };
   const readCompanyBy = async (
     column: "id" | "slug",
     value: string,
   ): Promise<MailerOpsCompanyRow | null> => {
     const res = await client.from("makesafe_companies")
-      .select("id,slug,name,sender_patterns,report_recipient,restoration_recipients")
+      .select("id,slug,name,sender_patterns,report_recipient,restoration_recipients,restoration_cc")
       .eq(column, value)
       .maybeSingle();
     if (res.error) {
@@ -1502,8 +1532,18 @@ export async function sendMailerOpsVisibilityAction(
 
   assertMailerOpsAttachmentRoles(attachmentRoles, kind);
 
-  const cc = [MAILER_OPS_CC] as const;
-  assertMailerOpsCcInvariant(cc);
+  // A restoration card also copies the builder's restoration_cc list (owner,
+  // 12 Nov 2026); every other card copies ses@ alone.
+  const restorationCc = restorationCard
+    ? restorationCcFor(
+      companiesConsulted.flatMap((row) =>
+        Array.isArray(row.restoration_cc) ? row.restoration_cc : []
+      ),
+      recipient.to,
+    )
+    : [];
+  const cc = [MAILER_OPS_CC, ...restorationCc] as const;
+  assertMailerOpsCcInvariant(cc, restorationCc);
 
   const reportWord = restorationCard ? "restoration report" : "make-safe report";
   const operatorNote = text(args.note).slice(0, 500);

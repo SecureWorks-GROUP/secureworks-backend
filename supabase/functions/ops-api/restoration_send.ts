@@ -34,7 +34,7 @@ import {
   type SesRouteAttachment,
   type SesRouteSendResult,
 } from "./ses_graph_mail_gateway.ts";
-import { isRestorationCardForMailer } from "./ses_mailer_ops_send.ts";
+import { isRestorationCardForMailer, restorationCcFor } from "./ses_mailer_ops_send.ts";
 import { isRestorationQuoteDocument } from "./restoration_workflow_store.ts";
 import { type SesActionAuth, SesActionError } from "./ses_reporting_actions.ts";
 import type { SesRefusal } from "./ses_reporting_refusals.ts";
@@ -310,7 +310,7 @@ export async function sendRestorationDocumentAction(
   ] as const) {
     if (!value) continue;
     const res = await client.from("makesafe_companies")
-      .select("id,slug,name,restoration_recipients")
+      .select("id,slug,name,restoration_recipients,restoration_cc")
       .eq(column, value)
       .maybeSingle();
     if (res.error) {
@@ -325,7 +325,13 @@ export async function sendRestorationDocumentAction(
     companies.flatMap((row) => Array.isArray(row.restoration_recipients) ? row.restoration_recipients : []),
   );
   const to = resolveRestorationRecipient(args.to, allowed);
-  const cc = [RESTORATION_SEND_CC] as const;
+  const cc = [
+    RESTORATION_SEND_CC,
+    ...restorationCcFor(
+      companies.flatMap((row) => Array.isArray(row.restoration_cc) ? row.restoration_cc : []),
+      to,
+    ),
+  ];
 
   // ── The one named document ──────────────────────────────────────────────
   let documentId = "";

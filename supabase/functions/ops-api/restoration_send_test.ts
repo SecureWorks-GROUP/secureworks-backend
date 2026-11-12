@@ -67,6 +67,7 @@ function makeClient(opts: {
   invoiceStatus?: string;
   invoiceJobId?: string;
   recipients?: string[];
+  cc?: string[];
   quoteDoc?: boolean;
 } = {}) {
   const tables: Record<string, Row[]> = {
@@ -86,7 +87,7 @@ function makeClient(opts: {
       requesting_company_slug: "mlb",
       external_ref: "MLR-41228",
     }],
-    makesafe_companies: [{ id: "co-1", slug: "mlb", name: "ML Builders", restoration_recipients: opts.recipients ?? [AMBER] }],
+    makesafe_companies: [{ id: "co-1", slug: "mlb", name: "ML Builders", restoration_recipients: opts.recipients ?? [AMBER], restoration_cc: opts.cc ?? [] }],
     xero_invoices: [{
       xero_invoice_id: "inv-1",
       invoice_number: "INV-1891",
@@ -278,4 +279,18 @@ Deno.test("restoration send: a filed quote's number is read from its file name",
   assertEquals(restorationQuoteNumberFromFileName("Restoration Quote - SWMS-261709-Q1 - 64545.pdf"), "SWMS-261709-Q1");
   assertEquals(restorationQuoteNumberFromFileName("Restoration Quote - SWRESTO-261800-Q2.pdf"), "SWRESTO-261800-Q2");
   assertEquals(restorationQuoteNumberFromFileName("quote.pdf"), "");
+});
+
+Deno.test("restoration send: the builder's restoration_cc is copied beside ses@, never the To twice", async () => {
+  const { client } = makeClient({ cc: ["MLB.Mailer@PrimeEco.tech", AMBER, "ses@secureworkswa.com.au"] });
+  const store = new MemoryEffectStore();
+  const sends: Row[] = [];
+  const result = await sendRestorationDocumentAction(
+    client,
+    API,
+    { job_id: JOB_ID, kind: "invoice", to: AMBER, xero_invoice_id: "inv-1", dry_run: false },
+    deps(store, sends) as any,
+  );
+  assertEquals(result.cc, ["ses@secureworkswa.com.au", "mlb.mailer@primeeco.tech"]);
+  assertEquals((sends[0].route as Row).cc, ["ses@secureworkswa.com.au", "mlb.mailer@primeeco.tech"]);
 });

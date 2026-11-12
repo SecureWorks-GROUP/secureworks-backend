@@ -1605,6 +1605,10 @@ actions `restoration_*`. What must not regress:
   document per call, an AUTHORISED or PAID ACCREC invoice on that job or the
   card's restoration quote document, to a listed restoration contact with ses@
   copied, dry run by default. It never mints, authorises or changes money.
+  Both restoration routes also copy the builder's
+  `makesafe_companies.restoration_cc` (`restorationCcFor`, `20261112190000`;
+  ML Builders: its Prime mailer, so its team sees it when the coordinator is
+  away). Outbound only, like `restoration_recipients`.
 
 - **Its own board** (owner, 12 Nov 2026): restoration cards leave the ops
   make-safe board (`excludeRestoration`) for `restoration_board`, seven stages
