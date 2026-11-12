@@ -130,6 +130,7 @@ import {
 } from './invoice_email_send_claim.ts'
 import { authorizeSendInvoiceAccess } from './send_invoice_access.ts'
 import { sendRunsJobTypeRefusal, sendRunsRequestRefusal } from './send_runs_request.ts'
+import { handleUploadPlans, resolveUploadPlansJob } from './upload_plans.ts'
 import {
   decideSendQuoteAuth,
   jobOrgIdFromQuoteSendDocument,
@@ -3968,78 +3969,29 @@ serve(async (req: Request) => {
 
     // ── UPLOAD PLANS — client uploads house plans for council process ──
     if (path === 'upload-plans' && req.method === 'GET') {
-      const token = url.searchParams.get('token')
-      const jobId = url.searchParams.get('job')
-      if (!token) return new Response('Invalid link', { status: 400, headers: corsHeaders })
-
-      // Validate token
-      const { data: doc } = await sb.from('job_documents').select('job_id, accepted_at, jobs(site_address, site_suburb)').eq('share_token', token).maybeSingle()
-      // The job foreign key is a to-one join. Do not choose an arbitrary job
-      // if a malformed/ambiguous response ever returns a list instead.
-      const site: unknown = doc?.jobs
-      const addr = site && typeof site === 'object' && !Array.isArray(site)
-        ? [('site_address' in site ? site.site_address : null), ('site_suburb' in site ? site.site_suburb : null)].filter(Boolean).join(', ')
-        : ''
-
-      return new Response(buildUploadPlansPage(token, jobId || doc?.job_id || '', addr), {
+      // Only a real share token, for the job the link names (upload_plans.ts).
+      const job = await resolveUploadPlansJob(sb, url.searchParams.get('token'), url.searchParams.get('job'))
+      if (!job.ok) return new Response('Invalid link', { status: job.status, headers: corsHeaders })
+      const addr = [job.site?.site_address, job.site?.site_suburb].filter(Boolean).join(', ')
+      return new Response(buildUploadPlansPage(url.searchParams.get('token') || '', job.jobId, addr), {
         status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
       })
     }
 
     if (path === 'upload-plans' && req.method === 'POST') {
-      const body = await req.json()
-      const { token, job_id, filename, content_base64, content_type } = body
-      if (!token || !content_base64) return jsonResponse({ error: 'token and content_base64 required' }, 400, corsHeaders)
-
-      // Validate token
-      const { data: doc } = await sb.from('job_documents').select('job_id').eq('share_token', token).maybeSingle()
-      const jId = job_id || doc?.job_id
-      if (!jId) return jsonResponse({ error: 'Invalid token or job not found' }, 404, corsHeaders)
-
-      // Upload to Storage
-      try { await sb.storage.createBucket('job-documents', { public: true }) } catch { /* exists */ }
-      const filePath = `${jId}/council/house-plans/${Date.now()}-${filename || 'house-plans.pdf'}`
-      const fileBuffer = Uint8Array.from(atob(content_base64), c => c.charCodeAt(0))
-      await sb.storage.from('job-documents').upload(filePath, fileBuffer, {
-        contentType: content_type || 'application/pdf', upsert: true,
-      })
-      const { data: urlData } = sb.storage.from('job-documents').getPublicUrl(filePath)
-
-      // Business event
-      await insertCapturedEvidence(sb, {
-        event_type: 'council.plans_received',
-        entity_type: 'job',
-        entity_id: jId,
-        detail_json: { filename, source: 'upload_page', url: urlData?.publicUrl },
-      }).then(() => {}, () => {})
-
-      // Annotation
-      await sb.from('ai_annotations').insert({
-        org_id: DEFAULT_ORG_ID,
-        entity_type: 'job',
-        entity_id: jId,
-        ui_location: 'job_overview',
-        annotation_type: 'council_plans_received',
-        category: 'council',
-        title: 'House plans uploaded by client',
-        body: `${filename || 'Plans'} uploaded via acceptance page`,
-        priority: 60,
-        severity: 'info',
-        source: 'send-quote',
-        source_ref: `plans:${jId}:${Date.now()}`,
-        confidence: 1.0,
-      }).then(() => {}, () => {})
-
-      // Update council submission step 0 if exists
-      const { data: submission } = await sb.from('council_submissions')
-        .select('id, steps').eq('job_id', jId).maybeSingle()
-      if (submission && submission.steps && submission.steps[0]?.status === 'pending') {
-        const steps = [...submission.steps]
-        steps[0] = { ...steps[0], status: 'complete', completed_at: new Date().toISOString(), documents_received: [{ filename, url: urlData?.publicUrl }] }
-        await sb.from('council_submissions').update({ steps, current_step_index: 1 }).eq('id', submission.id)
-      }
-
-      return jsonResponse({ success: true, url: urlData?.publicUrl }, 200, corsHeaders)
+      // Refused (and nothing written) unless the token belongs to the job; success only once stored.
+      const result = await handleUploadPlans({
+        sb,
+        store: async (filePath, bytes, contentType) => {
+          try { await sb.storage.createBucket('job-documents', { public: true }) } catch { /* exists */ }
+          const { error } = await sb.storage.from('job-documents').upload(filePath, bytes, { contentType, upsert: true })
+          return { error }
+        },
+        publicUrl: (filePath) => sb.storage.from('job-documents').getPublicUrl(filePath)?.data?.publicUrl ?? null,
+        recordEvidence: (row) => insertCapturedEvidence(sb, row as any),
+        orgId: DEFAULT_ORG_ID,
+      }, await req.json().catch(() => null))
+      return jsonResponse(result.body, result.status, corsHeaders)
     }
 
     // ── NEIGHBOUR NUDGE SMS (T7 — gated, call via cron or manual trigger) ──
@@ -5428,7 +5380,7 @@ function buildNextStepsPage(opts: {
                     content_type: file.type || 'application/pdf'
                   })
                 }).then(function(r) { return r.json(); }).then(function(data) {
-                  if (data.error) reject(new Error(data.error));
+                  if (data.error || data.success !== true) reject(new Error(data.error || 'upload_failed'));
                   else resolve(data);
                 }).catch(reject);
               };
@@ -5669,7 +5621,7 @@ async function doUpload(files) {
         body: JSON.stringify({token:'${token}',job_id:'${jobId}',filename:f.name,content_base64:b64,content_type:f.type})
       });
       var data = await resp.json();
-      if (data.error) throw new Error(data.error);
+      if (!resp.ok || data.error || data.success !== true) throw new Error(data.error || 'upload_failed');
     }
     dz.style.display = 'none';
     document.getElementById('success').style.display = '';
