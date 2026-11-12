@@ -478,12 +478,16 @@ Deno.test("fence missing work orders: open fence jobs with 2+ crew get a draft; 
 // Owner, 3 Nov 2026: patio pay goes through the group work order (patio jobs
 // after Zoo). What the crew see: hours on a patio job are refused with the
 // reason; a patio job already paid by hours finishes on hours; commission and
-// the council fee still go through; switched off, nothing changes.
+// the council fee still go through; switched off (or with group work orders
+// switched off), nothing changes.
 Deno.test("patio pay only through the group: what the crew are told", async () => {
   const { assertPatioPaysThroughGroup } = await import("./group_work_order.ts");
-  const world = (flagOn: boolean) => {
+  const world = (flagOn: boolean, groupsOn = true) => {
     const fake = new Fake();
-    fake.rows("feature_flags").push({ flag_name: "patio_pay_group_only_v1", enabled: flagOn });
+    fake.rows("feature_flags").push(
+      { flag_name: "patio_pay_group_only_v1", enabled: flagOn },
+      { flag_name: "group_work_order_v1", enabled: groupsOn },
+    );
     fake.rows("jobs").push(
       { id: "p-new", type: "patio" }, { id: "p-grouped", type: "patio" },
       { id: "p-legacy", type: "patio" }, { id: "fence", type: "fencing" },
@@ -508,6 +512,10 @@ Deno.test("patio pay only through the group: what the crew are told", async () =
   assertEquals(await refused(world(true), [{ job_id: "p-new", line_type: "commission", description: "Commission" }]), null);
   assertEquals(await refused(world(true), [{ job_id: "p-new", line_type: "labour", description: "Council Approval" }]), null);
   assertEquals(await refused(world(false), hours("p-new")), null);
+  // With group work orders themselves switched off nobody can open or join a
+  // group, so the patio rule refuses nothing (a patio trade must still be paid).
+  assertEquals(await refused(world(true, false), hours("p-new")), null);
+  assertEquals(await refused(world(true, false), hours("p-grouped")), null);
   // The office is asked for a work order only when there is none; a failed
   // ask still gives the crew the same refusal.
   const asked: string[] = [];
@@ -518,4 +526,40 @@ Deno.test("patio pay only through the group: what the crew are told", async () =
   assertEquals((await withAsk(hours("p-new")))?.code, "patio_pay_group_only");
   assertEquals((await withAsk(hours("p-grouped")))?.code, "patio_pay_group_only");
   assertEquals(asked, ["p-new"]);
+});
+
+Deno.test("patio pay only through the group: a failed read of the group switch refuses, never reads as off", async () => {
+  const { assertPatioPaysThroughGroup } = await import("./group_work_order.ts");
+  const client = {
+    from(table: string) {
+      let flagName = "";
+      const builder: any = {
+        select: () => builder,
+        eq: (column: string, value: unknown) => {
+          if (column === "flag_name") flagName = String(value);
+          return builder;
+        },
+        in: () => builder,
+        maybeSingle: () => {
+          if (table !== "feature_flags") return Promise.resolve({ data: null, error: null });
+          if (flagName === "patio_pay_group_only_v1") {
+            return Promise.resolve({ data: { enabled: true }, error: null });
+          }
+          return Promise.resolve({ data: null, error: { message: "feature_flags unreadable" } });
+        },
+        then: (resolve: (v: unknown) => unknown) =>
+          Promise.resolve({ data: [{ id: "p-new", type: "patio" }], error: null }).then(resolve),
+      };
+      return builder;
+    },
+  };
+  let caught: any = null;
+  try {
+    await assertPatioPaysThroughGroup(client, [{ job_id: "p-new", line_type: "labour", description: "Framing" }]);
+  } catch (e) {
+    caught = e;
+  }
+  assert(caught, "an unreadable group switch must not open the hours door");
+  assertEquals(caught.code, "group_work_order_unreadable");
+  assertEquals(caught.message, "Could not check whether group work orders are on.");
 });
