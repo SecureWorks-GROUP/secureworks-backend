@@ -38,6 +38,7 @@ import {
   describeRestorationPlan,
   markRestorationQuoteSent,
   readRestorationPlan,
+  restorationScopeText,
   restorationInvoiceHandoff,
   type RestorationPlan,
   restorationPlanForStorage,
@@ -264,12 +265,7 @@ async function loadRestorationJob(
     readFailed("The job's builder details", detailResponse.error);
   }
   const detail = detailResponse.data || null;
-  const metadata = record(job.metadata);
-  const scopeText = [
-    text(job.notes),
-    text(metadata.special_instructions),
-    text(detail?.special_instructions),
-  ].filter(Boolean).join("\n");
+  const scopeText = restorationScopeText(job, detail);
   const { plan, stored } = readRestorationPlan(
     await withFiledQuoteContent(client, job, options),
     scopeText,
