@@ -2,14 +2,17 @@ import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, r
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
 import { SelfAllocationRefusal, selfAllocateForInvoice } from './trade_self_allocation.ts'
 import {
+  isWorkOrderInvoiceItem,
   loadTradeInvoiceJobModes,
   parseTradeInvoiceJobModeIds,
   TradeInvoiceJobModesRequestError,
   TradeInvoiceModeReadError,
   type TradeInvoiceJobMode,
+  workOrderAmountRefusal,
 } from './trade_invoice_mode.ts'
 import {
   assertTradeMayBillExtraJobs,
+  commissionLinesTotalEx,
   ExtraJobBillingRefusal,
   extraLineType,
   normaliseExtraItem,
@@ -651,6 +654,7 @@ import {
 } from './wo_labour_fanout.ts'
 import {
   assertExistingTradeInvoiceXeroBill,
+  assertTradeInvoiceSuperBaseMatchesLines,
   calculateTradeInvoiceMoney,
   checkpointAndAssertReturnedTradeInvoiceXeroSplit,
   presentTradeInvoiceMoney,
@@ -2253,9 +2257,12 @@ function tradeInvoiceMoney(
   gstOn: unknown,
   earningsDate: unknown,
   superBasis: unknown = null,
+  // The invoice's commission lines, ex GST (commissionLinesTotalEx): no super
+  // on commission (Marnin, 12 Nov 2026). 0 leaves super on the whole gross.
+  commissionEx: unknown = 0,
 ): TradeInvoiceMoney {
   try {
-    return calculateTradeInvoiceMoney({ grossEarned, gstOn, earningsDate, superBasis })
+    return calculateTradeInvoiceMoney({ grossEarned, gstOn, earningsDate, superBasis, commissionEx })
   } catch (error) {
     return tradeInvoiceMoneyApiError(error)
   }
@@ -2287,6 +2294,11 @@ function tradeInvoiceMoneyFields(money: TradeInvoiceMoney) {
     // Only an employer-super group share carries the column, so ordinary
     // invoices insert exactly as before.
     ...(money.super_basis ? { super_basis: money.super_basis } : {}),
+    // Only an invoice with commission carries its super base (no super on
+    // commission, 20261112090000); every other invoice inserts as before.
+    ...(money.super_base_ex !== null && money.super_base_ex !== undefined
+      ? { super_base_ex: money.super_base_ex }
+      : {}),
   }
 }
 
@@ -2634,6 +2646,13 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
   const expectedSubtotal = invMoney.gross_earned
   if (Math.abs(computedSubtotal - expectedSubtotal) > 0.01) {
     throw new Error('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
+  }
+  // A stored super base must still be the lines less their commission. An
+  // invoice with none was priced with super on its whole gross and keeps it.
+  try {
+    assertTradeInvoiceSuperBaseMatchesLines(invMoney, commissionLinesTotalEx(reviewLines))
+  } catch (error) {
+    tradeInvoiceMoneyApiError(error)
   }
   const xeroTax = _tradeInvoiceXeroTax(invMoney.gst_amount)
 
@@ -14479,6 +14498,56 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   }
                   throw new ApiError(error?.message || 'Could not check the jobs on this invoice', 500)
                 })
+
+                // An approved job work order is billed at its agreed labour
+                // (Marnin, 12 Nov 2026). Every work-order line on such a job
+                // must carry exactly that amount, once, or nothing is saved.
+                // The agreed figure comes from the same rule my_hours shows
+                // (trade_invoice_mode.ts). Hourly lines are not checked here.
+                const woAmountLines = extraItemsIn.filter((item: any) =>
+                  item &&
+                  item.source !== 'clock' && item._source !== 'clock' && item.source !== 'server_labour' &&
+                  !isGroupShareInvoiceItem(item) && !item.group_share_id &&
+                  isWorkOrderInvoiceItem(item)
+                ).map((item: any) => {
+                  const job = item.job_id ? (jobById[item.job_id] || null) : (jobByNumber[item.job_number] || null)
+                  return job?.id
+                    ? { ref: String(job.job_number || item.job_number || job.id), jobId: String(job.id), woAllocated: item.wo_allocated }
+                    : null
+                }).filter(Boolean) as Array<{ ref: string; jobId: string; woAllocated: unknown }>
+                if (woAmountLines.length > 0) {
+                  let woModes: Map<string, TradeInvoiceJobMode>
+                  try {
+                    const modes = await loadTradeInvoiceJobModes(client, {
+                      tradeId: tradeUser.id,
+                      orgId: tradeUser.orgId,
+                      jobIds: woAmountLines.map((line) => line.jobId),
+                      jobVertical: _jobVertical,
+                      normaliseManagedVerticals: _normalizeManagedVerticals,
+                    })
+                    woModes = new Map(modes.jobs.map((m) => [m.job_id, m]))
+                  } catch (error) {
+                    if (error instanceof TradeInvoiceModeReadError) {
+                      console.error('[ops-api] generate_trade_invoice: agreed work order unreadable:', error.message)
+                      const message = 'This invoice was not saved. The agreed work order amounts could not be checked. Try again in a minute.'
+                      throw new ApiError(message, 503, {
+                        ok: false, success: false, saved: false,
+                        code: 'invoice_mode_unavailable', error: message, userMessage: message,
+                      })
+                    }
+                    throw error
+                  }
+                  const woRefusal = workOrderAmountRefusal(woAmountLines, woModes)
+                  if (woRefusal) {
+                    throw new ApiError(woRefusal.message, 409, {
+                      ok: false, success: false, saved: false,
+                      code: woRefusal.code,
+                      jobs: woRefusal.jobs,
+                      error: woRefusal.message,
+                      userMessage: woRefusal.message,
+                    })
+                  }
+                }
               }
 
               // double-pay guard removed per Marnin 2026-06-18 — the office verifies every invoice
@@ -14695,6 +14764,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const labourSubtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
             const subtotal = labourSubtotal + extraSubtotal
             const invoiceEarningsDate = weekEnd || new Date().toISOString().slice(0, 10)
+            // No super on commission (Marnin, 12 Nov 2026): the commission lines
+            // stay in gross but come out of the super base.
+            const invoiceCommissionEx = commissionLinesTotalEx([
+              ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour' })),
+              ...extraLineItems,
+            ])
             // Recurring deduction (for example Ute hire): taken off the amount
             // payable of a weekly invoice, after super and GST. The lines,
             // subtotal, super and GST below are untouched by it. An invoice
@@ -14702,7 +14777,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // trade has a deduction that week.
             const { money, decision: recurringDeduction } = await applyTradeRecurringDeduction(
               client,
-              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, groupInvoiceBasis.superBasis),
+              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, groupInvoiceBasis.superBasis, invoiceCommissionEx),
               {
                 userId: tradeUser.id,
                 weekStart: week_start || null,
@@ -56789,6 +56864,11 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     row.invoice_mode = mode?.invoice_mode ?? null
     row.invoice_mode_reason = mode?.invoice_mode_reason ?? null
     row.can_claim_commission = mode ? mode.can_claim_commission : null
+    // The trade's own pay for the job: the approved job work order's agreed
+    // labour, which the trade bills exactly (Marnin, 12 Nov 2026). Null when
+    // there is none or it could not be read.
+    row.work_order_agreed_ex = mode?.work_order_agreed_ex ?? null
+    row.job_work_order_id = mode?.job_work_order_id ?? null
   }
   for (const a of enriched) stampInvoiceMode(a, String(a.jobs?.id || ''))
   for (const r of groupRouteJobs) stampInvoiceMode(r, String(r.job_id || ''))
@@ -56849,7 +56929,7 @@ export async function submitTradeInvoice(_client: any, _userId: string, _body: a
 // xero_bill_total / xero_adjustments_ex / xero_adjustment_lines: what Xero pays
 // and the office's changes to the bill in Xero (Group WO V10, migration
 // 20261103140000; apply it before deploying this).
-const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, xero_bill_status, amount_paid, paid_at, status, submitted_at, created_at, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines'
+const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, super_base_ex, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, xero_bill_status, amount_paid, paid_at, status, submitted_at, created_at, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines'
 
 // presentTradeInvoice throws MONEY_SPLIT_INVALID on a legacy row whose split
 // does not reconcile. One such row is live; it used to 500 the whole list.
@@ -57044,7 +57124,7 @@ export const _listTradeInvoicesForTest = listTradeInvoices
 /** Most stuck invoices (no Xero bill) one Trade Bills read adds. */
 export const STUCK_TRADE_BILLS_CAP = 200
 
-const TRADE_BILLS_COLUMNS = 'id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, xero_bill_status, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)'
+const TRADE_BILLS_COLUMNS = 'id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, super_base_ex, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, xero_bill_status, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)'
 
 /** Weekly and no-week invoices in one list, newest first by week, else by day made. */
 export function mergeTradeBillRows(weekly: any[], noWeek: any[], stuck: any[] = []): any[] {

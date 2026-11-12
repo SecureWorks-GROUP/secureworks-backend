@@ -77,6 +77,20 @@ export function isCommissionLine(lineType: string): boolean {
   return String(lineType || "").trim().toLowerCase() === "commission";
 }
 
+// The commission lines of an invoice, ex GST: what carries no super (Marnin,
+// 12 Nov 2026). Reads each line's saved line_type through isCommissionLine,
+// so a saved line and the line about to be saved are read the same way.
+export function commissionLinesTotalEx(
+  lines: ReadonlyArray<{ line_type?: unknown; line_total_ex?: unknown }>,
+): number {
+  const cents = (lines || []).reduce((sum, line) => {
+    if (!isCommissionLine(String(line?.line_type ?? ""))) return sum;
+    const amount = Number(line?.line_total_ex ?? 0);
+    return Number.isFinite(amount) ? sum + Math.round(amount * 100) : sum;
+  }, 0);
+  return cents / 100;
+}
+
 export function extraJobBillingRule(c: ExtraJobBillingCase): string | null {
   return EXTRA_JOB_BILLING_RULES.find((rule) => rule.allows(c))?.name ?? null;
 }

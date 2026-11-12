@@ -4623,7 +4623,12 @@ minus line. Captain 2026-09-18: `super_amount` stays 12% of gross (bookkeeper /
 fund); cash withheld from the trade is 6%; the company contributes the other
 6%. On $1,000: super $120, worker $60, company $60, `net_pay` $940, company
 total out $1,060. `total_inc` stays `gross + GST` (supply face, not company
-cost). Historical 12% carve-out rows remain valid and are not rewritten. Once
+cost). Historical 12% carve-out rows remain valid and are not rewritten.
+No super on commission (Marnin, 12 Nov 2026): commission lines stay in gross
+but leave the super base (`super_base_ex`, stored only on an invoice with
+commission; null = whole gross, as on every older row, which stays valid).
+Every read that validates money must select `super_base_ex`; migration
+`20261112090000` also patches the group unfreeze. Once
 Xero creates a bill, its ID is checkpointed locally before returned-line
 reconciliation; only a reconciled split may advance to `pushed_to_xero`. Every
 create/retry uses the persisted invoice ID as its Xero idempotency key, and any
@@ -4884,7 +4889,12 @@ never allows it, refusal `commission_not_allowed`). The saved weekly draft is
 on unless `trade_details.runningInvoiceDraft` is exactly false
 (`runningInvoiceDraftEnabled`, one helper). `submit_trade_invoice` is retired:
 410 `use_weekly_invoice` before any read. Patio hours are refused only while
-`patio_pay_group_only_v1` AND `group_work_order_v1` are on. Contract:
+`patio_pay_group_only_v1` AND `group_work_order_v1` are on. A work-order job
+with an APPROVED job work order bills its `agreed_labour_ex` (Marnin,
+12 Nov 2026): the mode answer carries `work_order_agreed_ex` /
+`job_work_order_id`, and `generate_trade_invoice` refuses any other
+work-order amount, or a second work-order line on that job, before any write
+(409 `work_order_amount_not_agreed`, `workOrderAmountRefusal`). Contract:
 `docs/trade-invoice-mode-v1.md`.
 
 ## A Recurring Deduction Comes Off The Payable, Never The Gross

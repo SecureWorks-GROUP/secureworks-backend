@@ -8,6 +8,9 @@
  *   5. trade_invoice_job_modes through the REAL request handler (front door,
  *      outer and inner dispatch lists), and self_allocate_for_invoice passing
  *      the front door for a plain trade.
+ *   6. The agreed work-order amount (Marnin, 12 Nov 2026): a work-order job
+ *      with an approved job work order says its agreed labour, and the pure
+ *      refusal generate_trade_invoice applies.
  * Every name, number and id below is made up.
  */
 // deno-lint-ignore-file no-explicit-any
@@ -21,11 +24,13 @@ import {
 } from "./index.ts";
 import {
   decideTradeInvoiceMode,
+  isWorkOrderInvoiceItem,
   loadTradeInvoiceJobModes,
   parseTradeInvoiceJobModeIds,
   TRADE_INVOICE_JOB_MODES_MAX,
   TradeInvoiceJobModesRequestError,
   TradeInvoiceModeReadError,
+  workOrderAmountRefusal,
 } from "./trade_invoice_mode.ts";
 
 const TRADE = "7a1e0a52-0000-4000-8000-00000000aa01";
@@ -69,12 +74,25 @@ const GROUPS = [
   { job_id: VOID_GROUP_PATIO, status: "void" },
 ];
 
+const WO_FENCE = "7a1e0a52-0000-4000-8000-00000000c001";
+// Job work orders: FENCE has an approved one with its agreed labour; PATIO
+// has an approved one but is a group job (no agreed amount for the trade);
+// GROUPED_FENCE's is still a draft; a crew work order on FENCE is not a job
+// work order and is never read as one.
+const WORK_ORDERS = [
+  { id: WO_FENCE, org_id: ORG, job_id: FENCE, kind: "job", status: "approved", agreed_labour_ex: "1850.50" },
+  { id: "7a1e0a52-0000-4000-8000-00000000c002", org_id: ORG, job_id: PATIO, kind: "job", status: "approved", agreed_labour_ex: 900 },
+  { id: "7a1e0a52-0000-4000-8000-00000000c003", org_id: ORG, job_id: GROUPED_FENCE, kind: "job", status: "draft", agreed_labour_ex: 700 },
+  { id: "7a1e0a52-0000-4000-8000-00000000c004", org_id: ORG, job_id: FENCE, kind: "crew", status: "accepted", agreed_labour_ex: null },
+];
+
 type World = {
   invoiceType?: string;
   managedVerticals?: string[];
   invoiceAnyJob?: unknown;
   userOrg?: string;
-  fail?: "users" | "jobs" | "group_work_orders";
+  fail?: "users" | "jobs" | "group_work_orders" | "work_orders";
+  workOrders?: any[];
 };
 
 function fakeClient(world: World = {}) {
@@ -95,6 +113,7 @@ function fakeClient(world: World = {}) {
         }
         if (table === "jobs") return JOBS;
         if (table === "group_work_orders") return GROUPS;
+        if (table === "work_orders") return world.workOrders ?? WORK_ORDERS;
         return [];
       };
       const matching = () =>
@@ -260,7 +279,7 @@ Deno.test("loader: commission only on a job they created, a division they manage
 });
 
 Deno.test("loader: a failed read throws, never reads as no group or hourly", async () => {
-  for (const fail of ["users", "jobs", "group_work_orders"] as const) {
+  for (const fail of ["users", "jobs", "group_work_orders", "work_orders"] as const) {
     await assertRejects(() => load(fakeClient({ fail }), [FENCE]), TradeInvoiceModeReadError);
   }
   // The caller's company must be the trade's own.
@@ -318,6 +337,7 @@ function hoursClient(world: { failJobs?: boolean } = {}) {
     ],
     jobs: JOBS,
     group_work_orders: [{ id: "group-1", ...GROUPS[0] }],
+    work_orders: WORK_ORDERS,
     trade_rates: [{ hourly_rate: 50, effective_from: "2026-01-01" }],
   };
   return {
@@ -375,6 +395,15 @@ Deno.test("my_hours: every card and group job says how it is invoiced and whethe
     [cards["card-makesafe"].invoice_mode, cards["card-makesafe"].can_claim_commission],
     ["hourly", true],
   );
+  // The fencing job's approved job work order: the trade's own agreed pay.
+  assertEquals(
+    [cards["card-fence"].work_order_agreed_ex, cards["card-fence"].job_work_order_id],
+    [1850.5, WO_FENCE],
+  );
+  assertEquals(
+    [cards["card-makesafe"].work_order_agreed_ex, cards["card-makesafe"].job_work_order_id],
+    [null, null],
+  );
   // The grouped job is a group route, not an hours card, and says so too.
   assert(!cards["card-grouped"]);
   const route = out.group_route_jobs.find((r: any) => r.job_id === GROUPED_FENCE);
@@ -387,6 +416,7 @@ Deno.test("my_hours: a failed mode read never fails the hours view and never gue
   assert(out.assignments.length > 0);
   for (const a of out.assignments) {
     assertEquals([a.invoice_mode, a.invoice_mode_reason, a.can_claim_commission], [null, null, null]);
+    assertEquals([a.work_order_agreed_ex, a.job_work_order_id], [null, null]);
   }
   assertEquals(out.total_hours, 8);
 });
@@ -447,6 +477,15 @@ async function call(
       const jobs = values("job_id");
       return reply(GROUPS.filter((row) => !jobs || jobs.includes(row.job_id)));
     }
+    if (table === "work_orders") {
+      const jobs = values("job_id");
+      const kind = values("kind");
+      const status = values("status");
+      return reply(WORK_ORDERS.filter((row) =>
+        (!jobs || jobs.includes(row.job_id)) && (!kind || kind.includes(row.kind)) &&
+        (!status || status.includes(row.status))
+      ));
+    }
     return reply([]);
   }) as typeof fetch;
   try {
@@ -484,9 +523,30 @@ handlerTest("trade_invoice_job_modes: a plain trade gets each job's mode; anothe
     assertEquals(out.status, 200, JSON.stringify(out.body));
     assertEquals(out.body.ok, true);
     assertEquals(out.body.jobs, [
-      { job_id: FENCE, invoice_mode: "work_order", invoice_mode_reason: "fencing_job", can_claim_commission: false },
-      { job_id: PATIO, invoice_mode: "group_work_order", invoice_mode_reason: "patio_job", can_claim_commission: false },
-      { job_id: CREATED_MAKESAFE, invoice_mode: "hourly", invoice_mode_reason: "other_job", can_claim_commission: true },
+      {
+        job_id: FENCE,
+        invoice_mode: "work_order",
+        invoice_mode_reason: "fencing_job",
+        can_claim_commission: false,
+        work_order_agreed_ex: 1850.5,
+        job_work_order_id: WO_FENCE,
+      },
+      {
+        job_id: PATIO,
+        invoice_mode: "group_work_order",
+        invoice_mode_reason: "patio_job",
+        can_claim_commission: false,
+        work_order_agreed_ex: null,
+        job_work_order_id: null,
+      },
+      {
+        job_id: CREATED_MAKESAFE,
+        invoice_mode: "hourly",
+        invoice_mode_reason: "other_job",
+        can_claim_commission: true,
+        work_order_agreed_ex: null,
+        job_work_order_id: null,
+      },
     ]);
     assertEquals(out.body.not_found, [FOREIGN]);
   }
@@ -525,4 +585,81 @@ handlerTest("submit_trade_invoice: retired, 410 use_weekly_invoice", async () =>
   assertEquals(out.status, 410, JSON.stringify(out.body));
   assertEquals(out.body.code, "use_weekly_invoice");
   assertEquals(out.body.error, "Send your invoice from the Weekly Invoice in the Trade App.");
+});
+
+// ── 6. The agreed work-order amount ─────────────────────────────────────────
+
+Deno.test("loader: a work-order job with an approved job work order says its agreed labour", async () => {
+  const client = fakeClient();
+  const out = await load(client, [FENCE, PATIO, GROUPED_FENCE, MAKESAFE]);
+  const byJob = Object.fromEntries(out.jobs.map((j) => [j.job_id, [j.work_order_agreed_ex, j.job_work_order_id]]));
+  assertEquals(byJob, {
+    [FENCE]: [1850.5, WO_FENCE],
+    // A group job: the agreed labour is the group's pot, never one trade's.
+    [PATIO]: [null, null],
+    // A draft work order agrees nothing.
+    [GROUPED_FENCE]: [null, null],
+    [MAKESAFE]: [null, null],
+  });
+  // Only work-order jobs are asked about, only approved job work orders, in
+  // the trade's company.
+  const woReads = client.reads.filter((r) => r.table === "work_orders");
+  assertEquals(woReads.length, 1);
+  const filters = woReads[0].filters;
+  assert(filters.some(([op, col, val]) => op === "eq" && col === "kind" && val === "job"));
+  assert(filters.some(([op, col, val]) => op === "eq" && col === "status" && val === "approved"));
+  assert(filters.some(([op, col, val]) => op === "eq" && col === "org_id" && val === ORG));
+  assertEquals(filters.find(([op, col]) => op === "in" && col === "job_id")?.[2], [FENCE]);
+  // No work-order job: the work orders are not read at all.
+  const hourlyOnly = fakeClient();
+  await load(hourlyOnly, [MAKESAFE]);
+  assertEquals(hourlyOnly.reads.filter((r) => r.table === "work_orders"), []);
+});
+
+Deno.test("loader: a per-metre trade on a job with an approved job work order bills its agreed labour", async () => {
+  const out = await load(fakeClient({ invoiceType: "per_metre" }), [FENCE]);
+  assertEquals([out.jobs[0].invoice_mode, out.jobs[0].work_order_agreed_ex], ["work_order", 1850.5]);
+});
+
+Deno.test("loader: two approved job work orders on one job are never guessed between", async () => {
+  const twice = [
+    ...WORK_ORDERS,
+    { id: "7a1e0a52-0000-4000-8000-00000000c009", org_id: ORG, job_id: FENCE, kind: "job", status: "approved", agreed_labour_ex: 10 },
+  ];
+  await assertRejects(() => load(fakeClient({ workOrders: twice }), [FENCE]), TradeInvoiceModeReadError);
+});
+
+Deno.test("work-order line: a work-order row, labour lines or a work-order type; nothing else", () => {
+  assert(isWorkOrderInvoiceItem({ row_type: "work_order", type: "Work Order" }));
+  assert(isWorkOrderInvoiceItem({ type: "Labour", wo_labour_lines: [{ trade_name: "A", hours: 1, rate: 1 }] }));
+  assert(isWorkOrderInvoiceItem({ type: " Work Order " }));
+  assert(isWorkOrderInvoiceItem({ type: "work_order" }));
+  for (const item of [{ type: "Labour" }, { type: "Commission", row_type: "commission" }, { type: "Travel" }, { wo_labour_lines: [] }, null]) {
+    assert(!isWorkOrderInvoiceItem(item), JSON.stringify(item));
+  }
+});
+
+Deno.test("agreed amount: billed at the agreed figure passes, any other figure is refused by job", () => {
+  const modes = new Map([
+    [FENCE, { work_order_agreed_ex: 1850.5 }],
+    [MAKESAFE, { work_order_agreed_ex: null }],
+  ]);
+  assertEquals(workOrderAmountRefusal([{ ref: "SWF-123", jobId: FENCE, woAllocated: 1850.5 }], modes), null);
+  assertEquals(workOrderAmountRefusal([{ ref: "SWF-123", jobId: FENCE, woAllocated: "1850.495" }], modes), null);
+  // No agreed work order: the trade's figure stands, as before.
+  assertEquals(workOrderAmountRefusal([{ ref: "ZZ-1", jobId: MAKESAFE, woAllocated: 99 }], modes), null);
+  const over = workOrderAmountRefusal([{ ref: "SWF-123", jobId: FENCE, woAllocated: 2000 }], modes);
+  assertEquals(over?.code, "work_order_amount_not_agreed");
+  assertEquals(
+    over?.message,
+    "Job SWF-123 has an agreed work order of $1,850.50. Bill it at that amount, or ask the office.",
+  );
+  assertEquals(over?.jobs, [{ job: "SWF-123", job_id: FENCE, agreed_ex: 1850.5, billed_ex: 2000 }]);
+  // Missing amount, and a second work-order line on the same job.
+  assertEquals(workOrderAmountRefusal([{ ref: "SWF-123", jobId: FENCE, woAllocated: null }], modes)?.jobs[0].billed_ex, null);
+  const twice = workOrderAmountRefusal([
+    { ref: "SWF-123", jobId: FENCE, woAllocated: 1850.5 },
+    { ref: "SWF-123", jobId: FENCE, woAllocated: 1850.5 },
+  ], modes);
+  assertEquals(twice?.jobs.length, 1);
 });
