@@ -113,6 +113,7 @@ import {
 } from '../_shared/release_packet/build_v2_augmentation.ts'
 import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from './quote_run.ts'
 import { depositHeldMessage, namedPartyDeposit, neighbourLetter, readAcceptedRelease, runDepositFromRelease } from './accepted_deposit.ts'
+import { sendCouncilKickoffEmail } from './council_kickoff_email.ts'
 import { setJobPriceToAcceptedQuote } from './accepted_job_price.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
@@ -2526,10 +2527,6 @@ serve(async (req: Request) => {
         let councilSubmissionId: string | null = null
         const isPatio = job?.type === 'patio' || job?.job_number?.startsWith('SWP')
         if (isPatio && job) {
-          // This projection currently omits a job email. Preserve its existing
-          // contact fallback without adding a new recipient lookup.
-          const councilJobEmail = 'client_email' in job && typeof job.client_email === 'string'
-            ? job.client_email : ''
           try {
             const councilRes = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=create_council_submission`, {
               method: 'POST',
@@ -2545,44 +2542,24 @@ serve(async (req: Request) => {
             console.log('[send-quote] Council auto-create failed (non-blocking):', (e as Error).message)
           }
 
-          // Send "Next Steps & House Plans" email (fire-and-forget — don't block acceptance page)
+          // Send "Next Steps & House Plans" email (fire-and-forget — don't block acceptance page).
+          // To the address the quote itself was sent to; recorded 'sent' only when Resend accepts it
+          // (council_kickoff_email.ts).
           {
             const clientFirst = (acceptorName || '').split(' ')[0] || 'there'
             const uploadUrl = `${BASE_URL}/functions/v1/send-quote/upload-plans?token=${token}&job=${job.id}`
-            const replyToCouncil = councilSubmissionId
-              ? `council+${job.job_number}+CS${councilSubmissionId.slice(0, 8)}+S0@secureworksgroup.app`
-              : `approvals@secureworksgroup.app`
-
-            fetch('https://api.resend.com/emails', {
-              method: 'POST',
-              headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                from: 'SecureWorks Group <approvals@secureworksgroup.app>',
-                reply_to: getClientReplyTo(job?.type, job?.job_number),
-                to: [councilJobEmail || doc.job_contacts?.client_email || ''],
-                subject: `Your Patio Project - Next Steps & What We Need From You`,
-                html: buildCouncilKickoffEmail(clientFirst, job.site_address || '', job.site_suburb || '', uploadUrl),
-              }),
-            })
-            .then(() => {
-              console.log(`[send-quote] Council kickoff email sent for ${job.job_number}`)
-              logEmailToGHL(job?.ghl_contact_id, 'Council Kickoff - Next Steps & House Plans', councilJobEmail)
-              // Record in po_communications for council thread
-              if (councilSubmissionId) {
-                sb.from('po_communications').insert({
-                  job_id: job.id,
-                  direction: 'outbound',
-                  from_email: 'approvals@secureworksgroup.app',
-                  to_email: councilJobEmail,
-                  subject: 'Your Patio Project - Next Steps & What We Need From You',
-                  body_text: 'House plans request sent to client on acceptance',
-                  communication_type: 'council',
-                  council_submission_id: councilSubmissionId,
-                  council_step_index: 0,
-                  sent_at: new Date().toISOString(),
-                  delivery_status: 'sent',
-                }).then(() => {}, () => {})
-              }
+            sendCouncilKickoffEmail({
+              sb,
+              fetch,
+              resendApiKey: RESEND_API_KEY,
+              logGhl: (subject, recipient) => logEmailToGHL(job?.ghl_contact_id, subject, recipient),
+            }, {
+              jobId: job.id,
+              jobNumber: job.job_number,
+              documentId: doc.id,
+              councilSubmissionId,
+              replyTo: getClientReplyTo(job?.type, job?.job_number),
+              html: buildCouncilKickoffEmail(clientFirst, job.site_address || '', job.site_suburb || '', uploadUrl),
             })
             .catch((e: Error) => console.log('[send-quote] Council email failed (non-blocking):', e.message))
           }
