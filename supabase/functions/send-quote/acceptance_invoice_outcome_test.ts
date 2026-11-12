@@ -6,6 +6,7 @@ import {
   ACCEPT_INVOICE_PENDING_WORDS,
   ACCEPTANCE_INVOICE_ALERT_TYPE,
   acceptanceInvoiceAlertRow,
+  acceptanceInvoiceRequestHeaders,
   acceptanceInvoiceOutcome,
   alertAcceptanceInvoiceFailed,
   depositPaymentLine,
@@ -93,6 +94,37 @@ Deno.test('requestAcceptanceInvoice: a thrown call or unreadable reply is unknow
   assertEquals(failure(refused).created, 'no')
   const ok = await requestAcceptanceInvoice(() => Promise.resolve(Response.json({ success: true, invoice_number: 'INV-1' })), 'u', {})
   assert(ok.ok)
+})
+
+Deno.test('requestAcceptanceInvoice: the shared headers are admitted by ops-api, the plain SW_API_KEY is refused', async () => {
+  const serviceKey = 'service-role-key'
+  // A fake ops-api send_acceptance_invoice that, like ops-api since #667, admits the
+  // service-role Bearer and refuses the plain static key for operator actions.
+  const fakeOpsApi = (_url: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers)
+    if (headers.get('authorization') === `Bearer ${serviceKey}`) {
+      return Promise.resolve(Response.json({ success: true, invoice_number: 'INV-RUN-1' }))
+    }
+    return Promise.resolve(Response.json({ error: 'operator_access_required' }, { status: 401 }))
+  }
+  const body = JSON.stringify({ job_id: 'job-uuid', run_label: 'RHS' })
+
+  const admitted = await requestAcceptanceInvoice(fakeOpsApi, 'u', {
+    method: 'POST',
+    headers: acceptanceInvoiceRequestHeaders(serviceKey),
+    body,
+  })
+  assert(admitted.ok)
+  assertEquals(admitted.result.invoice_number, 'INV-RUN-1')
+
+  // The run branch's old credential: refused, and read as a failure, never a success.
+  const refused = await requestAcceptanceInvoice(fakeOpsApi, 'u', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': 'sw-api-key' },
+    body,
+  })
+  assertEquals(failure(refused).reason, 'operator_access_required')
+  assertEquals(failure(refused).created, 'unknown')
 })
 
 Deno.test('a failed invoice writes one office alert naming the job and the reason', async () => {

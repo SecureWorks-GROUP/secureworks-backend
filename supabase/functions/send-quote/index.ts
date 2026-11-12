@@ -116,6 +116,7 @@ import { depositHeldMessage, namedPartyDeposit, neighbourLetter, readAcceptedRel
 import { buildCouncilKickoffEmail, councilKickoffApplies, sendCouncilKickoffEmail } from './council_kickoff_email.ts'
 import { setJobPriceToAcceptedQuote } from './accepted_job_price.ts'
 import {
+  acceptanceInvoiceRequestHeaders,
   alertAcceptanceInvoiceFailed,
   depositPaymentLine,
   heldDepositFailure,
@@ -2196,7 +2197,6 @@ serve(async (req: Request) => {
           }).then(() => {}, () => {})
 
           // Create deposit invoices via ops-api for each party
-          const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 
           // Get all contacts for this run
           const { data: contacts } = await sb.from('job_contacts')
@@ -2257,7 +2257,7 @@ serve(async (req: Request) => {
 
             const outcome = await requestAcceptanceInvoice(fetch, `${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
+              headers: acceptanceInvoiceRequestHeaders(SUPABASE_SERVICE_KEY),
               body: JSON.stringify({
                 job_id: doc.job_id,
                 job_contact_id: contact.id,
@@ -2554,10 +2554,7 @@ serve(async (req: Request) => {
               ? heldDepositFailure(depositHeld)
               : await requestAcceptanceInvoice(fetch, `${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
                 method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-                },
+                headers: acceptanceInvoiceRequestHeaders(SUPABASE_SERVICE_KEY),
                 body: JSON.stringify(invoiceBody),
               })
             if (outcome.ok) {
