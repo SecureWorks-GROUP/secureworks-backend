@@ -1160,6 +1160,8 @@ export interface SendMailerOpsVisibilityArgs {
   to?: string | null;
   /** Optional preferred makesafe_report document id. */
   job_document_id?: string | null;
+  /** Optional plain line the operator adds under the body (e.g. "This replaces the report sent earlier"). */
+  note?: string | null;
   /**
    * The ONLY deliberate retry coordinate. A Graph failure parks the ledger row
    * on `unknown`; naming a new attempt key mints a new operation_key so the
@@ -1503,13 +1505,15 @@ export async function sendMailerOpsVisibilityAction(
   const cc = [MAILER_OPS_CC] as const;
   assertMailerOpsCcInvariant(cc);
 
-  const bodyText = kind === "report"
-    ? `Please find attached the make-safe report for ${
+  const reportWord = restorationCard ? "restoration report" : "make-safe report";
+  const operatorNote = text(args.note).slice(0, 500);
+  const bodyText = (kind === "report"
+    ? `Please find attached the ${reportWord} for ${
       text(job.job_number) || jobId
     }.`
     : `Please find attached site photo evidence for ${
       text(job.job_number) || jobId
-    }.`;
+    }.`) + (operatorNote ? `\n\n${operatorNote}` : "");
 
   const routePayload = {
     route_kind: kind,

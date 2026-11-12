@@ -361,7 +361,10 @@ function builderPurchaseOrder(job: any): string | null {
 
 function builderReference(job: any, detail: any): string | null {
   const metadata = record(job.metadata);
-  return text(metadata.builder_claim_ref) || text(detail?.external_ref) ||
+  // The detail row's external_ref is the builder's own job reference (MLR-41228);
+  // builder_claim_ref can hold only the PO digits on an MLR- card, so it is the
+  // fallback, never the first answer.
+  return text(detail?.external_ref) || text(metadata.builder_claim_ref) ||
     text(metadata.external_ref) || null;
 }
 

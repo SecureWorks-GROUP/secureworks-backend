@@ -12198,6 +12198,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             kind: mailerKind,
             to: body.to,
             job_document_id: body.job_document_id,
+            note: body.note,
             attempt_key: body.attempt_key,
             dry_run: body.dry_run,
             actor: authUser?.email || body.actor || 'mailer-ops-operator',
