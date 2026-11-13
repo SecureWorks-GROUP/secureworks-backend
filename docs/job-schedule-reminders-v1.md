@@ -2,7 +2,8 @@
 
 Captain, 13 Nov 2026: a job in Scheduled gets an automatic text every 7 days
 while its first work day is still ahead, and one the day before. The wording is
-fixed and the same for every fencing, patio and repair job.
+fixed and the same for every fencing, patio and repair job, except that a
+repair's text says "your repair" where the others say "your install".
 
 Code: `supabase/functions/ops-api/job_schedule_reminders.ts` (rules, reads,
 writes) and its test. Migration: `20261113120000_job_schedule_reminders.sql`;
