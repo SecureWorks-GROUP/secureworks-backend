@@ -279,6 +279,14 @@ jobs:
             supabase/functions/ops-api/job_deposit_advance_test.ts \
             supabase/functions/ops-api/deposit_invoice_lines_test.ts
 
+      # Scheduled-job reminder texts (job_schedule_reminders.ts): the weekly and
+      # day-before rule, the captain's fixed wording, the prior-text scan, the holds,
+      # the claim before the send and the switch. Every write and SMS is a fake.
+      - name: Test the scheduled-job reminder texts
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/ops-api/job_schedule_reminders_test.ts
+
       - name: Test the call transcription word list
         run: |
           deno test --allow-read --allow-env supabase/functions/transcribe-call/vocabulary_test.ts

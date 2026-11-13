@@ -1628,6 +1628,18 @@ import {
   recordJobAutoStartRun,
   runJobAutoStartAction,
 } from './job_auto_start.ts'
+import {
+  claimScheduleReminder,
+  finishScheduleReminder,
+  loadScheduleReminderCandidates,
+  readScheduleReminderContactShared,
+  readScheduleReminderJobDayEvents,
+  readScheduleReminderMode,
+  readScheduleReminderPriorTexts,
+  recordScheduleReminderRun,
+  runScheduleReminderAction,
+  type ScheduleReminderDeps,
+} from './job_schedule_reminders.ts'
 import { type JobReceiptDeps, RECEIPT_EMAIL_TIMEOUT_MS, runJobReceiptAction, xeroReceiptEmailer } from './job_receipt.ts'
 import {
   type DepositFlagBlock,
@@ -5483,6 +5495,7 @@ export function _authorizeOpsApiAction(input: {
 export const OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS: ReadonlySet<string> = new Set([
   'job_closeout_sweep', // trigger_job_closeout_sweep (sw_service_key())
   'job_auto_start_sweep', // trigger_job_auto_start, cron job-auto-start (sw_service_key())
+  'job_schedule_reminder_sweep', // trigger_job_schedule_reminders, cron job-schedule-reminders (sw_service_key())
   'auto_issue_job_work_orders', // trigger_job_work_order_auto_issue (sw_service_key())
   'makesafe_email_canary', // trigger_makesafe_reconcile, cron makesafe-canary-d4 (sw_service_key())
   'makesafe_email_reconcile', // trigger_makesafe_reconcile, crons makesafe-reconcile-d1 and -d3 (&mode=D3) (sw_service_key())
@@ -9426,6 +9439,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           jobAutoStartDeps(client),
         )
         return json(autoStart.body, autoStart.status)
+      }
+      // ── Reminder texts before a scheduled job's first work day, 12:00 Perth
+      // (job_schedule_reminders.ts; pg_cron job-schedule-reminders). Server key only, POST
+      // only; texts only while job_closeout_settings.schedule_reminder_mode is live.
+      case 'job_schedule_reminder_sweep': {
+        const reminders = await runScheduleReminderAction(
+          req.method,
+          body || {},
+          authMode === 'api_key' && serverSecretPresented,
+          jobScheduleReminderDeps(client),
+        )
+        return json(reminders.body, reminders.status)
       }
       // ── Deposit advance for fencing and patio (job_deposit_advance.ts;
       // docs/job-deposit-advance-v1.md). Server key only for the two that move or text;
@@ -58478,6 +58503,26 @@ function jobAutoStartDeps(client: any): AutoStartDeps {
     moveJobStatus: (moveBody: Record<string, unknown>) => updateJobStatus(client, moveBody),
     moveRepairStage: (moveBody: Record<string, unknown>) => updateRepairStage(client, moveBody),
     recordRun: (row: Record<string, unknown>) => recordJobAutoStartRun(client, row),
+  }
+}
+
+/** The scheduled-job reminder texts (job_schedule_reminders.ts): the text through
+ *  ghl-proxy send_sms like the review and deposit texts. */
+function jobScheduleReminderDeps(client: any): ScheduleReminderDeps {
+  const now = () => new Date()
+  return {
+    now,
+    readMode: () => readScheduleReminderMode(client),
+    loadCandidates: () => loadScheduleReminderCandidates(client),
+    readJobDayEvents: (jobId: string, dayStart: string) =>
+      readScheduleReminderJobDayEvents(client, jobId, dayStart),
+    readContactShared: (jobId: string) => readScheduleReminderContactShared(client, jobId, now()),
+    readPriorTexts: (contactId: string, jobId: string, since: string) =>
+      readScheduleReminderPriorTexts(client, contactId, jobId, since),
+    claim: (row) => claimScheduleReminder(client, row, now()),
+    finish: (row, outcome) => finishScheduleReminder(client, row, outcome, now()),
+    sendSms: ghlProxyReviewSender({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
+    recordRun: (row: Record<string, unknown>) => recordScheduleReminderRun(client, row),
   }
 }
 
