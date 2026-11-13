@@ -244,7 +244,6 @@ restoration_record_quote_decision # probe=source-only
 restoration_board                 # probe=source-only
 restoration_set_stage             # probe=source-only
 restoration_set_work_order        # probe=source-only
-restoration_render_report         # probe=source-only
 ensure_xero_tracking_option       # probe=source-only
 
 # ── Trade authenticated surface ──
