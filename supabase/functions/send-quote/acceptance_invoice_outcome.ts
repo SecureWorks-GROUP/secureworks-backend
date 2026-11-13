@@ -162,6 +162,15 @@ export async function alertAcceptanceInvoiceFailed(
 }
 
 /**
+ * The headers every send_acceptance_invoice call sends: the service-role key as a
+ * Bearer. ops-api refuses the plain SW_API_KEY for operator actions (since #667),
+ * so a call sent with it is refused and no deposit invoice is made.
+ */
+export function acceptanceInvoiceRequestHeaders(serviceKey: string): Record<string, string> {
+  return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${serviceKey}` }
+}
+
+/**
  * Asks ops-api for one deposit invoice and reads the answer. Never throws:
  * a thrown call or an unreadable reply is an 'unknown' failure.
  */
