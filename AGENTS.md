@@ -4947,7 +4947,46 @@ Never widen it to book anyone else or to reassign. The app calls it only after
 `generate_trade_invoice` refuses with `extra_job_not_allowed`. Contract:
 `docs/trade-self-allocation-v1.md`. Both it and `trade_invoice_job_modes` must
 stay on `OPS_API_PROFILE_SCOPED_JWT_ACTIONS`, or the front door 403s every
-plain trade before the route runs.
+plain trade before the route runs. Since 13 Nov 2026 there is a second door,
+`self_book_job` (today or a future day), switched off by default: see "Trade
+Open Access Is Three Switches" below. This door and its rules are unchanged.
+
+## Trade Open Access Is Three Switches, All Seeded Off
+
+Owner's word (Marnin, 13 Nov 2026), contract `docs/trade-open-access-v1.md`,
+flags and view rules in `ops-api/trade_open_access.ts`, seeded by
+`20261113090000`. Missing or unreadable is off, and off is the behaviour every
+section above describes.
+
+- `trade_company_job_view_v1`: tier `company_view`, a trade who is NOT on a
+  live job in their own company (the `selfAllocationJobRefusal` job rule).
+  Read only. `resolveTradeJobAccessTier` returns it only to a caller passing
+  `allowCompanyView`, and only `trade_job_detail`, `my_job_work_order` and
+  `trade_quote_extract` do. Never pass it from a write door, and never let
+  `tradeLabourCostVisibleForTier` admit it. Its reply is the allocated
+  redaction plus `projectTradeJobDetailForCompanyView`: no customer phone,
+  email or CRM contact at any depth, crew by name and day only, no service
+  reports. A new customer contact key on a trade payload must match
+  `isCustomerContactKey`. `search_all_jobs` gives a plain trade the company on
+  the allocated-safe row with `assigned_to_me`.
+- `trade_self_booking_v1`: `self_book_job` (today to 60 days ahead, up to 14
+  days, never a finished job) and `self_unbook_job` (own, self-made by its
+  `trade_self_allocated` event, not started, not invoiced, today or later), in
+  `trade_self_allocation.ts`. Still only the caller's own row, through
+  `createAssignment` / `deleteAssignment`. `createAssignment`'s
+  `revive_cancelled_assignment_id` is for this door alone. A booking ahead is a
+  real install booking: it moves an accepted job on, records the Scope Engine
+  install payment signal, arms the 6am auto start and grants the allocated
+  tier. `self_allocate_for_invoice` is unchanged.
+- `trade_rate_editable_v1`: `my_hours` says `trade_rate_editable: true`, and
+  `generate_trade_invoice` prices a job card at a rate the trade typed
+  (`rate` with `rate_source: 'client_entered'`, `typedJobCardRate`). Above the
+  office limit, or with no office rate, the line is held for office review
+  (`jobCardTypedRateHold`). The default card line still reads
+  `hourly_rate: resolvedRate`; the typed rate only overrides it.
+
+Tests: `trade_company_view_test.ts`, `trade_self_booking_test.ts`,
+`trade_rate_editable_test.ts`.
 
 ## A Job Is Invoiced One Way, Decided By The Job
 

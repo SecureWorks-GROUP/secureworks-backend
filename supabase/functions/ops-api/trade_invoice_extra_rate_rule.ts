@@ -35,7 +35,7 @@ export interface ExtraRateCap {
 export interface ExtraRateHold {
   held: true;
   cap: number | null;
-  source: ExtraRateCapSource | "rules_unreadable";
+  source: ExtraRateCapSource | "rules_unreadable" | "no_trade_rate";
   note: string;
 }
 
@@ -109,6 +109,63 @@ export function extraLineRateHold(input: {
       ? "Typed rate is above this trade's pay rate. Held for office review."
       : "Typed rate is above the office limit for this line type. Held for office review.",
   };
+}
+
+// ── A rate typed on a job card (Marnin, 13 Nov 2026) ────────────────────────
+// Behind trade_rate_editable_v1 a trade may type their hourly rate on a job
+// card of the weekly invoice (`manual_assignments`), not only on an extras
+// line. The same office limit decides whether the line is held.
+
+/** Job cards are saved as labour lines; that is the line type the limit is read for. */
+export const JOB_CARD_RATE_LINE_TYPE = "labour";
+
+/**
+ * The rate a trade typed on a job card, or null. The trade app posts `rate` on
+ * every card and says whether the trade changed it in `rate_source`; only a
+ * positive number posted as `client_entered` is a typed rate. Anything else
+ * (missing, zero, not a number, `server_resolved`) is the office rate's job.
+ */
+export function typedJobCardRate(card: Row | null | undefined): number | null {
+  if (!card || String(card.rate_source || "") !== "client_entered") return null;
+  if (typeof card.rate !== "number" && typeof card.rate !== "string") return null;
+  if (typeof card.rate === "string" && !card.rate.trim()) return null;
+  const rate = Number(card.rate);
+  if (!Number.isFinite(rate) || rate <= 0) return null;
+  return Math.round(rate * 100) / 100;
+}
+
+/**
+ * Whether a rate typed on a job card is held for office review. At or below
+ * the trade's own office rate it never is. Above it, the extras rule decides
+ * (the office's row for labour, else its `*` row, else the trade's own rate).
+ * A trade with no office rate on file is always held.
+ */
+export function jobCardTypedRateHold(input: {
+  rate: number;
+  rules: ExtraRateRules;
+  tradeHourlyRate: number | null;
+}): ExtraRateHold | null {
+  const rate = Number(input.rate);
+  if (!Number.isFinite(rate) || rate <= 0) return null;
+  const own = input.tradeHourlyRate != null && input.tradeHourlyRate > 0 ? input.tradeHourlyRate : null;
+  if (own !== null && Math.round(rate * 100) <= Math.round(own * 100)) return null;
+  const hold = extraLineRateHold({
+    lineType: JOB_CARD_RATE_LINE_TYPE,
+    rate,
+    serverResolved: false,
+    rules: input.rules,
+    tradeHourlyRate: own,
+  });
+  if (hold) return hold;
+  if (own === null) {
+    return {
+      held: true,
+      cap: null,
+      source: "no_trade_rate",
+      note: "Typed rate with no pay rate on file for this trade. Held for office review.",
+    };
+  }
+  return null;
 }
 
 export class ExtraRateRuleError extends Error {

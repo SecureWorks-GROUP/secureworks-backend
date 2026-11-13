@@ -493,3 +493,14 @@ searched-in labour extra items. Release plus a capability grant still
 requires an affected-user read/selection proof; database readback and
 source checks alone do not prove that screen journey.
 
+## Addendum (2026-11-13): a read-only company view, behind a switch seeded off
+
+Owner's word (Marnin, 13 Nov 2026): any trade may find and open any job in the
+company read only, prices hidden, the customer's phone only once the trade is
+on the job. This reverses "they will not see any other jobs but their own" from
+the 2026-09-24 addendum, but only while `feature_flags.trade_company_job_view_v1`
+is on (seeded off; off, everything above stands unchanged). It adds the
+`company_view` tier, which only `trade_job_detail`, `my_job_work_order` and
+`trade_quote_extract` accept, and widens a plain trade's `search_all_jobs` to
+the company with `assigned_to_me` on each row. Contract:
+`docs/trade-open-access-v1.md`.

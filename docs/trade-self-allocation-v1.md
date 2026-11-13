@@ -69,3 +69,12 @@ start, finish and break with `log_my_job_hours` (`source: "clock_off"`), into
 `logged_time_entry`, and the Weekly Invoice card opens on them for the trade to
 check (see `docs/trade-invoice-time-entries-2026-10-12.md`, "Times saved on the
 job view"). The server never copies them onto a line itself.
+
+## Addendum (2026-11-13): booking ahead is a separate door
+
+Owner's word (Marnin, 13 Nov 2026): a trade may add themselves to a job for
+today or a future day, and take that booking off again. That is `self_book_job`
+and `self_unbook_job`, behind `feature_flags.trade_self_booking_v1` (seeded
+off). `self_allocate_for_invoice` above is unchanged: it stays the door for a
+day already worked and still refuses a day after today. Contract, and what a
+booking ahead sets off: `docs/trade-open-access-v1.md`.

@@ -1142,3 +1142,33 @@ Deno.test("an agent edit or delete does not need a lines array, and it stays a d
   );
   assertEquals((lastRpc(db).args.p_invoice as Row).xero_bill_id, undefined);
 });
+
+// 13 Nov 2026 (trade_rate_editable_v1): the trade app keeps a rate typed on a
+// job card as `typed_rate` and the billed figure as `rate`. The saved draft
+// keeps both, and its draft line is priced at the card's rate.
+Deno.test("a rate the trade typed on a job card survives the saved draft", async () => {
+  const db = baseDb();
+  db.tables.job_assignments.push(assignment({ id: AS_HOURS }));
+  const body = saveBody({
+    draft_builder: {
+      version: 1,
+      jobCards: [hoursCard({ rate: 72, typed_rate: 72, rate_source: "client_entered" })],
+      invRows: [],
+      invLumpLines: [],
+      dismissedKeys: [],
+      gst_on: false,
+      weekStart: WEEK,
+      weekEnd: WEEK_END,
+    },
+  });
+  const saved = await saveRunningInvoiceDraft(db, USER, body, "staff");
+  assertEquals(saved.ok, true);
+  const cards = (saved.draft_builder as Row).jobCards as Row[];
+  assertEquals([cards[0].rate, cards[0].typed_rate, cards[0].rate_source], [72, 72, "client_entered"]);
+  const lines = lastRpc(db).args.p_lines as Row[];
+  assertEquals([lines[0].unit_rate, lines[0].hourly_rate, lines[0].line_total_ex], [72, 72, 144]);
+
+  const reloaded = await getRunningInvoiceDraft(db, USER, WEEK);
+  const again = (reloaded.draft_builder as Row).jobCards as Row[];
+  assertEquals([again[0].rate, again[0].typed_rate, again[0].rate_source], [72, 72, "client_entered"]);
+});

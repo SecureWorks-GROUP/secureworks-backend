@@ -4,7 +4,24 @@
 import { setCouncilRequired } from './council_mark.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
-import { SelfAllocationRefusal, selfAllocateForInvoice } from './trade_self_allocation.ts'
+import {
+  SelfAllocationRefusal,
+  SelfBookingRefusal,
+  selfAllocateForInvoice,
+  selfAllocationJobRefusal,
+  selfBookJob,
+  selfUnbookJob,
+} from './trade_self_allocation.ts'
+import {
+  maskContactDeep,
+  presentCompanyViewFeedRow,
+  projectTradeJobDetailForCompanyView,
+  stripCustomerContactDeep,
+  TRADE_COMPANY_JOB_VIEW_FLAG,
+  TRADE_RATE_EDITABLE_FLAG,
+  TRADE_SELF_BOOKING_FLAG,
+  tradeOpenAccessFlagOn,
+} from './trade_open_access.ts'
 import {
   isWorkOrderInvoiceItem,
   loadTradeInvoiceJobModes,
@@ -847,7 +864,7 @@ import {
 } from './job_work_order_office.ts'
 import { releaseVoidedTradeInvoice, VoidedTradeInvoiceReleaseError } from './trade_invoice_voided_release.ts'
 import { presentTradeInvoiceBillOutcome } from './trade_invoice_bill_outcome.ts'
-import { ExtraRateRuleError, extraLineRateHold, listExtraRateRules, loadExtraRateRules, setExtraRateRule, type ExtraRateHold } from './trade_invoice_extra_rate_rule.ts'
+import { ExtraRateRuleError, extraLineRateHold, jobCardTypedRateHold, listExtraRateRules, loadExtraRateRules, setExtraRateRule, typedJobCardRate, type ExtraRateHold, type ExtraRateRules } from './trade_invoice_extra_rate_rule.ts'
 import { findNoWeekClaimConflict, isNoWeekClaimRefusal, NO_WEEK_CLAIM_MESSAGE, NO_WEEK_CLAIM_REFUSAL } from './trade_invoice_no_week_claim.ts'
 import { isTradeInvoiceNumberCollision, nextTradeInvoiceNumber, tradeInvoiceDay, tradeInvoiceInitials } from './trade_invoice_number.ts'
 import { recordTradeInvoiceEvent } from './trade_invoice_events.ts'
@@ -5216,6 +5233,11 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   // for the signed-in trade, inside their company.
   'trade_invoice_job_modes',
   'self_allocate_for_invoice',
+  // Marnin, 13 Nov 2026, behind trade_self_booking_v1: a trade books
+  // themselves ahead on a job, and takes their own booking off again
+  // (trade_self_allocation.ts). Only ever the signed-in trade's own row.
+  'self_book_job',
+  'self_unbook_job',
   'submit_trade_invoice',
   'my_trade_invoices',
   'get_trade_invoice',
@@ -12819,6 +12841,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'waive_neighbour_signoff':
       case 'log_my_job_hours':
       case 'self_allocate_for_invoice':
+      case 'self_book_job':
+      case 'self_unbook_job':
       case 'trade_invoice_job_modes':
       case 'create_group_work_order':
       case 'join_group_work_order':
@@ -12984,6 +13008,47 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             } catch (error) {
               if (error instanceof SelfAllocationRefusal) {
                 return json({ ok: false, error: error.message, code: error.code }, error.status)
+              }
+              throw error
+            }
+          }
+          // Marnin, 13 Nov 2026, behind trade_self_booking_v1 (seeded off): a
+          // trade books THEMSELVES ahead on a job (today or a future day) and
+          // may take that booking off again. Only ever the caller's own row;
+          // never texts anyone. Rules: trade_self_allocation.ts.
+          case 'self_book_job':
+          case 'self_unbook_job': {
+            if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
+            const bookingEnabled = () => tradeOpenAccessFlagOn(client, TRADE_SELF_BOOKING_FLAG)
+            try {
+              const selfBookingInput = {
+                body,
+                trade: { id: tradeUser.id, orgId: tradeUser.orgId, name: await tradeDisplayName(client, tradeUser) },
+              }
+              if (action === 'self_unbook_job') {
+                return json(await selfUnbookJob(client, selfBookingInput, {
+                  bookingEnabled,
+                  // The office's own removal (invoice guard, events, watcher
+                  // rows). Only its staff-only authz is not asked: the rules
+                  // in selfUnbookJob are the authority for a trade's own row.
+                  deleteAssignment: (deleteBody) => deleteAssignment(client, deleteBody),
+                }))
+              }
+              return json(await selfBookJob(client, selfBookingInput, {
+                bookingEnabled,
+                findOwnRows: (jobId, userId, days) => findOwnAssignmentRowsForDates(client, jobId, userId, days),
+                createAssignment: (assignmentBody) => createAssignment(client, assignmentBody),
+                isUserDateConflict: isAssignmentUserDateConflict,
+                notSchedulableStatuses: _MAKESAFE_POOL_EXCLUDED_STATUSES,
+              }))
+            } catch (error) {
+              if (error instanceof SelfBookingRefusal) {
+                return json({
+                  ok: false,
+                  error: error.message,
+                  code: error.code,
+                  ...(error.bookings.length > 0 ? { bookings: error.bookings } : {}),
+                }, error.status)
               }
               throw error
             }
@@ -14291,11 +14356,33 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // Client-entered rates are allowed for manual rows and flagged below.
             let assignments: any[] = []
             let reviewFlag: string | null = null
+            // Marnin, 13 Nov 2026, behind trade_rate_editable_v1 (seeded off):
+            // a rate the trade typed on a job card (`rate` with `rate_source:
+            // 'client_entered'`, the keys the trade app posts) prices that
+            // line. It is marked trade-entered for the office, and a rate above
+            // the office limit holds the line, and so the invoice, for office
+            // review (typedJobCardRate / jobCardTypedRateHold). The switch is
+            // read once, and only when a card carries a typed rate. Off, or no
+            // typed rate: the office rate, exactly as before.
+            const jobCardRateEditable = !weeklyInvoice && !!week_start && !!weekEnd &&
+              manualAssignmentsIn.some((m: any) => typedJobCardRate(m) !== null) &&
+              await tradeOpenAccessFlagOn(client, TRADE_RATE_EDITABLE_FLAG)
+            const jobCardRateRules: ExtraRateRules | null = jobCardRateEditable
+              ? await loadExtraRateRules(client)
+              : null
+            let clientPricedCardCount = 0
             if (!weeklyInvoice && week_start && weekEnd && hasManualAssignments) {
               // Rate guard: the rate is SERVER-SIDE ONLY (trade_rates). A client
               // rate on a manual row is never read; a missing server rate blocks
               // the submission instead of trusting the client.  [audit 2026-09]
-              if (resolvedRate <= 0) {
+              // With the typed-rate switch on, a trade with no office rate may
+              // still submit when EVERY card carries a rate they typed; each
+              // such line is then held for office review (nothing to compare
+              // it with).
+              if (
+                resolvedRate <= 0 &&
+                !(jobCardRateEditable && manualAssignmentsIn.every((m: any) => typedJobCardRate(m) !== null))
+              ) {
                 // B3: RATE_NOT_CONFIGURED — structured error the FE can surface as a toast
                 return json({
                   ok: false,
@@ -14380,9 +14467,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 const manualRow = row.m || {}
                 // Server-resolved rate only. Any rate / subtotal / gst / super /
                 // total the client put on the row is never read.  [audit 2026-09]
+                // The one exception (trade_rate_editable_v1 on): a rate the
+                // trade typed that differs from their office rate.
+                const typedRate = jobCardRateEditable ? typedJobCardRate(manualRow) : null
+                const cardRateTyped = typedRate !== null &&
+                  Math.round(typedRate * 100) !== Math.round(resolvedRate * 100)
+                const cardRateHold = cardRateTyped && jobCardRateRules
+                  ? jobCardTypedRateHold({
+                    rate: typedRate,
+                    rules: jobCardRateRules,
+                    tradeHourlyRate: resolvedRate > 0 ? resolvedRate : null,
+                  })
+                  : null
+                if (cardRateTyped) clientPricedCardCount++
                 assignments.push({
                   id: a.id, job_id: a.job_id, hours_worked: h, hourly_rate: resolvedRate,
                   rate_source: 'server_resolved',
+                  // Only with the switch on and a rate the trade typed: that
+                  // rate, marked trade-entered, and its hold if it has one.
+                  ...(cardRateTyped
+                    ? { hourly_rate: typedRate, rate_source: 'client_entered', _rateHold: cardRateHold }
+                    : {}),
                   description: manualRow.description || null,
                   // M4 U1: carry the trade's variation explanation (trade-app capture
                   // is U2/Deckhand B) so the jobGroups loop can attach it to a flagged
@@ -14393,7 +14498,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   // One line is one job on one day: a card with a time entry is
                   // its own line. A card without one still groups per job.
                   _timeEntry: row.entry,
-                  _lineKey: row.entry ? `${a.job_id}#${entryIndex}` : null,
+                  // A card at a typed rate never shares a line with a card at
+                  // another rate: one line is one rate.
+                  _lineKey: row.entry
+                    ? `${a.job_id}#${entryIndex}`
+                    : cardRateTyped
+                    ? `${a.job_id}#rate${Math.round(typedRate * 100)}`
+                    : null,
                 })
               })
             } else if (!weeklyInvoice && week_start && weekEnd) {
@@ -14548,8 +14659,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               const lineTotal = Math.round(jobHours * rate * 100) / 100
               totalHours += jobHours
 
+              // A typed job-card rate above the limit (trade_rate_editable_v1).
+              const lineRateHold: ExtraRateHold | null =
+                assigns.find((a: any) => a._rateHold?.held)?._rateHold || null
               const rateNote = rateSource === 'client_entered'
-                ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
+                ? ['Client-entered rate: $' + rate + '/hr. Ops must verify before approval.', lineRateHold?.note]
+                  .filter(Boolean).join(' | ')
                 : 'Server-resolved rate from trade_rates.'
 
               // ── M4 U1: make-safe hours flag (assigned/clocked path) ────────
@@ -14585,6 +14700,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 // Internal — consumed by toTradeInvoiceLineRow (flag columns) and
                 // the Xero description/reference builders; stripped before insert.
                 _hoursFlag: hoursFlag,
+                // Only ever set for a typed job-card rate; spreads to nothing
+                // otherwise, so the line object is what it always was.
+                ...(lineRateHold ? { _rateHold: lineRateHold } : {}),
               })
             }
 
@@ -14804,7 +14922,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               }
 
               // B14: the office's rate limits for trade-typed extras.
-              const extraRateRules = await loadExtraRateRules(client)
+              const extraRateRules = jobCardRateRules ?? await loadExtraRateRules(client)
               for (const rawItem of extraItemsIn) {
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
                 // They must never be accepted as extra items, or normal weekly hours are double-counted.
@@ -15438,7 +15556,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
             // B14: one audit event per held typed rate. No amounts in the
             // reason; the line itself carries them.
-            for (const held of extraLineItems.filter((line: any) => line?._rateHold?.held)) {
+            for (const held of [...lineItems, ...extraLineItems].filter((line: any) => line?._rateHold?.held)) {
               await recordTradeInvoiceEvent(client, {
                 trade_invoice_id: String(invoiceId),
                 event_type: 'extra_rate_held',
@@ -15640,7 +15758,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // soft-review set. It leads the invoice query_note (money-relevant)
             // but only fires for a flagged make-safe line, so existing (non-make-
             // safe) invoices keep their exact prior message.
-            const softReviewFlag = hasManualAssignments || clientPricedExtraCount > 0 || reviewFlag === 'hours_excess' || duplicateExtraCount > 0 || anyHoursFlag
+            // A job card billed at a rate the trade typed counts with the
+            // client-priced extras (0 unless trade_rate_editable_v1 is on).
+            const clientPricedLineCount = clientPricedExtraCount + clientPricedCardCount
+            const softReviewFlag = hasManualAssignments || clientPricedLineCount > 0 || reviewFlag === 'hours_excess' || duplicateExtraCount > 0 || anyHoursFlag
             if (softReviewFlag) {
               await client.from('trade_invoices').update({
                 query_note: anyHoursFlag
@@ -15649,7 +15770,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   ? 'Possible duplicate searched-in job line(s): already appears on ' + duplicateExtraInvoiceRefs.slice(0, 5).join(', ') + '. Verify before approving the Xero draft.'
                   : reviewFlag === 'hours_excess'
                     ? 'Auto-flagged: an assignment exceeds 16h — verify hours in Xero before approving the draft.'
-                    : clientPricedExtraCount > 0
+                    : clientPricedLineCount > 0
                       ? 'Manual hours/rates entered by trade — verify job, description, hours and rate in Xero before approving the draft.'
                       : 'Manual hours entered — verify against schedule in Xero before approving the draft.',
               }).eq('id', invoice.id)
@@ -15670,7 +15791,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   total_hours: totalHours,
                   ...tradeInvoiceMoneyResponse(money),
                   ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
-                  client_priced_lines: clientPricedExtraCount,
+                  client_priced_lines: clientPricedLineCount,
                   possible_duplicate_extra_lines: duplicateExtraCount,
                 },
               })
@@ -18159,8 +18280,23 @@ export async function handleTradeJobWorkOrderAction(
   if (action === 'my_job_work_order') {
     const jobId = new URL(req.url).searchParams.get('job_id') || ''
     if (!jobId) throw new ApiError('job_id required', 400)
-    await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, tradeUser.seeEverything, access)
-    return json(await runJobWorkOrder(() => tradeJobWorkOrderRead(client, jobId, tradeUser.id, tradeJobWorkOrderRedaction)))
+    // The read (never the variation below) also admits the read-only company
+    // view: the approved work order without prices, any contact written into
+    // it masked, and no offer to report a variation.
+    const readAccess = await assertAssignedOrMakesafeAccess(
+      client,
+      jobId,
+      tradeUser.id,
+      tradeUser.seeEverything,
+      access,
+      { allowCompanyView: true },
+    )
+    const workOrderRead = await runJobWorkOrder(() =>
+      tradeJobWorkOrderRead(client, jobId, tradeUser.id, tradeJobWorkOrderRedaction)
+    )
+    return json(readAccess.tier === 'company_view'
+      ? { ...stripCustomerContactDeep(workOrderRead), can_report_variation: false }
+      : workOrderRead)
   }
   if (req.method !== 'POST') throw new ApiError('POST required', 405)
   const jobId = String(body?.job_id || '')
@@ -37232,6 +37368,23 @@ async function findActiveAssignmentForUserDate(
   return row && row.is_ghost !== true ? row : null
 }
 
+// Every row the user holds on this job for these days, whatever its status,
+// ghost or not: the unique key allows one per day, so this is what a
+// self-booking would collide with (trade_self_allocation.ts selfBookJob).
+async function findOwnAssignmentRowsForDates(
+  client: any,
+  jobId: string,
+  userId: string,
+  days: string[],
+): Promise<any[]> {
+  if (!days.length) return []
+  const { data, error } = await client.from('job_assignments')
+    .select('id, scheduled_date, user_id, status, assignment_type, role, is_ghost, invoiced_in, started_at, completed_at, clocked_on_at, hours_worked')
+    .eq('job_id', jobId).eq('user_id', userId).in('scheduled_date', days)
+  if (error) throw error
+  return data || []
+}
+
 function assignmentUserDateConflict(
   targetUserId: string,
   scheduledDate: string,
@@ -37403,6 +37556,39 @@ export async function allocateJob(client: any, args: {
   }
 }
 
+// Brings one cancelled, non-ghost row back as the new booking. Compare-and-set
+// on the row still being that user's cancelled row on that job and day; a row
+// that moved on answers as the unique-key conflict a blind insert would have.
+async function reviveCancelledAssignmentRow(
+  client: any,
+  assignmentId: string,
+  insertRow: Record<string, any>,
+): Promise<{ data: any; error: any }> {
+  const { data, error } = await client.from('job_assignments')
+    // The same columns an insert writes, plus is_lead: a row that used to
+    // lead must not come back as the lead (one lead per job is unique).
+    .update({ ...insertRow, is_lead: false })
+    .eq('id', assignmentId)
+    .eq('job_id', insertRow.job_id)
+    .eq('user_id', insertRow.user_id)
+    .eq('scheduled_date', insertRow.scheduled_date)
+    .eq('status', 'cancelled')
+    .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
+    .select()
+    .maybeSingle()
+  if (error) return { data: null, error }
+  if (!data) {
+    return {
+      data: null,
+      error: {
+        code: '23505',
+        message: 'job_assignments_job_user_date_key: the cancelled row to bring back was no longer there',
+      },
+    }
+  }
+  return { data, error: null }
+}
+
 export async function createAssignment(client: any, body: any) {
   const { jobId, job_id, userId, user_id, scheduledDate, scheduled_date, date,
           scheduledEnd, scheduled_end, startTime, start_time, endTime, end_time,
@@ -37529,7 +37715,17 @@ export async function createAssignment(client: any, body: any) {
     })
   }
 
-  const { data, error } = await client.from('job_assignments').insert(insertRow).select().single()
+  // A trade booking themselves ahead (self_book_job) on a day they hold a
+  // CANCELLED row for: the unique key is one row per job, user and day,
+  // cancelled included, so that row is brought back in place instead of
+  // inserting a second. Opt-in by id; no other caller sends it. Everything
+  // after this point runs exactly as for a new row.
+  const reviveAssignmentId = body.revive_cancelled_assignment_id
+    ? String(body.revive_cancelled_assignment_id)
+    : null
+  const { data, error } = reviveAssignmentId
+    ? await reviveCancelledAssignmentRow(client, reviveAssignmentId, insertRow)
+    : await client.from('job_assignments').insert(insertRow).select().single()
 
   if (error) throw error
 
@@ -43656,11 +43852,21 @@ export type TradeJobAccessContext = {
 // every insert and carries no authority); is_lead is display only and does not
 // change the tier. Every per-job trade door resolves through this so the tier
 // decision exists once. tradeQuoteVisibleForTier() is the ONE quote rule.
+//   company_view     (Marnin, 13 Nov 2026, behind trade_company_job_view_v1,
+//                    seeded off) any signed-in trade on a live job in their
+//                    own company that they are NOT on: READ ONLY, no prices,
+//                    no customer phone or email, a trimmed crew list. Returned
+//                    only to a caller that passes `allowCompanyView`, which
+//                    only the three reads do (trade_job_detail,
+//                    my_job_work_order, trade_quote_extract). Every other door
+//                    never asks for it, so it still gets `none` and refuses
+//                    exactly as before. docs/trade-open-access-v1.md.
 export type TradeJobAccessTier =
   | 'office'
   | 'division_manager'
   | 'allocated'
   | 'makesafe_open'
+  | 'company_view'
   | 'none'
 
 export type TradeJobAccessDecision = {
@@ -43671,10 +43877,16 @@ export type TradeJobAccessDecision = {
     | 'vertical_manager'
     | 'assigned'
     | 'makesafe_open'
+    | 'company_view'
     | 'tenant_mismatch'
     | 'not_assigned'
   job: any | null
 }
+
+// Opt-in for the read-only company view. A door that does not pass
+// `allowCompanyView: true` can never be handed the `company_view` tier, so no
+// write door can inherit it by accident.
+export type TradeJobAccessOptions = { allowCompanyView?: boolean }
 
 // Office and division managers see the quote. Never an allocated trade, lead
 // or crew, and never the MakeSafe open-pool exception.
@@ -43704,7 +43916,8 @@ export function tradeViewerQuoteVisibleForJob(
 // never whether it is open to this caller). That is the right trade for filing a
 // field report and the wrong one for a payroll read, so it is refused wherever a
 // response carries another trade's rate. Office, division manager of the job's
-// vertical, and an allocated crew member on the job all pass.
+// vertical, and an allocated crew member on the job all pass. The read-only
+// `company_view` tier never does.
 export function tradeLabourCostVisibleForTier(tier: TradeJobAccessTier): boolean {
   return tier === 'office' || tier === 'division_manager' || tier === 'allocated'
 }
@@ -43713,7 +43926,7 @@ export async function resolveTradeJobAccessTier(
   client: any,
   jobId: string,
   userId: string,
-  opts: { isOffice?: boolean; access?: TradeJobAccessContext } = {},
+  opts: { isOffice?: boolean; access?: TradeJobAccessContext } & TradeJobAccessOptions = {},
 ): Promise<TradeJobAccessDecision> {
   const { isOffice = false, access } = opts
   let job: any = null
@@ -43762,6 +43975,21 @@ export async function resolveTradeJobAccessTier(
   // with no see-everything or make-safe category-manager standing no longer
   // gets a report door onto a make-safe job it holds no assignment on — it
   // refuses exactly like any other vertical. See the tier doc comment above.
+  //
+  // Company view (13 Nov 2026): only for a read that asked for it, only inside
+  // the caller's own company (the tenant check above already ran), only on a
+  // job a trade could add themselves to (the SAME job rule as the
+  // self-allocation doors, so "can open" and "can add myself" agree), and only
+  // while the switch is on. The switch is read last, and only here.
+  if (
+    opts.allowCompanyView === true &&
+    access?.orgId &&
+    String(job.org_id || '') === access.orgId &&
+    !selfAllocationJobRefusal(job) &&
+    await tradeOpenAccessFlagOn(client, TRADE_COMPANY_JOB_VIEW_FLAG)
+  ) {
+    return { tier: 'company_view', quoteVisible: false, reason: 'company_view', job }
+  }
   return { tier: 'none', quoteVisible: false, reason: 'not_assigned', job }
 }
 
@@ -43781,8 +44009,15 @@ async function assertAssignedOrMakesafeAccess(
   userId: string,
   isAdmin = false,
   access?: TradeJobAccessContext,
+  // Only the three company-view reads pass this. Left out, the read-only
+  // tier cannot be returned and a stranger is refused as before.
+  options: TradeJobAccessOptions = {},
 ): Promise<TradeJobAccessDecision> {
-  const decision = await resolveTradeJobAccessTier(client, jobId, userId, { isOffice: isAdmin, access })
+  const decision = await resolveTradeJobAccessTier(client, jobId, userId, {
+    isOffice: isAdmin,
+    access,
+    allowCompanyView: options.allowCompanyView === true,
+  })
   const refusal = tradeJobAccessRefusal(decision)
   if (refusal) throw refusal
   return decision
@@ -44048,7 +44283,17 @@ export async function searchAllJobs(
   const seeEverything = isDispatcher === true || invoicePicker
   const managedVerticals = invoicePicker ? [] : _normalizeManagedVerticals(viewer.managedVerticals)
   const isCategoryManager = !seeEverything && managedVerticals.length > 0
-  const isAllocatedOnly = !seeEverything && managedVerticals.length === 0
+  // A plain trade: no see-everything, no managed vertical.
+  const isPlainTrade = !seeEverything && managedVerticals.length === 0
+  // Marnin, 13 Nov 2026, behind trade_company_job_view_v1 (seeded off): a
+  // plain trade may FIND every job in their company. The rows stay on the
+  // allocated-safe projection (no notes, no metadata, no money), each says
+  // whether the trade is on it (`assigned_to_me`), and the customer's phone
+  // and email are left off a job they are not on. The switch is read once,
+  // and only for a plain trade. Off: everything below is as it was.
+  const companyView = isPlainTrade && await tradeOpenAccessFlagOn(client, TRADE_COMPANY_JOB_VIEW_FLAG)
+  const isAllocatedOnly = isPlainTrade && !companyView
+  const feedLens = companyView && !q ? 'company' : lens
 
   // The allocated-only visibility set is a non-cancelled job_assignments row,
   // full stop — past and present, every job status. It is fetched once and
@@ -44056,7 +44301,7 @@ export async function searchAllJobs(
   // of the exact JS-side gate every row (including an external-ref match)
   // passes through below.
   let assignedJobIds: string[] = []
-  if (isAllocatedOnly || isCategoryManager) {
+  if (isPlainTrade || isCategoryManager) {
     const assignedRows = await readPagedRows(
       (from, limit) =>
         client.from('job_assignments')
@@ -44123,7 +44368,7 @@ export async function searchAllJobs(
   // pattern every other vertical-scoped surface in this file already uses.
   const jobWithinVisibility = (job: any): boolean => {
     if (!job?.id) return false
-    if (seeEverything) return true
+    if (seeEverything || companyView) return true
     if (assignedJobIdSet.has(String(job.id))) return true
     if (isCategoryManager) return managedVerticals.includes(_jobVertical(job))
     return false
@@ -44209,10 +44454,11 @@ export async function searchAllJobs(
       ? pageJobs.map(presentInvoiceJobPickerRow)
       : await enrichTradeMakesafeJobs(client, pageJobs, jobQuoteVisible)
     if (!invoicePicker) for (const job of jobs) presentTradeJobFeedRow(job, jobQuoteVisible(job))
+    if (companyView) for (const job of jobs) presentCompanyViewFeedRow(job, assignedJobIdSet.has(String(job?.id)))
     const canFetchMore = offset + jobs.length < materialized.length
     return {
       jobs,
-      lens,
+      lens: feedLens,
       total: materialized.length,
       page_size: pageSize,
       offset,
@@ -44267,6 +44513,7 @@ export async function searchAllJobs(
     : await enrichTradeMakesafeJobs(client, merged, jobQuoteVisible)
   // Surface external_ref at the top level of each job for convenience (trade app reads job.external_ref)
   if (!invoicePicker) for (const job of jobs) presentTradeJobFeedRow(job, jobQuoteVisible(job))
+  if (companyView) for (const job of jobs) presentCompanyViewFeedRow(job, assignedJobIdSet.has(String(job?.id)))
 
   // `total` counts the paged job query only; the seed and external-ref merges
   // can push a page past it, so never report fewer rows than were sent.
@@ -44274,7 +44521,7 @@ export async function searchAllJobs(
   const hasMore = total !== null && offset + allJobs.length < total
   return {
     jobs,
-    lens,
+    lens: feedLens,
     total: reportedTotal,
     page_size: pageSize,
     offset,
@@ -46860,8 +47107,13 @@ async function tradeJobDetail(
   const accessDecision = await assertAssignedOrMakesafeAccess(client, jobId, viewer.id, isAdmin, {
     orgId: viewer.orgId,
     managedVerticals: viewer.managedVerticals,
-  })
+  }, { allowCompanyView: true })
   const quoteVisible = tradeQuoteVisibleForTier(accessDecision.tier)
+  // Read-only company view (trade_company_job_view_v1): everything the
+  // allocated tier's redaction does, then the customer's contact comes off,
+  // the crew list is trimmed and the service reports are withheld, at the
+  // return below.
+  const companyView = accessDecision.tier === 'company_view'
 
   const TRADE_JOB_MEDIA_COLUMNS =
     'id, phase, type, storage_url, thumbnail_url, label, notes, po_id, created_at, attendance_cycle_id, cycle_attribution'
@@ -46897,10 +47149,18 @@ async function tradeJobDetail(
       .select('id, wo_number, scope_items, special_instructions, scheduled_date, status')
       .eq('job_id', jobId).neq('kind', 'job').neq('status', 'cancelled').order('created_at', { ascending: false }),
     // All crew assignments for this job (not filtered by date — user explicitly opened this job)
-    client.from('job_assignments')
-      .select('id, user_id, scheduled_date, start_time, role, is_lead, crew_name, status, started_at, completed_at, acknowledged_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, hours_worked, users:user_id(name, phone)')
-      .eq('job_id', jobId).neq('status', 'cancelled')
-      .order('scheduled_date', { ascending: true }),
+    // A company-view reader is told who is on the job and nothing else, and
+    // never a watcher row: a narrower select, ghosts left out at source.
+    companyView
+      ? client.from('job_assignments')
+        .select('id, user_id, scheduled_date, role, is_lead, crew_name, status, users:user_id(name)')
+        .eq('job_id', jobId).neq('status', 'cancelled')
+        .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
+        .order('scheduled_date', { ascending: true })
+      : client.from('job_assignments')
+        .select('id, user_id, scheduled_date, start_time, role, is_lead, crew_name, status, started_at, completed_at, acknowledged_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, hours_worked, users:user_id(name, phone)')
+        .eq('job_id', jobId).neq('status', 'cancelled')
+        .order('scheduled_date', { ascending: true }),
     // Purchase orders — materials for this job (trade-safe fields only)
     client.from('purchase_orders')
       .select('id, po_number, supplier_name, status, delivery_date, line_items')
@@ -47136,7 +47396,7 @@ async function tradeJobDetail(
     scope_json: jobRes.data?.scope_json,
   }])).get(jobId) || null
 
-  return {
+  const tradeJobDetailResponse = {
     job: tradeSafeJob,
     group_work_order_enabled: await groupFeatureOn(client),
     // Additive: the resolved tier and the quote fence, so the app can render the
@@ -47257,6 +47517,12 @@ async function tradeJobDetail(
       tradeSafeJob?.job_number || null,
     ),
   }
+  // A trade who is not on the job (company_view): no customer phone or email
+  // anywhere in the reply, who is on the job by name and day only, and no
+  // service reports. Every other tier gets the reply above untouched.
+  return companyView
+    ? projectTradeJobDetailForCompanyView(tradeJobDetailResponse, _tradeLeadInstaller)
+    : tradeJobDetailResponse
 }
 
 // Exported so the trade-visibility regression suite can assert on the REAL
@@ -47321,6 +47587,8 @@ async function tradeQuoteExtractAction(
         orgId: viewer.orgId,
         managedVerticals: viewer.managedVerticals,
       },
+      // Read-only company view may read the price-free extract.
+      allowCompanyView: true,
     })
   } catch (err) {
     if (isTradeQuoteExtractAccessRefusal(err)) throw tradeQuoteExtractJobNotFoundError()
@@ -47359,21 +47627,34 @@ async function tradeQuoteExtractAction(
     throw new ApiError('Quote extract unavailable', 503)
   }
 
+  // A trade who is not on the job (company_view) never gets the customer's
+  // phone or email: off the job row, off the frozen pack, and masked where it
+  // was typed into the quote's wording.
+  const extractCompanyView = extractAccess.tier === 'company_view'
+  const extractJob = extractCompanyView
+    ? { ...jobRes.data, client_phone: null, client_email: null }
+    : jobRes.data
   const packs = assembleFrozenQuoteExtractPacks({
     documents: quoteDocsRes.data || [],
-    customer: tradeQuoteCustomerFromJob(jobRes.data),
+    customer: tradeQuoteCustomerFromJob(extractJob),
   })
   const eligible = packs.filter((pack) => tradeQuoteExtractIsEligible(pack))
-  const pack = documentId
+  const foundPack = documentId
     ? eligible.find((row) => row.job_document_id === documentId)
     : eligible[0]
-  if (!pack) throw new ApiError('No sent quote extract for this job', 404)
+  if (!foundPack) throw new ApiError('No sent quote extract for this job', 404)
+  const pack = extractCompanyView
+    ? (() => {
+      const masked = maskContactDeep(foundPack)
+      return { ...masked, customer: { ...masked.customer, phone: null, email: null } }
+    })()
+    : foundPack
 
   let extract: ReturnType<typeof buildTradeQuoteExtractArtifact>['extract']
   let html: string
   let filename: string
   try {
-    const artifact = buildTradeQuoteExtractArtifact({ pack, job: jobRes.data })
+    const artifact = buildTradeQuoteExtractArtifact({ pack, job: extractJob })
     extract = artifact.extract
     html = artifact.html
     filename = artifact.filename
@@ -57331,6 +57612,9 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   const pendingVerification = enriched.some((a: any) => a.status === 'submitted')
   const allVerified = enriched.length > 0 && enriched.every((a: any) => a.status === 'verified' || a.status === 'complete')
 
+  // Marnin, 13 Nov 2026 (seeded off): may this trade type a rate on a job card?
+  const tradeRateEditable = await tradeOpenAccessFlagOn(client, TRADE_RATE_EDITABLE_FLAG)
+
   return {
     assignments: enriched,
     rate,
@@ -57348,6 +57632,10 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     total: previewMoney.total_inc,
     already_submitted: !!existingInvoice,
     running_invoice_draft: runningInvoiceDraftEnabled(userRow?.trade_details),
+    // Present (true) only while trade_rate_editable_v1 is on: it promises that
+    // generate_trade_invoice pays a rate the trade typed on a job card. Absent
+    // otherwise, so the app keeps the office rate read only.
+    ...(tradeRateEditable ? { trade_rate_editable: true } : {}),
     // True when how each job is invoiced could not be read; every card's
     // invoice_mode and can_claim_commission are then null.
     invoice_mode_unavailable: invoiceModeUnavailable,

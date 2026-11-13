@@ -1353,6 +1353,12 @@ async function callTradeDoor(
   }
 }
 
+// 13 Nov 2026: the two reads that may answer the read-only company view ask
+// one switch (feature_flags trade_company_job_view_v1, seeded off, so off
+// here) before they refuse. A switch row is not job data. No other door asks
+// for that tier, so no other door may read the switch.
+const COMPANY_VIEW_READ_DOORS = new Set(["trade_job_detail", "trade_quote_extract"]);
+
 for (const door of PER_JOB_TRADE_DOORS) {
   Deno.test(`rule table (end-to-end): ${door.action} refuses an unallocated ordinary trade before touching job data`, async () => {
     const out = await callTradeDoor(door.action, door.body ?? {});
@@ -1374,7 +1380,8 @@ for (const door of PER_JOB_TRADE_DOORS) {
     assertEquals(out.writes, [], `${door.action} wrote before refusing`);
     assertEquals(
       out.tables.filter((t) =>
-        t !== "users" && t !== "jobs" && t !== "job_assignments"
+        t !== "users" && t !== "jobs" && t !== "job_assignments" &&
+        !(t === "feature_flags" && COMPANY_VIEW_READ_DOORS.has(door.action))
       ),
       [],
       `${door.action} read job data before refusing`,
