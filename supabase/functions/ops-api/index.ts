@@ -19,9 +19,11 @@ import {
   commissionLinesTotalEx,
   ExtraJobBillingRefusal,
   extraLineType,
+  isCommissionLine,
   normaliseExtraItem,
 } from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
+import { commissionCapCodeFromDbError, commissionCapRefusal, readJobCommissionRecords } from './job_commission.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
@@ -10588,6 +10590,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         })
         return json(await response.json(), response.status)
       }
+      // Ruling 17 step 2: the commission rate (staff read, owner-only change)
+      // and one job's commission record. job_commission.ts,
+      // 20261113230000_job_commissions.sql.
+      case 'commission_rates':
+      case 'set_commission_rate':
+      case 'job_commission': {
+        const { jobCommissionAction } = await import('./job_commission.ts')
+        const result = await jobCommissionAction(client, action, req.method, req.method === 'GET' ? { job_id: url.searchParams.get('job_id') } : body, {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          sessionUserId: authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role) ? authUser?.id || null : null,
+          orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+        })
+        return json(result.body, result.status)
+      }
       case 'read_scope_payment_stages':
       case 'confirm_scope_payment_stage': {
         const { scopePaymentStagesAction } = await import('./scope_payment_stages.ts')
@@ -14737,6 +14753,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   },
                   lines: jobLines,
                   jobVertical: _jobVertical,
+                  readCommissionRecords: (jobIds) => readJobCommissionRecords(client, jobIds),
                 }).catch((error) => {
                   if (error instanceof ExtraJobBillingRefusal) {
                     throw new ApiError(error.message, 403, {
@@ -15016,6 +15033,40 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
             if (lineItems.length === 0 && extraLineItems.length === 0) {
               throw new ApiError('Nothing to invoice. Your only lines are auto-tracked clock entries. Add your hours or an extra line.', 400)
+            }
+
+            // Ruling 17 step 2: a commission line on a job with a commission
+            // record is from its named salesperson only, and the job's counted
+            // commission stays within the record's amount (job_commission.ts;
+            // the database holds the same rule on every write).
+            {
+              const commissionClaims = [...lineItems, ...extraLineItems]
+                .filter((line: any) => isCommissionLine(String(line?.line_type ?? '')) && line?.job_id)
+                .map((line: any) => ({
+                  jobId: String(line.job_id),
+                  ref: String(line.job_number || line.job_id),
+                  amountEx: Number(line.line_total_ex) || 0,
+                }))
+              if (commissionClaims.length > 0) {
+                let records
+                try {
+                  records = await readJobCommissionRecords(client, commissionClaims.map((c: any) => c.jobId))
+                } catch {
+                  throw new ApiError('Could not check the commission on this invoice. Nothing was saved. Please submit again.', 503, { saved: false, code: 'commission_unreadable' })
+                }
+                const capRefusal = commissionCapRefusal({ tradeId: tradeUser.id, lines: commissionClaims, records })
+                if (capRefusal) {
+                  throw new ApiError(capRefusal.message, 409, {
+                    ok: false,
+                    success: false,
+                    saved: false,
+                    code: capRefusal.code,
+                    commission_jobs: capRefusal.jobs,
+                    error: capRefusal.message,
+                    userMessage: capRefusal.message,
+                  })
+                }
+              }
             }
 
             const labourSubtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
@@ -15460,7 +15511,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   tradeUser.id,
                   includedAssignmentIds,
                 ),
-              }, priorDraftId))
+              }, priorDraftId)).catch((error) => {
+                // The database's commission cap (a claim that raced another
+                // invoice past the check above) is a refusal, not a failure.
+                const capCode = commissionCapCodeFromDbError(error)
+                if (!capCode) throw error
+                const message = 'This invoice was not saved. The commission on this job changed while you were submitting. Reload and check the commission line, or ask the office.'
+                throw new ApiError(message, 409, { ok: false, success: false, saved: false, code: capCode, error: message, userMessage: message })
+              })
             const invoice = { id: invoiceId }
 
             // B14: one audit event per held typed rate. No amounts in the
