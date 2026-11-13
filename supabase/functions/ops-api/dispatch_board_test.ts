@@ -592,6 +592,40 @@ Deno.test("arrival: solid when confirmed, ring when not, red when sent with no d
   assertEquals(onDay.all_confirmed_in_time, true);
 });
 
+Deno.test("arrival: a box with an order email saved as a draft is order_drafted, never sent (Shaun, 13 Nov 2026)", () => {
+  const arrival = dispatchArrival({
+    today: TODAY,
+    installDay: addDays(TODAY, 10),
+    boxes: [
+      { supplier_id: "s1", supplier_name: "CMI", position: 0 },
+      { supplier_id: "s2", supplier_name: "Bondor", position: 1 },
+      { supplier_id: "s3", supplier_name: "Ampelite", position: 2 },
+      { supplier_id: "s4", supplier_name: "Panelmakers", position: 3 },
+    ],
+    sentEmails: [
+      // CMI went; Bondor is written and waiting; Ampelite has nothing;
+      // Panelmakers' draft was discarded, which is nothing either.
+      { supplier_id: "s1", status: "sent", sent_at: "2026-11-06T07:08:03Z", delivery_date: addDays(TODAY, 4) },
+      { supplier_id: "s2", status: "draft", sent_at: null as any, delivery_date: addDays(TODAY, 5) },
+      { supplier_id: "s4", status: "discarded", sent_at: null as any },
+    ],
+    orders: [],
+  });
+  assertEquals(
+    arrival.orders.map((o) => [o.supplier_name, o.order_sent, o.order_drafted, o.flag, o.delivery_date]),
+    [
+      ["CMI", true, false, null, addDays(TODAY, 4)],
+      // A draft's Date line is not a date asked of the supplier yet.
+      ["Bondor", false, true, "not_sent", null],
+      ["Ampelite", false, false, "not_sent", null],
+      ["Panelmakers", false, false, "not_sent", null],
+    ],
+  );
+  assertEquals(arrival.counts.sent, 1);
+  // The draft does not move Bondor's stage: still at Order materials.
+  assertEquals(arrival.orders[1].material_stage, arrival.orders[2].material_stage);
+});
+
 Deno.test("arrival: with no date on the box, the date our sent email asked for is a ring, never confirmed", () => {
   const arrival = dispatchArrival({
     today: TODAY,
@@ -868,6 +902,26 @@ Deno.test("pipeline v2 Active: only board jobs, each with its card fields", asyn
   assertEquals(result.board.waiting_on_us, 2);
   // The real columns still carry the rows.
   assertEquals(result.columns.scheduled.length, 2);
+});
+
+Deno.test("pipeline v2: the board reads draft order emails too, and marks the box order_drafted", async () => {
+  const fixture: any = boardFixture();
+  fixture.job_material_suppliers.push(
+    { id: "box2", job_id: jobId(3), supplier_id: "s2", supplier_name: "Ampelite", position: 1, created_at: "2026-10-02T00:00:00Z" },
+  );
+  fixture.dispatch_supplier_order_emails.push(
+    { id: "em2", job_id: jobId(3), supplier_id: "s2", status: "draft", sent_at: null },
+  );
+  const { client, reads } = makeClient(fixture);
+  const result: any = await _pipelineForTest(client as any, params("dispatch=1&board=v2"));
+  const read = reads.find((r) => r.table === "dispatch_supplier_order_emails")!;
+  assertEquals(read.in.find(([c]) => c === "status")?.[1], ["sent", "draft"]);
+  const orders = rowFor(result, 3)!.board.arrival.orders;
+  assertEquals(orders.map((o: any) => [o.supplier_name, o.order_sent, o.order_drafted]), [
+    ["Stratco WA", true, false],
+    ["Ampelite", false, true],
+  ]);
+  assertEquals(rowFor(result, 3)!.board.arrival.counts.sent, 1);
 });
 
 Deno.test("pipeline v2 Archive: the day after the install, 30 days shown, a search finds older", async () => {
