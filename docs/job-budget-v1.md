@@ -118,7 +118,7 @@ only. Every read that hands pricing to a customer, a trade or a crew document:
 | send-quote `model` (customer 3D page) | customer | Reads scope artifacts only, no pricing. |
 | send-quote customer emails (send, send-runs, acceptance, decline) | customer | Built from named totals; no pricing record is attached or embedded. |
 | ops-api `my_jobs` | trade | `pricing_json` deleted from every card (existing). |
-| ops-api `trade_job_detail` | trade | `pricing_json` dropped from the payload (existing); the quote packer gets `withoutBudget(pricing)`; `scope_json` goes through `redactTradeScopeQuote`, whose `TRADE_SCOPE_QUOTE_KEYS` now drops `budget` at any depth, and `tradeScopePrivateKey` drops every key naming commission or the salesperson (`commissionBasis`, `commissionFrom`, ...) at any depth (ruling 17a). |
+| ops-api `trade_job_detail` | trade | `pricing_json` dropped from the payload (existing); the quote packer gets `withoutBudget(pricing)`; `scope_json` goes through `redactTradeScopeQuote`, whose `TRADE_SCOPE_QUOTE_KEYS` now drops `budget` at any depth, and `tradeScopePrivateKey` drops every key naming commission or the salesperson (`commissionBasis`, `commissionFrom`, ...) at any depth (ruling 17a). The whole answer then goes through `stripTradePrivateCarriers` for every tier, the office and a division manager included: they keep the quote figures but never a `budget`, commission or salesperson key. |
 | ops-api `trade_quote_extract` | trade | Built from the trade pack, which picks quote lines and terms only; `pricing_json` is on its refused keys. |
 | Crew scope of works, work orders (`my_work_orders`, `my_job_work_order`) | crew | Built from the redacted scope and the quote fill's lines (descriptions, no money). |
 
