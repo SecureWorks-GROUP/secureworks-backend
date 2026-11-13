@@ -145,3 +145,28 @@ Apply `20261113190000_job_budgets.sql` before or with the matching
 `send-quote` deploy (the writer skips with `store_missing` until it is
 applied). The rollback (`supabase/rollbacks/20261113190000_job_budgets_down.sql`)
 drops the writer, the view and the guard and keeps every stored budget.
+
+## Step 5: Job Profit's first expected source
+
+Migration `20261114040000_job_profit_expected_from_budget.sql` (rollback in
+`supabase/rollbacks/`). With `feature_flags.job_profit_expected_from_job_budget`
+on (seeded off), `v_job_profit` reads a job's newest budget version first:
+
+| `v_job_profit` | From the budget |
+|---|---|
+| `expected_source` | `job_budget` |
+| `expected_labour_ex` | `work_order_ex_gst` (labour plus the other lines paid to the crew, what the crew bills) |
+| `expected_materials_ex` | `materials_ex_gst` |
+| `expected_commission_ex` | `commission_ex_gst` |
+| `expected_other_ex` (new) | cost before commission less materials less the work order amount |
+| `expected_cost_ex` | the four lanes above added up |
+| `budget_gross_profit_ex` (new) | `gross_profit_ex_gst`, the figure commission is worked from |
+| `expected_budget_id` (new) | the budget row read |
+
+A budget lane that is not known names `expected_cost_lane_missing`, as for
+every other source; it is never read as 0 or taken from an older source. A job
+with no budget, and every job while the switch is off, reads exactly as before.
+`commission_summary` and the patio expected read treat `job_budget` as an
+accepted baseline. Nothing works commission or margin from an assumed 35%.
+Proof: `supabase/tests/migration-contracts/20261114040000_job_profit_expected_from_budget/`.
+Rollout: apply the migration, then turn the switch on.

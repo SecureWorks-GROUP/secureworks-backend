@@ -545,3 +545,11 @@ Deno.test("job_profit: a released quote naming the frozen and baseline revision 
     assertEquals(fp.lanes.materials.variance_ex, null, t);
   }
 });
+
+Deno.test("patio_expected: a job budget baseline (ruling 17 step 5) is the accepted one; a sent quote is not", () => {
+  const budget = pe(current(), frozen(), row({ expected_source: "job_budget" })) as any;
+  assertEquals(budget.commercial_baseline.source, "job_budget");
+  assertEquals(budget.commercial_baseline.accepted, true);
+  const sent = pe(current(), frozen(), row({ expected_source: "sent_quote_revision" })) as any;
+  assertEquals(sent.commercial_baseline.accepted, false);
+});

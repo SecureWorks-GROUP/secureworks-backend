@@ -5109,6 +5109,11 @@ and the salesperson: any read that hands pricing or scope to a customer, trade
 or crew document strips it (`withoutBudget`, and `budget` is on
 `TRADE_SCOPE_QUOTE_KEYS`); a new such read must too, and joins the list in the
 doc and `ops-api/job_budget_strip_test.ts`.
+Step 5 (`20261114040000`): with `job_profit_expected_from_job_budget` on
+(seeded off) `v_job_profit` reads the newest budget first (`expected_source`
+`job_budget`; labour is the work order amount, plus `expected_other_ex` and
+`budget_gross_profit_ex`). Commission and margin are never worked from an
+assumed percentage; read the budget's gross profit.
 
 ## Booking confirmation authority
 
