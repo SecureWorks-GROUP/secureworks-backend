@@ -5110,6 +5110,13 @@ or crew document strips it (`withoutBudget`, and `budget` is on
 `TRADE_SCOPE_QUOTE_KEYS`, and every key naming commission or the salesperson
 is dropped from a trade scope by `tradeScopePrivateKey`); a new such read must too, and joins the list in the
 doc and `ops-api/job_budget_strip_test.ts`.
+Step 3 (`20261114020000`, flag `dispatch_budget_cost_v1`, seeded off): a
+Dispatch line on a budget job is costed only by `dispatch_v2_budget_cost.ts`
+(linked by `job_material_lines.budget_id` + `budget_line_key`); a line over its
+budget line or not in it is ordered only with a signed-in person's reason in
+the append-only `dispatch_line_cost_reasons`; the order email stores
+`order_cost` and its body never prints a dollar. Contract: "Dispatch lines
+carry cost" in `docs/job-budget-v1.md`.
 
 Step 2 (`20261113230000`, `ops-api/job_commission.ts`): the commission rate is
 `commission_rates` (fence 15, patio 8, of gross profit; append-only, changed
