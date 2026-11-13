@@ -46037,6 +46037,17 @@ export const TRADE_SCOPE_QUOTE_KEYS = new Set([
   // `budget`; dropped here at any depth wherever it is carried.
   'budget',
 ])
+// Ruling 17a: no commission key reaches Trade App job data. The scoping tools
+// carry commission metadata on the scope itself (`commissionBasis`,
+// `commissionFrom`, a pack's `commission`, the salesperson), under names that
+// change with each tool release, so every key naming commission or the
+// salesperson is dropped at any depth, whatever its value. A trade's own
+// can-claim answer is decided by the server and never read from the scope.
+export const TRADE_SCOPE_PRIVATE_KEY_RE = /commission|salesperson/i
+export function tradeScopePrivateKey(key: string): boolean {
+  return TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key) ||
+    TRADE_SCOPE_PRIVATE_KEY_RE.test(key)
+}
 // Walked, never dropped as objects: the quote narrative + quote-number pack.
 // A bare numeric/money value on these keys is still stripped. Nested objects
 // keep ONLY the allowlist below — unknown keys are dropped, not denylisted.
@@ -46246,7 +46257,7 @@ function sanitizeTradeAllocatedJsonTree(node: any, depth = 0, parentKey?: string
   if (typeof node !== 'object') return tradeScopeRetainPrimitive(node, parentKey)
   const out: Record<string, any> = {}
   for (const [key, value] of Object.entries(node)) {
-    if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+    if (tradeScopePrivateKey(key)) continue
     if (typeof value === 'number' && Number.isFinite(value)) {
       if (!tradeScopeKeepNumericLeaf(key)) continue
       out[key] = value
@@ -46280,7 +46291,7 @@ function sanitizeTradeAllocatedMediaNotes(media: any[]): any[] {
     if (!row || typeof row !== 'object' || Array.isArray(row)) return row
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(row)) {
-      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (tradeScopePrivateKey(key)) continue
       if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
         if (typeof value === 'string') {
           const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
@@ -46469,7 +46480,7 @@ function walkTradeQuoteObjectAllowlist(node: any, depth: number, parentKey?: str
   const out: Record<string, any> = {}
   for (const [key, value] of Object.entries(node)) {
     if (!TRADE_SCOPE_QUOTE_OBJECT_ALLOWLIST.has(key)) continue
-    if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+    if (tradeScopePrivateKey(key)) continue
     // Nested quote/quotes are narrative keys, same as the outer walker:
     // a bare numeric / "$594" value is money, not a quote object.
     if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key) && tradeScopeBareMoneyValue(value)) {
@@ -46507,7 +46518,7 @@ export function redactTradeScopeQuote(scope: any): any {
     if (typeof node !== 'object') return tradeScopeRetainPrimitive(node, parentKey)
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(node)) {
-      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (tradeScopePrivateKey(key)) continue
       if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key)) {
         if (tradeScopeBareMoneyValue(value)) continue
         if (typeof value === 'string') {
@@ -46615,7 +46626,7 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(item)) {
       if (!TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key)) continue
-      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (tradeScopePrivateKey(key)) continue
       if (!isTradeWoScopeItemScalar(value)) continue
       if (key === 'is_variation') {
         if (typeof value === 'boolean') out[key] = value
@@ -46656,7 +46667,7 @@ export function redactTradeWorkOrdersForAllocated(orders: any[]): any[] {
         out.scope_items = redactTradeWorkOrderScopeItems(value)
         continue
       }
-      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (tradeScopePrivateKey(key)) continue
       if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
         if (typeof value === 'string') {
           const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)

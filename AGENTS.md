@@ -5107,7 +5107,8 @@ only, never money: trades read job events); the acceptance always stands.
 `jobs.expected_costs` is untouched until step 5. The budget carries commission
 and the salesperson: any read that hands pricing or scope to a customer, trade
 or crew document strips it (`withoutBudget`, and `budget` is on
-`TRADE_SCOPE_QUOTE_KEYS`); a new such read must too, and joins the list in the
+`TRADE_SCOPE_QUOTE_KEYS`, and every key naming commission or the salesperson
+is dropped from a trade scope by `tradeScopePrivateKey`); a new such read must too, and joins the list in the
 doc and `ops-api/job_budget_strip_test.ts`.
 
 Step 2 (`20261113230000`, `ops-api/job_commission.ts`): the commission rate is
