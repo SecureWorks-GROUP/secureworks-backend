@@ -5119,6 +5119,12 @@ the append-only `dispatch_line_cost_reasons`; the order email stores
 never off: it refuses the fill, email, send and reason (503
 `budget_switch_unreadable`). Contract: "Dispatch lines carry cost" in
 `docs/job-budget-v1.md`.
+=======
+Step 5 (`20261114040000`): with `job_profit_expected_from_job_budget` on
+(seeded off) `v_job_profit` reads the newest budget first (`expected_source`
+`job_budget`; labour is the work order amount, plus `expected_other_ex` and
+`budget_gross_profit_ex`). Commission and margin are never worked from an
+assumed percentage; read the budget's gross profit.
 
 Step 2 (`20261113230000`, `ops-api/job_commission.ts`): the commission rate is
 `commission_rates` (fence 15, patio 8, of gross profit; append-only, changed

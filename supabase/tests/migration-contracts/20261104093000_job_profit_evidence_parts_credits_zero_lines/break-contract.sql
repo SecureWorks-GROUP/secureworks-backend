@@ -6,6 +6,11 @@ SELECT md5(pg_get_functiondef('public.job_profit_line_evidence_many(uuid[])'::re
 -- its down runs first.
 SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.v_job_profit'::regclass AND attname = 'office_variations_ex' AND NOT attisdropped) AS rq15g_unwind_20261104093000 \gset
 \if :rq15g_unwind_20261104093000
+-- 20261114040000 (ruling 17 step 5) sits on v_job_profit after 20261111100000: unwind it first when live.
+SELECT strpos(pg_get_viewdef('public.v_job_profit'::regclass, true), 'budget_rev AS (') > 0 AS r17s5_live_20261104093000_break_contract_0 \gset
+\if :r17s5_live_20261104093000_break_contract_0
+\ir ../../../rollbacks/20261114040000_job_profit_expected_from_budget_down.sql
+\endif
 \ir ../../../rollbacks/20261111100000_job_profit_office_variations_down.sql
 \endif
 \ir ../../../rollbacks/20261104200500_job_profit_credits_follow_their_documents_down.sql
