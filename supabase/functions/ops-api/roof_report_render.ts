@@ -7,18 +7,22 @@
 // This module renders bytes only. It does NOT upload, send, authorise, or touch
 // any live system -- the ops-api action that calls it owns attachment + state.
 //
-// Layout (mirrors the make-safe report chrome, roof-report content):
-//   - orange top band (#F15A29)
-//   - white header band with 'Roof Inspection Report' + '<ref> | <address>'
-//   - KV table (Job reference, Property, Site contact, Inspection date,
-//     Inspected by, Weather, Number of storeys; Report fee inc GST only when
-//     include_report_fee is not false — trade-visible attaches omit the fee)
-//   - Property Details KV grid + Roof Findings Yes/No block
-//   - prose sections (Scope of Inspection, Roof Condition and Findings,
-//     Maintenance) with doc.splitTextToSize wrapping
-//   - labelled photo evidence grid (two per page, caption = photo label)
+// The look is the shared SecureWorks report design (report_design.ts): hero
+// with the property as the headline, key facts card (Job reference, Property,
+// Site contact, Inspection date, Inspected by, Weather, Number of storeys;
+// Report fee inc GST only when include_report_fee is not false, since
+// trade-visible attaches omit the fee), Property Details and Roof Findings
+// grids, Maintenance, Scope of Inspection, then a labelled photo gallery.
+// The content, field set, hash, limits and file name are unchanged by the look.
 //
 // Colours: orange #F15A29, dark #293C46, mid #4C6A7C, light #F0F4F7.
+
+import {
+  type GalleryPhoto,
+  ReportCanvas,
+  type ReportImage,
+  reportImageFormat,
+} from "./report_design.ts";
 
 // ── Pure helpers (exported for unit tests; no jsPDF / no network) ──
 
@@ -214,18 +218,7 @@ export function sanitiseText(text: unknown): string {
 
 // ── Renderer (async; imports jsPDF lazily, like the make-safe renderer) ──
 
-const ORANGE: [number, number, number] = [241, 90, 41]; // #F15A29
-const DARK: [number, number, number] = [41, 60, 70]; // #293C46
-const MID: [number, number, number] = [76, 106, 124]; // #4C6A7C
-const LIGHT: [number, number, number] = [240, 244, 247]; // #F0F4F7
-const RULE: [number, number, number] = [210, 218, 224]; // #D2DAE0
-const BODY: [number, number, number] = [50, 50, 50]; // #323232
-
-const PAGE_W = 210;
-const PAGE_H = 297;
-const MARGIN = 14;
-const CONTENT_W = PAGE_W - 2 * MARGIN;
-// 2026-09-08: all photos on the visit go in (Marnin). Six thumbnails per page.
+// 2026-09-08: all photos on the visit go in (Marnin). About six per page.
 const DEFAULT_REPORT_PHOTO_LIMIT = 200;
 const MAX_REPORT_PHOTO_LIMIT = 200;
 
@@ -250,30 +243,34 @@ export function aspectFitBox(
   return { x: boxX + (boxW - w) / 2, y: boxY + (boxH - h) / 2, w, h };
 }
 
-function photoDataUrl(p: RoofReportPhoto): string | null {
-  if (!p?.bytesBase64) return null;
-  const ct = p.contentType || "image/jpeg";
-  const fmt = ct.toLowerCase().includes("png") ? "PNG" : "JPEG";
-  return `data:${
-    fmt === "PNG" ? "image/png" : "image/jpeg"
-  };base64,${p.bytesBase64}`;
+// A photo the renderer holds ready to draw. Fetched photos stay as raw bytes:
+// jsPDF takes a Uint8Array, so no base64 copy of every photo is built.
+interface ResolvedRoofPhoto {
+  data: Uint8Array | string;
+  contentType: string;
+  label?: string;
 }
 
 async function resolvePhotoBytes(
   p: RoofReportPhoto,
-): Promise<RoofReportPhoto | null> {
-  if (p?.bytesBase64) return p;
+): Promise<ResolvedRoofPhoto | null> {
+  if (p?.bytesBase64) {
+    const ct = p.contentType || "image/jpeg";
+    const png = ct.toLowerCase().includes("png");
+    return {
+      data: `data:${png ? "image/png" : "image/jpeg"};base64,${p.bytesBase64}`,
+      contentType: ct,
+      label: p.label,
+    };
+  }
   const src = p?.thumbUrl || p?.url;
   if (!src) return null;
   try {
     let resp = await fetch(src);
     if (!resp.ok && p?.thumbUrl && p?.url && src !== p.url) resp = await fetch(p.url);
     if (!resp.ok) return null;
-    const buf = new Uint8Array(await resp.arrayBuffer());
-    let bin = "";
-    for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
     return {
-      bytesBase64: btoa(bin),
+      data: new Uint8Array(await resp.arrayBuffer()),
       contentType: resp.headers.get("content-type") || p.contentType ||
         "image/jpeg",
       label: p.label,
@@ -299,150 +296,39 @@ export async function renderRoofReportPdf(
 
   const fileName = roofReportFileName(job.ref, job.address);
   const hash = await renderHash(job);
-  const subtitle = sanitiseText(`${job.ref} | ${job.address}`).slice(0, 128);
 
   const { jsPDF } = await import("https://esm.sh/jspdf@2.5.1");
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
 
-  const header = (): number => {
-    doc.setFillColor(...ORANGE);
-    doc.rect(0, 0, PAGE_W, 5, "F");
-    doc.setFillColor(255, 255, 255);
-    doc.rect(0, 5, PAGE_W, 40, "F");
-    doc.setTextColor(...DARK);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(18);
-    doc.text(REPORT_TITLE, MARGIN, 20);
-    doc.setDrawColor(...ORANGE);
-    doc.setLineWidth(0.6);
-    doc.line(MARGIN, 23, 78, 23);
-    doc.setTextColor(...MID);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(9);
-    doc.text(subtitle, MARGIN, 30);
-    // SecureWorks Group letterhead label, top-right.
-    doc.setTextColor(...DARK);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(11);
-    doc.text("SecureWorks Group", PAGE_W - MARGIN, 20, { align: "right" });
-    doc.setTextColor(...MID);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.5);
-    doc.text("Outdoor living and make safe", PAGE_W - MARGIN, 25, {
-      align: "right",
-    });
-    doc.setDrawColor(...RULE);
-    doc.setLineWidth(0.3);
-    doc.line(MARGIN, 41, PAGE_W - MARGIN, 41);
-    return 52;
-  };
+  const canvas = new ReportCanvas(doc, {
+    kind: REPORT_TITLE,
+    title: sanitiseText(job.address),
+    subtitle: sanitiseText(`Job reference ${job.ref}`).slice(0, 128),
+    reference: sanitiseText(job.ref).slice(0, 60),
+    tagline: "Outdoor living and make safe",
+  });
+  canvas.hero({ overlap: true });
+  canvas.facts(
+    roofReportHeaderRows(job).map(([label, value]) => ({
+      label,
+      value: sanitiseText(value),
+    })),
+    3,
+  );
 
-  const footer = (): void => {
-    doc.setTextColor(...MID);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.5);
-    const pageNo = doc.getNumberOfPages();
-    doc.text(`SecureWorks Group | Page ${pageNo}`, PAGE_W / 2, PAGE_H - 9, {
-      align: "center",
-    });
-  };
-
-  const newPage = (): number => {
-    footer();
-    doc.addPage();
-    return header();
-  };
-
-  let y = header();
-  const BODY_BOTTOM = PAGE_H - 18;
-
-  const ensureSpace = (height: number): void => {
-    if (y + height > BODY_BOTTOM) y = newPage();
-  };
-
-  // KV table renderer, reused for the header block and property details.
-  const kvTable = (rowsIn: Array<[string, string]>): void => {
-    for (const [k, v] of rowsIn) {
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(7.5);
-      // 2026-09-08: long labels ("Gutters/valleys/downpipes serviceable",
-      // "Storm-created openings in roof") ran into the value column. Wrap the
-      // label inside its own 40mm column and size the row to the taller side.
-      const labelLines: string[] = doc.splitTextToSize(k.toUpperCase(), 40);
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(8.4);
-      const valueLines: string[] = doc.splitTextToSize(
-        sanitiseText(v) || "-",
-        CONTENT_W - 52,
-      );
-      const rowH = Math.max(8.5, 5 + Math.max(labelLines.length, valueLines.length) * 4.1);
-      ensureSpace(rowH);
-      doc.setFillColor(...LIGHT);
-      doc.setDrawColor(...RULE);
-      doc.setLineWidth(0.2);
-      doc.rect(MARGIN, y, CONTENT_W, rowH, "FD");
-      doc.setTextColor(...MID);
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(7.5);
-      doc.text(labelLines, MARGIN + 4, y + 5.2);
-      doc.setTextColor(...DARK);
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(8.4);
-      doc.text(valueLines, MARGIN + 46, y + 5.2);
-      y += rowH;
-    }
-  };
-
-  kvTable(roofReportHeaderRows(job));
-  y += 4;
-
-  // Section header bar (dark band + orange tab + white title).
-  const section = (title: string, followingHeightHint = 0): number => {
-    ensureSpace(8 + 5 + Math.max(0, followingHeightHint));
-    doc.setFillColor(...DARK);
-    doc.rect(MARGIN, y, CONTENT_W, 8, "F");
-    doc.setFillColor(...ORANGE);
-    doc.rect(MARGIN, y, 2.3, 8, "F");
-    doc.setTextColor(255, 255, 255);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(10.5);
-    doc.text(title, MARGIN + 6, y + 5.4);
-    y += 13;
-    return y;
-  };
-
-  const para = (text: string): number => {
-    doc.setTextColor(...BODY);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(9.4);
-    const clean = sanitiseText(text) || "-";
-    const lines: string[] = doc.splitTextToSize(clean, CONTENT_W);
-    const lineH = 4.5;
-    for (const line of lines) {
-      ensureSpace(lineH);
-      doc.text(line, MARGIN, y);
-      y += lineH;
-    }
-    y += 4;
-    return y;
-  };
+  const kv = (rows: Array<[string, string]>, columns = 2): void =>
+    canvas.kvGrid(rows.map(([k, v]) => [k, sanitiseText(v)]), columns);
 
   // A bold lead-in followed by the trade's own words, verbatim.
-  const labelledPara = (label: string, text: unknown): number => {
+  const labelledPara = (label: string, text: unknown): void => {
     const clean = sanitiseText(String(text ?? "")).trim();
-    if (!clean) return y;
-    ensureSpace(9);
-    doc.setTextColor(...DARK);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(8.6);
-    doc.text(label, MARGIN, y);
-    y += 4.6;
-    return para(clean);
+    if (!clean) return;
+    canvas.lead(label);
+    canvas.paragraph(clean);
   };
 
-  // Property Details as a KV grid.
-  y = section("Property Details", 40);
-  kvTable([
+  canvas.section("Property Details", 30);
+  kv([
     ["Construction type", String(job.construction_type || "")],
     ["Property condition", String(job.property_condition || "")],
     ["Roof type", String(job.roof_type || "")],
@@ -452,44 +338,42 @@ export async function renderRoofReportPdf(
     ["Roof condition", String(job.roof_condition || "")],
     ["Services / penetrations", String(job.services_penetrations || "")],
   ]);
-  y += 4;
-  y = labelledPara("Gutters, valleys and downpipes", job.gutters_notes);
+  labelledPara("Gutters, valleys and downpipes", job.gutters_notes);
 
   // Roof Findings: the Yes/No block + leak cause + narrative.
-  y = section("Roof Findings", 20);
-  kvTable([
+  canvas.section("Roof Findings", 22);
+  kv([
     ["Storm-created openings in roof", yesNo(job.storm_openings)],
     ["Water leak through roof", yesNo(job.water_leak)],
-    ["Cause of water leak", String(job.leak_cause || "")],
   ]);
-  y += 2;
-  y = labelledPara("Storm-created openings", job.storm_openings_notes);
-  y = labelledPara("Roof condition and findings", job.overall_findings || "");
+  canvas.gap(-4);
+  kv([["Cause of water leak", String(job.leak_cause || "")]], 1);
+  labelledPara("Storm-created openings", job.storm_openings_notes);
+  labelledPara("Roof condition and findings", job.overall_findings || "");
 
   // Maintenance.
-  y = section("Maintenance", 10);
-  kvTable([
+  canvas.section("Maintenance", 16);
+  kv([
     [
       "Maintenance recommended / required",
       String(job.maintenance_recommendation || ""),
     ],
-  ]);
-  y += 2;
+  ], 1);
   const maint = [
     job.maintenance_issues ? `Issues present: ${job.maintenance_issues}` : "",
     job.maintenance_details ? `Details: ${job.maintenance_details}` : "",
   ].filter(Boolean).join("\n\n");
-  y = para(maint);
+  canvas.paragraph(sanitiseText(maint) || "-");
 
   // Scope of Inspection (prose).
-  y = section("Scope of Inspection", 10);
-  y = para(job.scope_summary || "");
+  canvas.section("Scope of Inspection", 10);
+  canvas.paragraph(sanitiseText(job.scope_summary || "") || "-");
 
-  // Photo evidence: two per page, caption = the photo label when supplied.
+  // Photo evidence: a labelled gallery, caption = the photo label when supplied.
   const limit = Number.isFinite(job.photo_limit as number)
     ? Math.max(0, Math.floor(job.photo_limit as number))
     : DEFAULT_REPORT_PHOTO_LIMIT;
-  const resolved: RoofReportPhoto[] = [];
+  const resolved: ResolvedRoofPhoto[] = [];
   for (
     const p of (job.photos || []).slice(
       0,
@@ -500,104 +384,33 @@ export async function renderRoofReportPdf(
     if (r) resolved.push(r);
   }
   if (resolved.length === 0) {
-    y = section("Photo Evidence", 8);
-    doc.setTextColor(...MID);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(8.3);
-    doc.text(
-      "No usable photo evidence was available for this report.",
-      MARGIN,
-      y,
-    );
-    y += 5;
+    canvas.section("Photo Evidence", 8);
+    canvas.note("No usable photo evidence was available for this report.");
   } else {
-    // 2026-09-08: six per page (2 x 3) so a 137-photo visit is 23 pages of
-    // thumbnails, not 69 pages of full-size images.
-    const cols = 2;
-    const rows = 3;
-    const gap = 4;
-    const cellW = (CONTENT_W - gap) / cols;
-    const cellH = 62;
-    const perPage = cols * rows;
-    const gridH = rows * cellH + (rows - 1) * gap;
-    let idx = 0;
-    while (idx < resolved.length) {
-      // section() breaks the page itself when the grid will not fit; calling
-      // newPage() first as well produced a blank page between photo pages.
-      y = section(
-        idx === 0 ? `Photo Evidence (${resolved.length})` : `Photo Evidence (${resolved.length}), continued`,
-        gridH + 4,
-      );
-      const gridTop = y;
-      for (let slot = 0; slot < perPage && idx < resolved.length; slot++) {
-        const p = resolved[idx];
-        idx++;
-        const cellX = MARGIN + (slot % cols) * (cellW + gap);
-        const cellY = gridTop + Math.floor(slot / cols) * (cellH + gap);
-        const dataUrl = photoDataUrl(p);
-        doc.setDrawColor(...RULE);
-        doc.setFillColor(255, 255, 255);
-        doc.setLineWidth(0.2);
-        doc.rect(cellX, cellY, cellW, cellH, "FD");
-        if (dataUrl) {
-          try {
-            const fmt = (p.contentType || "").toLowerCase().includes("png")
-              ? "PNG"
-              : "JPEG";
-            const boxX = cellX + 3;
-            const boxY = cellY + 4;
-            const boxW = cellW - 6;
-            const boxH = cellH - 15;
-            const props = doc.getImageProperties(dataUrl) as {
-              width?: number;
-              height?: number;
-            };
-            const fit = aspectFitBox(
-              Number(props?.width || 0),
-              Number(props?.height || 0),
-              boxX,
-              boxY,
-              boxW,
-              boxH,
-            );
-            doc.addImage(
-              dataUrl,
-              fmt,
-              fit.x,
-              fit.y,
-              fit.w,
-              fit.h,
-              undefined,
-              "FAST",
-            );
-          } catch {
-            doc.setTextColor(...MID);
-            doc.setFont("helvetica", "normal");
-            doc.setFontSize(8);
-            doc.text(
-              `Photo evidence ${idx} (could not embed)`,
-              cellX + cellW / 2,
-              cellY + cellH / 2,
-              { align: "center" },
-            );
-          }
-        }
-        // Caption: the trade-supplied label wins; fall back to a numbered
-        // caption so an unlabelled photo still reads.
-        const caption = sanitiseText(p.label).trim() ||
-          `Photo evidence ${idx}`;
-        doc.setTextColor(...MID);
-        doc.setFont("helvetica", "normal");
-        doc.setFontSize(8);
-        doc.text(caption, cellX + cellW / 2, cellY + cellH - 4, {
-          align: "center",
-        });
-      }
-      y = gridTop + gridH + 7;
-    }
+    // 2026-09-08: about six per page so a 137-photo visit is a couple of dozen
+    // pages of thumbnails, not 69 pages of full-size images.
+    const photos: GalleryPhoto[] = resolved.map((p, i) => {
+      const image: ReportImage = {
+        data: p.data,
+        format: reportImageFormat(
+          p.data instanceof Uint8Array ? p.data : null,
+          p.contentType,
+        ),
+        alias: `roof-photo-${i + 1}`,
+      };
+      return {
+        image,
+        // The trade-supplied label wins; fall back to a numbered caption so an
+        // unlabelled photo still reads.
+        caption: sanitiseText(p.label).trim() || `Photo evidence ${i + 1}`,
+        fallback: `Photo evidence ${i + 1} (could not embed)`,
+      };
+    });
+    canvas.section(`Photo Evidence (${resolved.length})`, 80);
+    canvas.gallery(photos, { targetH: 64 });
   }
 
-  footer();
+  canvas.finish();
 
   const out = doc.output("arraybuffer") as ArrayBuffer;
   return { bytes: new Uint8Array(out), fileName, renderHash: hash };
