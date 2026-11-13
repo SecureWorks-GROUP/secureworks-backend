@@ -652,6 +652,8 @@ jobs:
             supabase/functions/ops-api/sales_booking_routes_test.ts \
             supabase/functions/reporting-api/reporting_staff_gate_test.ts \
             supabase/functions/reporting-api/job_profitability_test.ts \
+            supabase/functions/reporting-api/commission_summary_test.ts \
+            supabase/functions/ops-api/job_profit_patio_expected_test.ts \
             supabase/functions/reporting-api/team_activity_test.ts
 
       # This suite imports the serving monolith, whose pre-existing type errors

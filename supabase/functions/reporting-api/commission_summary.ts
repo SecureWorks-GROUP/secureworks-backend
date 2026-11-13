@@ -26,8 +26,9 @@ export const COMMISSION_PROFIT_COLUMNS = [
   "expected_commission_ex",
 ].join(", ");
 
-// Job Profit sources that are the customer's accepted quote.
-export const ACCEPTED_COMMISSION_SOURCES = ["frozen_at_acceptance", "accepted_quote_revision"];
+// Job Profit sources that are the customer's accepted quote. job_budget (ruling 17 step 5) is the job
+// budget stored at acceptance, its commission worked from the budget's gross profit.
+export const ACCEPTED_COMMISSION_SOURCES = ["job_budget", "frozen_at_acceptance", "accepted_quote_revision"];
 
 // The newest accepted revision's saved commission (same pick as Job Profit's
 // accepted_rev: newest acceptance, then newest version), projected only.
