@@ -14,7 +14,9 @@ import {
   firstWorkDay,
   jobScheduleReminderSweep,
   loadScheduleReminderCandidates,
+  perthDayStart,
   priorTextWindowStart,
+  readScheduleReminderJobDayEvents,
   readScheduleReminderMode,
   readScheduleReminderPriorTexts,
   type ReminderCandidate,
@@ -928,8 +930,9 @@ Deno.test("the prior-text read: the contact's texts by their own time, the job's
 });
 
 Deno.test("one contact on two jobs: the sweep's own text for one job never holds the other's", async () => {
-  // A shared in-memory store: ghl-proxy writes the evidence row as it sends, and the
-  // sweep records the GHL message id on its claim row when it finishes.
+  // A shared in-memory store: ghl-proxy writes the evidence row as it sends (even when
+  // the sweep's wait for its answer times out), and the sweep records the outcome, the
+  // message and the GHL message id on its claim row when it finishes.
   const smsOut: any[] = [];
   const reminderRows: any[] = [];
   const client = fakeClient({
@@ -941,13 +944,14 @@ Deno.test("one contact on two jobs: the sweep's own text for one job never holds
       return {
         data: reminderRows.filter((r) =>
           r.ghl_contact_id === arg("eq", "ghl_contact_id") &&
-          r.job_id !== arg("neq", "job_id") && r.ghl_message_id
+          r.job_id !== arg("neq", "job_id") &&
+          arg("in", "status").includes(r.status)
         ),
         error: null,
       };
     },
   });
-  const run = async (handSent: any[] = []) => {
+  const run = async (handSent: any[] = [], xTimesOut = false) => {
     smsOut.length = 0;
     reminderRows.length = 0;
     smsOut.push(...handSent);
@@ -955,27 +959,32 @@ Deno.test("one contact on two jobs: the sweep's own text for one job never holds
       // x: weekly today (7 days out); y: day before (tomorrow). Same customer.
       cand("x", [work("2026-11-20")], { ghl_contact_id: "c-shared" }),
       cand("y", [work("2026-11-14")], { ghl_contact_id: "c-shared" }),
-    ], { send: (args) => ({ ok: true, message_id: `m-${args.jobId}` }) });
+    ], {
+      send: (args) =>
+        xTimesOut && args.jobId === "x"
+          ? { ok: false, refused: false, error: "timed out" }
+          : { ok: true, message_id: `m-${args.jobId}` },
+    });
     h.deps.readPriorTexts = (contactId, jobId, since) =>
       readScheduleReminderPriorTexts(client, contactId, jobId, since);
     const send = h.deps.sendSms;
     h.deps.sendSms = async (args) => {
       const res = await send(args);
-      if (res.ok) {
-        smsOut.push({
-          event_type: "client.sms_out",
-          event_at: NOON.toISOString(),
-          occurred_at: NOON.toISOString(),
-          provider_message_id: `ghl:${res.message_id}`,
-          body: args.message,
-        });
-      }
+      smsOut.push({
+        event_type: "client.sms_out",
+        event_at: NOON.toISOString(),
+        occurred_at: NOON.toISOString(),
+        provider_message_id: `ghl:${res.ok ? res.message_id : "late"}`,
+        body: args.message,
+      });
       return res;
     };
     const finish = h.deps.finish;
     h.deps.finish = async (row, outcome) => {
       reminderRows.push({
         ...row,
+        status: outcome.status,
+        message: outcome.message ?? null,
         ghl_message_id: outcome.ghl_message_id ?? null,
       });
       await finish(row, outcome);
@@ -991,6 +1000,15 @@ Deno.test("one contact on two jobs: the sweep's own text for one job never holds
     ["sent", "sent"],
   );
 
+  // x's text went but its answer timed out (unconfirmed, no GHL message id): its words
+  // still mark it as the sweep's own, so y is texted.
+  const late = await run([], true);
+  assertEquals(late.h.sent.map((s) => s.jobId), ["x", "y"]);
+  assertEquals(
+    late.r.results.map((x: any) => x.recipients[0].result),
+    ["unconfirmed", "sent"],
+  );
+
   // A hand-sent text that is not one of the sweep's reminders still counts.
   const hand = await run([{
     event_type: "client.sms_out",
@@ -1003,6 +1021,38 @@ Deno.test("one contact on two jobs: the sweep's own text for one job never holds
   assertEquals(
     hand.r.results.map((x: any) => x.recipients[0].result),
     ["skipped_similar_prior", "skipped_similar_prior"],
+  );
+});
+
+Deno.test("today's booking events: a ghost watcher mirror's event is not a booking change", async () => {
+  const at = (events: any[], reschedules = 0) =>
+    fakeClient({
+      job_events: { data: events, error: null },
+      email_events: { data: null, count: reschedules, error: null },
+    });
+  const read = (client: any) =>
+    readScheduleReminderJobDayEvents(client, "j1", perthDayStart(TODAY));
+  assertEquals(await read(at([])), {
+    booking_event: false,
+    reschedule_text: false,
+  });
+  assertEquals(await read(at([{ source: "ghost_auto_mirror" }])), {
+    booking_event: false,
+    reschedule_text: false,
+  });
+  assertEquals(
+    await read(at([{ source: "ghost_auto_mirror" }, { source: null }])),
+    { booking_event: true, reschedule_text: false },
+  );
+  assertEquals(await read(at([], 1)), {
+    booking_event: false,
+    reschedule_text: true,
+  });
+  assertEquals(
+    await read(fakeClient({
+      job_events: { data: null, error: { message: "timeout" } },
+    })),
+    null,
   );
 });
 

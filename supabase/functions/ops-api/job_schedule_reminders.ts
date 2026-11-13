@@ -21,7 +21,7 @@
 //     nothing. No catch-up: a missed noon is not sent later.
 //   - Held for the day (captain answer 1): a crew booking on the job was made, changed
 //     or removed today, or an install_rescheduled text went today. The booked-in or
-//     reschedule text covers that day.
+//     reschedule text covers that day. A ghost watcher mirror's booking event is not one.
 //   - Repairs: when the job's contact sits on other clients' jobs (a builder's or an
 //     agent's number, the job story's contact_shared test, context_job_story_meta), the
 //     job is held and flagged instead (captain answer 6).
@@ -32,8 +32,9 @@
 //     and the job's sms_sent job events since the previous reminder slot (weekly: the
 //     last 6 days; day before: today). One that mentions the work day, its weekday or
 //     reminder wording (similarReminderReason) holds this text as skipped_similar_prior.
-//     A reminder this sweep sent the contact for another job (its GHL message id on a
-//     job_schedule_reminders row of that job) is not a repeat and is left out.
+//     A reminder this sweep sent the contact for another job (a sent or unconfirmed
+//     job_schedule_reminders row of that job, matched by GHL message id or by the same
+//     words) is not a repeat and is left out.
 //   - Once: one job_schedule_reminders row per job, recipient and Perth day, claimed by
 //     insert before the send (conflict = someone already has it). Outcomes: sent, refused
 //     (a 4xx: nothing went), unconfirmed (may have reached GHL, never retried),
@@ -49,7 +50,10 @@
 // it would send. Each live run writes one job_schedule_reminder_runs row.
 
 import { autoStartLane, isWorkBooking, perthToday } from "./job_auto_start.ts";
-import { isGenuineCrewAssignmentRow } from "./ghost_observer_mirror.ts";
+import {
+  GHOST_OBSERVER_MIRROR_SOURCE,
+  isGenuineCrewAssignmentRow,
+} from "./ghost_observer_mirror.ts";
 import { reviewRecipients, type SmsSendResult } from "./job_closeout.ts";
 
 export const SCHEDULE_REMINDER_COMMS_TRIGGER = "schedule_reminder";
@@ -711,10 +715,11 @@ export async function readScheduleReminderJobDayEvents(
 ): Promise<JobDayEvents | null> {
   const [bookingEvents, rescheduleTexts] = await Promise.all([
     client.from("job_events")
-      .select("id", { count: "exact", head: true })
+      .select("source:detail_json->>source")
       .eq("job_id", jobId)
       .in("event_type", ["assignment_created", "assignment_deleted"])
-      .gte("created_at", dayStart),
+      .gte("created_at", dayStart)
+      .limit(PRIOR_TEXT_LIMIT),
     client.from("email_events")
       .select("id", { count: "exact", head: true })
       .eq("job_id", jobId)
@@ -724,7 +729,9 @@ export async function readScheduleReminderJobDayEvents(
   ]);
   if (bookingEvents.error || rescheduleTexts.error) return null;
   return {
-    booking_event: (bookingEvents.count ?? 0) > 0,
+    booking_event: (bookingEvents.data ?? []).some((e: any) =>
+      text(e.source) !== GHOST_OBSERVER_MIRROR_SOURCE
+    ),
     reschedule_text: (rescheduleTexts.count ?? 0) > 0,
   };
 }
@@ -747,8 +754,8 @@ export async function readScheduleReminderContactShared(
 /**
  * Outbound texts to the contact (business_events client.sms_out and legacy sms_sent, any
  * sender) and the job's sms_sent job events (to that contact, or naming none) since
- * `since`, less the reminders this sweep sent the contact for another job (matched by
- * GHL message id). Null when any read fails.
+ * `since`, less the reminders this sweep sent the contact for another job (sent or
+ * unconfirmed, matched by GHL message id or the same words). Null when any read fails.
  */
 export async function readScheduleReminderPriorTexts(
   client: any,
@@ -774,36 +781,42 @@ export async function readScheduleReminderPriorTexts(
       .order("created_at", { ascending: false })
       .limit(PRIOR_TEXT_LIMIT),
     client.from("job_schedule_reminders")
-      .select("ghl_message_id")
+      .select("ghl_message_id, message")
       .eq("ghl_contact_id", contactId)
       .neq("job_id", jobId)
-      .not("ghl_message_id", "is", null),
+      .in("status", ["sent", "unconfirmed"]),
   ]);
   if (events.error || jobTexts.error || otherJobReminders.error) return null;
-  const otherJobIds = new Set(
-    (otherJobReminders.data ?? []).map((r: any) => text(r.ghl_message_id)),
-  );
-  const isOtherJobReminder = (id: unknown) =>
-    text(id) !== "" && otherJobIds.has(text(id));
+  const sameWords = (m: unknown) => text(m).replace(/\s+/g, " ");
+  const otherJobIds = new Set<string>();
+  const otherJobMessages = new Set<string>();
+  for (const r of otherJobReminders.data ?? []) {
+    if (text(r.ghl_message_id)) otherJobIds.add(text(r.ghl_message_id));
+    if (sameWords(r.message)) otherJobMessages.add(sameWords(r.message));
+  }
+  const isOtherJobReminder = (id: unknown, message: string) =>
+    (text(id) !== "" && otherJobIds.has(text(id))) ||
+    (message !== "" && otherJobMessages.has(sameWords(message)));
   const out: PriorText[] = [];
   for (const e of events.data ?? []) {
-    if (isOtherJobReminder(text(e.provider_message_id).replace(/^ghl:/, ""))) {
-      continue;
-    }
+    const message = text(e.body || e.msg || e.body_preview);
+    const id = text(e.provider_message_id).replace(/^ghl:/, "");
+    if (isOtherJobReminder(id, message)) continue;
     out.push({
       // The message's own time when known (a backfilled row lands later than it was sent).
       at: String(e.event_at || e.occurred_at),
-      message: text(e.body || e.msg || e.body_preview),
+      message,
       source: `business_events:${e.event_type}`,
     });
   }
   for (const e of jobTexts.data ?? []) {
     const to = text(e.detail_json?.contact_id);
     if (to && to !== contactId) continue;
-    if (isOtherJobReminder(e.detail_json?.message_id)) continue;
+    const message = text(e.detail_json?.message);
+    if (isOtherJobReminder(e.detail_json?.message_id, message)) continue;
     out.push({
       at: String(e.created_at),
-      message: text(e.detail_json?.message),
+      message,
       source: "job_events:sms_sent",
     });
   }

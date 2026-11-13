@@ -34,7 +34,8 @@ Each held text is recorded with its reason (`skipped_<reason>`):
 
 - `booking_changed_today`: a crew booking on the job was made, changed,
   cancelled or removed today (Perth). The booked-in or reschedule text covers
-  the day.
+  the day. A ghost watcher mirror's booking event (`source`
+  `ghost_auto_mirror`) is not a booking change.
 - `reschedule_text_today`: an `install_rescheduled` text went today.
 - `similar_prior`: an outbound text to that contact (`business_events`
   `client.sms_out` / `sms_sent`, hand-sent or tool-sent) or a text on the job
@@ -43,8 +44,9 @@ Each held text is recorded with its reason (`skipped_<reason>`):
   as similar when it names the work day's date or weekday, or uses booking or
   reminder words: on track, reminder, remind, booked, booking, coming in,
   tomorrow, scheduled. A reminder this sweep sent the same contact for another
-  job (its GHL message id on that job's `job_schedule_reminders` row) is not a
-  repeat and does not count.
+  job (a `sent` or `unconfirmed` `job_schedule_reminders` row of that job,
+  matched by GHL message id or by the same words) is not a repeat and does not
+  count.
 - `contact_shared` (repairs only, flagged on the job event): the job's contact
   sits on other clients' jobs (a builder's or agent's number), by the job
   story's `contact_shared` test (`context_job_story_meta`).
