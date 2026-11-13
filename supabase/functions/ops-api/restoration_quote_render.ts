@@ -1,7 +1,7 @@
 // Restoration quote PDF (docs/restoration-workflow-v1.md): the priced quote a
-// builder approves before restoration works start. TS/jsPDF on the same
-// SecureWorks letterhead chrome as roof_report_render.ts and
-// makesafe_report_render.ts.
+// builder approves before restoration works start. TS/jsPDF on the shared
+// SecureWorks report design (report_design.ts), so the quote and the reports
+// read as one family.
 //
 // This module renders bytes only. It uploads nothing, sends nothing and
 // touches no live system; the ops-api action that calls it files the document.
@@ -11,6 +11,11 @@
 // stays price-free (its renderer refuses money wording) and this is why the
 // quote is its own document rather than a section of the report.
 
+import {
+  REPORT_COLOURS,
+  REPORT_PAGE,
+  ReportCanvas,
+} from "./report_design.ts";
 import type { RestorationQuote } from "./restoration_workflow.ts";
 
 export interface RestorationQuoteDocumentInput {
@@ -34,18 +39,11 @@ export interface RenderedRestorationQuote {
   fileName: string;
 }
 
-const ORANGE: [number, number, number] = [241, 90, 41]; // #F15A29
-const DARK: [number, number, number] = [41, 60, 70]; // #293C46
-const MID: [number, number, number] = [76, 106, 124]; // #4C6A7C
-const LIGHT: [number, number, number] = [240, 244, 247]; // #F0F4F7
-const RULE: [number, number, number] = [210, 218, 224]; // #D2DAE0
-const BODY: [number, number, number] = [50, 50, 50]; // #323232
-
-const PAGE_W = 210;
-const PAGE_H = 297;
-const MARGIN = 14;
-const CONTENT_W = PAGE_W - 2 * MARGIN;
-const BODY_TOP = 47;
+const { orange: ORANGE, dark: DARK, mid: MID, light: LIGHT, rule: RULE, body: BODY } =
+  REPORT_COLOURS;
+const MARGIN = REPORT_PAGE.MARGIN;
+const CONTENT_W = REPORT_PAGE.CONTENT_W;
+const BODY_BOTTOM = REPORT_PAGE.BODY_BOTTOM;
 
 export const RESTORATION_QUOTE_TITLE = "Restoration Quote";
 
@@ -154,263 +152,136 @@ export async function renderRestorationQuotePdf(
     quote.quote_number,
     input.builder_reference,
   );
-  const subtitle = sanitiseText(
-    [input.builder_reference, input.site_address].filter(Boolean).join(" | "),
-  ).slice(0, 128);
 
   // deno-lint-ignore no-import-prefix
   const { jsPDF } = await import("https://esm.sh/jspdf@2.5.1");
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
 
-  const header = (): number => {
-    doc.setFillColor(...ORANGE);
-    doc.rect(0, 0, PAGE_W, 5, "F");
-    doc.setFillColor(255, 255, 255);
-    doc.rect(0, 5, PAGE_W, 40, "F");
-    doc.setTextColor(...DARK);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(18);
-    doc.text(RESTORATION_QUOTE_TITLE, MARGIN, 20);
-    doc.setDrawColor(...ORANGE);
-    doc.setLineWidth(0.6);
-    doc.line(MARGIN, 23, 70, 23);
-    doc.setTextColor(...MID);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(9);
-    doc.text(subtitle, MARGIN, 30);
-    doc.setTextColor(...DARK);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(11);
-    doc.text("SecureWorks Group", PAGE_W - MARGIN, 20, { align: "right" });
-    doc.setTextColor(...MID);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.5);
-    doc.text("Emergency services and restoration", PAGE_W - MARGIN, 25, {
-      align: "right",
-    });
-    doc.setDrawColor(...RULE);
-    doc.setLineWidth(0.3);
-    doc.line(MARGIN, 41, PAGE_W - MARGIN, 41);
-    return BODY_TOP;
-  };
-
-  const footer = (): void => {
-    doc.setTextColor(...MID);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.5);
-    doc.text(
-      `SecureWorks Group | ${quote.quote_number} | Page ${doc.getNumberOfPages()}`,
-      PAGE_W / 2,
-      PAGE_H - 9,
-      { align: "center" },
-    );
-  };
-
-  let y = header();
-  const BODY_BOTTOM = PAGE_H - 18;
-  const ensureSpace = (height: number): void => {
-    if (y + height > BODY_BOTTOM) {
-      footer();
-      doc.addPage();
-      y = header();
-    }
-  };
-
-  const section = (title: string, followingHeightHint = 0): void => {
-    ensureSpace(8 + 5 + Math.max(0, followingHeightHint));
-    doc.setFillColor(...DARK);
-    doc.rect(MARGIN, y, CONTENT_W, 8, "F");
-    doc.setFillColor(...ORANGE);
-    doc.rect(MARGIN, y, 2.3, 8, "F");
-    doc.setTextColor(255, 255, 255);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(10.5);
-    doc.text(title, MARGIN + 6, y + 5.4);
-    y += 13;
-  };
-
-  const para = (body: string): void => {
-    doc.setTextColor(...BODY);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(9.4);
-    for (const block of sanitiseText(body).split("\n")) {
-      const lines: string[] = doc.splitTextToSize(block || " ", CONTENT_W);
-      for (const line of lines) {
-        ensureSpace(4.5);
-        doc.text(line, MARGIN, y);
-        y += 4.5;
-      }
-    }
-    y += 4;
-  };
-
-  // Details as a two-column grid (the site address takes a full row), so the
-  // header stays short and the priced table fits on the first page.
-  const kvGrid = (rows: Array<[string, string]>): void => {
-    const half = CONTENT_W / 2;
-    const cellLines = (value: string, width: number): string[] => {
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(8.4);
-      return doc.splitTextToSize(sanitiseText(value) || "-", width);
-    };
-    const drawCell = (
-      x: number,
-      width: number,
-      rowH: number,
-      label: string,
-      lines: string[],
-    ): void => {
-      doc.setFillColor(...LIGHT);
-      doc.setDrawColor(...RULE);
-      doc.setLineWidth(0.2);
-      doc.rect(x, y, width, rowH, "FD");
-      doc.setTextColor(...MID);
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(7);
-      doc.text(label.toUpperCase(), x + 3, y + 5.2);
-      doc.setTextColor(...DARK);
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(8.4);
-      doc.text(lines, x + 35, y + 5.2);
-    };
-    const full = rows.filter(([label]) => label === "Site address");
-    const paired = rows.filter(([label]) => label !== "Site address");
-    for (let i = 0; i < paired.length; i += 2) {
-      const left = paired[i];
-      const right = paired[i + 1];
-      const leftLines = cellLines(left[1], half - 38);
-      const rightLines = right ? cellLines(right[1], half - 38) : [];
-      const rowH = Math.max(
-        8.5,
-        5 + Math.max(leftLines.length, rightLines.length) * 4.1,
-      );
-      ensureSpace(rowH);
-      drawCell(MARGIN, half, rowH, left[0], leftLines);
-      if (right) drawCell(MARGIN + half, half, rowH, right[0], rightLines);
-      else drawCell(MARGIN + half, half, rowH, "", []);
-      y += rowH;
-    }
-    for (const [label, value] of full) {
-      const lines = cellLines(value, CONTENT_W - 38);
-      const rowH = Math.max(8.5, 5 + lines.length * 4.1);
-      ensureSpace(rowH);
-      drawCell(MARGIN, CONTENT_W, rowH, label, lines);
-      y += rowH;
-    }
-  };
-
-  kvGrid(restorationQuoteHeaderRows(input));
-  y += 6;
+  const canvas = new ReportCanvas(doc, {
+    kind: RESTORATION_QUOTE_TITLE,
+    title: sanitiseText(input.site_address),
+    subtitle: sanitiseText(
+      [`Quote ${quote.quote_number}`, input.builder_reference].filter(Boolean)
+        .join("  |  "),
+    ).slice(0, 128),
+    reference: sanitiseText(quote.quote_number),
+    referenceNote: formatQuoteDate(input.quote_date),
+    tagline: "Emergency services and restoration",
+  });
+  canvas.hero({ overlap: true });
+  canvas.facts(
+    restorationQuoteHeaderRows(input).map(([label, value]) => ({
+      label,
+      value: sanitiseText(value) || "-",
+    })),
+    3,
+  );
 
   if (quote.scope_of_works) {
-    section("Scope of works", 12);
-    para(quote.scope_of_works);
+    canvas.section("Scope of works", 12);
+    canvas.paragraph(quote.scope_of_works);
   }
 
   // Line table: description | qty | unit | rate ex GST | amount ex GST.
-  const COL_QTY = MARGIN + 108;
-  const COL_UNIT = MARGIN + 124;
-  const COL_RATE = MARGIN + 151;
+  const COL_QTY = MARGIN + 110;
+  const COL_UNIT = MARGIN + 115;
+  const COL_RATE = MARGIN + 150;
   const COL_AMOUNT = MARGIN + CONTENT_W - 3;
   const DESC_W = 92;
 
   const tableHead = (): void => {
-    ensureSpace(8);
-    doc.setFillColor(...LIGHT);
-    doc.setDrawColor(...RULE);
-    doc.setLineWidth(0.2);
-    doc.rect(MARGIN, y, CONTENT_W, 7.5, "FD");
-    doc.setTextColor(...MID);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(7.5);
-    doc.text("DESCRIPTION", MARGIN + 3, y + 4.9);
-    doc.text("QTY", COL_QTY, y + 4.9, { align: "right" });
-    doc.text("UNIT", COL_UNIT, y + 4.9);
-    doc.text("RATE EX GST", COL_RATE, y + 4.9, { align: "right" });
-    doc.text("AMOUNT EX GST", COL_AMOUNT, y + 4.9, { align: "right" });
-    y += 7.5;
+    canvas.ensure(8);
+    const y = canvas.y;
+    doc.setFillColor(...DARK);
+    doc.roundedRect(MARGIN, y, CONTENT_W, 7.5, 1.2, 1.2, "F");
+    canvas.eyebrow("Description", MARGIN + 3, y + 4.9, [255, 255, 255], 6.2);
+    canvas.eyebrow("Qty", COL_QTY, y + 4.9, [255, 255, 255], 6.2, "right");
+    canvas.eyebrow("Unit", COL_UNIT, y + 4.9, [255, 255, 255], 6.2);
+    canvas.eyebrow("Rate ex GST", COL_RATE, y + 4.9, [255, 255, 255], 6.2, "right");
+    canvas.eyebrow("Amount ex GST", COL_AMOUNT, y + 4.9, [255, 255, 255], 6.2, "right");
+    canvas.y = y + 7.5;
   };
 
   // Measure the whole priced table first. When the table and its totals fit
   // on one page they are never split: they start on a new page instead.
   doc.setFont("helvetica", "normal");
-  doc.setFontSize(8.8);
+  doc.setFontSize(9);
   const measured = quote.lines.map((line) => {
     const descLines: string[] = doc.splitTextToSize(
       sanitiseText(line.description),
       DESC_W,
     );
-    // jsPDF sets a multi-line description about 3.6 mm per line at 8.8 pt.
-    return { line, descLines, rowH: 7.5 + (descLines.length - 1) * 3.6 };
+    // jsPDF sets a multi-line description about 3.7 mm per line at 9 pt.
+    return { line, descLines, rowH: 8 + (descLines.length - 1) * 3.7 };
   });
-  const TOTALS_H = 26;
-  const tableH = 13 + 7.5 + measured.reduce((sum, m) => sum + m.rowH, 0) +
-    TOTALS_H;
-  const freshPageRoom = BODY_BOTTOM - BODY_TOP;
-  section("Quoted works", tableH <= freshPageRoom ? tableH - 13 : 30);
+  const TOTALS_H = 30;
+  const tableH = 7.5 + measured.reduce((sum, m) => sum + m.rowH, 0) + TOTALS_H;
+  const freshPageRoom = BODY_BOTTOM - REPORT_PAGE.RUNNING_TOP - 15;
+  canvas.section("Quoted works", tableH <= freshPageRoom ? tableH : 30);
   tableHead();
-  for (const { line, descLines, rowH } of measured) {
-    if (y + rowH > BODY_BOTTOM) {
-      footer();
-      doc.addPage();
-      y = header();
+  measured.forEach(({ line, descLines, rowH }, index) => {
+    if (canvas.y + rowH > BODY_BOTTOM) {
+      canvas.newPage();
       tableHead();
+    }
+    const y = canvas.y;
+    if (index % 2 === 1) {
+      doc.setFillColor(...LIGHT);
+      doc.rect(MARGIN, y, CONTENT_W, rowH, "F");
     }
     doc.setDrawColor(...RULE);
     doc.setLineWidth(0.2);
-    doc.rect(MARGIN, y, CONTENT_W, rowH, "D");
+    doc.line(MARGIN, y + rowH, MARGIN + CONTENT_W, y + rowH);
     doc.setTextColor(...BODY);
     doc.setFont("helvetica", "normal");
-    doc.setFontSize(8.8);
-    doc.text(descLines, MARGIN + 3, y + 5);
-    doc.text(formatQuantity(line.quantity), COL_QTY, y + 5, {
+    doc.setFontSize(9);
+    doc.text(descLines, MARGIN + 3, y + 5.2);
+    doc.text(formatQuantity(line.quantity), COL_QTY, y + 5.2, {
       align: "right",
     });
-    doc.text(sanitiseText(line.unit || ""), COL_UNIT, y + 5);
-    doc.text(formatAud(line.unit_price_ex_gst), COL_RATE, y + 5, {
+    doc.text(sanitiseText(line.unit || ""), COL_UNIT, y + 5.2);
+    doc.text(formatAud(line.unit_price_ex_gst), COL_RATE, y + 5.2, {
       align: "right",
     });
-    doc.text(formatAud(line.line_total_ex_gst), COL_AMOUNT, y + 5, {
+    doc.setTextColor(...DARK);
+    doc.text(formatAud(line.line_total_ex_gst), COL_AMOUNT, y + 5.2, {
       align: "right",
     });
-    y += rowH;
-  }
+    canvas.y = y + rowH;
+  });
 
   // Totals block, right aligned under the amount column.
-  y += 3;
-  ensureSpace(TOTALS_H - 2);
-  const totalsRow = (label: string, amount: number, strong = false): void => {
-    doc.setTextColor(...(strong ? DARK : MID));
-    doc.setFont("helvetica", strong ? "bold" : "normal");
-    doc.setFontSize(strong ? 10.5 : 9.2);
+  canvas.gap(4);
+  canvas.ensure(TOTALS_H - 4);
+  const totalsRow = (label: string, amount: number): void => {
+    const y = canvas.y;
+    doc.setTextColor(...MID);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9.2);
     doc.text(label, COL_RATE, y + 4.6, { align: "right" });
     doc.setTextColor(...DARK);
     doc.text(formatAud(amount), COL_AMOUNT, y + 4.6, { align: "right" });
-    y += strong ? 7.5 : 6;
+    canvas.y = y + 6;
   };
   totalsRow("Subtotal ex GST", quote.subtotal_ex_gst);
   totalsRow("GST", quote.gst);
-  doc.setDrawColor(...ORANGE);
-  doc.setLineWidth(0.5);
-  doc.line(COL_UNIT, y, MARGIN + CONTENT_W, y);
-  y += 1;
-  totalsRow("Total inc GST", quote.total_inc_gst, true);
-  y += 5;
+  {
+    const y = canvas.y + 1.5;
+    const boxX = COL_UNIT - 3;
+    doc.setFillColor(...DARK);
+    doc.roundedRect(boxX, y, MARGIN + CONTENT_W - boxX, 10, 1.6, 1.6, "F");
+    doc.setFillColor(...ORANGE);
+    doc.rect(boxX + 2.2, y + 2.6, 1.1, 4.8, "F");
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10.5);
+    doc.text("Total inc GST", COL_RATE, y + 6.5, { align: "right" });
+    doc.text(formatAud(quote.total_inc_gst), COL_AMOUNT, y + 6.5, {
+      align: "right",
+    });
+    canvas.y = y + 10 + 7;
+  }
 
-  const bullets = (items: string[]): void => {
-    doc.setTextColor(...BODY);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(9.2);
-    for (const item of items) {
-      const lines: string[] = doc.splitTextToSize(item, CONTENT_W - 6);
-      ensureSpace(lines.length * 4.4 + 1.2);
-      doc.setFillColor(...ORANGE);
-      doc.circle(MARGIN + 1.4, y - 1.2, 0.7, "F");
-      doc.text(lines, MARGIN + 5, y);
-      y += lines.length * 4.4 + 1.2;
-    }
-    y += 4;
-  };
   const listItems = (body: string): string[] =>
     sanitiseText(body).split("\n")
       .map((item) => item.replace(/^\s*[-*\u2022]\s*/, "").trim())
@@ -418,14 +289,14 @@ export async function renderRestorationQuotePdf(
 
   if (quote.exclusions) {
     const items = listItems(quote.exclusions);
-    section("Exclusions and assumptions", Math.min(items.length, 3) * 5.6);
-    bullets(items);
+    canvas.section("Exclusions and assumptions", Math.min(items.length, 2) * 6.5);
+    canvas.bullets(items);
   }
 
-  section("Terms", 3 * 5.6);
-  bullets([...RESTORATION_QUOTE_TERMS]);
+  canvas.section("Terms", 2 * 6.5);
+  canvas.bullets([...RESTORATION_QUOTE_TERMS]);
 
-  footer();
+  canvas.finish();
   const out = doc.output("arraybuffer") as ArrayBuffer;
   return { bytes: new Uint8Array(out), fileName };
 }
