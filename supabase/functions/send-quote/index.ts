@@ -1741,7 +1741,11 @@ serve(async (req: Request) => {
             const isNeighbour = doc.job_contact_id && fullJob.job_contacts?.some(
               (c: any) => c.id === doc.job_contact_id && !c.is_primary
             )
-            return await htmlResponse(buildRunQuotePage(doc, token, run, fullJob, isNeighbour ? 'neighbour' : 'client'))
+            // Ruling 11 item 8: the run's sealed sentence beside Accept Quote.
+            const runAcceptWords = !doc.accepted_at && !doc.declined_at
+              ? await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel, job_contact_id: doc.job_contact_id ?? null })
+              : null
+            return await htmlResponse(buildRunQuotePage(doc, token, run, fullJob, isNeighbour ? 'neighbour' : 'client', runAcceptWords))
           }
         }
       }
@@ -1821,7 +1825,7 @@ serve(async (req: Request) => {
       // Ruling 11 item 8: the sealed "You are accepting: ..." sentence beside
       // Accept Quote. No sealed sentence (every older quote): the page is as before.
       const acceptWords = !doc.accepted_at && !doc.declined_at
-        ? await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel })
+        ? await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel, job_contact_id: doc.job_contact_id ?? null })
         : null
       return await htmlResponse(buildClientPage(doc, token, heroUrl, acceptWords))
     }
@@ -1994,7 +1998,7 @@ serve(async (req: Request) => {
 
       // Ruling 11 item 8: what was accepted, in the sealed design's own words,
       // kept with the acceptance below. A failed read never blocks accepting.
-      const acceptWords = await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel })
+      const acceptWords = await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel, job_contact_id: doc.job_contact_id ?? null })
 
       const { error: acceptError } = await sb
         .from('job_documents')
@@ -4646,7 +4650,9 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
 // PER-RUN FENCING QUOTE PAGE (multi-neighbour)
 // ════════════════════════════════════════════════════════════
 
-function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerType: string): string {
+function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerType: string, acceptWords: AcceptSentenceRead | null = null): string {
+  // Ruling 11 item 8: empty unless the released quote sealed this run's words.
+  const acceptingLine = acceptSentenceHtml(acceptWords)
   const clientName = job?.client_name || 'Customer'
   const clientAddress = job?.site_address || ''
   const suburb = job?.site_suburb || ''
@@ -4785,6 +4791,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
     .btn-accept { background: #34C759; color: #fff; }
     .btn-decline { background: #f5f5f7; color: #FF3B30; border: 1px solid #FF3B30; }
     .btn:hover { opacity: 0.9; }
+    .accept-sentence { color: #293C46; font-size: 15px; font-weight: 600; line-height: 1.45; margin-bottom: 14px; }
     .footer { text-align: center; color: #999; font-size: 12px; padding: 24px; }
     @media print {
       body { background: #fff; }
@@ -4826,6 +4833,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
       ${!isAccepted && !isDeclined ? `
       <div class="no-print" style="margin-top:24px;padding-top:24px;border-top:1px solid #eee;">
         <p style="color:#4C6A7C;font-size:14px;margin-bottom:16px;">Happy with this quote? Accept below to confirm.</p>
+        ${acceptingLine}
         <button class="btn btn-accept" onclick="respondToQuote('accept')">Accept Quote</button>
         <button class="btn btn-decline" onclick="respondToQuote('decline')">Decline</button>
       </div>
