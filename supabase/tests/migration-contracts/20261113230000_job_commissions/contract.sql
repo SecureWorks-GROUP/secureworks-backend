@@ -137,11 +137,15 @@ VALUES
    10000, 1000, 11000, 10100, -100, 'fence_gross_profit_rate', 15, 0, -100, '00000000-0000-0000-0000-00000000c001', '{"version":"budget.v1"}'),
   ('00000000-0000-0000-0000-00000000d005', '00000000-0000-0000-0000-00000000e005', 1, repeat('b', 64), 'fence', true, 0,
    10000, 1000, 11000, 6515, 3485, NULL, NULL, NULL, NULL, '00000000-0000-0000-0000-00000000c001', '{"version":"budget.v1"}');
-INSERT INTO public.trade_invoices (id, user_id, status)
-VALUES ('00000000-0000-0000-0000-00000000f001', '00000000-0000-0000-0000-00000000c001', 'pending_acknowledgment'),
-       ('00000000-0000-0000-0000-00000000f002', '00000000-0000-0000-0000-00000000c001', 'pending_acknowledgment'),
-       ('00000000-0000-0000-0000-00000000f003', '00000000-0000-0000-0000-00000000c001', 'draft'),
-       ('00000000-0000-0000-0000-00000000f004', '00000000-0000-0000-0000-00000000c002', 'pending_acknowledgment');
+-- Invoice headers carry a valid (zero) money split; the cap reads the lines.
+INSERT INTO public.trade_invoices (id, org_id, user_id, status, invoice_number,
+  subtotal_ex, gross_earned, gst, total_inc, gst_on, super_rate, super_amount, net_pay)
+SELECT v.id::uuid, '00000000-0000-0000-0000-000000000001', v.user_id::uuid, v.status, v.num, 0, 0, 0, 0, false, 0.12, 0, 0
+  FROM (VALUES ('00000000-0000-0000-0000-00000000f001', '00000000-0000-0000-0000-00000000c001', 'pending_acknowledgment', 'ZZTEST-COMM-1'),
+               ('00000000-0000-0000-0000-00000000f002', '00000000-0000-0000-0000-00000000c001', 'pending_acknowledgment', 'ZZTEST-COMM-2'),
+               ('00000000-0000-0000-0000-00000000f003', '00000000-0000-0000-0000-00000000c001', 'draft', NULL),
+               ('00000000-0000-0000-0000-00000000f004', '00000000-0000-0000-0000-00000000c002', 'pending_acknowledgment', 'ZZTEST-COMM-4'))
+       AS v(id, user_id, status, num);
 DO $$
 DECLARE
   seller uuid := '00000000-0000-0000-0000-00000000c001';
