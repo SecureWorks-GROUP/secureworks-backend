@@ -355,3 +355,29 @@ Deno.test("Read: a failed accepted revision read fails the answer", async () => 
   };
   await assertRejects(() => readAcceptedRevisionCommissions(sb, ["a"]), Error, "accepted quote read failed");
 });
+
+Deno.test("Accepted: the job budget (ruling 17 step 5) is the accepted quote's commission, read as Job Profit has it", () => {
+  const out = build(
+    [job("b")],
+    { b: "2026-11-05" },
+    // No accepted revision is read for a budget job: the budget stored at acceptance is the record.
+    [profit("b", { expected_source: "job_budget", expected_commission_ex: 312.5 })],
+  );
+  assertEquals(out.breakdown[0].commission, 312.5);
+  assertEquals(out.breakdown[0].commission_source, "job_budget");
+  assertEquals(out.breakdown[0].commission_status, "known");
+  assertEquals(out.earned_total, 312.5);
+  assertEquals(out.commission_complete, true);
+});
+
+Deno.test("No 0.35: a job budget with no commission is unknown, never price x an assumed margin", () => {
+  const out = build(
+    [job("b")],
+    { b: "2026-11-05" },
+    [profit("b", { expected_source: "job_budget", expected_commission_ex: null })],
+  );
+  assertEquals(out.breakdown[0].commission, null);
+  assertEquals(out.breakdown[0].commission_status, "unknown");
+  assertEquals(out.earned_total, 0);
+  assertEquals(out.commission_complete, false);
+});
