@@ -8,6 +8,7 @@ import {
   budgetLabourPay,
   JOB_LABOUR_BUDGET_FLAG,
   JOB_LABOUR_CAP_EXCEEDED,
+  JOB_LABOUR_CAP_UNREADABLE,
   jobLabourCapAction,
   jobLabourCapRefusal,
   JobLabourPayReadError,
@@ -168,6 +169,14 @@ Deno.test("refusal: the cap is a 409 with no figure, on the trade doors and anyw
   const trade = tradeInvoiceRefusal(new Error("Failed to persist weekly/hourly draft invoice: job_labour_cap_exceeded"));
   assertEquals([trade.status, trade.body.code], [409, JOB_LABOUR_CAP_EXCEEDED]);
   assertEquals(jobLabourCapRefusal(new Error("something else")), null);
+});
+
+Deno.test("refusal: an unreadable cap is its own 409, never read as no cap", () => {
+  const r = jobLabourCapRefusal({ message: "job_labour_cap_unreadable", code: "23514", details: JOB_A });
+  assertEquals([r?.status, r?.code], [409, JOB_LABOUR_CAP_UNREADABLE]);
+  assert(!/\d/.test(String(r?.message)));
+  const trade = tradeInvoiceRefusal(new Error("Failed to persist weekly/hourly draft invoice: job_labour_cap_unreadable"));
+  assertEquals([trade.status, trade.body.code], [409, JOB_LABOUR_CAP_UNREADABLE]);
 });
 
 Deno.test("raise: a signed-in person, a whole-cent amount and a reason, before the database is asked", async () => {

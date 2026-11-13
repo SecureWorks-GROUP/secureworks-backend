@@ -127,6 +127,21 @@ Deno.test('a taken option is added by the formula and must equal the accepted to
   assert((f.rpcCalls[0].p_lines as Row[]).some((l) => l.key === 'option:o1' && l.cost_ex_gst === 180))
 })
 
+Deno.test('an hourly budget with a taken crew option is stored: 70 x 40 = 2800 plus the 250 crew option', async () => {
+  const base = patioBase() as Row & { labour: Row }
+  base.labour.pay = 'hourly_capped'
+  base.labour.hourly = { rate_ex_gst: 70, max_hours: 40, max_ex_gst: 2800 }
+  const f = await fixture({ budget: base }, { taken: ['o2'], acceptedEx: 10520 })
+  const r = await recordJobBudgetOnAcceptance(f.client, J)
+  assertEquals(r.outcome, 'recorded', JSON.stringify(r))
+  assertEquals(f.rpcCalls.length, 1)
+  assertEquals(f.state.job_events.length, 0, 'no refusal event')
+  const labour = (f.rpcCalls[0].p_budget as Row).labour as Row
+  assertEquals([labour.pay, labour.amount_ex_gst, labour.work_order_amount_ex_gst], ['hourly_capped', 3050, 3050])
+  assertEquals(labour.hourly, { rate_ex_gst: 70, max_hours: 40, max_ex_gst: 2800 }, 'rate and hours unchanged')
+  assert((f.rpcCalls[0].p_lines as Row[]).some((l) => l.key === 'option:o2' && l.lane === 'labour' && l.cost_ex_gst === 250))
+})
+
 Deno.test('a budget whose sell is not what the customer accepted is refused, acceptance untouched', async () => {
   const f = await fixture({ budget: patioBase() }, { taken: ['o1'], acceptedEx: 10399 })
   const r = await recordJobBudgetOnAcceptance(f.client, J)

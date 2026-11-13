@@ -116,6 +116,7 @@ DECLARE
   v_rate     numeric;
   v_hours    numeric;
   v_max      numeric;
+  v_labour   numeric;
   v_valid    boolean;
   v_raised   numeric;
   v_billed   numeric;
@@ -136,20 +137,27 @@ BEGIN
                               'pay', v_pay, 'budget_id', b.id, 'budget_version', b.version);
   END IF;
   v_hourly := b.budget #> '{labour,hourly}';
-  v_valid := jsonb_typeof(v_hourly) = 'object'
-             AND jsonb_typeof(v_hourly->'rate_ex_gst') = 'number'
-             AND jsonb_typeof(v_hourly->'max_hours') = 'number'
-             AND jsonb_typeof(v_hourly->'max_ex_gst') = 'number';
+  -- A missing hourly object, {} or a missing property makes jsonb_typeof NULL,
+  -- so every test is COALESCEd: unknown validity is invalid, never NULL.
+  v_valid := COALESCE(jsonb_typeof(v_hourly) = 'object', false)
+             AND COALESCE(jsonb_typeof(v_hourly->'rate_ex_gst') = 'number', false)
+             AND COALESCE(jsonb_typeof(v_hourly->'max_hours') = 'number', false)
+             AND COALESCE(jsonb_typeof(v_hourly->'max_ex_gst') = 'number', false)
+             AND COALESCE(jsonb_typeof(b.budget #> '{labour,amount_ex_gst}') = 'number', false);
   IF v_valid THEN
     v_rate := (v_hourly->>'rate_ex_gst')::numeric;
     v_hours := (v_hourly->>'max_hours')::numeric;
     v_max := (v_hourly->>'max_ex_gst')::numeric;
-    v_valid := v_max >= 0 AND v_rate > 0 AND v_hours > 0;
+    -- The labour the crew may bill: the hourly maximum plus every crew option
+    -- the customer took (budget.v1 labour.amount_ex_gst, checked at storing).
+    v_labour := (b.budget #>> '{labour,amount_ex_gst}')::numeric;
+    v_valid := COALESCE(v_max >= 0 AND v_rate > 0 AND v_hours > 0 AND v_labour >= v_max, false);
   END IF;
   -- A stored maximum that cannot be read caps the job at nothing: no labour
-  -- is let through on a guess.
-  IF NOT v_valid THEN
-    v_rate := NULL; v_hours := NULL; v_max := 0;
+  -- is let through on a guess (only an approver's raise lets labour in).
+  IF v_valid IS NOT TRUE THEN
+    v_valid := false;
+    v_rate := NULL; v_hours := NULL; v_max := 0; v_labour := 0;
   END IF;
   SELECT COALESCE(sum(r.amount_ex_gst), 0) INTO v_raised
     FROM public.job_labour_cap_raises r
@@ -160,7 +168,7 @@ BEGIN
      AND v.cost_lane = 'labour'
      AND NOT v.is_probable_test_line
      AND v.invoice_status = ANY (public.job_work_order_billed_invoice_statuses());
-  v_cap := round(v_max + v_raised, 2);
+  v_cap := round(v_labour + v_raised, 2);
   RETURN jsonb_build_object(
     'state', CASE WHEN v_valid THEN 'capped' ELSE 'capped_unreadable' END,
     'switch_on', public.job_labour_budget_on(),
@@ -171,6 +179,7 @@ BEGIN
     'rate_ex_gst', v_rate,
     'max_hours', v_hours,
     'max_ex_gst', round(v_max, 2),
+    'crew_options_ex_gst', round(v_labour - v_max, 2),
     'raised_ex_gst', round(v_raised, 2),
     'cap_ex_gst', v_cap,
     'billed_ex_gst', round(v_billed, 2),
@@ -232,6 +241,12 @@ BEGIN
       CONTINUE;
     END IF;
     v_state := public.job_labour_cap_state(v_job);
+    -- Refuses on its own when the cap is missing or not a number: never a
+    -- NULL comparison that lets the line through.
+    IF jsonb_typeof(v_state->'cap_ex_gst') IS DISTINCT FROM 'number' THEN
+      RAISE EXCEPTION 'job_labour_cap_unreadable'
+        USING ERRCODE = '23514', DETAIL = v_job::text;
+    END IF;
     SELECT COALESCE(sum(v.line_total_ex), 0) INTO v_total
       FROM public.v_trade_charge_resolved v
      WHERE v.resolved_job_id = v_job
@@ -239,7 +254,7 @@ BEGIN
        AND NOT v.is_probable_test_line
        AND (v.invoice_status = ANY (public.job_work_order_billed_invoice_statuses())
             OR v.trade_invoice_id = p_invoice);
-    IF v_total > (v_state->>'cap_ex_gst')::numeric + 0.004 THEN
+    IF (v_total > (v_state->>'cap_ex_gst')::numeric + 0.004) IS NOT FALSE THEN
       RAISE EXCEPTION 'job_labour_cap_exceeded'
         USING ERRCODE = '23514', DETAIL = v_job::text;
     END IF;

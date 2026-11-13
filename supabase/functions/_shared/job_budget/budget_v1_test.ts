@@ -143,6 +143,32 @@ Deno.test('R17 step 4: hourly pay carries a maximum whose rate x hours is the al
   assertEquals(run((b) => { b.labour.pay = 'fixed' }), 'labour_pay_unknown')
 })
 
+Deno.test('R17 step 4: a taken crew option rides on top of the hourly maximum; rate and hours unchanged', () => {
+  const base = patioBase() as any
+  base.labour.pay = 'hourly_capped'
+  base.labour.hourly = { rate_ex_gst: 70, max_hours: 40, max_ex_gst: 2800 }
+  assert(checkBudget(base).ok)
+  const b = applied(base, ['o2'])
+  assert(checkBudget(b).ok, JSON.stringify(checkBudget(b)))
+  assertEquals([b.labour.amount_ex_gst, b.labour.work_order_amount_ex_gst], [3050, 3050])
+  assertEquals(b.labour.hourly, { rate_ex_gst: 70, max_hours: 40, max_ex_gst: 2800 })
+  const opt = b.labour.lines.find((l: any) => l.key === 'option:o2')
+  assertEquals(opt?.amount_ex_gst, 250)
+  // Both options taken: the supplier option does not touch labour.
+  const both = applied(base, ['o1', 'o2'])
+  assert(checkBudget(both).ok)
+  assertEquals(both.labour.amount_ex_gst, 3050)
+  // A crew option line not on the taken list is refused, never a cap raise.
+  const forged = structuredClone(b)
+  delete forged.taken_option_ids
+  assertEquals((checkBudget(forged) as any).refusal?.code, 'labour_hourly_mismatch')
+  // The tool's own lines must still be the maximum, options aside.
+  const short = structuredClone(b)
+  const own = short.labour.lines.find((l: any) => l.key === 'l1')
+  own.amount_ex_gst = 2700
+  assert(!checkBudget(short).ok)
+})
+
 Deno.test('R17 checks: an unknown cost must be named as a gap, and a loss pays no commission', () => {
   const b = patioBase() as any
   b.other[0].lines[0].cost_ex_gst = null

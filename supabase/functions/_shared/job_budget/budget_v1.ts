@@ -344,8 +344,12 @@ function check(raw: unknown): CheckedBudget {
     return refuse('labour_amount_mismatch')
   }
   // Ruling 17 step 4: hourly pay carries its maximum. The rate times the
-  // maximum hours is the maximum dollars, and that maximum is the allowance
-  // (the labour amount, the lines adding up to it). Group pay carries none.
+  // maximum hours is the maximum dollars, and the tool's own labour lines add
+  // up to it. A crew option the customer took (the options formula's labour
+  // line, key option:<id>) is labour on top: the labour amount, the work order
+  // and the cap are the maximum plus those options, and the rate and hours
+  // are never changed for them. An option whose cost is unknown leaves the
+  // labour amount unknown (a named gap), never a guess. Group pay carries none.
   if (labour.pay === 'group_work_order') {
     if (labour.hourly !== null && labour.hourly !== undefined) return refuse('labour_hourly_invalid')
   } else {
@@ -357,7 +361,14 @@ function check(raw: unknown): CheckedBudget {
         maxHours <= 0 || Math.abs(maxHours * 100 - Math.round(maxHours * 100)) > 1e-6) {
       return refuse('labour_hourly_invalid')
     }
-    if (max !== Math.round((rate * Math.round(maxHours * 100)) / 100) || labourAmount !== max) {
+    const taken = Array.isArray(raw.taken_option_ids) ? (raw.taken_option_ids as string[]) : []
+    const labourLines = lines.filter((l) => l.lane === 'labour' && l.in_total)
+    const own = labourLines.filter((l) => l.option_id === null)
+    const options = labourLines.filter((l) => l.option_id !== null)
+    if (options.some((l) => !taken.includes(l.option_id as string))) return refuse('labour_hourly_mismatch')
+    if (max !== Math.round((rate * Math.round(maxHours * 100)) / 100) ||
+        addAll(own.map((l) => l.cost_cents)) !== max ||
+        labourAmount !== add(max, addAll(options.map((l) => l.cost_cents)))) {
       return refuse('labour_hourly_mismatch')
     }
   }

@@ -193,3 +193,91 @@ VALUES ('00000000-0000-0000-0000-00000000c464', '00000000-0000-0000-0000-0000000
 DELETE FROM public.trade_invoice_lines WHERE id = '00000000-0000-0000-0000-00000000c464';
 SET CONSTRAINTS job_labour_cap_guard_line, job_labour_cap_guard_invoice IMMEDIATE;
 ROLLBACK;
+
+-- 3. Crew options the customer took are labour on top of the hourly maximum,
+-- and a cap that cannot be read lets no labour through (absent hourly, {},
+-- each absent property, an absent labour amount, an amount under the maximum).
+BEGIN;
+INSERT INTO public.users (id, org_id, name)
+VALUES ('00000000-0000-0000-0000-00000000c5a1', '00000000-0000-0000-0000-000000000001', 'ZZTEST trade');
+UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_labour_budget_v1';
+SET CONSTRAINTS job_labour_cap_guard_line, job_labour_cap_guard_invoice IMMEDIATE;
+
+DO $$
+DECLARE
+  cases  text[][] := ARRAY[
+    -- name, labour json
+    ['options',      '{"pay":"hourly_capped","amount_ex_gst":3050,"hourly":{"rate_ex_gst":70,"max_hours":40,"max_ex_gst":2800},"work_order_amount_ex_gst":3050}'],
+    ['no_hourly',    '{"pay":"hourly_capped","amount_ex_gst":800,"work_order_amount_ex_gst":800}'],
+    ['null_hourly',  '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":null,"work_order_amount_ex_gst":800}'],
+    ['empty_hourly', '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{},"work_order_amount_ex_gst":800}'],
+    ['no_rate',      '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{"max_hours":10,"max_ex_gst":800},"work_order_amount_ex_gst":800}'],
+    ['no_hours',     '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{"rate_ex_gst":80,"max_ex_gst":800},"work_order_amount_ex_gst":800}'],
+    ['no_max',       '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{"rate_ex_gst":80,"max_hours":10},"work_order_amount_ex_gst":800}'],
+    ['text_max',     '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{"rate_ex_gst":80,"max_hours":10,"max_ex_gst":"800"},"work_order_amount_ex_gst":800}'],
+    ['no_amount',    '{"pay":"hourly_capped","hourly":{"rate_ex_gst":80,"max_hours":10,"max_ex_gst":800},"work_order_amount_ex_gst":800}'],
+    ['under_max',    '{"pay":"hourly_capped","amount_ex_gst":700,"hourly":{"rate_ex_gst":80,"max_hours":10,"max_ex_gst":800},"work_order_amount_ex_gst":700}']
+  ];
+  i      int;
+  job    uuid;
+  rev    uuid;
+  inv    uuid;
+  st     jsonb;
+  refused boolean;
+  code   text;
+BEGIN
+  FOR i IN 1 .. array_length(cases, 1) LOOP
+    job := ('00000000-0000-0000-0000-00000000c9' || lpad(to_hex(i), 2, '0'))::uuid;
+    rev := ('00000000-0000-0000-0000-00000000ca' || lpad(to_hex(i), 2, '0'))::uuid;
+    inv := ('00000000-0000-0000-0000-00000000cb' || lpad(to_hex(i), 2, '0'))::uuid;
+    INSERT INTO public.jobs (id, org_id, status, type, job_number)
+    VALUES (job, '00000000-0000-0000-0000-000000000001', 'accepted', 'fencing', 'ZZTEST-C5' || i);
+    INSERT INTO public.scope_revisions (id, job_id, revision_number, status, scope_canonical_text, pricing_canonical_text, scope_hash, pricing_hash)
+    VALUES (rev, job, 1, 'frozen', '{}', '{"p":' || i || '}',
+            encode(sha256(convert_to('{}', 'UTF8')), 'hex'), encode(sha256(convert_to('{"p":' || i || '}', 'UTF8')), 'hex'));
+    INSERT INTO public.job_budgets (id, job_id, scope_revision_id, version, pricing_hash, trade, complete, gap_count, budget)
+    VALUES (gen_random_uuid(), job, rev, 1, repeat('d', 64), 'fence', true, 0,
+            jsonb_build_object('version', 'budget.v1', 'labour', cases[i][2]::jsonb));
+    st := public.job_labour_cap_state(job);
+    INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subtotal_ex, gst_on, gst, total_inc, super_rate, super_amount, gross_earned, net_pay)
+    VALUES (inv, '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000c5a1', '2026-11-09', 'pending_acknowledgment',
+            3000, false, 0, 3000, 0.12, 360, 3000, 2820);
+
+    IF cases[i][1] = 'options' THEN
+      -- 70 x 40 = 2800, plus a 250 crew option: the crew may bill 3050.
+      IF st->>'state' <> 'capped' OR (st->>'max_ex_gst')::numeric <> 2800
+         OR (st->>'crew_options_ex_gst')::numeric <> 250 OR (st->>'cap_ex_gst')::numeric <> 3050 THEN
+        RAISE EXCEPTION 'labour cap contract: a taken crew option is not inside the cap: %', st;
+      END IF;
+      INSERT INTO public.trade_invoice_lines (id, trade_invoice_id, job_id, line_type, description, line_total_ex, line_date)
+      VALUES (gen_random_uuid(), inv, job, 'labour', 'Build and the crew option', 3050, '2026-11-10');
+      refused := false;
+      BEGIN
+        INSERT INTO public.trade_invoice_lines (id, trade_invoice_id, job_id, line_type, description, line_total_ex, line_date)
+        VALUES (gen_random_uuid(), inv, job, 'labour', 'One more', 0.01, '2026-11-11');
+      EXCEPTION WHEN check_violation THEN
+        refused := SQLERRM = 'job_labour_cap_exceeded';
+      END;
+      IF NOT refused THEN
+        RAISE EXCEPTION 'labour cap contract: labour past the maximum plus options was not refused';
+      END IF;
+    ELSE
+      IF st->>'state' <> 'capped_unreadable' OR jsonb_typeof(st->'cap_ex_gst') <> 'number'
+         OR (st->>'cap_ex_gst')::numeric <> 0 OR (st->>'remaining_ex_gst')::numeric <> 0 THEN
+        RAISE EXCEPTION 'labour cap contract: % did not read as unreadable with a zero cap: %', cases[i][1], st;
+      END IF;
+      refused := false;
+      BEGIN
+        INSERT INTO public.trade_invoice_lines (id, trade_invoice_id, job_id, line_type, description, line_total_ex, line_date)
+        VALUES (gen_random_uuid(), inv, job, 'labour', 'Any labour', 1, '2026-11-10');
+      EXCEPTION WHEN check_violation THEN
+        code := SQLERRM;
+        refused := code IN ('job_labour_cap_exceeded', 'job_labour_cap_unreadable');
+      END;
+      IF NOT refused THEN
+        RAISE EXCEPTION 'labour cap contract: % let labour through on an unreadable cap', cases[i][1];
+      END IF;
+    END IF;
+  END LOOP;
+END $$;
+ROLLBACK;

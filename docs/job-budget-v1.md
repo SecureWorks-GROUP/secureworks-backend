@@ -227,8 +227,12 @@ is off). While it is off, invoicing and the work order fill are exactly as
 before.
 
 - **What the budget must say.** On `hourly_capped`, `hourly.max_ex_gst` is
-  `rate_ex_gst x max_hours` to the cent and equals `labour.amount_ex_gst` (the
-  labour lines add up to the maximum). On `group_work_order`, `hourly` is
+  `rate_ex_gst x max_hours` to the cent and the tool's own labour lines add
+  up to it. A crew option the customer took (the options formula's labour
+  line, key `option:<id>`, on the taken list) is labour on top:
+  `labour.amount_ex_gst` and the work order amount are the maximum plus those
+  options, and the rate and hours are never changed for them (70 x 40 = 2800
+  plus a 250 crew option stores 3050). On `group_work_order`, `hourly` is
   null. Otherwise `checkBudget` refuses `labour_hourly_invalid` or
   `labour_hourly_mismatch` and nothing is stored.
 - **The work order.** The job work order's `agreed_labour_ex` is the budget's
@@ -243,19 +247,25 @@ before.
   invoiced by the hour (`invoice_mode` `hourly`, reason `hourly_capped`),
   after a live group work order only (`trade_invoice_mode.ts`). An unreadable
   budget fails the mode read; it never reads as "no cap".
-- **The cap.** `job_labour_cap_state(job)` is the one read: the maximum plus
-  the approver's raises on that budget, against every labour-lane charge
+- **The cap.** `job_labour_cap_state(job)` is the one read: the budget's
+  labour amount (the maximum plus taken crew options, `crew_options_ex_gst`)
+  plus the approver's raises on that budget, against every labour-lane charge
   resolved to the job (`v_trade_charge_resolved`) on a billed invoice. A
   deferred guard on `trade_invoice_lines` and `trade_invoices` refuses, at
   commit, an invoice whose labour on a capped job would take that job past
   its cap (`job_labour_cap_exceeded`). The trade's own draft counts; other
   trades' drafts do not. A per-job lock makes two invoices take turns. A line
   only lowered, and a billed invoice moving on (approved, pushed, paid), are
-  never refused. A maximum the database cannot read caps the job at nothing.
+  never refused. A maximum the database cannot read (no `hourly`, `{}`, any
+  property missing or not a number, or a labour amount below the maximum)
+  caps the job at nothing (`capped_unreadable`, cap 0): only an approver's
+  raise lets labour in. The guard also refuses on its own a cap it cannot
+  read at all (`job_labour_cap_unreadable`), never a comparison with nothing.
   The cap is in dollars, not hours: hours times each trade's own rate is what
   is charged to the job.
-- **The refusal.** Any door answers 409 `job_labour_cap_exceeded` with no
-  figure (the maximum is the office's): "Ask the office to raise it".
+- **The refusal.** Any door answers 409 `job_labour_cap_exceeded` (or
+  `job_labour_cap_unreadable`) with no figure (the maximum is the office's):
+  "Ask the office".
 - **Raising it.** `POST ops-api?action=raise_job_labour_cap`
   `{ job_id, budget_id, amount_ex_gst, reason }`, signed in only.
   `raise_job_labour_cap` checks the caller with `owner_approval_authority`

@@ -5131,8 +5131,10 @@ invoice against the amount. Contract: `docs/job-budget-v1.md`, "Commission (step
 Step 4 (`20261114030000`, behind `job_labour_budget_v1`, seeded off): the
 budget's `labour.pay` decides how the crew is paid. On `hourly_capped` the job
 is invoiced by the hour and the database refuses trade invoice labour past the
-maximum plus the approver's raises (`job_labour_cap_exceeded`, deferred guard,
-one read `job_labour_cap_state`); only `raise_job_labour_cap` lifts it, for an
+budget's labour amount (the maximum plus taken crew options) plus the
+approver's raises (`job_labour_cap_exceeded`, deferred guard, one read
+`job_labour_cap_state`); an unreadable maximum caps the job at 0 and an
+unreadable cap refuses (`job_labour_cap_unreadable`), never a NULL compare; only `raise_job_labour_cap` lifts it, for an
 approver `owner_approval_authority` names, against the job's current budget.
 Never re-derive the cap in TypeScript, never let a trade read it, and never
 make a billed invoice moving on (approved, paid) refusable by it.

@@ -190,6 +190,12 @@ export async function raiseJobLabourCapAction(
 }
 
 export const JOB_LABOUR_CAP_EXCEEDED = "job_labour_cap_exceeded";
+/** The guard's refusal when a capped job's maximum cannot be read: nothing
+ *  is let through on a guess. */
+export const JOB_LABOUR_CAP_UNREADABLE = "job_labour_cap_unreadable";
+
+export const JOB_LABOUR_CAP_UNREADABLE_TRADE_MESSAGE =
+  "The labour maximum on a job on this invoice could not be read, so nothing was saved. Ask the office to check that job's labour budget.";
 
 export const JOB_LABOUR_CAP_TRADE_MESSAGE =
   "A job on this invoice has reached the most labour that can be charged to it. Ask the office to raise it before you invoice more on that job. Nothing was saved.";
@@ -198,6 +204,9 @@ export const JOB_LABOUR_CAP_TRADE_MESSAGE =
  *  names no figure: the maximum is the office's. null for any other error. */
 export function jobLabourCapRefusal(error: unknown): { status: 409; code: string; message: string } | null {
   const text = String((error as any)?.message || error || "");
+  if (text.includes(JOB_LABOUR_CAP_UNREADABLE)) {
+    return { status: 409, code: JOB_LABOUR_CAP_UNREADABLE, message: JOB_LABOUR_CAP_UNREADABLE_TRADE_MESSAGE };
+  }
   if (!text.includes(JOB_LABOUR_CAP_EXCEEDED)) return null;
   return {
     status: 409,
