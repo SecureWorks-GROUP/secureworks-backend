@@ -24,6 +24,43 @@ Deno.test('trade scope reads drop a budget at any depth', () => {
   assertEquals(out.notes.general, 'Site access via side gate')
 })
 
+Deno.test('ruling 17a: no commission or salesperson key reaches the trade scope, at any depth', () => {
+  // The shape a sealed fence revision saves (commission metadata on the job,
+  // on each revision pack and in its snapshot).
+  const scope = {
+    job: {
+      runs: [{ length: 10, label: 'A' }],
+      commissionBasis: 'gross_profit',
+      commission_basis: 'gross_profit',
+      salespersonId: '00000000-0000-4000-8000-00000000000b',
+      salesperson: { id: '00000000-0000-4000-8000-00000000000b', name: 'ZZTEST Seller' },
+      revisionPacks: [{
+        commissionFrom: 'app',
+        commission: { rule_id: 'fence_15', percent: 15 },
+        snapshot: { commissionBasis: 'gross_profit', runs: [{ length: 10 }] },
+      }],
+    },
+    notes: { general: 'Site access via side gate' },
+  }
+  const out = redactTradeScopeQuote(structuredClone(scope))
+  const keys: string[] = []
+  const walk = (x: unknown) => {
+    if (Array.isArray(x)) return x.forEach(walk)
+    if (x && typeof x === 'object') {
+      for (const [k, v] of Object.entries(x)) {
+        keys.push(k)
+        walk(v)
+      }
+    }
+  }
+  walk(out)
+  assertEquals(keys.filter((k) => /commission|salesperson|budget/i.test(k)), [])
+  assert(!JSON.stringify(out).includes('ZZTEST Seller'))
+  assertEquals(out.job.runs, [{ length: 10, label: 'A' }])
+  assertEquals(out.job.revisionPacks[0].snapshot.runs, [{ length: 10 }])
+  assertEquals(out.notes.general, 'Site access via side gate')
+})
+
 Deno.test('the pricing strip keeps everything but the budget', () => {
   const pricing = { totalIncGST: 11000, runs: [{ label: 'A' }], budget: patioBase() }
   assertEquals(withoutBudget(pricing) as unknown, { totalIncGST: 11000, runs: [{ label: 'A' }] })
