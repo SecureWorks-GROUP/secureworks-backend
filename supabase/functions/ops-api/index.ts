@@ -1,6 +1,7 @@
 // JWT flag: --no-verify-jwt. Keep this line at the top: the deploy workflow reads
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
+import { setCouncilRequired } from './council_mark.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
 import { SelfAllocationRefusal, selfAllocateForInvoice } from './trade_self_allocation.ts'
@@ -10110,7 +10111,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // UI can show the "see admin" message and machine-read the code.
         return json(cancelResult, cancelResult?.ok === false ? 409 : 200)
       }
-      case 'update_job_status': return json(await updateJobStatus(client, body))
+      case 'update_job_status': {
+        const { event_detail: _ujsEventDetail, ...ujsBody } = body
+        return json(await updateJobStatus(client, ujsBody))
+      }
       // Repairs board stage move. Guarded to staff operators and deliberately
       // absent from ROUTINE_ALLOWED_ACTIONS, so the routine key is refused by
       // the default-deny above: an autonomous loop may not reshuffle the board.
@@ -10953,6 +10957,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (!ujfJobId || !ujfField) return json({ error: 'job_id and field required' }, 400)
         const ALLOWED_FIELDS = ['ghl_contact_id', 'ghl_opportunity_id', 'client_phone', 'client_email', 'client_name', 'site_address', 'site_suburb', 'council_required']
         if (!ALLOWED_FIELDS.includes(ujfField)) return json({ error: 'Field not allowed: ' + ujfField }, 400)
+        if (ujfField === 'council_required') {
+          const ujfSet = await setCouncilRequired(client, {
+            jobId: ujfJobId,
+            value: ujfValue,
+            operatorId: authMode === 'jwt' ? (authUser?.id ?? null) : null,
+            actor: requestActor.actor,
+            source: typeof body.source === 'string' && body.source ? body.source : 'update_job_field',
+          })
+          if (!ujfSet.ok) return json({ error: ujfSet.error }, ujfSet.status)
+          return json({ success: true, value: ujfSet.value })
+        }
         const { error: ujfErr } = await client.from('jobs').update({ [ujfField]: ujfValue, updated_at: new Date().toISOString() }).eq('id', ujfJobId)
         if (ujfErr) return json({ error: ujfErr.message }, 500)
         return json({ success: true })
@@ -38551,7 +38566,10 @@ export async function updateJobStatus(client: any, body: any) {
     job_id: jId,
     user_id: body.userId || body.user_id || null,
     event_type: 'status_changed',
-    detail_json: { new_status: status, source, operator: body.operator_email || body.user_email || null },
+    detail_json: {
+      ...(body.event_detail && typeof body.event_detail === 'object' ? body.event_detail : {}),
+      new_status: status, source, operator: body.operator_email || body.user_email || null,
+    },
   })
 
   // Log to jarvis_event_log (non-blocking, fire-and-forget)
