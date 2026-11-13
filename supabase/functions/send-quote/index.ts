@@ -133,6 +133,8 @@ import {
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { freezeExpectedCostsOnAcceptance } from '../_shared/expected_costs/expected_costs_freeze.ts'
+import { recordJobBudgetOnAcceptance } from '../_shared/job_budget/record_job_budget.ts'
+import { withoutBudget } from '../_shared/job_budget/budget_v1.ts'
 import { inspectSealedSesJob } from '../_shared/sealed_ses_money_fence.ts'
 import { customerSiteLine } from '../_shared/customer_site_line.ts'
 import {
@@ -1760,6 +1762,8 @@ serve(async (req: Request) => {
           .eq('id', doc.job_id)
           .single()
 
+        // Ruling 17: the customer's page never carries the staff-only budget.
+        if (fullJob) fullJob.pricing_json = withoutBudget(fullJob.pricing_json)
         if (fullJob?.pricing_json?.runs) {
           const pj = typeof fullJob.pricing_json === 'string' ? JSON.parse(fullJob.pricing_json) : fullJob.pricing_json
           const run = findQuoteRun(pj, sourceRunLabel)
@@ -2341,6 +2345,14 @@ serve(async (req: Request) => {
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
           }
+          // Ruling 17 step 1: the job budget, beside the baseline (which is unchanged).
+          // Never blocks the acceptance; a budget that does not add up is a refusal event.
+          try {
+            const jb = await recordJobBudgetOnAcceptance(sb, doc.job_id)
+            console.log('[send-quote] job budget (run flow)', JSON.stringify({ job_id: doc.job_id, result: jb }))
+          } catch (e) {
+            console.error('[send-quote] job budget failed (non-blocking):', (e as Error).message)
+          }
           try {
             const { releaseScopeJobDraftsOnAcceptance } = await import('../_shared/scope_freeze/release_scope_job_drafts.ts')
             await releaseScopeJobDraftsOnAcceptance(sb, doc.job_id)
@@ -2545,6 +2557,13 @@ serve(async (req: Request) => {
             console.log('[send-quote] expected-cost baseline', JSON.stringify({ job_id: doc.job_id, result: efc }))
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
+          }
+          // Ruling 17 step 1: the job budget, beside the baseline (which is unchanged).
+          try {
+            const jb = await recordJobBudgetOnAcceptance(sb, doc.job_id)
+            console.log('[send-quote] job budget', JSON.stringify({ job_id: doc.job_id, result: jb }))
+          } catch (e) {
+            console.error('[send-quote] job budget failed (non-blocking):', (e as Error).message)
           }
           // Taken options are added to the drafts (work order lines, payer
           // amounts, payment stages) before they are released.
