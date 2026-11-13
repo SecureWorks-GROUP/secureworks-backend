@@ -102,7 +102,7 @@ import {
   type DispatchLineReason,
   dispatchOrderCost,
   readDispatchBudget,
-  readDispatchBudgetCostOn,
+  readDispatchBudgetCostSwitch,
 } from "./dispatch_v2_budget_cost.ts";
 // Tweak 4: the supplier picker rules and the name a box shows.
 import {
@@ -403,13 +403,19 @@ async function readJobLines(client: any, jobId: string): Promise<any[]> {
 // ── Ruling 17 step 3: the job budget's cost on each line ───────────────────
 
 // The budget a job's lines are costed against, or null: with the switch off
-// (or missing or unreadable) every Dispatch path runs exactly as before step
-// 3, and a job with no stored budget keeps today's path too. An unreadable
-// budget refuses: a line is never ordered as though the job had none.
+// (explicitly false, or no row) every Dispatch path runs exactly as before
+// step 3, and a job with no stored budget keeps today's path too. A switch or
+// budget that cannot be read refuses with a retryable 503: a line is never
+// ordered as though the switch were off or the job had no budget.
 type BudgetCostState = { on: boolean; budget: DispatchBudget | null };
 
 async function readBudgetCostState(client: any, jobId: string): Promise<BudgetCostState> {
-  if (!await readDispatchBudgetCostOn(client)) return { on: false, budget: null };
+  const sw = await readDispatchBudgetCostSwitch(client);
+  if (sw === "unreadable") {
+    console.error("[dispatch_v2] dispatch budget cost switch read failed");
+    refuse(503, "budget_switch_unreadable", "The job budget setting could not be read, so nothing was changed. Try again.");
+  }
+  if (sw === "off") return { on: false, budget: null };
   try {
     return { on: true, budget: await readDispatchBudget(client, jobId) };
   } catch (error) {
@@ -492,7 +498,11 @@ async function readBudgetCostView(client: any, jobId: string, lines: any[]): Pro
   view: null | Record<string, unknown>;
 }> {
   const reasons = new Map<string, DispatchLineReason>();
-  if (!await readDispatchBudgetCostOn(client)) return { budget: null, reasons, view: null };
+  const sw = await readDispatchBudgetCostSwitch(client);
+  // The read never refuses, but it never hides a switch it could not read:
+  // the panel says so, and every write refuses until it can be read.
+  if (sw === "unreadable") return { budget: null, reasons, view: { state: "switch_unreadable" } };
+  if (sw === "off") return { budget: null, reasons, view: null };
   let budget: DispatchBudget | null;
   try {
     budget = await readDispatchBudget(client, jobId);
@@ -1724,6 +1734,14 @@ export async function suggestDispatchV2Draft(
     );
   }
   const budgetFill = budget ? dispatchBudgetFillLines(budget) : null;
+  if (budgetFill && !budgetFill.ok && budgetFill.code === "order_detail_too_long") {
+    refuse(
+      409,
+      "order_detail_too_long",
+      `A line in the job budget has more order detail (length, cuts, note, profile or colour) than a line holds, so the list was not filled. Shorten its note in the quote tool.`,
+      { budget_line_keys: budgetFill.keys },
+    );
+  }
   if (budgetFill && !budgetFill.ok) {
     refuse(
       409,

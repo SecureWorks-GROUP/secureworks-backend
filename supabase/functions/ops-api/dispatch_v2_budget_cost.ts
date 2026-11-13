@@ -59,6 +59,18 @@ export type DispatchBudgetLine = {
   in_total: boolean;
   cost_from: string | null;
   note_to_supplier: string | null;
+  /** What the supplier copy prints for the line (tool contract, 14 Nov):
+   * absent on a revision sealed before, read as absent, never as zero. */
+  stock_length_mm: number | null;
+  cuts: { length_mm: number; qty: number }[];
+  stock_to_confirm: boolean;
+  profile: string | null;
+  colour: string | null;
+  finish: string | null;
+  gauge_mm: number | null;
+  girth_mm: number | null;
+  /** The supplier copy's own cut words, used only when cuts is empty. */
+  cut: string | null;
 };
 
 export type DispatchBudgetSupplier = {
@@ -106,6 +118,22 @@ function money(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+// A physical measure: a positive finite number, else absent (never zero).
+function measure(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  return value;
+}
+
+function cutsOf(value: unknown): { length_mm: number; qty: number }[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((raw: unknown) => {
+    const c = rec(raw);
+    const length = measure(c.length_mm);
+    const qty = measure(c.qty);
+    return length !== null && qty !== null ? [{ length_mm: length, qty }] : [];
+  });
+}
+
 /** A stored budget record (job_budgets.budget, budget.v1) read for Dispatch. */
 export function dispatchBudgetFromRecord(
   row: { id: string; job_id: string; scope_revision_id: string; version: number; trade: string; budget: unknown },
@@ -134,6 +162,15 @@ export function dispatchBudgetFromRecord(
       in_total: l.in_total === true,
       cost_from: text(l.cost_from),
       note_to_supplier: text(l.note_to_supplier),
+      stock_length_mm: measure(l.stock_length_mm),
+      cuts: cutsOf(l.cuts),
+      stock_to_confirm: l.stock_to_confirm === true,
+      profile: text(l.profile),
+      colour: text(l.colour),
+      finish: text(l.finish),
+      gauge_mm: measure(l.gauge_mm),
+      girth_mm: measure(l.girth_mm),
+      cut: text(l.cut),
     }];
   });
   const bySupplier = (Array.isArray(materials.by_supplier) ? materials.by_supplier : [])
@@ -187,17 +224,22 @@ export async function readDispatchBudget(client: any, jobId: string): Promise<Di
 }
 
 /**
- * Is the switch on? Missing or unreadable is off: Dispatch then runs exactly
- * as it did before step 3.
+ * The switch as stored. `off` is an explicit false or no row (Dispatch then
+ * runs exactly as it did before step 3); `unreadable` is a failed read, which
+ * every caller refuses (writes) or names (reads), never treats as off: a read
+ * fault must never let an uncosted order through while the switch is on.
  */
-export async function readDispatchBudgetCostOn(client: any): Promise<boolean> {
+export type DispatchBudgetCostSwitch = "on" | "off" | "unreadable";
+
+export async function readDispatchBudgetCostSwitch(client: any): Promise<DispatchBudgetCostSwitch> {
   try {
     const { data, error } = await client.from("feature_flags").select("enabled")
       .eq("flag_name", DISPATCH_BUDGET_COST_FLAG).limit(1);
-    if (error) return false;
-    return data?.[0]?.enabled === true;
+    if (error) return "unreadable";
+    if (!Array.isArray(data)) return "unreadable";
+    return data[0]?.enabled === true ? "on" : "off";
   } catch {
-    return false;
+    return "unreadable";
   }
 }
 
@@ -209,8 +251,8 @@ export type DispatchBudgetFillLine = {
   unit: string | null;
   /** The supplier note the sealed line carries, printed under the line. */
   detail: string | null;
-  profile: null;
-  colour: null;
+  profile: string | null;
+  colour: string | null;
   /** The sealed line id (source_line_id), or null. */
   scope_line_id: string | null;
   supplier_key: string | null;
@@ -220,7 +262,46 @@ export type DispatchBudgetFillLine = {
 
 export type DispatchBudgetFill =
   | { ok: true; lines: DispatchBudgetFillLine[]; notes: string[] }
-  | { ok: false; code: "supplier_note_too_long"; keys: string[] };
+  | { ok: false; code: "supplier_note_too_long" | "order_detail_too_long"; keys: string[] };
+
+/** The longest profile or colour a line holds (job_material_lines). */
+export const DISPATCH_PROFILE_MAX = 80;
+
+// Millimetres as the supplier copy writes a length: whole, with a thousands
+// comma ("8,000 mm"); a fraction keeps up to two decimal places (a 0.42 gauge).
+function mm(value: number): string {
+  const rounded = Math.round(value * 100) / 100;
+  const [whole, frac] = String(rounded).split(".");
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${grouped}${frac ? `.${frac}` : ""} mm`;
+}
+
+function count(value: number): string {
+  return String(Math.round(value * 1000) / 1000);
+}
+
+/**
+ * The physical order detail a budget line prints under itself on the supplier
+ * copy: its stock length (or that the stock length is the supplier's to
+ * confirm), its cuts, finish, gauge and girth, then the note to the supplier.
+ * Profile and colour have their own fields. Only what the sealed line states;
+ * nothing is made up for a line sealed before these fields existed.
+ */
+export function dispatchBudgetLineDetail(line: DispatchBudgetLine): string | null {
+  const parts: string[] = [];
+  if (line.stock_length_mm !== null) parts.push(`Length: ${mm(line.stock_length_mm)}`);
+  else if (line.stock_to_confirm) parts.push("Stock length to confirm");
+  if (line.cuts.length) {
+    parts.push(`Cuts: ${line.cuts.map((c) => `${count(c.qty)} x ${mm(c.length_mm)}`).join(", ")}`);
+  } else if (line.cut) {
+    parts.push(`Cuts: ${line.cut}`);
+  }
+  if (line.finish) parts.push(`Finish: ${line.finish}`);
+  if (line.gauge_mm !== null) parts.push(`Gauge: ${mm(line.gauge_mm)}`);
+  if (line.girth_mm !== null) parts.push(`Girth: ${mm(line.girth_mm)}`);
+  if (line.note_to_supplier) parts.push(line.note_to_supplier);
+  return parts.length ? parts.join("\n") : null;
+}
 
 // No supplier to order from: the office's own fixings and the catalogue's
 // placeholder (scope_engine_materials.ts keeps the same two).
@@ -238,6 +319,7 @@ export function dispatchBudgetFillLines(budget: DispatchBudget): DispatchBudgetF
   const lines: DispatchBudgetFillLine[] = [];
   const charges: string[] = [];
   const tooLong: string[] = [];
+  const detailTooLong: string[] = [];
   const held: string[] = [];
   const offCopy: string[] = [];
   for (const l of budget.lines) {
@@ -260,6 +342,17 @@ export function dispatchBudgetFillLines(budget: DispatchBudget): DispatchBudgetF
       tooLong.push(l.key);
       continue;
     }
+    // The length, cuts, profile and colour are what tell two lines of one
+    // section apart (two 90x90 stock lengths): never cut one short.
+    const detail = dispatchBudgetLineDetail(l);
+    if (
+      (detail && detail.length > DISPATCH_SUPPLIER_NOTE_MAX) ||
+      (l.profile && l.profile.length > DISPATCH_PROFILE_MAX) ||
+      (l.colour && l.colour.length > DISPATCH_PROFILE_MAX)
+    ) {
+      detailTooLong.push(l.key);
+      continue;
+    }
     const placed = l.supplier_key !== null && l.supplier_key !== "none" &&
       !(l.supplier_id && NO_SUPPLIER.has(l.supplier_id.toLowerCase()));
     if (!placed) held.push(description);
@@ -267,9 +360,9 @@ export function dispatchBudgetFillLines(budget: DispatchBudget): DispatchBudgetF
       description,
       quantity: quantity.ok ? quantity.value : null,
       unit: unit.ok ? unit.value : null,
-      detail: l.note_to_supplier,
-      profile: null,
-      colour: null,
+      detail,
+      profile: l.profile,
+      colour: l.colour,
       scope_line_id: l.line_id && l.line_id.length <= 100 ? l.line_id : null,
       supplier_key: placed ? (l.supplier_id ?? l.supplier_name ?? l.supplier_key) : null,
       supplier_name: placed ? l.supplier_name : null,
@@ -277,6 +370,7 @@ export function dispatchBudgetFillLines(budget: DispatchBudget): DispatchBudgetF
     });
   }
   if (tooLong.length) return { ok: false, code: "supplier_note_too_long", keys: tooLong };
+  if (detailTooLong.length) return { ok: false, code: "order_detail_too_long", keys: detailTooLong };
   const notes = [`These lines come from the job budget (version ${budget.version}), with their costs.`];
   if (charges.length) {
     notes.push(`Delivery and cutting charges stay on the budget, not as lines: ${charges.join(", ")}.`);

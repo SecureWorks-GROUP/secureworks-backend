@@ -17,6 +17,7 @@ import {
   dispatchOrderCost,
 } from "./dispatch_v2_budget_cost.ts";
 import native from "../_shared/job_budget/fixtures/native-budgets.json" with { type: "json" };
+import { dispatchV2LineText } from "./dispatch_v2_emails.ts";
 
 const BUDGET_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -92,6 +93,65 @@ Deno.test("fill: a one-figure patio budget fills its order lines, never the one 
   const twins = fill.lines.filter((l) => l.scope_line_id === "SL-960b8f314bbd83cb");
   assertEquals(twins.map((l) => l.budget_line_key), ["patio:SL-960b8f314bbd83cb", "patio:SL-960b8f314bbd83cb#2"]);
   assert(fill.notes.some((n) => n.includes("one figure")));
+});
+
+// The tool's physical order detail per line (r17 step 3 tool contract, 14 Nov).
+function withTwinDetail(): any {
+  const raw = structuredClone(native.budgets.patio_one_figure) as any;
+  const twins = raw.materials.lines.filter((l: any) => l.line_id === "SL-960b8f314bbd83cb");
+  Object.assign(twins[0], { stock_length_mm: 8000, cuts: [{ length_mm: 3350, qty: 2 }], stock_to_confirm: false, profile: null, colour: "Monument", finish: null, gauge_mm: null, girth_mm: null, cut: "2 \u00d7 3350" });
+  Object.assign(twins[1], { stock_length_mm: 4100, cuts: [{ length_mm: 3350, qty: 1 }], stock_to_confirm: false, profile: null, colour: "Monument", finish: null, gauge_mm: null, girth_mm: null, cut: "1 \u00d7 3350" });
+  return raw;
+}
+const fromRaw = (raw: any) =>
+  dispatchBudgetFromRecord({ id: BUDGET_ID, job_id: "j", scope_revision_id: "r", version: 1, trade: "patio", budget: raw });
+
+Deno.test("fill: two stock rows of one section print their own length and cuts, so the supplier copy tells them apart", () => {
+  const fill = dispatchBudgetFillLines(fromRaw(withTwinDetail()));
+  assert(fill.ok);
+  const twins = fill.lines.filter((l) => l.scope_line_id === "SL-960b8f314bbd83cb");
+  const texts = twins.map((l) => dispatchV2LineText(l));
+  assertEquals(texts, [
+    "1 length x 90x90x2 SHS\nLength: 8,000 mm\nCuts: 2 x 3,350 mm\nColour: Monument",
+    "1 length x 90x90x2 SHS\nLength: 4,100 mm\nCuts: 1 x 3,350 mm\nColour: Monument",
+  ]);
+  assertEquals(twins.map((l) => l.colour), ["Monument", "Monument"]);
+  // No dollar reaches the order text.
+  assert(!texts.join("\n").includes("$"));
+});
+
+Deno.test("fill: a line sealed before the order detail existed prints only what it states; nothing is made up", () => {
+  const fill = dispatchBudgetFillLines(stored("patio_one_figure"));
+  assert(fill.ok);
+  const twins = fill.lines.filter((l) => l.scope_line_id === "SL-960b8f314bbd83cb");
+  assertEquals(twins.map((l) => [l.detail, l.profile, l.colour]), [[null, null, null], [null, null, null]]);
+  assertEquals(twins.map((l) => dispatchV2LineText(l)), ["1 length x 90x90x2 SHS", "1 length x 90x90x2 SHS"]);
+});
+
+Deno.test("fill: no stock length on file says so; cut words stand in for empty cuts; finish, gauge, girth and the note follow", () => {
+  const raw = withTwinDetail();
+  const twin = raw.materials.lines.find((l: any) => l.key === "patio:SL-960b8f314bbd83cb");
+  Object.assign(twin, { stock_length_mm: null, stock_to_confirm: true, cuts: [], cut: "2 x 3350", profile: "Square", finish: "Matt", gauge_mm: 0.42, girth_mm: 300, note_to_supplier: "Deliver with the posts" });
+  const fill = dispatchBudgetFillLines(fromRaw(raw));
+  assert(fill.ok);
+  const line = fill.lines.find((l) => l.budget_line_key === "patio:SL-960b8f314bbd83cb")!;
+  assertEquals(line.detail, "Stock length to confirm\nCuts: 2 x 3350\nFinish: Matt\nGauge: 0.42 mm\nGirth: 300 mm\nDeliver with the posts");
+  assertEquals(line.profile, "Square");
+  // A zero or negative measure is absent, never zero.
+  Object.assign(twin, { stock_length_mm: 0, stock_to_confirm: false, cuts: [{ length_mm: -1, qty: 2 }], cut: null, finish: null, gauge_mm: 0, girth_mm: null, note_to_supplier: null });
+  const again = dispatchBudgetFillLines(fromRaw(raw));
+  assert(again.ok);
+  assertEquals(again.lines.find((l) => l.budget_line_key === "patio:SL-960b8f314bbd83cb")!.detail, null);
+});
+
+Deno.test("fill: order detail longer than a line holds refuses the fill by key, never cut short", () => {
+  const raw = withTwinDetail();
+  const twin = raw.materials.lines.find((l: any) => l.key === "patio:SL-960b8f314bbd83cb#2");
+  twin.note_to_supplier = "x".repeat(290);
+  assertEquals(dispatchBudgetFillLines(fromRaw(raw)), { ok: false, code: "order_detail_too_long", keys: ["patio:SL-960b8f314bbd83cb#2"] });
+  twin.note_to_supplier = null;
+  twin.colour = "c".repeat(81);
+  assertEquals(dispatchBudgetFillLines(fromRaw(raw)), { ok: false, code: "order_detail_too_long", keys: ["patio:SL-960b8f314bbd83cb#2"] });
 });
 
 Deno.test("cost: at its budget quantity a line costs the budget's unit cost times its quantity; under is fine too", () => {

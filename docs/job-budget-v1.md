@@ -225,13 +225,17 @@ silently $0, never silently over. Migration
 `20261114020000_dispatch_line_budget_cost.sql`; the rule is one module,
 `ops-api/dispatch_v2_budget_cost.ts`; the store is `ops-api/dispatch_v2_store.ts`.
 
-Switch: `feature_flags.dispatch_budget_cost_v1`, seeded off. Off, missing or
-unreadable: Dispatch fills, makes and sends exactly as before. On, for a job
-with a stored budget (the newest `job_budgets` version):
+Switch: `feature_flags.dispatch_budget_cost_v1`, seeded off. Off or missing:
+Dispatch fills, makes and sends exactly as before. Unreadable (the flag read
+fails): the fill, the email, the send and a reason refuse with 503
+`budget_switch_unreadable` and change nothing (try again), and the read answers
+`budget: {state: 'switch_unreadable'}`; an unreadable switch is never read as
+off, so an uncosted order cannot reach Send. On, for a job with a stored budget
+(the newest `job_budgets` version):
 
 | Step | What happens |
 | --- | --- |
-| Fill (`dispatch_v2_suggest_draft`) | Lines come from the budget's materials lines, each naming its budget line (`job_material_lines.budget_id` + `budget_line_key`). The budget must be for the job's current frozen revision, else `budget_not_current_revision`. A line's `note_to_supplier` rides as its detail (over 300 characters refuses `supplier_note_too_long`). Delivery and cutting lines, and lines that never go on a supplier order (tek screws, removal, labour), stay on the budget and are named in the fill notes. Taken options are already in the budget, so they are not added again. Standing lines are unchanged. |
+| Fill (`dispatch_v2_suggest_draft`) | Lines come from the budget's materials lines, each naming its budget line (`job_material_lines.budget_id` + `budget_line_key`). The budget must be for the job's current frozen revision, else `budget_not_current_revision`. A line's detail prints what the supplier copy prints, from the sealed line only: `Length: <stock_length_mm>` (or `Stock length to confirm` when `stock_to_confirm`), `Cuts: <qty> x <length_mm>, ...` (else the line's `cut` words), `Finish`, `Gauge`, `Girth`, then its `note_to_supplier`; `profile` and `colour` fill the line's own fields. A line sealed before these fields has none of them and prints its note only. A note over 300 characters refuses `supplier_note_too_long`; a detail over 300, or a profile or colour over 80, refuses `order_detail_too_long` (never cut short). Delivery and cutting lines, and lines that never go on a supplier order (tek screws, removal, labour), stay on the budget and are named in the fill notes. Taken options are already in the budget, so they are not added again. Standing lines are unchanged. |
 | Read (`dispatch_materials`) | Each line carries `cost` (basis, unit cost, line cost, needs a reason or not); the reply carries `budget` (state, version, totals by supplier, how many open lines need a reason). A budget read fault answers `budget: {state: 'unreadable'}`, never "no budget". |
 | Make the email | Every orderable line must be costed or carry a covering reason, else 409 `line_cost_needs_reason` naming the lines. The email row stores `order_cost` (`dispatch-order-cost.v1`: each line's basis and cost, the total, the supplier's budget). |
 | Send | Refuses `order_cost_missing` if the email was made without its cost, `budget_changed` if a newer budget was stored since, and `line_cost_needs_reason` if a line moved. |

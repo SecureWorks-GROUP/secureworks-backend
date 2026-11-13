@@ -3761,3 +3761,56 @@ Deno.test("budget: an unreadable budget refuses the make press and the fill; the
   await refused(makeEmail(db, JOB.patio, SUP.metroll), 503, "budget_unreadable");
   assertEquals(db.tables.dispatch_supplier_order_emails, []);
 });
+
+Deno.test("budget switch unreadable: the fill, the make press, the send and a reason refuse (retryable) and change nothing; the read says so", async () => {
+  const { db } = await budgetJob();
+  await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio });
+  // Made while the switch read fine: every Metroll line is within its budget.
+  const made = await makeEmail(db, JOB.patio, SUP.metroll);
+  assertEquals(made.email.order_cost.budget_id, BUDGET);
+  db.failures.add("select:feature_flags");
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.patio });
+  assertEquals(read.budget, { state: "switch_unreadable" });
+  const before = db.writes().length;
+  await refused(makeEmail(db, JOB.patio, SUP.stratco), 503, "budget_switch_unreadable");
+  const { sent, sender } = fakeSender();
+  await refused(call(db, "dispatch_v2_send_email", { email_id: made.email.id, expected_updated_at: made.email.updated_at }, ctx(sender)), 503, "budget_switch_unreadable");
+  assertEquals(sent, []);
+  const flash = lineByKey(db, "b-flash");
+  await refused(call(db, "dispatch_v2_line_cost_reason", { job_id: JOB.patio, line_id: flash.id, expected_updated_at: flash.updated_at, reason: "Builder asked for barge flashing", unit_cost_ex_gst: 12.5 }), 503, "budget_switch_unreadable");
+  assertEquals(db.writes().length, before);
+  assertEquals(db.tables.dispatch_line_cost_reasons, []);
+  assertEquals(db.tables.dispatch_supplier_order_emails.map((e: any) => e.status), ["draft"]);
+  assertEquals(db.tables.feature_flags[0].enabled, true);
+});
+
+Deno.test("budget switch unreadable: a fill refuses before writing a line", async () => {
+  const { db } = await budgetJob();
+  db.failures.add("select:feature_flags");
+  await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio }), 503, "budget_switch_unreadable");
+  assertEquals(db.tables.job_material_lines, []);
+});
+
+Deno.test("budget switch explicitly off reads exactly as a missing switch: the old path", async () => {
+  const { db } = await budgetJob(false);
+  db.tables.feature_flags.push({ flag_name: "dispatch_budget_cost_v1", enabled: false });
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio });
+  assertEquals(out.lines.length, 7, "the sealed scope lines, as before");
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.patio });
+  assertEquals(read.budget, null);
+  const made = await makeEmail(db, JOB.patio, SUP.stratco);
+  assertEquals(made.email.order_cost, null);
+});
+
+Deno.test("budget make: a line's stock length, cuts and colour from the sealed budget print on the supplier email, never a dollar", async () => {
+  const { db } = await budgetJob();
+  const post = db.tables.job_budgets[0].budget.materials.lines.find((l: any) => l.key === "b-post");
+  Object.assign(post, { stock_length_mm: 6500, cuts: [{ length_mm: 2900, qty: 3 }], stock_to_confirm: false, profile: null, colour: "Monument", cut: "3 × 2900" });
+  await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio });
+  const line = lineByKey(db, "b-post");
+  assertEquals([line.detail, line.colour], ["Length: 6,500 mm\nCuts: 3 x 2,900 mm", "Monument"]);
+  const made = await makeEmail(db, JOB.patio, SUP.metroll);
+  const body = made.email.body_text as string;
+  assert(body.includes("3 length x 100x100 SHS post 2,900\nLength: 6,500 mm\nCuts: 3 x 2,900 mm\nColour: Monument"), body);
+  assert(!/\$|\b60\b|180/.test(body), body);
+});

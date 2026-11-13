@@ -5115,8 +5115,10 @@ Dispatch line on a budget job is costed only by `dispatch_v2_budget_cost.ts`
 (linked by `job_material_lines.budget_id` + `budget_line_key`); a line over its
 budget line or not in it is ordered only with a signed-in person's reason in
 the append-only `dispatch_line_cost_reasons`; the order email stores
-`order_cost` and its body never prints a dollar. Contract: "Dispatch lines
-carry cost" in `docs/job-budget-v1.md`.
+`order_cost` and its body never prints a dollar. An unreadable switch is
+never off: it refuses the fill, email, send and reason (503
+`budget_switch_unreadable`). Contract: "Dispatch lines carry cost" in
+`docs/job-budget-v1.md`.
 
 Step 2 (`20261113230000`, `ops-api/job_commission.ts`): the commission rate is
 `commission_rates` (fence 15, patio 8, of gross profit; append-only, changed
