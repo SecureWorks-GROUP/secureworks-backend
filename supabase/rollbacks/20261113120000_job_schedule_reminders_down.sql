@@ -3,9 +3,12 @@
 -- record of who was texted); a re-apply finds them and leaves them as they are.
 DO $cron$
 BEGIN
-  IF to_regclass('cron.job') IS NOT NULL
-     AND EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'job-schedule-reminders') THEN
-    PERFORM cron.unschedule('job-schedule-reminders');
+  -- Nested, not AND: Postgres plans the whole expression, so cron.job must exist
+  -- before the EXISTS is reached.
+  IF to_regclass('cron.job') IS NOT NULL THEN
+    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'job-schedule-reminders') THEN
+      PERFORM cron.unschedule('job-schedule-reminders');
+    END IF;
   END IF;
 END $cron$;
 
