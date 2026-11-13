@@ -359,6 +359,10 @@ UPDATE public.feature_flags
 SET enabled = true
 WHERE flag_name = 'trade_invoice_time_entry_required_v1';
 
+-- The labour cap's deferred guards (20261114030000) queue an event for each invoice line written
+-- above; run them now so the re-applied migration's ALTER TABLE has no pending trigger events.
+SET CONSTRAINTS ALL IMMEDIATE;
+
 \ir ../../../migrations/20261012180000_trade_invoice_time_entries.sql
 
 DO $$
