@@ -46048,6 +46048,45 @@ export function tradeScopePrivateKey(key: string): boolean {
   return TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key) ||
     TRADE_SCOPE_PRIVATE_KEY_RE.test(key)
 }
+// Ruling 17a, every tier: the office and a division manager read the quote on
+// the Trade App, but the job budget, commission and the salesperson never reach
+// Trade App job data for anyone. This strip runs over the whole trade_job_detail
+// answer whatever the quote fence decided; it drops those keys only, so the
+// quote figures a quote-visible tier may read are kept. A JSON string carrying
+// one is parsed and stripped too; one it cannot parse is dropped. Deeper than
+// the cap is dropped, never returned unread.
+export const TRADE_PRIVATE_CARRIER_MAX_DEPTH = 64
+export function tradePrivateCarrierKey(key: string): boolean {
+  return key === 'budget' || TRADE_SCOPE_PRIVATE_KEY_RE.test(key)
+}
+const TRADE_PRIVATE_CARRIER_TEXT_RE = /commission|salesperson|"budget"/i
+export function stripTradePrivateCarriers<T>(node: T): T {
+  const walk = (x: any, depth: number): any => {
+    if (x == null) return x
+    if (typeof x === 'string') {
+      if (!TRADE_PRIVATE_CARRIER_TEXT_RE.test(x)) return x
+      const t = x.trim()
+      if (!t.startsWith('{') && !t.startsWith('[')) return x
+      try {
+        return JSON.stringify(walk(JSON.parse(t), depth))
+      } catch {
+        return undefined
+      }
+    }
+    if (typeof x !== 'object') return x
+    if (depth > TRADE_PRIVATE_CARRIER_MAX_DEPTH) return undefined
+    if (Array.isArray(x)) return x.map((v) => walk(v, depth + 1)).filter((v) => v !== undefined)
+    const out: Record<string, any> = {}
+    for (const [k, v] of Object.entries(x)) {
+      if (tradePrivateCarrierKey(k)) continue
+      const w = walk(v, depth + 1)
+      if (w === undefined) continue
+      out[k] = w
+    }
+    return out
+  }
+  return walk(node, 0)
+}
 // Walked, never dropped as objects: the quote narrative + quote-number pack.
 // A bare numeric/money value on these keys is still stripped. Nested objects
 // keep ONLY the allowlist below — unknown keys are dropped, not denylisted.
@@ -47245,7 +47284,8 @@ async function tradeJobDetail(
     scope_json: jobRes.data?.scope_json,
   }])).get(jobId) || null
 
-  return {
+  // Ruling 17a: no budget, commission or salesperson key, for every tier.
+  return stripTradePrivateCarriers({
     job: tradeSafeJob,
     group_work_order_enabled: await groupFeatureOn(client),
     // Additive: the resolved tier and the quote fence, so the app can render the
@@ -47365,7 +47405,7 @@ async function tradeJobDetail(
       }),
       tradeSafeJob?.job_number || null,
     ),
-  }
+  })
 }
 
 // Exported so the trade-visibility regression suite can assert on the REAL

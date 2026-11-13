@@ -544,3 +544,62 @@ Deno.test("office still sees the whole working scope, and the same crew page fie
   );
   assertEquals(d.crew_scope_of_works.page, PAGE_REV1);
 });
+
+// Ruling 17a, every tier (money14's case on PR 1426): the office and a division
+// manager read the quote on the Trade App, but no budget, commission or
+// salesperson key reaches them either. The quote fence is not the gate.
+Deno.test("trade view: no budget, commission or salesperson key for any tier, the quote kept where it is visible", async () => {
+  const tables = await seedRev1AcceptedRev2Saved();
+  const seller = { id: "00000000-0000-4000-8000-00000000000b", name: "ZZTEST Seller Two" };
+  const budget = {
+    version: "budget.v1",
+    job: { salesperson: seller },
+    commission: { rule_id: "fence_15", percent: 15, salesperson: seller },
+    totals: { cost_before_commission_ex_gst: 5500, commission_ex_gst: 675, profit_after_commission_ex_gst: 3825 },
+  };
+  const scope = tables.jobs[0].scope_json;
+  scope.budget = budget;
+  scope.expected = { commission: 675 };
+  if (scope.sealed) scope.sealed.budget = budget;
+  scope.job = {
+    ...(scope.job || {}),
+    commissionBasis: "gross_profit",
+    quote: { quote_number: "Q-1", salesperson: seller },
+    revisionPacks: [{ commissionFrom: "app", budget, snapshot: { commissionBasis: "gross_profit", runs: [] } }],
+  };
+  tables.jobs[0].pricing_json = { totalIncGST: 9800, budget };
+  const tiers: Array<[string, any, boolean, boolean]> = [
+    ["allocated", installer, false, false],
+    ["division_manager", { ...installer, managedVerticals: ["patio"] }, false, true],
+    ["office", { ...installer, role: "admin" }, true, true],
+  ];
+  for (const [tier, viewer, isAdmin, quoteVisible] of tiers) {
+    const d: any = await _tradeJobDetailForTest(
+      makeClient(structuredClone(tables)),
+      new URLSearchParams({ jobId: JOB_ID }),
+      viewer,
+      isAdmin,
+    );
+    assertEquals(d.quote_visible, quoteVisible, tier);
+    const found: string[] = [];
+    const walk = (x: unknown, p: string) => {
+      if (Array.isArray(x)) return x.forEach((v, i) => walk(v, `${p}[${i}]`));
+      if (x && typeof x === "object") {
+        for (const [k, v] of Object.entries(x)) {
+          if (/commission|salesperson|budget/i.test(k)) found.push(`${p}.${k}`);
+          walk(v, `${p}.${k}`);
+        }
+      }
+    };
+    walk(d, "");
+    assertEquals(found, [], tier);
+    const text = JSON.stringify(d);
+    assert(!text.includes("ZZTEST Seller Two"), tier);
+    assert(!text.includes(seller.id), tier);
+    assert(d.crew_scope_of_works, `${tier}: the crew page is kept`);
+    if (quoteVisible) {
+      // The quote a quote-visible tier may read is kept.
+      assertEquals(d.job.scope_json.job.quote.quote_number, "Q-1", tier);
+    }
+  }
+});
