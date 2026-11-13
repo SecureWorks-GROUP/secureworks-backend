@@ -18,7 +18,9 @@
 // Commission is not a mode. It is an extra line a trade may add only on a job
 // they created, a job in a division they manage, or with the office's
 // invoice-any-job grant: `can_claim_commission` reads that through the ONE
-// rule list in trade_invoice_extra_job_authority.ts, never restated here.
+// rule list in trade_invoice_extra_job_authority.ts, never restated here. On a
+// job whose accepted budget stored a commission record (ruling 17 step 2),
+// only the salesperson it names may (job_commission.ts).
 //
 // This module answers the question; the write paths keep their own checks
 // (fencing helpers are still paid by the hour on fencing jobs, so no hourly
@@ -34,6 +36,7 @@
 // deno-lint-ignore-file no-explicit-any
 
 import { isRestorationCard } from "./restoration_workflow_store.ts";
+import { readJobCommissionRecords } from "./job_commission.ts";
 import {
   extraLineType,
   tradeMayClaimCommission,
@@ -254,6 +257,12 @@ export async function loadTradeInvoiceJobModes(
     managedVerticals: input.normaliseManagedVerticals(user.managed_verticals),
     invoiceAnyJob: user.invoice_any_job === true,
   };
+  let commissionRecords: Map<string, { salesperson_user_id: string | null }>;
+  try {
+    commissionRecords = await readJobCommissionRecords(client, [...jobs.keys()]);
+  } catch {
+    throw new TradeInvoiceModeReadError("the job commission records");
+  }
   const out: TradeInvoiceJobMode[] = [];
   const notFound: string[] = [];
   for (const id of ids) {
@@ -275,6 +284,9 @@ export async function loadTradeInvoiceJobModes(
           id,
           createdBy: row.created_by ? String(row.created_by) : null,
           vertical,
+          commission: commissionRecords.has(id)
+            ? { salespersonUserId: commissionRecords.get(id)!.salesperson_user_id }
+            : null,
         },
         trade,
       }),

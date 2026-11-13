@@ -97,8 +97,9 @@ type World = {
   managedVerticals?: string[];
   invoiceAnyJob?: unknown;
   userOrg?: string;
-  fail?: "users" | "jobs" | "group_work_orders" | "work_orders";
+  fail?: "users" | "jobs" | "group_work_orders" | "work_orders" | "v_job_commission";
   workOrders?: any[];
+  commissions?: any[];
 };
 
 function fakeClient(world: World = {}) {
@@ -120,6 +121,7 @@ function fakeClient(world: World = {}) {
         if (table === "jobs") return JOBS;
         if (table === "group_work_orders") return GROUPS;
         if (table === "work_orders") return world.workOrders ?? WORK_ORDERS;
+        if (table === "v_job_commission") return world.commissions ?? [];
         return [];
       };
       const matching = () =>
@@ -284,8 +286,29 @@ Deno.test("loader: commission only on a job they created, a division they manage
   assertEquals(granted.jobs.map((j) => j.can_claim_commission), [true, true]);
 });
 
+Deno.test("loader: a job with a commission record opens commission to its named salesperson only (ruling 17 step 2)", async () => {
+  const OTHER = "7a1e0a52-0000-4000-8000-0000000000ff";
+  const commissions = [
+    { job_id: CREATED_MAKESAFE, salesperson_user_id: OTHER, state: "named" },
+    { job_id: FENCE, salesperson_user_id: TRADE, state: "named" },
+    { job_id: MAKESAFE, salesperson_user_id: null, state: "no_salesperson" },
+  ];
+  // The creator of CREATED_MAKESAFE is not its salesperson; FENCE names this
+  // trade though they neither created nor manage it; nobody claims MAKESAFE.
+  const plain = await load(fakeClient({ commissions }), [CREATED_MAKESAFE, FENCE, MAKESAFE, PATIO]);
+  assertEquals(plain.jobs.map((j) => [j.job_id, j.can_claim_commission]), [
+    [CREATED_MAKESAFE, false],
+    [FENCE, true],
+    [MAKESAFE, false],
+    [PATIO, false],
+  ]);
+  // A manager or the grant does not open a job with a record; jobs without one keep their rules.
+  const granted = await load(fakeClient({ commissions, invoiceAnyJob: true, managedVerticals: ["makesafe"] }), [CREATED_MAKESAFE, MAKESAFE, PATIO]);
+  assertEquals(granted.jobs.map((j) => j.can_claim_commission), [false, false, true]);
+});
+
 Deno.test("loader: a failed read throws, never reads as no group or hourly", async () => {
-  for (const fail of ["users", "jobs", "group_work_orders", "work_orders"] as const) {
+  for (const fail of ["users", "jobs", "group_work_orders", "work_orders", "v_job_commission"] as const) {
     await assertRejects(() => load(fakeClient({ fail }), [FENCE]), TradeInvoiceModeReadError);
   }
   // The caller's company must be the trade's own.

@@ -119,13 +119,103 @@ only. Every read that hands pricing to a customer, a trade or a crew document:
 | send-quote `model` (customer 3D page) | customer | Reads scope artifacts only, no pricing. |
 | send-quote customer emails (send, send-runs, acceptance, decline) | customer | Built from named totals; no pricing record is attached or embedded. |
 | ops-api `my_jobs` | trade | `pricing_json` deleted from every card (existing). |
-| ops-api `trade_job_detail` | trade | `pricing_json` dropped from the payload (existing); the quote packer gets `withoutBudget(pricing)`; `scope_json` goes through `redactTradeScopeQuote`, whose `TRADE_SCOPE_QUOTE_KEYS` now drops `budget` at any depth. |
+| ops-api `trade_job_detail` | trade | `pricing_json` dropped from the payload (existing); the quote packer gets `withoutBudget(pricing)`; `scope_json` goes through `redactTradeScopeQuote`, whose `TRADE_SCOPE_QUOTE_KEYS` now drops `budget` at any depth, and `tradeScopePrivateKey` drops every key naming commission or the salesperson (`commissionBasis`, `commissionFrom`, ...) at any depth (ruling 17a). The whole answer then goes through `stripTradePrivateCarriers` for every tier, the office and a division manager included: they keep the quote figures but never a `budget`, commission or salesperson key. |
 | ops-api `trade_quote_extract` | trade | Built from the trade pack, which picks quote lines and terms only; `pricing_json` is on its refused keys. |
 | Crew scope of works, work orders (`my_work_orders`, `my_job_work_order`) | crew | Built from the redacted scope and the quote fill's lines (descriptions, no money). |
 
 Staff reads (`get_scope_revision_for_viewer`, `read_job_record`, the scoping
 tools through ghl-proxy, reporting) are unchanged and may show it. Proof:
 `ops-api/job_budget_strip_test.ts`.
+
+## Commission (step 2)
+
+`supabase/migrations/20261113230000_job_commissions.sql`, module
+`supabase/functions/ops-api/job_commission.ts`.
+
+### The rate
+
+One rate per trade, of the budget's gross profit, 0 on a loss: fence 15,
+patio 8 (the owner's rule, 13 Nov 2026). There is no typed rate per job.
+
+| Object | What it is |
+| --- | --- |
+| `commission_rates` | Append-only: a change is a new row (trade, `rule_id`, percent, `basis = gross_profit`, who, why, when). Seeded `fence_gross_profit_rate` 15.00 and `patio_gross_profit_rate` 8.00. |
+| `v_commission_rates` | The current rate per trade. Staff (admin, owner, ops_manager, estimator) read it under their own sign-in, the same rule as the staff-only scope tool defaults. Trades and customers read nothing. |
+| `commission_rate_settings` | One row, `editor_user_ids` (`public.users.id`). Ships empty. |
+| `set_commission_rate(trade, percent, reason, actor)` | The one writer, service role only. Refuses anyone not in `editor_user_ids` (`commission_rate_editor_only`). Keeps the trade's rule id. |
+
+The scoping tool reads `v_commission_rates` at seal. That replaces the old staff-only
+`commission-pct` row in `scope_tool_defaults`, which is no longer the rate.
+A sealed revision keeps what it sealed, including an older typed rate.
+
+Go-live (the owner's word): write the owner's `users.id` into
+`commission_rate_settings.editor_user_ids`. Until then nobody can change a rate
+and the two seeded rates stand.
+
+### The record
+
+`job_commissions`: one row per stored budget, written by a trigger on
+`job_budgets` the moment the budget is stored at acceptance. Budgets stored
+before the migration are backfilled. Write-once. Columns: job, budget, version,
+trade, the sealed salesperson id, the salesperson (`public.users.id`, only when
+that id is a person of the job's company), the state, rule, percent, gross
+profit and the expected amount.
+
+| State | Meaning | Who may claim |
+| --- | --- | --- |
+| `named` | A person of the company and an amount (0 on a loss). | That person, up to the amount. |
+| `no_amount` | A person, but the budget has no commission figure. | Nobody (`commission_amount_unknown`). |
+| `salesperson_not_found` | The sealed id is not a person of the job's company. | Nobody. |
+| `no_salesperson` | The budget names nobody. | Nobody. |
+
+The job's current record is its newest version (`v_job_commission`, service
+only, with `claimed_ex_gst` and `remaining_ex_gst`).
+
+### The cap
+
+On a job with a record, a commission line is accepted only on the named
+salesperson's invoice, and only while the job's counted commission stays
+within the expected amount. A job with no record keeps the rules from before step 2.
+
+- What counts: commission lines on the job, on an invoice that is neither a
+  draft nor `ops-reject`, that the office has not rejected, plus the invoice
+  being written.
+- A draft does not hold the amount: it is checked when it stops being a draft.
+- Triggers on `trade_invoice_lines` (insert, or a change to type, amount, job,
+  invoice or office review) and on `trade_invoices` (status or owner) hold every
+  write path. The record row is locked, so two invoices on one job are checked
+  one after the other.
+- `generate_trade_invoice` runs the same rule before it writes anything and
+  answers 409 with `commission_not_salesperson`, `commission_amount_unknown` or
+  `commission_over_amount`. If a write loses a race, the database refuses it
+  under the same code. A failed read of the records is a 503 (`commission_unreadable`), never a pass.
+- On a job with a record the creator, manager and invoice-any-job rules no
+  longer open commission. Only the named salesperson may claim it
+  (`commission_named_salesperson`). `my_hours`' `can_claim_commission` says the same.
+- Refusals carry codes and job numbers, never money.
+
+Not capped: a line a lead overrides in the crew review (`override_amount`), and
+a commission line that names a job number with no job id. The database cap
+needs the job id; the invoice route checks resolved jobs.
+
+### Doors and the AI command
+
+| Action | Who | What |
+| --- | --- | --- |
+| `commission_rates` (GET) | staff or server key | The current rate per trade. |
+| `set_commission_rate` (POST) | the signed-in editor only; the server key is refused | `{trade, percent, reason}`; the writer gets the session's own id. |
+| `job_commission` (GET) | staff or server key, inside the caller's company | One job's record, the salesperson's name, what counts and what is left. The AI command. |
+
+Tests: `ops-api/job_commission_test.ts`,
+`ops-api/trade_invoice_extra_job_authority_test.ts` (the cap through the
+invoice route), `ops-api/trade_invoice_mode_test.ts`, and the migration
+contract `supabase/tests/migration-contracts/20261113230000_job_commissions/`.
+
+Rollout: apply `20261113230000_job_commissions.sql` after `20261113190000`
+and before or with the matching `ops-api`. Until it is applied the reads find
+no records and the rules from before step 2 run. The rollback
+(`supabase/rollbacks/20261113230000_job_commissions_down.sql`) takes away the
+cap, the trigger, the writer and the reads and keeps every row.
 
 ## Labour: pay mode and the hourly cap (step 4)
 

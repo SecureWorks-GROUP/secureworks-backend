@@ -20,9 +20,11 @@ import {
   commissionLinesTotalEx,
   ExtraJobBillingRefusal,
   extraLineType,
+  isCommissionLine,
   normaliseExtraItem,
 } from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
+import { commissionCapCodeFromDbError, commissionCapRefusal, readJobCommissionRecords } from './job_commission.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
@@ -10589,6 +10591,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         })
         return json(await response.json(), response.status)
       }
+      // Ruling 17 step 2: the commission rate (staff read, owner-only change)
+      // and one job's commission record. job_commission.ts,
+      // 20261113230000_job_commissions.sql.
+      case 'commission_rates':
+      case 'set_commission_rate':
+      case 'job_commission': {
+        const { jobCommissionAction } = await import('./job_commission.ts')
+        const result = await jobCommissionAction(client, action, req.method, req.method === 'GET' ? { job_id: url.searchParams.get('job_id') } : body, {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          sessionUserId: authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role) ? authUser?.id || null : null,
+          orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+        })
+        return json(result.body, result.status)
+      }
       // Ruling 17 step 4: a job paid hourly up to a maximum. The cap is the
       // database's (20261114030000_job_labour_cap.sql); job_labour_cap.ts.
       case 'job_labour_cap':
@@ -14758,6 +14774,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   },
                   lines: jobLines,
                   jobVertical: _jobVertical,
+                  readCommissionRecords: (jobIds) => readJobCommissionRecords(client, jobIds),
                 }).catch((error) => {
                   if (error instanceof ExtraJobBillingRefusal) {
                     throw new ApiError(error.message, 403, {
@@ -15037,6 +15054,40 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
             if (lineItems.length === 0 && extraLineItems.length === 0) {
               throw new ApiError('Nothing to invoice. Your only lines are auto-tracked clock entries. Add your hours or an extra line.', 400)
+            }
+
+            // Ruling 17 step 2: a commission line on a job with a commission
+            // record is from its named salesperson only, and the job's counted
+            // commission stays within the record's amount (job_commission.ts;
+            // the database holds the same rule on every write).
+            {
+              const commissionClaims = [...lineItems, ...extraLineItems]
+                .filter((line: any) => isCommissionLine(String(line?.line_type ?? '')) && line?.job_id)
+                .map((line: any) => ({
+                  jobId: String(line.job_id),
+                  ref: String(line.job_number || line.job_id),
+                  amountEx: Number(line.line_total_ex) || 0,
+                }))
+              if (commissionClaims.length > 0) {
+                let records
+                try {
+                  records = await readJobCommissionRecords(client, commissionClaims.map((c: any) => c.jobId))
+                } catch {
+                  throw new ApiError('Could not check the commission on this invoice. Nothing was saved. Please submit again.', 503, { saved: false, code: 'commission_unreadable' })
+                }
+                const capRefusal = commissionCapRefusal({ tradeId: tradeUser.id, lines: commissionClaims, records })
+                if (capRefusal) {
+                  throw new ApiError(capRefusal.message, 409, {
+                    ok: false,
+                    success: false,
+                    saved: false,
+                    code: capRefusal.code,
+                    commission_jobs: capRefusal.jobs,
+                    error: capRefusal.message,
+                    userMessage: capRefusal.message,
+                  })
+                }
+              }
             }
 
             const labourSubtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
@@ -15481,7 +15532,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   tradeUser.id,
                   includedAssignmentIds,
                 ),
-              }, priorDraftId))
+              }, priorDraftId)).catch((error) => {
+                // The database's commission cap (a claim that raced another
+                // invoice past the check above) is a refusal, not a failure.
+                const capCode = commissionCapCodeFromDbError(error)
+                if (!capCode) throw error
+                const message = 'This invoice was not saved. The commission on this job changed while you were submitting. Reload and check the commission line, or ask the office.'
+                throw new ApiError(message, 409, { ok: false, success: false, saved: false, code: capCode, error: message, userMessage: message })
+              })
             const invoice = { id: invoiceId }
 
             // B14: one audit event per held typed rate. No amounts in the
@@ -46003,6 +46061,56 @@ export const TRADE_SCOPE_QUOTE_KEYS = new Set([
   // `budget`; dropped here at any depth wherever it is carried.
   'budget',
 ])
+// Ruling 17a: no commission key reaches Trade App job data. The scoping tools
+// carry commission metadata on the scope itself (`commissionBasis`,
+// `commissionFrom`, a pack's `commission`, the salesperson), under names that
+// change with each tool release, so every key naming commission or the
+// salesperson is dropped at any depth, whatever its value. A trade's own
+// can-claim answer is decided by the server and never read from the scope.
+export const TRADE_SCOPE_PRIVATE_KEY_RE = /commission|salesperson/i
+export function tradeScopePrivateKey(key: string): boolean {
+  return TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key) ||
+    TRADE_SCOPE_PRIVATE_KEY_RE.test(key)
+}
+// Ruling 17a, every tier: the office and a division manager read the quote on
+// the Trade App, but the job budget, commission and the salesperson never reach
+// Trade App job data for anyone. This strip runs over the whole trade_job_detail
+// answer whatever the quote fence decided; it drops those keys only, so the
+// quote figures a quote-visible tier may read are kept. A JSON string carrying
+// one is parsed and stripped too; one it cannot parse is dropped. Deeper than
+// the cap is dropped, never returned unread.
+export const TRADE_PRIVATE_CARRIER_MAX_DEPTH = 64
+export function tradePrivateCarrierKey(key: string): boolean {
+  return key === 'budget' || TRADE_SCOPE_PRIVATE_KEY_RE.test(key)
+}
+const TRADE_PRIVATE_CARRIER_TEXT_RE = /commission|salesperson|"budget"/i
+export function stripTradePrivateCarriers<T>(node: T): T {
+  const walk = (x: any, depth: number): any => {
+    if (x == null) return x
+    if (typeof x === 'string') {
+      if (!TRADE_PRIVATE_CARRIER_TEXT_RE.test(x)) return x
+      const t = x.trim()
+      if (!t.startsWith('{') && !t.startsWith('[')) return x
+      try {
+        return JSON.stringify(walk(JSON.parse(t), depth))
+      } catch {
+        return undefined
+      }
+    }
+    if (typeof x !== 'object') return x
+    if (depth > TRADE_PRIVATE_CARRIER_MAX_DEPTH) return undefined
+    if (Array.isArray(x)) return x.map((v) => walk(v, depth + 1)).filter((v) => v !== undefined)
+    const out: Record<string, any> = {}
+    for (const [k, v] of Object.entries(x)) {
+      if (tradePrivateCarrierKey(k)) continue
+      const w = walk(v, depth + 1)
+      if (w === undefined) continue
+      out[k] = w
+    }
+    return out
+  }
+  return walk(node, 0)
+}
 // Walked, never dropped as objects: the quote narrative + quote-number pack.
 // A bare numeric/money value on these keys is still stripped. Nested objects
 // keep ONLY the allowlist below — unknown keys are dropped, not denylisted.
@@ -46212,7 +46320,7 @@ function sanitizeTradeAllocatedJsonTree(node: any, depth = 0, parentKey?: string
   if (typeof node !== 'object') return tradeScopeRetainPrimitive(node, parentKey)
   const out: Record<string, any> = {}
   for (const [key, value] of Object.entries(node)) {
-    if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+    if (tradeScopePrivateKey(key)) continue
     if (typeof value === 'number' && Number.isFinite(value)) {
       if (!tradeScopeKeepNumericLeaf(key)) continue
       out[key] = value
@@ -46246,7 +46354,7 @@ function sanitizeTradeAllocatedMediaNotes(media: any[]): any[] {
     if (!row || typeof row !== 'object' || Array.isArray(row)) return row
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(row)) {
-      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (tradeScopePrivateKey(key)) continue
       if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
         if (typeof value === 'string') {
           const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
@@ -46435,7 +46543,7 @@ function walkTradeQuoteObjectAllowlist(node: any, depth: number, parentKey?: str
   const out: Record<string, any> = {}
   for (const [key, value] of Object.entries(node)) {
     if (!TRADE_SCOPE_QUOTE_OBJECT_ALLOWLIST.has(key)) continue
-    if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+    if (tradeScopePrivateKey(key)) continue
     // Nested quote/quotes are narrative keys, same as the outer walker:
     // a bare numeric / "$594" value is money, not a quote object.
     if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key) && tradeScopeBareMoneyValue(value)) {
@@ -46473,7 +46581,7 @@ export function redactTradeScopeQuote(scope: any): any {
     if (typeof node !== 'object') return tradeScopeRetainPrimitive(node, parentKey)
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(node)) {
-      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (tradeScopePrivateKey(key)) continue
       if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key)) {
         if (tradeScopeBareMoneyValue(value)) continue
         if (typeof value === 'string') {
@@ -46581,7 +46689,7 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(item)) {
       if (!TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key)) continue
-      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (tradeScopePrivateKey(key)) continue
       if (!isTradeWoScopeItemScalar(value)) continue
       if (key === 'is_variation') {
         if (typeof value === 'boolean') out[key] = value
@@ -46622,7 +46730,7 @@ export function redactTradeWorkOrdersForAllocated(orders: any[]): any[] {
         out.scope_items = redactTradeWorkOrderScopeItems(value)
         continue
       }
-      if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
+      if (tradeScopePrivateKey(key)) continue
       if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
         if (typeof value === 'string') {
           const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
@@ -47200,7 +47308,8 @@ async function tradeJobDetail(
     scope_json: jobRes.data?.scope_json,
   }])).get(jobId) || null
 
-  return {
+  // Ruling 17a: no budget, commission or salesperson key, for every tier.
+  return stripTradePrivateCarriers({
     job: tradeSafeJob,
     group_work_order_enabled: await groupFeatureOn(client),
     // Additive: the resolved tier and the quote fence, so the app can render the
@@ -47320,7 +47429,7 @@ async function tradeJobDetail(
       }),
       tradeSafeJob?.job_number || null,
     ),
-  }
+  })
 }
 
 // Exported so the trade-visibility regression suite can assert on the REAL
