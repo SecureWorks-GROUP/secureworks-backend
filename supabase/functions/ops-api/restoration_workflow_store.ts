@@ -491,36 +491,6 @@ function jobSummary(job: any, detail: any): Record<string, unknown> {
   };
 }
 
-/**
- * READ. The job facts a restoration report prints (restoration_report_store.ts):
- * the same job read, restoration check and builder naming the quote uses.
- * Refuses a job that is not a restoration card.
- */
-export async function loadRestorationReportJobFacts(
-  client: any,
-  selector: { job_id?: unknown; job_number?: unknown },
-  caller: RestorationCaller,
-): Promise<{
-  job_id: string;
-  job_number: string;
-  site_address: string;
-  builder_name: string | null;
-  builder_reference: string | null;
-  builder_purchase_order: string | null;
-  policyholder: string | null;
-}> {
-  const { job, detail } = await loadRestorationJob(client, selector, caller);
-  return {
-    job_id: String(job.id),
-    job_number: text(job.job_number),
-    site_address: siteAddress(job),
-    builder_name: builderName(job, detail),
-    builder_reference: builderReference(job, detail),
-    builder_purchase_order: builderPurchaseOrder(job),
-    policyholder: text(job.client_name) || null,
-  };
-}
-
 // ── Actions ──────────────────────────────────────────────────────────────────
 
 /** READ. The plan, where the job is at, and the hand-off to an invoice. */

@@ -1622,17 +1622,6 @@ actions `restoration_*`. What must not regress:
   (`restoration_work_order.ts`). SWRESTO- books to Xero option
   `SW - RESTORATION`, which `ensure_xero_tracking_option` adds.
 
-- **Its report, and one look for every PDF** (owner, 13 Nov 2026):
-  `restoration_render_report` (dry run by default; live files the job's
-  `makesafe_report` document through the one attach path, sends nothing)
-  renders `restoration_report_render.ts`. Every PDF this function draws
-  (restoration report and quote, make-safe report, roof report) takes its look
-  from `report_design.ts`; change the look there, never in one renderer, and
-  never let a look change touch a renderer's field set, hash input, limits or
-  file name. The wiki's Python make-safe renderer is not on it yet (pinned
-  pair, see "The Curated Renderer Pin"). Contract: `docs/restoration-board-v1.md`,
-  "Report"; tests: `restoration_report_render_test.ts`.
-
 Tests: `restoration_intake_test.ts`, `restoration_workflow_test.ts`,
 `restoration_workflow_store_test.ts`, the SWRESTO cases in
 `makesafe_intake_auto_allocate_test.ts`.

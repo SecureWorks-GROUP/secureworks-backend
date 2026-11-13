@@ -145,7 +145,7 @@ Deno.test("aspectFitBox: preserves image aspect inside a target rectangle", () =
   assertEquals(Math.round(fit.y), 45);
 });
 
-Deno.test("render PDF: eight curated photos are all embedded, numbered and captioned in a compact gallery", async () => {
+Deno.test("render PDF: eight curated photos use one large evidence page each", async () => {
   const onePixelPng =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
   const rendered = await renderMakesafeReportPdf({
@@ -158,21 +158,12 @@ Deno.test("render PDF: eight curated photos are all embedded, numbered and capti
     })),
   });
 
-  // The shared report design lays evidence photos out in a gallery (several
-  // large photos to a page) instead of one photo per page, so an eight photo
-  // report is a few pages, not nine. Every photo is still embedded, in order.
   const pages = countPdfPages(rendered.bytes);
-  assert(pages >= 2 && pages <= 4, `expected 2-4 pages, got ${pages}`);
+  assertEquals(pages, 9);
   const pdf = new TextDecoder("latin1").decode(rendered.bytes);
-  let last = -1;
   for (let index = 1; index <= 8; index++) {
-    const at = pdf.indexOf(`Deliberate evidence ${index}`);
-    assert(at > last, `caption ${index} missing or out of order`);
-    last = at;
+    assertStringIncludes(pdf, `Deliberate evidence ${index}`);
   }
-  assertStringIncludes(pdf, "8 photos");
-  // Eight evidence images plus the logo.
-  assertEquals((pdf.match(/\/Subtype \/Image/g) || []).length >= 9, true);
 });
 
 Deno.test("commercial guard is pinned to rendered fields and ignores legacy billing_note", () => {

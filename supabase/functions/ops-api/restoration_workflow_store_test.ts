@@ -636,7 +636,6 @@ Deno.test("restoration doors: staff or the ops key; the routine reads only; trad
     "restoration_save_quote",
     "restoration_mark_quote_sent",
     "restoration_record_quote_decision",
-    "restoration_render_report",
   ];
   for (const action of actions) {
     const url = new URL(`https://example.invalid/ops-api?action=${action}`);
@@ -659,11 +658,6 @@ Deno.test("restoration doors: staff or the ops key; the routine reads only; trad
   // A write sent as a GET, and a read sent as a POST, are both refused.
   assertEquals((await dispatchRestorationAction(client, "restoration_set_plan", "GET", new URLSearchParams(), {}, STAFF)).status, 405);
   assertEquals((await dispatchRestorationAction(client, "restoration_plan", "POST", new URLSearchParams(), {}, STAFF)).status, 405);
-  assertEquals((await dispatchRestorationAction(client, "restoration_render_report", "GET", new URLSearchParams(), {}, STAFF)).status, 405);
-  // The report action refuses a job that is not a restoration card.
-  const notRestoration = await dispatchRestorationAction(client, "restoration_render_report", "POST", new URLSearchParams(), { job_id: MAKESAFE_JOB, report: {} }, STAFF);
-  assertEquals(notRestoration.status, 409);
-  assertEquals((await notRestoration.json()).code, "not_a_restoration_job");
 
   // The module's own refusals come back with their code and status.
   const refused = await dispatchRestorationAction(client, "restoration_record_quote_decision", "POST", new URLSearchParams(), { job_id: RESTORATION_JOB, revision: 1, decision: "approved" }, STAFF);
