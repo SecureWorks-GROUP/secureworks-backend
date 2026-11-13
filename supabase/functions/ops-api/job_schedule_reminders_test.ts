@@ -209,7 +209,7 @@ function work(date: string, extra: Record<string, unknown> = {}) {
   };
 }
 
-Deno.test("the first work day: crew install bookings only, a completed day still counts", () => {
+Deno.test("the first work day: the earliest crew install booking from today on", () => {
   assertEquals(
     firstWorkDay([
       work("2026-11-20", { is_ghost: true, role: "observer" }),
@@ -218,18 +218,22 @@ Deno.test("the first work day: crew install bookings only, a completed day still
       work("2026-11-19", { role: "observer" }),
       work("2026-11-27"),
       work("2026-11-25", { status: null }),
-    ]),
+    ], TODAY),
     "2026-11-25",
   );
+  // A booking before today on a job still in Scheduled is a stale one, never the day.
   assertEquals(
     firstWorkDay([
       work("2026-11-02", { status: "complete" }),
+      work("2026-11-12"),
       work("2026-11-27"),
-    ]),
-    "2026-11-02",
+    ], TODAY),
+    "2026-11-27",
   );
+  assertEquals(firstWorkDay([work(TODAY), work("2026-11-27")], TODAY), TODAY);
+  assertEquals(firstWorkDay([work("2026-11-12")], TODAY), null);
   assertEquals(
-    firstWorkDay([work("2026-11-02", { status: "cancelled" })]),
+    firstWorkDay([work("2026-11-27", { status: "cancelled" })], TODAY),
     null,
   );
 });
@@ -505,30 +509,35 @@ Deno.test("only jobs in Scheduled, fencing, patio and repairs; never make-safe o
   );
 });
 
-Deno.test("a job already under way, on today, or not due today is not texted", async () => {
+Deno.test("a stale past booking never hides the real day; on today, not due or none is not texted", async () => {
   const h = harness([
-    cand("started", [
+    cand("stale-complete", [
       work("2026-11-10", { status: "complete" }),
       work("2026-11-27"),
     ]),
-    cand("past-booking", [work("2026-11-12"), work("2026-11-27")]),
-    cand("today", [work(TODAY)]),
+    cand("stale-booking", [work("2026-11-12"), work("2026-11-20")]),
+    cand("today", [work(TODAY), work("2026-11-14")]),
     cand("not-due", [work("2026-11-25")]),
+    cand("only-past", [work("2026-11-12")]),
     cand("none", [work("2026-11-27", { status: "cancelled" })]),
   ]);
   const r: any = await jobScheduleReminderSweep(h.deps, LIVE);
   assertEquals(
-    r.results.map((x: any) => x.action),
+    r.results.map((x: any) => [x.action, x.detail?.first_work_day ?? null]),
     [
-      "already_started",
-      "already_started",
-      "already_started",
-      "not_due",
-      "no_work_booking",
+      ["reminded", "2026-11-27"],
+      ["reminded", "2026-11-20"],
+      ["not_due", TODAY],
+      ["not_due", "2026-11-25"],
+      ["no_work_booking", null],
+      ["no_work_booking", null],
     ],
   );
-  assertEquals(h.sent, []);
-  assertEquals(h.calls.some((c) => c.startsWith("claim")), false);
+  assertEquals(h.sent.map((s) => s.jobId), ["stale-complete", "stale-booking"]);
+  assertEquals(
+    h.sent[1].message.includes("Friday, 20 November"),
+    true,
+  );
 });
 
 Deno.test("held the day a booking was made or moved, or a reschedule text went", async () => {
@@ -908,6 +917,92 @@ Deno.test("the prior-text read: the contact's texts by their own time, the job's
   assertEquals(
     await readScheduleReminderPriorTexts(broken, "c-1", "j1", "x"),
     null,
+  );
+  const remindersBroken = fakeClient({
+    job_schedule_reminders: { data: null, error: { message: "timeout" } },
+  });
+  assertEquals(
+    await readScheduleReminderPriorTexts(remindersBroken, "c-1", "j1", "x"),
+    null,
+  );
+});
+
+Deno.test("one contact on two jobs: the sweep's own text for one job never holds the other's", async () => {
+  // A shared in-memory store: ghl-proxy writes the evidence row as it sends, and the
+  // sweep records the GHL message id on its claim row when it finishes.
+  const smsOut: any[] = [];
+  const reminderRows: any[] = [];
+  const client = fakeClient({
+    business_events: () => ({ data: [...smsOut], error: null }),
+    job_events: { data: [], error: null },
+    job_schedule_reminders: (q: any) => {
+      const arg = (op: string, col: string) =>
+        q.filters.find((f: any) => f[0] === op && f[1] === col)?.[2];
+      return {
+        data: reminderRows.filter((r) =>
+          r.ghl_contact_id === arg("eq", "ghl_contact_id") &&
+          r.job_id !== arg("neq", "job_id") && r.ghl_message_id
+        ),
+        error: null,
+      };
+    },
+  });
+  const run = async (handSent: any[] = []) => {
+    smsOut.length = 0;
+    reminderRows.length = 0;
+    smsOut.push(...handSent);
+    const h = harness([
+      // x: weekly today (7 days out); y: day before (tomorrow). Same customer.
+      cand("x", [work("2026-11-20")], { ghl_contact_id: "c-shared" }),
+      cand("y", [work("2026-11-14")], { ghl_contact_id: "c-shared" }),
+    ], { send: (args) => ({ ok: true, message_id: `m-${args.jobId}` }) });
+    h.deps.readPriorTexts = (contactId, jobId, since) =>
+      readScheduleReminderPriorTexts(client, contactId, jobId, since);
+    const send = h.deps.sendSms;
+    h.deps.sendSms = async (args) => {
+      const res = await send(args);
+      if (res.ok) {
+        smsOut.push({
+          event_type: "client.sms_out",
+          event_at: NOON.toISOString(),
+          occurred_at: NOON.toISOString(),
+          provider_message_id: `ghl:${res.message_id}`,
+          body: args.message,
+        });
+      }
+      return res;
+    };
+    const finish = h.deps.finish;
+    h.deps.finish = async (row, outcome) => {
+      reminderRows.push({
+        ...row,
+        ghl_message_id: outcome.ghl_message_id ?? null,
+      });
+      await finish(row, outcome);
+    };
+    const r: any = await jobScheduleReminderSweep(h.deps, LIVE);
+    return { h, r };
+  };
+
+  const both = await run();
+  assertEquals(both.h.sent.map((s) => s.jobId), ["x", "y"]);
+  assertEquals(
+    both.r.results.map((x: any) => x.recipients[0].result),
+    ["sent", "sent"],
+  );
+
+  // A hand-sent text that is not one of the sweep's reminders still counts.
+  const hand = await run([{
+    event_type: "client.sms_out",
+    event_at: "2026-11-13T01:00:00Z",
+    occurred_at: "2026-11-13T01:00:00Z",
+    provider_message_id: "ghl:hand-1",
+    body: "See you tomorrow for the install!",
+  }]);
+  assertEquals(hand.h.sent.map((s) => s.jobId), []);
+  assertEquals(
+    hand.r.results.map((x: any) => x.recipients[0].result),
+    ["skipped_similar_prior", "skipped_similar_prior"],
   );
 });
 

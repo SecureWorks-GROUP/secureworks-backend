@@ -76,7 +76,7 @@ CREATE INDEX IF NOT EXISTS job_schedule_reminder_runs_run_on_idx
   ON public.job_schedule_reminder_runs (run_on DESC, ran_at DESC);
 
 COMMENT ON TABLE public.job_schedule_reminder_runs IS
-  'Scheduled-job reminder texts (20261113120000): one row per live run of ops-api job_schedule_reminder_sweep. run_on is the Perth day; outcome ok | partial (a text unconfirmed, a claim failed or a job failed) | failed (candidates unreadable); detail.outcomes counts every recipient outcome, detail.reminded lists each job texted or held with its recipients, detail.not_due lists every other candidate and why (not_due, already_started, no_work_booking, not_scheduled, make_safe_board, not_reminded_type). Written only by ops-api job_schedule_reminders.ts.';
+  'Scheduled-job reminder texts (20261113120000): one row per live run of ops-api job_schedule_reminder_sweep. run_on is the Perth day; outcome ok | partial (a text unconfirmed, a claim failed or a job failed) | failed (candidates unreadable); detail.outcomes counts every recipient outcome, detail.reminded lists each job texted or held with its recipients, detail.not_due lists every other candidate and why (not_due, no_work_booking, not_scheduled, make_safe_board, not_reminded_type). Written only by ops-api job_schedule_reminders.ts.';
 
 ALTER TABLE public.job_schedule_reminder_runs ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.job_schedule_reminder_runs FROM PUBLIC, anon, authenticated;

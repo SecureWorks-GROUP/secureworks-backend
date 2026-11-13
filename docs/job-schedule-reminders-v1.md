@@ -17,13 +17,13 @@ Scheduled:
 - fencing and patio at `jobs.status = 'scheduled'`; a repair (the Repairs board
   family) at board stage `scheduled`. Make-safe and restoration cards are never
   texted. The lane rule is `job_auto_start.ts` `autoStartLane`.
-- The first work day is the job's earliest crew work booking
+- The first work day is the job's earliest crew work booking on or after today
   (`job_auto_start.ts` `isWorkBooking`: install bookings, no ghost watcher rows,
-  no cancelled rows).
+  no cancelled rows). A job still in Scheduled has not started, so a booking
+  before today is a stale one left on the calendar and is ignored.
 - `d` = calendar days from today to that day. `d = 1` sends the day-before text.
   `d = 7, 14, 21 ...` sends the weekly text. Any other day sends nothing, and a
-  job whose first work day is today or past gets nothing (no reminders before a
-  return visit).
+  job with no work booking from today on gets nothing (`no_work_booking`).
 
 A job starting 27 Nov is texted on 13, 20 and 26 Nov; one starting 23 Nov on
 16 and 22 Nov; one starting 18 Nov on 17 Nov.
@@ -42,7 +42,9 @@ Each held text is recorded with its reason (`skipped_<reason>`):
   text looks back 6 days and the day-before text looks at today. A text counts
   as similar when it names the work day's date or weekday, or uses booking or
   reminder words: on track, reminder, remind, booked, booking, coming in,
-  tomorrow, scheduled.
+  tomorrow, scheduled. A reminder this sweep sent the same contact for another
+  job (its GHL message id on that job's `job_schedule_reminders` row) is not a
+  repeat and does not count.
 - `contact_shared` (repairs only, flagged on the job event): the job's contact
   sits on other clients' jobs (a builder's or agent's number), by the job
   story's `contact_shared` test (`context_job_story_meta`).

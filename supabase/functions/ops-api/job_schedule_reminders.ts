@@ -9,12 +9,13 @@
 //     board family) at board stage 'scheduled'. Make-safe and restoration cards are
 //     never texted. Which lane a job is in is job_auto_start.ts autoStartLane, the same
 //     rule the 6am auto start moves jobs by.
-//   - The job's first work day is its earliest crew work booking (job_auto_start.ts
-//     isWorkBooking: an install booking, never a ghost watcher row, never cancelled; a
-//     completed booking still counts as a day already worked). Only a first work day
-//     after today is reminded: a job already under way gets no reminders before a return
-//     visit (captain answer 3). The day is re-read every run, so a moved job follows its
-//     new day and nothing is stored ahead of time.
+//   - The job's first work day is its earliest crew work booking on or after today
+//     (job_auto_start.ts isWorkBooking: an install booking, never a ghost watcher row,
+//     never cancelled). A job still in Scheduled has not started (the 6am auto start
+//     moves it to In Progress on its first work day), so a booking before today is a
+//     stale one left on the calendar and never the day the customer is told (captain
+//     answer 3). The day is re-read every run, so a moved job follows its new day and
+//     nothing is stored ahead of time.
 //   - reminderKindForToday: d = calendar days from today to the first work day. d = 1 is
 //     the day-before text; d = 7, 14, 21 ... is the weekly text; any other day sends
 //     nothing. No catch-up: a missed noon is not sent later.
@@ -31,6 +32,8 @@
 //     and the job's sms_sent job events since the previous reminder slot (weekly: the
 //     last 6 days; day before: today). One that mentions the work day, its weekday or
 //     reminder wording (similarReminderReason) holds this text as skipped_similar_prior.
+//     A reminder this sweep sent the contact for another job (its GHL message id on a
+//     job_schedule_reminders row of that job) is not a repeat and is left out.
 //   - Once: one job_schedule_reminders row per job, recipient and Perth day, claimed by
 //     insert before the send (conflict = someone already has it). Outcomes: sent, refused
 //     (a 4xx: nothing went), unconfirmed (may have reached GHL, never retried),
@@ -151,12 +154,13 @@ export function reminderKindForToday(
   return null;
 }
 
-/** The earliest day of the job's crew work bookings (completed ones included), or null. */
-export function firstWorkDay(bookings: any[]): string | null {
+/** The earliest day on or after `today` of the job's crew work bookings, or null. */
+export function firstWorkDay(bookings: any[], today: string): string | null {
   let first: string | null = null;
   for (const row of bookings) {
     if (!isWorkBooking(row)) continue;
     const day = String(row.scheduled_date).slice(0, 10);
+    if (day < today) continue;
     if (!first || day < first) first = day;
   }
   return first;
@@ -468,11 +472,8 @@ async function remindOne(
   if (!isRepair && type !== "fencing" && type !== "patio") {
     return { action: "not_reminded_type", detail: type || null };
   }
-  const workDay = firstWorkDay(c.bookings);
+  const workDay = firstWorkDay(c.bookings, today);
   if (!workDay) return { action: "no_work_booking" };
-  if (workDay <= today) {
-    return { action: "already_started", detail: { first_work_day: workDay } };
-  }
   const kind = reminderKindForToday(today, workDay);
   if (!kind) return { action: "not_due", detail: { first_work_day: workDay } };
 
@@ -746,7 +747,8 @@ export async function readScheduleReminderContactShared(
 /**
  * Outbound texts to the contact (business_events client.sms_out and legacy sms_sent, any
  * sender) and the job's sms_sent job events (to that contact, or naming none) since
- * `since`. Null when either read fails.
+ * `since`, less the reminders this sweep sent the contact for another job (matched by
+ * GHL message id). Null when any read fails.
  */
 export async function readScheduleReminderPriorTexts(
   client: any,
@@ -754,10 +756,10 @@ export async function readScheduleReminderPriorTexts(
   jobId: string,
   since: string,
 ): Promise<PriorText[] | null> {
-  const [events, jobTexts] = await Promise.all([
+  const [events, jobTexts, otherJobReminders] = await Promise.all([
     client.from("business_events")
       .select(
-        "event_type, event_at, occurred_at, body_preview, body:payload->>body, msg:payload->>message",
+        "event_type, event_at, occurred_at, provider_message_id, body_preview, body:payload->>body, msg:payload->>message",
       )
       .in("event_type", ["client.sms_out", "sms_sent"])
       .or(`contact_id.eq.${contactId},entity_id.eq.${contactId}`)
@@ -771,10 +773,23 @@ export async function readScheduleReminderPriorTexts(
       .gte("created_at", since)
       .order("created_at", { ascending: false })
       .limit(PRIOR_TEXT_LIMIT),
+    client.from("job_schedule_reminders")
+      .select("ghl_message_id")
+      .eq("ghl_contact_id", contactId)
+      .neq("job_id", jobId)
+      .not("ghl_message_id", "is", null),
   ]);
-  if (events.error || jobTexts.error) return null;
+  if (events.error || jobTexts.error || otherJobReminders.error) return null;
+  const otherJobIds = new Set(
+    (otherJobReminders.data ?? []).map((r: any) => text(r.ghl_message_id)),
+  );
+  const isOtherJobReminder = (id: unknown) =>
+    text(id) !== "" && otherJobIds.has(text(id));
   const out: PriorText[] = [];
   for (const e of events.data ?? []) {
+    if (isOtherJobReminder(text(e.provider_message_id).replace(/^ghl:/, ""))) {
+      continue;
+    }
     out.push({
       // The message's own time when known (a backfilled row lands later than it was sent).
       at: String(e.event_at || e.occurred_at),
@@ -785,6 +800,7 @@ export async function readScheduleReminderPriorTexts(
   for (const e of jobTexts.data ?? []) {
     const to = text(e.detail_json?.contact_id);
     if (to && to !== contactId) continue;
+    if (isOtherJobReminder(e.detail_json?.message_id)) continue;
     out.push({
       at: String(e.created_at),
       message: text(e.detail_json?.message),
