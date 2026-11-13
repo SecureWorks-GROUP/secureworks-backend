@@ -1108,6 +1108,13 @@ ops-api|supabase/migrations/20261105010000_job_auto_start.sql|table|job_auto_sta
 ops-api|supabase/migrations/20261105010000_job_auto_start.sql|column|job_auto_start_runs.moved_job_numbers
 ops-api|supabase/migrations/20261105010000_job_auto_start.sql|policy|job_auto_start_runs.job_auto_start_runs_service_role_all
 ops-api|supabase/migrations/20261105010000_job_auto_start.sql|function|trigger_job_auto_start
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|column|job_closeout_settings.schedule_reminder_mode
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|table|job_schedule_reminders
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|constraint|job_schedule_reminders_once_a_day
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|policy|job_schedule_reminders.job_schedule_reminders_service_role_all
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|table|job_schedule_reminder_runs
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|policy|job_schedule_reminder_runs.job_schedule_reminder_runs_service_role_all
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|function|trigger_job_schedule_reminders
 # Dispatch v2 Tweak 1: the order-confirmed step remembers each crew pickup line
 # it wrote (dispatch_v2_order_confirmed_write.ts), so ops-api must not deploy
 # ahead of the table.
