@@ -13,13 +13,17 @@ function fakeClient(
 ) {
   return {
     from(table: string) {
+      // A result keyed "table:columns" answers that exact select; "table" any other.
+      let cols = ''
+      const pick = (fallback: Result) => tables[`${table}:${cols}`] ?? tables[table] ?? fallback
       const q: any = {}
-      for (const m of ['select', 'eq', 'in', 'not', 'is', 'order', 'limit']) q[m] = () => q
-      q.maybeSingle = () => Promise.resolve(tables[table] ?? { data: null, error: null })
+      for (const m of ['eq', 'in', 'not', 'is', 'order', 'limit']) q[m] = () => q
+      q.select = (c: string) => { cols = c; return q }
+      q.maybeSingle = () => Promise.resolve(pick({ data: null, error: null }))
       q.single = q.maybeSingle
       q.insert = (row: unknown) => { log.inserts.push([table, row]); return Promise.resolve({ error: null }) }
       q.then = (ok: (r: Result) => unknown, bad: (e: unknown) => unknown) =>
-        Promise.resolve(tables[table] ?? { data: [], error: null }).then(ok, bad)
+        Promise.resolve(pick({ data: [], error: null })).then(ok, bad)
       return q
     },
     rpc(fn: string, args: any) {
@@ -32,25 +36,41 @@ function fakeClient(
 
 const GUTTER = { id: 'gutter', name: 'Extra gutter', goes: 'crew', labour_line: { line_key: 'g', description: 'Fit gutter', total: 250 } }
 const RECORD = {
+  job_document_id: 'doc-1',
   offered: [{ id: 'lights', name: 'Two downlights', goes: 'supplier' }, { id: 'gutter', name: 'Extra gutter', goes: 'crew' }],
   taken_option_ids: ['gutter'],
   taken_options: [GUTTER],
 }
 
+const CURRENT_DOC = { 'job_documents:id, superseded_at': { data: [{ id: 'doc-1', superseded_at: null }], error: null } }
+
 Deno.test('R14 reader: taken, none, unreadable, and a table not yet created', async () => {
   const log = { inserts: [], rpc: 0 }
-  assertEquals(await readTakenQuoteOptions(fakeClient({ quote_option_acceptances: { data: [RECORD], error: null } }, log), 'j'),
-    { state: 'taken', options: [{ id: 'gutter', name: 'Extra gutter', goes: 'crew', sealed: GUTTER }] })
+  assertEquals(await readTakenQuoteOptions(fakeClient({ ...CURRENT_DOC, quote_option_acceptances: { data: [RECORD], error: null } }, log), 'j'),
+    { state: 'taken', options: [{ id: 'gutter', name: 'Extra gutter', goes: 'crew', sealed: GUTTER }], job_document_id: 'doc-1' })
   // A taken id with no sealed entry is unreadable, never "none".
-  assertEquals(await readTakenQuoteOptions(fakeClient({ quote_option_acceptances: { data: [{ ...RECORD, taken_options: [] }], error: null } }, log), 'j'),
+  assertEquals(await readTakenQuoteOptions(fakeClient({ ...CURRENT_DOC, quote_option_acceptances: { data: [{ ...RECORD, taken_options: [] }], error: null } }, log), 'j'),
     { state: 'unreadable' })
-  assertEquals(await readTakenQuoteOptions(fakeClient({ quote_option_acceptances: { data: [{ ...RECORD, taken_option_ids: [], taken_options: [] }], error: null } }, log), 'j'),
+  assertEquals(await readTakenQuoteOptions(fakeClient({ ...CURRENT_DOC, quote_option_acceptances: { data: [{ ...RECORD, taken_option_ids: [], taken_options: [] }], error: null } }, log), 'j'),
     { state: 'none' })
   assertEquals(await readTakenQuoteOptions(fakeClient({ quote_option_acceptances: { data: [], error: null } }, log), 'j'), { state: 'none' })
   assertEquals(await readTakenQuoteOptions(fakeClient({ quote_option_acceptances: { data: null, error: { code: '57014' } } }, log), 'j'),
     { state: 'unreadable' })
   assertEquals(await readTakenQuoteOptions(fakeClient({ quote_option_acceptances: { data: null, error: { code: 'PGRST205' } } }, log), 'j'),
     { state: 'none' })
+})
+
+Deno.test('R14 reader: only the current accepted quote\'s record applies; a re-quote never merges', async () => {
+  const log = { inserts: [], rpc: 0 }
+  const OLD = { ...RECORD, job_document_id: 'doc-old', taken_option_ids: ['gutter'], taken_options: [GUTTER] }
+  const NEW = { ...RECORD, job_document_id: 'doc-1', taken_option_ids: [], taken_options: [] }
+  const docs = (old: string | null) => ({ 'job_documents:id, superseded_at': { data: [{ id: 'doc-old', superseded_at: old }, { id: 'doc-1', superseded_at: null }], error: null } })
+  // Re-quoted and accepted again with nothing taken: the old option is gone.
+  assertEquals(await readTakenQuoteOptions(fakeClient({ ...docs('2026-11-01T00:00:00Z'), quote_option_acceptances: { data: [OLD, NEW], error: null } }, log), 'j'), { state: 'none' })
+  // Two current records (never written by send-quote): unreadable, never a merge.
+  assertEquals(await readTakenQuoteOptions(fakeClient({ ...docs(null), quote_option_acceptances: { data: [OLD, NEW], error: null } }, log), 'j'), { state: 'unreadable' })
+  // The documents cannot be read: unreadable.
+  assertEquals(await readTakenQuoteOptions(fakeClient({ 'job_documents:id, superseded_at': { data: null, error: { code: '57014' } }, quote_option_acceptances: { data: [OLD], error: null } }, log), 'j'), { state: 'unreadable' })
 })
 
 const DRAFT = { scope_job_draft_sets: { data: { scope_revision_id: 'rev-1', released_at: null }, error: null } }
@@ -66,7 +86,7 @@ const RELEASE_TABLES = {
 Deno.test('R14 release: a taken option is applied to the drafts first, then they are released', async () => {
   const log = { inserts: [] as Array<[string, any]>, rpc: 0, calls: [] as Array<[string, any]> }
   const out = await releaseScopeJobDraftsOnAcceptance(
-    fakeClient({ ...RELEASE_TABLES, quote_option_acceptances: { data: [RECORD], error: null } }, log), 'j')
+    fakeClient({ ...RELEASE_TABLES, ...CURRENT_DOC, quote_option_acceptances: { data: [RECORD], error: null } }, log), 'j')
   assertEquals(out, { state: 'released' })
   assertEquals(log.calls.map(([fn]) => fn), ['apply_quote_options_to_scope_drafts', 'release_scope_job_drafts'])
   assertEquals(log.calls[0][1], { p_job_id: 'j', p_scope_revision_id: 'rev-1' })
@@ -75,7 +95,7 @@ Deno.test('R14 release: a taken option is applied to the drafts first, then they
 Deno.test('R14 release: an overlay the database refuses releases nothing and names its code', async () => {
   const log = { inserts: [] as Array<[string, any]>, rpc: 0, calls: [] as Array<[string, any]> }
   const out = await releaseScopeJobDraftsOnAcceptance(
-    fakeClient({ ...RELEASE_TABLES, quote_option_acceptances: { data: [RECORD], error: null } }, log,
+    fakeClient({ ...RELEASE_TABLES, ...CURRENT_DOC, quote_option_acceptances: { data: [RECORD], error: null } }, log,
       { apply_quote_options_to_scope_drafts: { data: null, error: { message: 'scope_options_not_sealed' } } }), 'j')
   assertEquals(out, { state: 'release_unavailable' })
   assertEquals(log.calls.map(([fn]) => fn), ['apply_quote_options_to_scope_drafts'], 'nothing released')
@@ -104,7 +124,21 @@ Deno.test('R14 release: no option taken goes on to the release exactly as before
       jobs: { data: { expected_costs: null }, error: null },
     }, log), 'j')
   assertEquals(out, { state: 'released' })
-  assertEquals(log.rpc, 1)
+  // The database is still asked: it holds drafts whose record a re-quote superseded.
+  assertEquals(log.rpc, 2)
+})
+
+Deno.test('R14 release: before the migration a job with no options releases as before; a taken one holds', async () => {
+  const missing = { apply_quote_options_to_scope_drafts: { data: null, error: { code: 'PGRST202', message: 'no function' } } }
+  const none = { inserts: [] as Array<[string, any]>, rpc: 0, calls: [] as Array<[string, any]> }
+  assertEquals(await releaseScopeJobDraftsOnAcceptance(
+    fakeClient({ ...RELEASE_TABLES, quote_option_acceptances: { data: [], error: null } }, none, missing), 'j'), { state: 'released' })
+  assertEquals(none.calls.map(([fn]) => fn), ['apply_quote_options_to_scope_drafts', 'release_scope_job_drafts'])
+  const taken = { inserts: [] as Array<[string, any]>, rpc: 0, calls: [] as Array<[string, any]> }
+  assertEquals(await releaseScopeJobDraftsOnAcceptance(
+    fakeClient({ ...RELEASE_TABLES, ...CURRENT_DOC, quote_option_acceptances: { data: [RECORD], error: null } }, taken, missing), 'j'),
+    { state: 'release_unavailable' })
+  assertEquals(taken.calls.map(([fn]) => fn), ['apply_quote_options_to_scope_drafts'], 'nothing released')
 })
 
 import { readJobQuoteOptionRecords } from './taken_options.ts'

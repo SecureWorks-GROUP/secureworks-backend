@@ -103,6 +103,8 @@ function readOption(raw: unknown): QuoteOption | string {
   }
   const lineKey = goes === 'supplier' ? 'order_line' : goes === 'crew' ? 'labour_line' : 'office_line'
   if (!isRec(raw[lineKey])) return 'option_destination_line_missing'
+  const lineProblem = destinationLineProblem(goes, raw[lineKey] as Rec)
+  if (lineProblem) return lineProblem
   const out: QuoteOption = {
     id,
     name,
@@ -126,6 +128,38 @@ function readOption(raw: unknown): QuoteOption | string {
   return out
 }
 
+const positive = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v > 0
+const moneyOrNull = (v: unknown) => v === null || v === undefined || (cents(v) != null && (cents(v) as number) >= 0)
+
+/**
+ * A destination line its consumer can use, or the reason it cannot. The line
+ * is checked here, before the customer can tick it, so a taken option is never
+ * on an order, work order or office list as an empty line. No cost is required
+ * (a blank cost stays unknown), and none is invented.
+ *   supplier: id, description, a positive quantity and a unit; never the
+ *             office's own fixing (the Dispatch fill skips those).
+ *   crew:     line_key, description, a positive quantity and a unit; total in
+ *             whole cents or blank.
+ *   office:   description, a positive quantity and a unit; cost in whole cents or blank.
+ */
+export function destinationLineProblem(goes: 'supplier' | 'crew' | 'office', line: Rec): string | null {
+  if (!nonEmptyString(line.description)) return `option_${goes}_line_description_missing`
+  if (!positive(line.quantity)) return `option_${goes}_line_quantity_unreadable`
+  if (!nonEmptyString(line.unit)) return `option_${goes}_line_unit_missing`
+  if (goes === 'supplier') {
+    if (!nonEmptyString(line.id)) return 'option_supplier_line_id_missing'
+    const supplier = line.supplier ?? line.supplierId ?? line.supplier_id
+    const sid = typeof supplier === 'string' ? supplier : isRec(supplier) ? supplier.id : null
+    if (typeof sid === 'string' && sid.trim().toLowerCase() === 'office') return 'option_supplier_line_is_office'
+  } else if (goes === 'crew') {
+    if (!nonEmptyString(line.line_key)) return 'option_crew_line_key_missing'
+    if (!moneyOrNull(line.total)) return 'option_crew_line_total_unreadable'
+  } else if (!moneyOrNull(line.cost_ex_gst)) {
+    return 'option_office_line_cost_unreadable'
+  }
+  return null
+}
+
 /** Same JSON meaning (object key order ignored). */
 function sameMeaning(a: unknown, b: unknown): boolean {
   const canon = (v: unknown): unknown =>
@@ -138,6 +172,16 @@ function sameMeaning(a: unknown, b: unknown): boolean {
 }
 
 type Shape = { ids: string[]; amounts: number[] }
+
+const SCHEDULE_MONEY_KEYS = new Set(['amount_inc_gst'])
+const STAGES_MONEY_KEYS = new Set(['amount_inc_gst', 'total_inc_gst'])
+
+/** A copy without its money keys, at every depth: the terms that must not move. */
+function withoutMoney(v: unknown, keys: Set<string>): unknown {
+  if (Array.isArray(v)) return v.map((x) => withoutMoney(x, keys))
+  if (isRec(v)) return Object.fromEntries(Object.entries(v).filter(([k]) => !keys.has(k)).map(([k, x]) => [k, withoutMoney(x, keys)]))
+  return v
+}
 
 /** Ids and amounts (whole cents, never negative) of a list of payment-like entries. */
 function readSteps(list: unknown, amountKey: string, idOf: (r: Rec) => unknown): Shape | string {
@@ -340,10 +384,16 @@ export function readQuoteOptions(pricing: unknown): QuoteOptionsRead {
     if ((raw.payment_schedule != null) !== hasSchedule) {
       return invalid(hasSchedule ? 'combination_schedule_missing' : 'combination_schedule_not_on_base')
     }
+    let printed: Shape | null = null
     if (baseSchedule) {
       const s = checkSchedule(raw.payment_schedule, baseSchedule, inc)
       if (typeof s === 'string') return invalid(s)
       if (s.amounts[0] !== dep) return invalid('combination_deposit_not_first_payment')
+      // Labels, printed terms: everything but the amounts is the base's.
+      if (!sameMeaning(withoutMoney(raw.payment_schedule, SCHEDULE_MONEY_KEYS), withoutMoney(pricing.payment_schedule, SCHEDULE_MONEY_KEYS))) {
+        return invalid('combination_schedule_terms_not_base')
+      }
+      printed = s
       if (isBase && !sameMeaning(raw.payment_schedule, pricing.payment_schedule)) {
         return invalid('base_combination_schedule_not_base')
       }
@@ -357,6 +407,16 @@ export function readQuoteOptions(pricing: unknown): QuoteOptionsRead {
       const s = checkStages(raw.local_invoice_stages, baseStages, inc)
       if (typeof s === 'string') return invalid(s)
       if (s.amounts[0] !== dep) return invalid('combination_deposit_not_first_stage')
+      // Basis, trigger, due rule, labels, terms, payers: everything but the amounts is the base's.
+      if (!sameMeaning(withoutMoney(raw.local_invoice_stages, STAGES_MONEY_KEYS), withoutMoney(pricing.local_invoice_stages, STAGES_MONEY_KEYS))) {
+        return invalid('combination_stages_terms_not_base')
+      }
+      // The printed payments and the invoice stages are one plan: the same
+      // payments, the same amount each, or the customer is billed other than
+      // what they were shown.
+      if (printed && (!sameIds(printed.ids, s.ids) || printed.amounts.some((a, i) => a !== s.amounts[i]))) {
+        return invalid('combination_schedule_and_stages_disagree')
+      }
       if (isBase && !sameMeaning(raw.local_invoice_stages, pricing.local_invoice_stages)) {
         return invalid('base_combination_stages_not_base')
       }

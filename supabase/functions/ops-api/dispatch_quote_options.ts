@@ -10,6 +10,8 @@ import { scopeEngineSealedLines, type ScopeEngineSealedLine } from "./scope_engi
 
 export type TakenOptionOrderItems =
   | { state: "unreadable" }
+  /** A taken supplier option whose sealed line gives no order line: the fill is held, never short. */
+  | { state: "unusable"; option_ids: string[] }
   | { state: "read"; items: ScopeEngineSealedLine[]; notes: string[] };
 
 export async function takenQuoteOptionOrderItems(client: any, jobId: string): Promise<TakenOptionOrderItems> {
@@ -19,20 +21,27 @@ export async function takenQuoteOptionOrderItems(client: any, jobId: string): Pr
   return takenOptionOrderItems(taken.options);
 }
 
-/** Pure: the order items of taken supplier options, and a note naming them. */
+/**
+ * Pure: the order items of taken supplier options, and a note naming them.
+ * Each taken supplier option must give exactly one order line by the sealed
+ * line rule; one that gives none (missing, empty or an office fixing) holds
+ * the fill as "unusable" rather than be reported on the order while dropped.
+ */
 export function takenOptionOrderItems(
   options: Array<{ id: string; name: string; goes: string | null; sealed: Record<string, unknown> }>,
-): { state: "read"; items: ScopeEngineSealedLine[]; notes: string[] } {
+): Extract<TakenOptionOrderItems, { state: "read" | "unusable" }> {
   const supplier = options.filter((o) => o.goes === "supplier");
-  const withLine = takenLines(supplier, "supplier");
-  const items = scopeEngineSealedLines(withLine.map((o) => o.line));
-  const notes: string[] = [];
-  if (withLine.length) {
-    notes.push(`Taken quote option${withLine.length === 1 ? "" : "s"} on this order: ${withLine.map((o) => o.name).join(", ")}.`);
+  const items: ScopeEngineSealedLine[] = [];
+  const unusable: string[] = [];
+  for (const o of supplier) {
+    const line = takenLines([o], "supplier")[0]?.line;
+    const parsed = line ? scopeEngineSealedLines([line]) : [];
+    if (parsed.length !== 1) unusable.push(o.id);
+    else items.push(parsed[0]);
   }
-  const unread = supplier.filter((o) => !withLine.some((w) => w.id === o.id));
-  if (unread.length) {
-    notes.push(`The quote option${unread.length === 1 ? "" : "s"} ${unread.map((o) => o.name).join(", ")} ${unread.length === 1 ? "has" : "have"} no order line in the sealed quote. Check the quote.`);
-  }
+  if (unusable.length) return { state: "unusable", option_ids: unusable };
+  const notes = supplier.length
+    ? [`Taken quote option${supplier.length === 1 ? "" : "s"} on this order: ${supplier.map((o) => o.name).join(", ")}.`]
+    : [];
   return { state: "read", items, notes };
 }

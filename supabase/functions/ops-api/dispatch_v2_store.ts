@@ -1597,6 +1597,9 @@ export async function suggestDispatchV2Draft(
   if (taken.state === "unreadable") {
     refuse(409, "quote_options_unreadable", "The quote options the customer took could not be read, so the list was not filled. Try again.");
   }
+  if (taken.state === "unusable") {
+    refuse(409, "quote_option_line_unusable", "A quote option the customer took has no usable order line in the sealed quote, so the list was not filled. Check the quote.");
+  }
   for (const item of taken.items) {
     if (!dispatchV2SuggestionAllowed(item.description)) continue;
     const [line] = dispatchSuggestedLines([item]);

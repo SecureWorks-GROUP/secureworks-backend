@@ -29,11 +29,18 @@ Deno.test("R14 dispatch: a fence option with no supplier is held on the draft li
   assertEquals(out.items.map((i) => [i.description, i.supplier_id]), [["Gate kit", null]]);
 });
 
-Deno.test("R14 dispatch: nothing taken adds nothing; a supplier option with no order line is named", () => {
+Deno.test("R14 dispatch: nothing taken adds nothing; a taken supplier line that gives no order line holds the fill", () => {
   assertEquals(takenOptionOrderItems([]), { state: "read", items: [], notes: [] });
-  const out = takenOptionOrderItems([{ id: "x", name: "Mystery", goes: "supplier", sealed: {} }]);
-  assertEquals(out.items, []);
-  assertEquals(out.notes, ["The quote option Mystery has no order line in the sealed quote. Check the quote."]);
+  // Missing, empty, no description, or an office fixing: never "on the order" while dropped.
+  for (const sealed of [
+    {},
+    { order_line: {} },
+    { order_line: { id: "z", quantity: 1, unit: "each", supplierName: "Sparky Supplies" } },
+    { order_line: { id: "z", description: "Screws", quantity: 1, unit: "box", supplierId: "office", supplierName: "Office" } },
+  ]) {
+    assertEquals(takenOptionOrderItems([LIGHTS, { id: "x", name: "Mystery", goes: "supplier", sealed }]),
+      { state: "unusable", option_ids: ["x"] }, JSON.stringify(sealed));
+  }
 });
 
 Deno.test("R14 dispatch: both fills add the taken options and refuse an unreadable record, pinned by source", () => {
@@ -44,6 +51,9 @@ Deno.test("R14 dispatch: both fills add the taken options and refuse an unreadab
     const block = src.slice(at, at + 600);
     if (!block.includes('taken.state === "unreadable"') || !block.includes('"quote_options_unreadable"')) {
       throw new Error(`${file}: an unreadable option record must fill nothing`);
+    }
+    if (!block.includes('taken.state === "unusable"') || !block.includes('"quote_option_line_unusable"')) {
+      throw new Error(`${file}: an unusable taken line must fill nothing`);
     }
   }
 });

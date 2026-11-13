@@ -11,6 +11,11 @@
 // taken_options, written with the acceptance in one transaction
 // (20261113150000), never from the live job.
 //
+// Which record: the one on the job's current accepted quote. Only the client's
+// quote carries options (a neighbour's acceptance writes no record), and a
+// record on a document since superseded (a re-quote) never applies, so a job
+// has at most one current record; two is unreadable, never a merge.
+//
 // Unknown is never "none": a failed read answers 'unreadable' and the callers
 // hold. The one exception is the table not existing yet (the migration
 // 20261113150000 not applied): then no option can have been taken, because
@@ -26,7 +31,7 @@ export type TakenQuoteOption = {
 
 export type TakenQuoteOptions =
   | { state: 'none' }
-  | { state: 'taken'; options: TakenQuoteOption[] }
+  | { state: 'taken'; options: TakenQuoteOption[]; job_document_id: string }
   | { state: 'unreadable' }
 
 const TABLE_MISSING = new Set(['42P01', 'PGRST205'])
@@ -37,33 +42,58 @@ const isRec = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
 export async function readTakenQuoteOptions(client: any, jobId: string): Promise<TakenQuoteOptions> {
   try {
     const { data, error } = await client.from('quote_option_acceptances')
-      .select('taken_option_ids, taken_options')
+      .select('job_document_id, taken_option_ids, taken_options')
       .eq('job_id', jobId)
     if (error) {
       return TABLE_MISSING.has(String(error?.code ?? '')) ? { state: 'none' } : { state: 'unreadable' }
     }
     if (!Array.isArray(data)) return { state: 'unreadable' }
-    const options: TakenQuoteOption[] = []
-    for (const row of data) {
-      const ids = Array.isArray(row?.taken_option_ids) ? row.taken_option_ids.map(String) : []
-      const sealed = Array.isArray(row?.taken_options) ? row.taken_options : []
-      // The database keeps one sealed entry per taken id; anything else is unreadable.
-      if (sealed.length !== ids.length) return { state: 'unreadable' }
-      for (const id of ids) {
-        const o = sealed.find((x: unknown) => isRec(x) && String(x.id) === id)
-        if (!isRec(o)) return { state: 'unreadable' }
-        options.push({
-          id,
-          name: typeof o.name === 'string' ? o.name : id,
-          goes: typeof o.goes === 'string' ? o.goes : null,
-          sealed: o,
-        })
-      }
+    if (data.length === 0) return { state: 'none' }
+    const docIds = [...new Set(data.map((r) => String(r?.job_document_id ?? '')))]
+    if (docIds.some((id) => !id)) return { state: 'unreadable' }
+    const docs = await client.from('job_documents').select('id, superseded_at').in('id', docIds)
+    if (docs?.error || !Array.isArray(docs?.data)) return { state: 'unreadable' }
+    const current = new Set<string>()
+    for (const id of docIds) {
+      const d = docs.data.find((x: Record<string, unknown>) => String(x?.id) === id)
+      if (!d) return { state: 'unreadable' }
+      if (d.superseded_at == null) current.add(id)
     }
-    return options.length > 0 ? { state: 'taken', options } : { state: 'none' }
+    const rows = data.filter((r) => current.has(String(r.job_document_id)))
+    if (rows.length === 0) return { state: 'none' }
+    if (rows.length > 1) return { state: 'unreadable' }
+    const row = rows[0]
+    const ids = Array.isArray(row?.taken_option_ids) ? row.taken_option_ids.map(String) : []
+    const sealed = Array.isArray(row?.taken_options) ? row.taken_options : []
+    // The database keeps one sealed entry per taken id; anything else is unreadable.
+    if (sealed.length !== ids.length) return { state: 'unreadable' }
+    const options: TakenQuoteOption[] = []
+    for (const id of ids) {
+      const o = sealed.find((x: unknown) => isRec(x) && String(x.id) === id)
+      if (!isRec(o)) return { state: 'unreadable' }
+      options.push({
+        id,
+        name: typeof o.name === 'string' ? o.name : id,
+        goes: typeof o.goes === 'string' ? o.goes : null,
+        sealed: o,
+      })
+    }
+    return options.length > 0
+      ? { state: 'taken', options, job_document_id: String(row.job_document_id) }
+      : { state: 'none' }
   } catch {
     return { state: 'unreadable' }
   }
+}
+
+/** A taken option's cost for the expected-cost baseline, read from its sealed copy. */
+export function takenOptionCost(o: TakenQuoteOption): { id: string; cost_ex_gst: number | null; cost_kind: 'materials' | 'labour' | 'other' } | null {
+  const kind = o.sealed.cost_kind
+  if (kind !== 'materials' && kind !== 'labour' && kind !== 'other') return null
+  const raw = o.sealed.cost_ex_gst
+  if (raw === null || raw === undefined) return { id: o.id, cost_ex_gst: null, cost_kind: kind }
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return null
+  return { id: o.id, cost_ex_gst: raw, cost_kind: kind }
 }
 
 /** The sealed destination lines of the taken options that go one way. */

@@ -385,9 +385,20 @@ Deno.test('R14 an old quote with no options sends the same deposit request as be
   assert(/else if \(optionCombination && optionDeposit !== null\)/.test(block), 'the option deposit keys are set only with a taken combination')
 })
 
-Deno.test('R14 taken options reach the expected cost; their destinations follow from the record', () => {
-  assert(SRC.includes('accepted_options: optionsTaken.map((o) => ({ id: o.id, cost_ex_gst: o.cost_ex_gst, cost_kind: o.cost_kind }))'))
+Deno.test('R14 the cost baseline is frozen from the durable record, never the last request', () => {
+  // Whichever party accepts last, the freeze reads the client's stored record.
+  assert(!SRC.includes('accepted_options:'), 'no request-scoped option list reaches the freeze')
+  assertEquals(SRC.split('freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id, quote_acceptance: true })').length - 1, 2)
   assert(SRC.includes("event_type: 'quote_options_taken'"))
+})
+
+Deno.test('R14 a neighbour acceptance writes no option record and cannot tick one', () => {
+  const at = SRC.indexOf('if (loaded.neighbour) {', ACCEPT)
+  assert(at > ACCEPT, 'the neighbour branch exists')
+  const block = SRC.slice(at, at + 1200)
+  assert(block.includes("'options_on_neighbour_quote'"), 'a ticked box on a neighbour quote is refused')
+  const elseAt = block.indexOf('} else {')
+  assert(elseAt > 0 && block.indexOf('chooseOptions(') > elseAt, 'options are chosen only off the neighbour branch')
 })
 
 // F3: contradictory deposit and payment structures are refused, never trusted.
@@ -428,4 +439,96 @@ Deno.test('R14 a shared fence: the client pays their share of the first payment'
   delete combination.local_invoice_stages
   assertEquals(partyOptionDeposit(pricing, combination, 'a'), 1320, 'no stages: the party total at the deposit percent')
   assertEquals(partyOptionDeposit({}, combination, 'a'), null, 'unknown is never guessed')
+})
+
+// ── review 2: payments and stages are one plan; destination lines are usable ──
+
+/** A three-payment offer whose invoice stages match its printed payments. */
+function threeStagePricing(): Record<string, any> {
+  const pay = (dep: number, mid: number, fin: number) => ({ version: 1, payments: [
+    { id: 'deposit', label: 'Deposit', amount_inc_gst: dep },
+    { id: 'frame', label: 'Frame up', amount_inc_gst: mid },
+    { id: 'final', label: 'Final', amount_inc_gst: fin },
+  ] })
+  const stg = (inc: number, dep: number, mid: number, fin: number) => ({ version: 1, total_inc_gst: inc, stages: [
+    { id: 'deposit', label: 'Deposit', basis: 'percent', trigger: 'acceptance', due_rule: 'on_issue', amount_inc_gst: dep, payers: [{ payer_id: 'c', amount_inc_gst: dep }] },
+    { id: 'frame', label: 'Frame up', basis: 'percent', trigger: 'frame_complete', due_rule: '7_days', amount_inc_gst: mid, payers: [{ payer_id: 'c', amount_inc_gst: mid }] },
+    { id: 'final', label: 'Final', basis: 'balance', trigger: 'completion', due_rule: '7_days', amount_inc_gst: fin, payers: [{ payer_id: 'c', amount_inc_gst: fin }] },
+  ] })
+  const c3 = (ids: string[], ex: number, gst: number, inc: number, dep: number, mid: number, fin: number) => ({
+    option_ids: ids, totalExGST: ex, gst, totalIncGST: inc, deposit_inc_gst: dep,
+    payment_schedule: pay(dep, mid, fin), local_invoice_stages: stg(inc, dep, mid, fin),
+  })
+  return patioPricing({
+    payment_schedule: pay(5500, 2750, 2750),
+    local_invoice_stages: stg(11000, 5500, 2750, 2750),
+    optional_extras: {
+      version: 1, sentence: 'Tell us which options you want when you accept.', options: [LIGHTS, GUTTER],
+      combinations: [
+        c3([], 10000, 1000, 11000, 5500, 2750, 2750),
+        c3(['lights'], 10400, 1040, 11440, 5720, 2860, 2860),
+        c3(['gutter'], 11000, 1100, 12100, 6050, 3025, 3025),
+        c3(['lights', 'gutter'], 11400, 1140, 12540, 6270, 3135, 3135),
+      ],
+    },
+  })
+}
+
+function reasonOf(p: unknown): string {
+  const r = readQuoteOptions(p)
+  return r.kind === 'invalid' ? (r as { reason: string }).reason : r.kind
+}
+
+Deno.test('R14 a three-payment offer whose stages match its printed payments reads as an offer', () => {
+  assertEquals(readQuoteOptions(threeStagePricing()).kind, 'offer')
+})
+
+Deno.test('R14 printed payments and invoice stages that disagree are refused, even when each adds up', () => {
+  const p = threeStagePricing()
+  const st = p.optional_extras.combinations[1].local_invoice_stages.stages
+  st[1].amount_inc_gst = 2861; st[1].payers[0].amount_inc_gst = 2861
+  st[2].amount_inc_gst = 2859; st[2].payers[0].amount_inc_gst = 2859
+  assertEquals(reasonOf(p), 'combination_schedule_and_stages_disagree')
+})
+
+Deno.test('R14 an option combination may change the amounts, never the payment terms', () => {
+  const trigger = threeStagePricing()
+  trigger.optional_extras.combinations[2].local_invoice_stages.stages[1].trigger = 'acceptance'
+  assertEquals(reasonOf(trigger), 'combination_stages_terms_not_base')
+  const basis = threeStagePricing()
+  basis.optional_extras.combinations[3].local_invoice_stages.stages[2].basis = 'percent'
+  assertEquals(reasonOf(basis), 'combination_stages_terms_not_base')
+  const due = threeStagePricing()
+  due.optional_extras.combinations[1].local_invoice_stages.stages[0].due_rule = '30_days'
+  assertEquals(reasonOf(due), 'combination_stages_terms_not_base')
+  const label = threeStagePricing()
+  label.optional_extras.combinations[1].payment_schedule.payments[1].label = 'Halfway'
+  assertEquals(reasonOf(label), 'combination_schedule_terms_not_base')
+})
+
+Deno.test('R14 a destination line its consumer cannot use is refused before acceptance', () => {
+  const cases: Array<[string, (o: any[]) => void]> = [
+    ['option_supplier_line_description_missing', (o) => { o[0] = { ...o[0], order_line: {} } }],
+    ['option_supplier_line_quantity_unreadable', (o) => { o[0] = { ...o[0], order_line: { ...o[0].order_line, quantity: 0 } } }],
+    ['option_supplier_line_unit_missing', (o) => { o[0] = { ...o[0], order_line: { ...o[0].order_line, unit: '' } } }],
+    ['option_supplier_line_id_missing', (o) => { o[0] = { ...o[0], order_line: { ...o[0].order_line, id: '' } } }],
+    ['option_supplier_line_is_office', (o) => { o[0] = { ...o[0], order_line: { ...o[0].order_line, supplierId: 'office' } } }],
+    ['option_crew_line_key_missing', (o) => { o[1] = { ...o[1], labour_line: { ...o[1].labour_line, line_key: '' } } }],
+    ['option_crew_line_total_unreadable', (o) => { o[1] = { ...o[1], labour_line: { ...o[1].labour_line, total: 'lots' } } }],
+    ['option_crew_line_description_missing', (o) => { o[1] = { ...o[1], labour_line: { ...o[1].labour_line, description: ' ' } } }],
+  ]
+  for (const [reason, mut] of cases) {
+    assertEquals(reasonOf(withBlock((b) => mut(b.options))), reason, reason)
+  }
+  // A crew line with no total yet is readable (held downstream, never priced as 0).
+  assertEquals(readQuoteOptions(withBlock((b) => { b.options[1] = { ...b.options[1], labour_line: { ...b.options[1].labour_line, total: null } } })).kind, 'offer')
+})
+
+Deno.test('R14 an office line needs words, a quantity and a unit; its cost may be blank, never invented', () => {
+  const office = (line: Record<string, unknown>) => withBlock((b) => {
+    b.options[0] = { ...b.options[0], goes: 'office', order_line: undefined, office_line: line }
+  })
+  assertEquals(readQuoteOptions(office({ description: 'Order a skip bin', quantity: 1, unit: 'each', cost_ex_gst: null })).kind, 'offer')
+  assertEquals(reasonOf(office({ description: 'Order a skip bin', quantity: 1, unit: 'each', cost_ex_gst: -5 })), 'option_office_line_cost_unreadable')
+  assertEquals(reasonOf(office({ quantity: 1, unit: 'each', cost_ex_gst: 120 })), 'option_office_line_description_missing')
 })

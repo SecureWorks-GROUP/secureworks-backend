@@ -23,8 +23,25 @@
 --   taken option is on none of them. scope_payment_plan reads the combination's
 --   stages for such a job (contract section 4.4).
 --
+--   Which record applies: the one on the job's current accepted quote
+--   (job_documents.superseded_at null). Only the client's quote carries options; a
+--   neighbour's acceptance writes no record. A record on a superseded document never
+--   applies; one that took options on these drafts' revision, with no current
+--   record, holds the drafts (scope_options_record_superseded). Two current records
+--   are refused (scope_options_more_than_one_record).
+--
+--   Unknown crew labour: a taken crew option sealed with no total is refused
+--   (scope_options_labour_unknown) and nothing is written, so no work order is
+--   agreed or released at the base labour. send-quote also refuses such a line at
+--   acceptance only when it is unreadable; a blank total is allowed there and held here.
+--
 -- A quote with no options writes no row and accepts exactly as before.
--- Rollback: supabase/rollbacks/20261113150000_quote_option_acceptances_down.sql.
+--
+-- Rollback: supabase/rollbacks/20261113150000_quote_option_acceptances_down.sql. It
+-- restores scope_payment_plan and drops the two functions and the write-once trigger.
+-- It KEEPS the record table, its rows and the three draft-set columns, and does not
+-- undo drafts already changed by apply_quote_options_to_scope_drafts (work order
+-- labour, payer amounts, totals). It is not a restore of pre-option business content.
 
 CREATE TABLE IF NOT EXISTS public.quote_option_acceptances (
   id                       uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -151,10 +168,10 @@ DECLARE
   j public.jobs%ROWTYPE; s public.scope_job_draft_sets%ROWTYPE; r public.scope_revisions%ROWTYPE;
   w public.work_orders%ROWTYPE; rec public.quote_option_acceptances%ROWTYPE;
   n int; pricing jsonb; combo jsonb; opt jsonb; ids text[]; combo_ids text[];
-  lines jsonb; add_labour bigint := 0; c bigint; unknown_totals text[] := ARRAY[]::text[];
+  lines jsonb; add_labour bigint := 0; c bigint;
   new_labour bigint; parties jsonb; party jsonb; payer text; seen text[] := ARRAY[]::text[];
   ex bigint; gst bigint; inc bigint; tex bigint; tgst bigint; tinc bigint;
-  sx bigint := 0; sg bigint := 0; si bigint := 0; known boolean := true;
+  sx bigint := 0; sg bigint := 0; si bigint := 0;
   stages jsonb; base_has_stages boolean; touched int;
 BEGIN
   SELECT * INTO j FROM public.jobs WHERE id = p_job_id FOR UPDATE;
@@ -164,10 +181,30 @@ BEGIN
   IF s.scope_revision_id IS DISTINCT FROM p_scope_revision_id THEN
     RAISE EXCEPTION 'scope_drafts_accepted_revision_mismatch' USING ERRCODE = '23514';
   END IF;
-  SELECT count(*) INTO n FROM public.quote_option_acceptances WHERE job_id = j.id;
-  IF n = 0 THEN RETURN jsonb_build_object('applied', false, 'reason', 'no_options_record'); END IF;
+  -- The applicable record is the one on the job's current accepted quote: a
+  -- record on a document since superseded (a re-quote) never applies. Only the
+  -- client's quote carries options, so a job has at most one current record.
+  SELECT count(*) INTO n FROM public.quote_option_acceptances a
+    JOIN public.job_documents d ON d.id = a.job_document_id
+   WHERE a.job_id = j.id AND d.superseded_at IS NULL;
+  IF n = 0 THEN
+    -- A superseded record that took options on the revision these drafts were
+    -- prepared from, with no current record: the drafts are held, never
+    -- released at the base price while the re-quote is open.
+    IF EXISTS (SELECT 1 FROM public.quote_option_acceptances a
+                 JOIN public.job_documents d ON d.id = a.job_document_id
+                 JOIN public.quote_revisions q ON q.id = a.quote_revision_id
+                WHERE a.job_id = j.id AND d.superseded_at IS NOT NULL
+                  AND q.scope_revision_id = s.scope_revision_id
+                  AND cardinality(a.taken_option_ids) > 0) THEN
+      RAISE EXCEPTION 'scope_options_record_superseded' USING ERRCODE = '23514';
+    END IF;
+    RETURN jsonb_build_object('applied', false, 'reason', 'no_options_record');
+  END IF;
   IF n > 1 THEN RAISE EXCEPTION 'scope_options_more_than_one_record' USING ERRCODE = '23514'; END IF;
-  SELECT * INTO rec FROM public.quote_option_acceptances WHERE job_id = j.id;
+  SELECT a.* INTO rec FROM public.quote_option_acceptances a
+    JOIN public.job_documents d ON d.id = a.job_document_id
+   WHERE a.job_id = j.id AND d.superseded_at IS NULL;
   ids := COALESCE(rec.taken_option_ids, '{}'::text[]);
   IF s.quote_options_applied_at IS NOT NULL THEN
     IF s.quote_option_ids IS NOT DISTINCT FROM ids THEN
@@ -215,15 +252,16 @@ BEGIN
   END LOOP;
 
   -- Crew: each labour line appended as sealed; its total joins the agreed
-  -- labour when known (a blank cost adds nothing and is named in the event).
+  -- labour. A blank total is unknown labour: nothing is written and the drafts
+  -- are held, never issued with the base labour as the agreed figure.
   lines := s.labour_lines;
   FOR opt IN SELECT value FROM jsonb_array_elements(rec.taken_options) WHERE value->>'goes' = 'crew' LOOP
     IF jsonb_typeof(opt->'labour_line') IS DISTINCT FROM 'object' THEN
       RAISE EXCEPTION 'scope_options_labour_line_invalid' USING ERRCODE = '23514';
     END IF;
     c := public.scope_draft_cents(opt#>'{labour_line,total}');
-    IF c IS NULL THEN unknown_totals := array_append(unknown_totals, opt->>'id');
-    ELSE add_labour := add_labour + c; END IF;
+    IF c IS NULL THEN RAISE EXCEPTION 'scope_options_labour_unknown' USING ERRCODE = '23514'; END IF;
+    add_labour := add_labour + c;
     lines := lines || jsonb_build_array(opt->'labour_line');
   END LOOP;
   new_labour := CASE WHEN s.labour_total_cents IS NULL THEN NULL ELSE s.labour_total_cents + add_labour END;
@@ -291,7 +329,7 @@ BEGIN
   UPDATE public.scope_job_draft_sets
      SET labour_lines = lines, labour_total_cents = new_labour,
          totals = jsonb_build_object('ex_cents', tex, 'gst_cents', tgst, 'inc_cents', tinc),
-         amounts_confirmed = s.amounts_confirmed AND known,
+         amounts_confirmed = s.amounts_confirmed,
          quote_option_ids = ids, quote_option_stages = stages, quote_options_applied_at = now()
    WHERE job_id = j.id;
   FOR party IN SELECT value FROM jsonb_array_elements(parties) LOOP
@@ -306,7 +344,7 @@ BEGIN
   INSERT INTO public.job_events(job_id, event_type, detail_json) VALUES
     (j.id, 'scope_job_drafts_quote_options_applied', jsonb_build_object(
       'work_order_id', s.work_order_id, 'scope_revision_id', s.scope_revision_id,
-      'option_ids', to_jsonb(ids), 'labour_total_unknown_option_ids', to_jsonb(unknown_totals)));
+      'option_ids', to_jsonb(ids)));
   RETURN jsonb_build_object('applied', true, 'taken', cardinality(ids));
 END $$;
 REVOKE ALL ON FUNCTION public.apply_quote_options_to_scope_drafts(uuid, uuid) FROM PUBLIC, anon, authenticated;

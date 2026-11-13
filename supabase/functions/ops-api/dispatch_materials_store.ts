@@ -1329,6 +1329,13 @@ export async function suggestDispatchMaterialLines(
       "The quote options the customer took could not be read, so no lines were suggested. Try again.",
     );
   }
+  if (taken.state === "unusable") {
+    throw new DispatchMaterialsError(
+      409,
+      "quote_option_line_unusable",
+      "A quote option the customer took has no usable order line in the sealed quote, so no lines were suggested. Check the quote.",
+    );
+  }
   const suggested = [...offer.lines, ...dispatchSuggestedLines(taken.items)];
   const optionNotes = taken.notes.length ? { quote_option_notes: taken.notes } : {};
   if (suggested.length === 0) {

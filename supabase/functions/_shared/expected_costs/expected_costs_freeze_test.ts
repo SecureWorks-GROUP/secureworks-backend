@@ -30,7 +30,7 @@ import {
 // ── In-memory mock Supabase client ──────────────────────────────────────────
 
 type Row = Record<string, unknown>
-type Tables = { jobs: Row[]; scope_revisions: Row[]; job_documents: Row[]; run_acceptances: Row[]; quote_revisions: Row[]; job_variations: Row[] }
+type Tables = { jobs: Row[]; scope_revisions: Row[]; job_documents: Row[]; run_acceptances: Row[]; quote_revisions: Row[]; job_variations: Row[]; quote_option_acceptances: Row[] }
 
 function newId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`
@@ -216,6 +216,7 @@ function makeMockClient(seed?: Partial<Tables>) {
     run_acceptances: deepCopy(seed?.run_acceptances ?? []),
     quote_revisions: deepCopy(seed?.quote_revisions ?? []),
     job_variations: deepCopy(seed?.job_variations ?? []),
+    quote_option_acceptances: deepCopy(seed?.quote_option_acceptances ?? []),
   }
   return {
     from(table: string) {
@@ -638,17 +639,22 @@ for (const table of ['job_documents', 'run_acceptances', 'job_variations', 'quot
 
 // ── Ruling 14 step 1: taken quote options join the baseline ──────────────────
 
+// The job's option record, as accept_quote_document_with_options writes it: the
+// taken options exactly as sealed, on the client's current accepted quote.
+const sealedOption = (id: string, cost: number | null, kind: string) => ({ id, name: id, goes: 'supplier', cost_ex_gst: cost, cost_kind: kind })
+function optionRecord(jobId: string, docId: string, taken: Array<Record<string, unknown>>): Row {
+  return { id: newId('qoa'), job_id: jobId, job_document_id: docId, taken_option_ids: taken.map((o) => o.id), taken_options: taken }
+}
+
 Deno.test('R14 taken options: each cost joins its lane and the total; margin is withheld', async () => {
-  const client = makeMockClient({ jobs: [seedJob({ id: 'JO1', pricing_json: LIVE_PRICING })] })
-  const r = await freezeExpectedCostsOnAcceptance(client as any, {
-    job_id: 'JO1', now_iso: FROZE_AT,
-    accepted_options: [
-      { id: 'lights', cost_ex_gst: 180, cost_kind: 'materials' },
-      { id: 'gutter', cost_ex_gst: 600, cost_kind: 'labour' },
-      { id: 'permit', cost_ex_gst: 50, cost_kind: 'other' },
-      { id: 'blank', cost_ex_gst: null, cost_kind: 'materials' },
-    ],
+  const taken = [sealedOption('lights', 180, 'materials'), sealedOption('gutter', 600, 'labour'),
+    sealedOption('permit', 50, 'other'), sealedOption('blank', null, 'materials')]
+  const client = makeMockClient({
+    jobs: [seedJob({ id: 'JO1', pricing_json: LIVE_PRICING })],
+    job_documents: [{ id: 'D1', job_id: 'JO1', type: 'quote', superseded_at: null }],
+    quote_option_acceptances: [optionRecord('JO1', 'D1', taken)],
   })
+  const r = await freezeExpectedCostsOnAcceptance(client as any, { job_id: 'JO1', now_iso: FROZE_AT })
   assert(r.ok && r.snapshot === true)
   const ec = (client._state.jobs[0] as any).expected_costs
   assertEquals(ec.lanes.materials.amount_ex_gst, 724.5)
@@ -665,18 +671,58 @@ Deno.test('R14 taken options: each cost joins its lane and the total; margin is 
 
 Deno.test('R14 no taken options: the baseline is exactly as before', async () => {
   const a = makeMockClient({ jobs: [seedJob({ id: 'JO2', pricing_json: LIVE_PRICING })] })
-  const b = makeMockClient({ jobs: [seedJob({ id: 'JO2', pricing_json: LIVE_PRICING })] })
+  const b = makeMockClient({
+    jobs: [seedJob({ id: 'JO2', pricing_json: LIVE_PRICING })],
+    job_documents: [{ id: 'D2', job_id: 'JO2', type: 'quote', superseded_at: null }],
+    quote_option_acceptances: [optionRecord('JO2', 'D2', [])],
+  })
   await freezeExpectedCostsOnAcceptance(a as any, { job_id: 'JO2', now_iso: FROZE_AT })
-  await freezeExpectedCostsOnAcceptance(b as any, { job_id: 'JO2', now_iso: FROZE_AT, accepted_options: [] })
+  await freezeExpectedCostsOnAcceptance(b as any, { job_id: 'JO2', now_iso: FROZE_AT })
   assertEquals((a._state.jobs[0] as any).expected_costs, (b._state.jobs[0] as any).expected_costs)
   assertEquals('quote_options' in (a._state.jobs[0] as any).expected_costs, false)
 })
 
+// Shared fence: the client takes an option, a neighbour accepts last with
+// none. The baseline is read from the record, so the order never matters and a
+// retry keeps the same baseline.
+Deno.test('R14 shared acceptance: either order freezes the client\'s option, and a retry keeps it', async () => {
+  const base = () => makeMockClient({
+    jobs: [seedJob({ id: 'JS', pricing_json: LIVE_PRICING })],
+    job_documents: [{ id: 'DC', job_id: 'JS', type: 'quote', superseded_at: null }, { id: 'DN', job_id: 'JS', type: 'quote', superseded_at: null }],
+    quote_option_acceptances: [optionRecord('JS', 'DC', [sealedOption('lights', 180, 'materials')])],
+  })
+  // Client last or neighbour last: the request carries no options either way.
+  const first = base(), second = base()
+  await freezeExpectedCostsOnAcceptance(first as any, { job_id: 'JS', now_iso: FROZE_AT })
+  await freezeExpectedCostsOnAcceptance(second as any, { job_id: 'JS', now_iso: FROZE_AT })
+  const ec = (first._state.jobs[0] as any).expected_costs
+  assertEquals(ec.lanes.materials.amount_ex_gst, 724.5)
+  assertEquals(ec, (second._state.jobs[0] as any).expected_costs)
+  const retry = await freezeExpectedCostsOnAcceptance(first as any, { job_id: 'JS', now_iso: AFTER_ACCEPT })
+  assertEquals(retry, { ok: true, snapshot: false, reason: 'already_frozen', existing_confidence: 'live_fallback' })
+  assertEquals((first._state.jobs[0] as any).expected_costs, ec)
+})
+
+Deno.test('R14 a record on a superseded quote never reaches the baseline; an unreadable record writes nothing', async () => {
+  const superseded = makeMockClient({
+    jobs: [seedJob({ id: 'JR', pricing_json: LIVE_PRICING })],
+    job_documents: [{ id: 'OLD', job_id: 'JR', type: 'quote', superseded_at: '2026-07-04T00:00:00Z' }],
+    quote_option_acceptances: [optionRecord('JR', 'OLD', [sealedOption('lights', 180, 'materials')])],
+  })
+  await freezeExpectedCostsOnAcceptance(superseded as any, { job_id: 'JR', now_iso: FROZE_AT })
+  assertEquals((superseded._state.jobs[0] as any).expected_costs.lanes.materials.amount_ex_gst, 544.5)
+  const broken = makeMockClient({ jobs: [seedJob({ id: 'JU', pricing_json: LIVE_PRICING })] })
+  const from = broken.from.bind(broken)
+  ;(broken as any).from = (t: string) => t === 'quote_option_acceptances'
+    ? { select: () => ({ eq: () => Promise.resolve({ data: null, error: { code: '57014' } }) }) }
+    : from(t)
+  const r = await freezeExpectedCostsOnAcceptance(broken as any, { job_id: 'JU', now_iso: FROZE_AT })
+  assertEquals(r, { ok: true, snapshot: false, reason: 'quote_options_unreadable' })
+  assertEquals((broken._state.jobs[0] as any).expected_costs, null)
+})
+
 Deno.test('R14 options never make a baseline out of pricing with no cost lanes', async () => {
   const client = makeMockClient({ jobs: [seedJob({ id: 'JO3', pricing_json: { totalExGST: 100 } })] })
-  const r = await freezeExpectedCostsOnAcceptance(client as any, {
-    job_id: 'JO3', now_iso: FROZE_AT,
-    accepted_options: [{ id: 'lights', cost_ex_gst: 180, cost_kind: 'materials' }],
-  })
+  const r = await freezeExpectedCostsOnAcceptance(client as any, { job_id: 'JO3', now_iso: FROZE_AT })
   assertEquals(r, { ok: true, snapshot: false, reason: 'no_cost_lanes' })
 })

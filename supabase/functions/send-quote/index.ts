@@ -2048,12 +2048,17 @@ serve(async (req: Request) => {
           // Options are the client's alone (contract section 6): a shared
           // fence's client takes them on their whole quote, with the tool's
           // party figures; a neighbour's document offers none.
-          if (loaded.neighbour && !tickedNothing(tickedOptionIds)) {
-            return refuseAccept(optionRefusalMessage('options_on_neighbour_quote'), 200, 'options_on_neighbour_quote')
+          // A neighbour accepts their quote plainly: no option record is written
+          // for them, so the job's one option record is the client's.
+          if (loaded.neighbour) {
+            if (!tickedNothing(tickedOptionIds)) {
+              return refuseAccept(optionRefusalMessage('options_on_neighbour_quote'), 200, 'options_on_neighbour_quote')
+            }
+          } else {
+            const choice = chooseOptions(loaded.offer, tickedOptionIds)
+            if (!choice.ok) return refuseAccept(optionRefusalMessage(choice.reason), 200, choice.reason)
+            optionPlan = { offer: loaded.offer, pricing: loaded.pricing, revisionId: loaded.revisionId, shared: loaded.shared, choice }
           }
-          const choice = chooseOptions(loaded.offer, tickedOptionIds)
-          if (!choice.ok) return refuseAccept(optionRefusalMessage(choice.reason), 200, choice.reason)
-          optionPlan = { offer: loaded.offer, pricing: loaded.pricing, revisionId: loaded.revisionId, shared: loaded.shared, choice }
         } else if (!tickedNothing(tickedOptionIds)) {
           const code = loaded.kind === 'invalid' ? loaded.reason : 'options_not_offered'
           return refuseAccept(optionRefusalMessage(code), 200, code)
@@ -2519,14 +2524,9 @@ serve(async (req: Request) => {
         // once the whole job is accepted, matching the accepted_at write above.
         if (newStatus === 'accepted') {
           try {
-            // Ruling 14 step 1: each taken option's cost joins its lane.
-            const efc = await freezeExpectedCostsOnAcceptance(sb, {
-              job_id: doc.job_id,
-              quote_acceptance: true,
-              ...(optionsTaken.length > 0
-                ? { accepted_options: optionsTaken.map((o) => ({ id: o.id, cost_ex_gst: o.cost_ex_gst, cost_kind: o.cost_kind })) }
-                : {}),
-            })
+            // Ruling 14 step 1: each taken option's cost joins its lane, read by
+            // the freeze from the job's option record whichever party accepted last.
+            const efc = await freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id, quote_acceptance: true })
             console.log('[send-quote] expected-cost baseline', JSON.stringify({ job_id: doc.job_id, result: efc }))
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)

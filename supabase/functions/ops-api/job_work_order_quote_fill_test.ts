@@ -1831,14 +1831,20 @@ const GATE_OPTION = {
   labour_line: { line_key: "opt-gate", description: "Hang the extra gate", quantity: 1, unit: "each", rate: 200, total: 200 },
 };
 const LIGHT_OPTION = { id: "lights", name: "Lights", goes: "supplier", order_line: { name: "Light", qty: 2 } };
+// The option record sits on the client's current accepted document. Typed
+// "other" here so the fake's accepted-source read is unchanged.
+const OPTION_DOC = "doc-options";
+const optionDocs = (superseded_at: string | null = null) => [{ id: OPTION_DOC, job_id: JOB, type: "other", superseded_at }];
 
 Deno.test("R14 a taken crew option joins the filled draft and the agreed labour, and the draft still issues on its own", async () => {
   const before = baseDb();
   await fillJobWorkOrderDraftFromQuote(before, JOB);
   const base = before.tables.work_orders[0];
   const db = baseDb({
+    job_documents: optionDocs(),
     quote_option_acceptances: [{
       job_id: JOB,
+      job_document_id: OPTION_DOC,
       offered: [GATE_OPTION, LIGHT_OPTION],
       taken_option_ids: ["gate", "lights"],
       taken_options: [GATE_OPTION, LIGHT_OPTION],
@@ -1859,7 +1865,8 @@ Deno.test("R14 a taken crew option joins the filled draft and the agreed labour,
 Deno.test("R14 a taken crew option with no sealed total holds the draft for the approver", async () => {
   const noTotal = { ...GATE_OPTION, labour_line: { ...GATE_OPTION.labour_line, total: null } };
   const db = baseDb({
-    quote_option_acceptances: [{ job_id: JOB, taken_option_ids: ["gate"], taken_options: [noTotal] }],
+    job_documents: optionDocs(),
+    quote_option_acceptances: [{ job_id: JOB, job_document_id: OPTION_DOC, taken_option_ids: ["gate"], taken_options: [noTotal] }],
   } as any);
   await fillJobWorkOrderDraftFromQuote(db, JOB);
   const wo = db.tables.work_orders[0];
@@ -1869,7 +1876,8 @@ Deno.test("R14 a taken crew option with no sealed total holds the draft for the 
 
 Deno.test("R14 an option record that cannot be read holds the draft for the approver", async () => {
   const db = baseDb({
-    quote_option_acceptances: [{ job_id: JOB, taken_option_ids: ["gate"], taken_options: [] }],
+    job_documents: optionDocs(),
+    quote_option_acceptances: [{ job_id: JOB, job_document_id: OPTION_DOC, taken_option_ids: ["gate"], taken_options: [] }],
   } as any);
   await fillJobWorkOrderDraftFromQuote(db, JOB);
   const wo = db.tables.work_orders[0];
@@ -1880,8 +1888,10 @@ Deno.test("R14 an option record that cannot be read holds the draft for the appr
 
 Deno.test("R14 no option taken: the fill stamps the draft as before", async () => {
   const db = baseDb({
+    job_documents: optionDocs(),
     quote_option_acceptances: [{
       job_id: JOB,
+      job_document_id: OPTION_DOC,
       offered: [GATE_OPTION],
       taken_option_ids: [],
       taken_options: [],
@@ -1891,4 +1901,15 @@ Deno.test("R14 no option taken: the fill stamps the draft as before", async () =
   const wo = db.tables.work_orders[0];
   assert(!wo.scope_items.some((l: any) => l.line_key.startsWith("option:")), "an untaken option is not on the work order");
   assert(wo.quote_filled_at, "stamped as before");
+});
+
+Deno.test("R14 a record on a superseded (re-quoted) document is not applied", async () => {
+  const db = baseDb({
+    job_documents: optionDocs("2026-11-01T00:00:00Z"),
+    quote_option_acceptances: [{ job_id: JOB, job_document_id: OPTION_DOC, taken_option_ids: ["gate"], taken_options: [GATE_OPTION] }],
+  } as any);
+  await fillJobWorkOrderDraftFromQuote(db, JOB);
+  const wo = db.tables.work_orders[0];
+  assert(!wo.scope_items.some((l: any) => l.line_key === "option:gate"), "the old quote's option is not on the work order");
+  assert(wo.quote_filled_at, "stamped as with no options");
 });

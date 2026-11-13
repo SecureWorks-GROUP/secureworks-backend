@@ -1,6 +1,9 @@
 import { acceptedRevisionForOrders } from "../expected_costs/accepted_quote_cost_source.ts";
 import { readTakenQuoteOptions } from "../quote_options/taken_options.ts";
 
+// PostgREST: no such function (the migration 20261113150000 not applied yet).
+const FUNCTION_MISSING = new Set(["PGRST202", "42883"]);
+
 export type ScopeDraftReleaseOutcome =
   | { state: "not_prepared" | "already_released" | "released" }
   /** Acceptance retained; the issue waits for the owner-approved price and
@@ -75,12 +78,16 @@ export async function releaseScopeJobDraftsOnAcceptance(
     // joins the work order and its total the agreed labour; the payer
     // amounts and payment stages become the accepted combination's. One
     // transaction, checked against the frozen revision; a repeat replays.
-    if (options.state === "taken") {
-      const applied = await client.rpc("apply_quote_options_to_scope_drafts", {
-        p_job_id: jobId,
-        p_scope_revision_id: revision,
-      });
-      if (applied.error) throw applied.error;
+    // Asked on every release, taken or not: the database also holds drafts
+    // whose options record was superseded by an open re-quote. Before the
+    // migration (no such function) a job with no options releases as before.
+    const applied = await client.rpc("apply_quote_options_to_scope_drafts", {
+      p_job_id: jobId,
+      p_scope_revision_id: revision,
+    });
+    if (applied.error) {
+      const missing = FUNCTION_MISSING.has(String(applied.error?.code ?? ""));
+      if (!(missing && options.state === "none")) throw applied.error;
     }
     const release = await client.rpc("release_scope_job_drafts", {
       p_job_id: jobId,

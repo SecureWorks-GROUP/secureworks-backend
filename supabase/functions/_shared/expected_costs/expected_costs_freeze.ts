@@ -44,6 +44,7 @@
 
 import { jsonHash } from '../release_packet/canonicalize.ts'
 import { readAcceptedQuoteCostSource } from './accepted_quote_cost_source.ts'
+import { readTakenQuoteOptions, takenOptionCost } from '../quote_options/taken_options.ts'
 
 // ── The canonical cost keys ──────────────────────────────────────────────────
 // Verified identical across live jobs.pricing_json and frozen
@@ -100,7 +101,7 @@ export type ExpectedCostsSnapshot = {
   }
 }
 
-/** A taken quote option's cost, from pricing_json.optional_extras (send-quote quote_options.ts). */
+/** A taken quote option's cost, from its sealed copy on the job's option record (taken_options.ts). */
 export type AcceptedOptionCost = {
   id: string
   cost_ex_gst: number | null
@@ -112,10 +113,6 @@ export type FreezeExpectedCostsInput = {
   // send-quote's actual acceptance only. A declared release-to-scope binding
   // takes precedence over time selection; other legacy callers stay unchanged.
   quote_acceptance?: boolean
-  // Ruling 14 step 1: the options the customer took on this acceptance. Each
-  // cost goes into its lane (materials or labour; 'other' only into the
-  // total) and into totalCostEstimate. Absent or empty: exactly as before.
-  accepted_options?: AcceptedOptionCost[]
   // Overridable clock for tests + so callers can pin frozen_at to the exact
   // accept moment. Defaults to now().
   now_iso?: string
@@ -145,6 +142,7 @@ export type FreezeExpectedCostsResult =
         | 'zero_filled_pricing' // lanes present but all 0 — fabricated placeholder, not a baseline
         | 'frozen_hash_mismatch_no_live' // frozen row failed verification, no live fallback
         | 'accepted_quote_source_unproven'
+        | 'quote_options_unreadable' // the job's option record could not be read; nothing written
       existing_confidence?: ExpectedCostConfidence
       source_reason?: string
     }
@@ -407,8 +405,24 @@ export async function freezeExpectedCostsOnAcceptance(
     return { ok: true, snapshot: false, reason: 'zero_filled_pricing' }
   }
 
-  // Taken quote options join only a real base baseline (checked above).
-  const taken = input.accepted_options ?? []
+  // Ruling 14 step 1: the options the customer took join only a real base
+  // baseline (checked above). They are read from the job's durable option
+  // record (the current accepted quote's), never from the request that
+  // happened to finish the acceptance, so the baseline is the same whichever
+  // party accepts last. An unreadable record writes nothing: the write-once
+  // baseline is never made without options the customer took.
+  const takenRead = await readTakenQuoteOptions(client, input.job_id)
+  if (takenRead.state === 'unreadable') {
+    return { ok: true, snapshot: false, reason: 'quote_options_unreadable' }
+  }
+  const taken: AcceptedOptionCost[] = []
+  if (takenRead.state === 'taken') {
+    for (const o of takenRead.options) {
+      const cost = takenOptionCost(o)
+      if (!cost) return { ok: true, snapshot: false, reason: 'quote_options_unreadable' }
+      taken.push(cost)
+    }
+  }
   let optionsBlock: ExpectedCostsSnapshot['quote_options'] | undefined
   let optionCost = 0
   if (taken.length > 0) {

@@ -56,9 +56,9 @@ BEGIN
     RAISE EXCEPTION 'quote options contract: a second record for one document was accepted';
   EXCEPTION WHEN unique_violation THEN NULL;
   END;
-  -- Written once: an update is refused.
+  -- Written once: an update is refused (one no check constraint would refuse).
   BEGIN
-    UPDATE public.quote_option_acceptances SET taken_option_ids = '{}'::text[]
+    UPDATE public.quote_option_acceptances SET created_at = created_at - interval '1 day'
      WHERE job_document_id = '00000000-0000-0000-0000-00000000f101';
     RAISE EXCEPTION 'quote options contract: the record was changed';
   EXCEPTION WHEN restrict_violation THEN NULL;
@@ -224,8 +224,9 @@ BEGIN
   PERFORM public.prepare_scope_job_drafts(job, rev, org);
   SELECT w.id INTO wo FROM public.work_orders w WHERE w.job_id = job AND w.kind = 'job';
   INSERT INTO public.job_documents (id, job_id, type) VALUES (doc, job, 'quote');
-  INSERT INTO public.quote_revisions (id, job_id, job_document_id, version, totals_snapshot_json, released_via, sent_at)
-    VALUES (qrev, job, doc, 1, '{}'::jsonb, 'contract', now());
+  INSERT INTO public.quote_revisions (id, job_id, job_document_id, version, totals_snapshot_json, released_via, sent_at,
+      scope_revision_id)
+    VALUES (qrev, job, doc, 1, '{}'::jsonb, 'contract', now(), rev);
   SELECT c INTO combo FROM jsonb_array_elements(combos) c
     WHERE (SELECT coalesce(array_agg(x ORDER BY x), '{}') FROM jsonb_array_elements_text(c->'option_ids') x) = p_taken;
   PERFORM public.accept_quote_document_with_options(doc, now(), jsonb_build_object(
@@ -292,5 +293,82 @@ BEGIN
   PERFORM public.release_scope_job_drafts(g.job, g.rev);
   err := pg_temp.qo_refused(format('SELECT public.apply_quote_options_to_scope_drafts(%L, %L)', g.job, g.rev));
   ASSERT err = 'scope_options_after_release', 'options after release are refused: ' || coalesce(err, 'it went through');
+END $$;
+
+-- 5. Which record applies: the one on the current accepted quote. A neighbour's
+-- acceptance writes none, a re-quote's superseded record never applies, two
+-- current records are refused, and an unknown crew total holds the drafts.
+DO $$
+DECLARE f record; r jsonb; err text; nb uuid := gen_random_uuid(); doc2 uuid := gen_random_uuid(); qrev2 uuid := gen_random_uuid();
+BEGIN
+  -- Client takes the gate; a neighbour then accepts their own quote with no
+  -- record (send-quote writes none for a neighbour). Applied once, then replayed.
+  f := pg_temp.qo_job(ARRAY['gate']);
+  INSERT INTO public.job_documents (id, job_id, type, accepted_at) VALUES (nb, f.job, 'quote', now());
+  r := public.apply_quote_options_to_scope_drafts(f.job, f.rev);
+  ASSERT r = '{"applied": true, "taken": 1}'::jsonb, 'a neighbour acceptance changes nothing: ' || r::text;
+  r := public.apply_quote_options_to_scope_drafts(f.job, f.rev);
+  ASSERT r = '{"applied": true, "replayed": true}'::jsonb, 'applied once';
+  ASSERT (SELECT agreed_labour_ex = 1000 AND jsonb_array_length(scope_items) = 2 FROM public.work_orders WHERE id = f.wo),
+    'the gate is on the work order once';
+
+  -- Neighbour accepted first (an hour earlier, no record), client took the gate
+  -- second: the same single application.
+  f := pg_temp.qo_job(ARRAY['gate']);
+  INSERT INTO public.job_documents (id, job_id, type, accepted_at)
+    VALUES (gen_random_uuid(), f.job, 'quote', now() - interval '1 hour');
+  ASSERT (SELECT count(*) FROM public.quote_option_acceptances WHERE job_id = f.job) = 1, 'the client record only';
+  r := public.apply_quote_options_to_scope_drafts(f.job, f.rev);
+  ASSERT r = '{"applied": true, "taken": 1}'::jsonb, 'applied once: ' || r::text;
+  ASSERT (SELECT agreed_labour_ex = 1000 FROM public.work_orders WHERE id = f.wo), 'the gate once, either order';
+
+  -- Two current records (never written by send-quote): refused, nothing changes.
+  f := pg_temp.qo_job(ARRAY['gate']);
+  INSERT INTO public.job_documents (id, job_id, type) VALUES (doc2, f.job, 'quote');
+  INSERT INTO public.quote_revisions (id, job_id, job_document_id, version, totals_snapshot_json, released_via, sent_at)
+    VALUES (qrev2, f.job, doc2, 1, '{}'::jsonb, 'contract', now());
+  INSERT INTO public.quote_option_acceptances (job_id, job_document_id, quote_revision_id, accepted_via, offered,
+      base_total_inc_gst, accepted_total_ex_gst, accepted_gst, accepted_total_inc_gst, accepted_deposit_inc_gst,
+      accepted_combination)
+    VALUES (f.job, doc2, qrev2, 'public_link', '[{"id":"gate"}]'::jsonb, 3300, 3000, 300, 3300, 0,
+      (SELECT v FROM qo_fx WHERE k = 'base'));
+  err := pg_temp.qo_refused(format('SELECT public.apply_quote_options_to_scope_drafts(%L, %L)', f.job, f.rev));
+  ASSERT err = 'scope_options_more_than_one_record', 'two current records are refused: ' || coalesce(err, 'it went through');
+  ASSERT (SELECT agreed_labour_ex = 800 FROM public.work_orders WHERE id = f.wo), 'nothing changes';
+
+  -- Re-quoted: the gate record's document is superseded and the new quote is
+  -- not accepted yet. The drafts are held, never released at the base price.
+  f := pg_temp.qo_job(ARRAY['gate']);
+  UPDATE public.job_documents SET superseded_at = now() WHERE job_id = f.job;
+  err := pg_temp.qo_refused(format('SELECT public.apply_quote_options_to_scope_drafts(%L, %L)', f.job, f.rev));
+  ASSERT err = 'scope_options_record_superseded', 'an open re-quote holds: ' || coalesce(err, 'it went through');
+  ASSERT (SELECT agreed_labour_ex = 800 AND jsonb_array_length(scope_items) = 1 FROM public.work_orders WHERE id = f.wo),
+    'the superseded option is not applied';
+  -- The new quote accepted with nothing taken: its record is the one that applies.
+  INSERT INTO public.job_documents (id, job_id, type) VALUES (gen_random_uuid(), f.job, 'quote') RETURNING id INTO doc2;
+  qrev2 := gen_random_uuid();
+  INSERT INTO public.quote_revisions (id, job_id, job_document_id, version, totals_snapshot_json, released_via, sent_at)
+    VALUES (qrev2, f.job, doc2, 2, '{}'::jsonb, 'contract', now());
+  PERFORM public.accept_quote_document_with_options(doc2, now(), jsonb_build_object(
+    'job_id', f.job, 'job_document_id', doc2, 'quote_revision_id', qrev2, 'accepted_via', 'public_link',
+    'offered', '[{"id":"gate"},{"id":"lights"}]'::jsonb, 'taken_option_ids', '[]'::jsonb,
+    'base_total_inc_gst', 3300, 'accepted_total_ex_gst', 3000, 'accepted_gst', 300,
+    'accepted_total_inc_gst', 3300, 'accepted_deposit_inc_gst', 0,
+    'taken_options', '[]'::jsonb, 'accepted_combination', (SELECT v FROM qo_fx WHERE k = 'base')));
+  r := public.apply_quote_options_to_scope_drafts(f.job, f.rev);
+  ASSERT r = '{"applied": true, "taken": 0}'::jsonb, 'the current record applies, not the superseded one: ' || r::text;
+  ASSERT (SELECT agreed_labour_ex = 800 FROM public.work_orders WHERE id = f.wo), 'never applied twice or from the old quote';
+
+  -- A taken crew option sealed with no total: unknown labour. Refused and held,
+  -- never written as the base labour; the drafts are not released by the caller.
+  UPDATE qo_fx SET v = jsonb_set(v, '{labour_line,total}', 'null') WHERE k = 'gate';
+  f := pg_temp.qo_job(ARRAY['gate']);
+  err := pg_temp.qo_refused(format('SELECT public.apply_quote_options_to_scope_drafts(%L, %L)', f.job, f.rev));
+  ASSERT err = 'scope_options_labour_unknown', 'an unknown crew total holds: ' || coalesce(err, 'it went through');
+  ASSERT (SELECT agreed_labour_ex = 800 AND jsonb_array_length(scope_items) = 1 AND approved_at IS NULL
+    FROM public.work_orders WHERE id = f.wo), 'no understated agreed labour is written';
+  ASSERT (SELECT quote_options_applied_at IS NULL AND released_at IS NULL FROM public.scope_job_draft_sets WHERE job_id = f.job),
+    'nothing applied or released';
+  UPDATE qo_fx SET v = jsonb_set(v, '{labour_line,total}', '200') WHERE k = 'gate';
 END $$;
 ROLLBACK;
