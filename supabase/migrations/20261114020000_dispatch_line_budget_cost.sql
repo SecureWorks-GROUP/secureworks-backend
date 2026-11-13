@@ -157,7 +157,7 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dispatch_supplier_order_emails_order_cost_shape') THEN
     ALTER TABLE public.dispatch_supplier_order_emails ADD CONSTRAINT dispatch_supplier_order_emails_order_cost_shape
       CHECK (order_cost IS NULL OR (jsonb_typeof(order_cost) = 'object'
-                                    AND order_cost->>'version' = 'dispatch-order-cost.v1'));
+                                    AND COALESCE(order_cost->>'version', '') = 'dispatch-order-cost.v1'));
   END IF;
 END $cost$;
 
