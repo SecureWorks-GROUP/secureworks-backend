@@ -1601,9 +1601,11 @@ export async function suggestDispatchV2Draft(
     refuse(409, "quote_option_line_unusable", "A quote option the customer took has no usable order line in the sealed quote, so the list was not filled. Check the quote.");
   }
   for (const item of taken.items) {
-    if (!dispatchV2SuggestionAllowed(item.description)) continue;
-    const [line] = dispatchSuggestedLines([item]);
-    if (!line) continue;
+    // takenOptionOrderItems already holds such a line; never skip one silently.
+    const [line] = dispatchV2SuggestionAllowed(item.description) ? dispatchSuggestedLines([item]) : [];
+    if (!line) {
+      refuse(409, "quote_option_line_unusable", "A quote option the customer took has no usable order line in the sealed quote, so the list was not filled. Check the quote.");
+    }
     suggested.push({
       ...line,
       scope_line_id: item.scope_line_id,

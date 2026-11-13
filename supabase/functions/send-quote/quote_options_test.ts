@@ -513,6 +513,8 @@ Deno.test('R14 a destination line its consumer cannot use is refused before acce
     ['option_supplier_line_unit_missing', (o) => { o[0] = { ...o[0], order_line: { ...o[0].order_line, unit: '' } } }],
     ['option_supplier_line_id_missing', (o) => { o[0] = { ...o[0], order_line: { ...o[0].order_line, id: '' } } }],
     ['option_supplier_line_is_office', (o) => { o[0] = { ...o[0], order_line: { ...o[0].order_line, supplierId: 'office' } } }],
+    ['option_supplier_line_not_supplier_copy', (o) => { o[0] = { ...o[0], order_line: { ...o[0].order_line, description: 'Concrete bags for extra posts' } } }],
+    ['option_supplier_line_not_supplier_copy', (o) => { o[0] = { ...o[0], order_line: { ...o[0].order_line, description: 'Delivery fee' } } }],
     ['option_crew_line_key_missing', (o) => { o[1] = { ...o[1], labour_line: { ...o[1].labour_line, line_key: '' } } }],
     ['option_crew_line_total_unreadable', (o) => { o[1] = { ...o[1], labour_line: { ...o[1].labour_line, total: 'lots' } } }],
     ['option_crew_line_description_missing', (o) => { o[1] = { ...o[1], labour_line: { ...o[1].labour_line, description: ' ' } } }],

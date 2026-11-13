@@ -57,3 +57,23 @@ Deno.test("R14 dispatch: both fills add the taken options and refuse an unreadab
     }
   }
 });
+
+Deno.test("R14 dispatch: a taken supplier line Dispatch never puts on supplier copy holds both fills, never 'on this order' while dropped", () => {
+  for (const description of ["Concrete bags for extra posts", "Concrete footings", "Tek screws 12g", "Delivery fee", "Labour to fit", "Removal of old sheets"]) {
+    const sealed = { order_line: { id: "z", description, quantity: 2, unit: "each", supplierId: "elec", supplierName: "Sparky Supplies" } };
+    assertEquals(takenOptionOrderItems([LIGHTS, { id: "x", name: "Extra", goes: "supplier", sealed }]),
+      { state: "unusable", option_ids: ["x"] }, description);
+  }
+  // A line both fills keep is still read, with its note.
+  const ok = takenOptionOrderItems([LIGHTS]);
+  assertEquals(ok.state, "read");
+});
+
+Deno.test("R14 dispatch: the v2 fill never skips a taken option silently, pinned by source", () => {
+  const src = Deno.readTextFileSync(new URL("./dispatch_v2_store.ts", import.meta.url));
+  const at = src.indexOf("for (const item of taken.items) {");
+  if (at < 0) throw new Error("the taken option loop moved");
+  const block = src.slice(at, src.indexOf("notes.push(...taken.notes);", at));
+  if (/\bcontinue\b/.test(block)) throw new Error("a taken option is skipped while its note says it is on the order");
+  if (!block.includes('"quote_option_line_unusable"')) throw new Error("a line the fill cannot keep must refuse");
+});

@@ -13,6 +13,7 @@
 //
 // A revision with no optional_extras block is byte-for-byte today: none() is
 // returned and nothing here touches the acceptance.
+import { goesOnSupplierCopy } from '../_shared/quote_options/supplier_copy_rule.ts'
 
 export const MAX_QUOTE_OPTIONS = 6
 
@@ -151,6 +152,8 @@ export function destinationLineProblem(goes: 'supplier' | 'crew' | 'office', lin
     const supplier = line.supplier ?? line.supplierId ?? line.supplier_id
     const sid = typeof supplier === 'string' ? supplier : isRec(supplier) ? supplier.id : null
     if (typeof sid === 'string' && sid.trim().toLowerCase() === 'office') return 'option_supplier_line_is_office'
+    // Dispatch never puts these on supplier copy, so the line could never be ordered.
+    if (!goesOnSupplierCopy(line.description)) return 'option_supplier_line_not_supplier_copy'
   } else if (goes === 'crew') {
     if (!nonEmptyString(line.line_key)) return 'option_crew_line_key_missing'
     if (!moneyOrNull(line.total)) return 'option_crew_line_total_unreadable'
