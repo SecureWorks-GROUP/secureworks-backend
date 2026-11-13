@@ -1,0 +1,122 @@
+# Job budget v1 (ruling 17 step 1, backend half)
+
+The job budget is what a sealed quote says the job will cost and make: every
+material line by supplier, the labour, the other lanes (delivery, removal, skip
+and tip, hire, buffer, other), commission and the totals. The Scope Engine
+builds it at seal and freezes it as the top-level key `budget` of the
+revision's pricing record (`scope_revisions.pricing_canonical_text`, covered by
+`pricing_hash`), shape `budget.v1`. The job system stores it at acceptance.
+
+Step 1 only records it. Nothing reads it for money yet: `jobs.expected_costs`
+is written exactly as before and Job Profit is unchanged (step 5 switches
+both). No operator share of profit is recorded anywhere.
+
+## Where it comes from (B1, B11)
+
+- Only the accepted revision the acceptance chain names
+  (`readAcceptedQuoteCostSource` answers `bound`), read through
+  `fetchNamedAcceptedRevision`, its pricing re-hashed against `pricing_hash`.
+  Never `jobs.pricing_json`, which the tools may also carry a `budget` in.
+- `bound` means the whole job is accepted (every party), every accepted
+  document was released from one revision, and no variation is accepted. Any
+  other answer stores nothing: an accepted variation means no budget (B11).
+- A revision sealed before step 1 has no `budget` key: nothing is stored and
+  today's path runs.
+
+## What is stored
+
+`supabase/migrations/20261113190000_job_budgets.sql`:
+
+| Object | What it is |
+| --- | --- |
+| `job_budgets` | One row per accepted revision: the totals as columns, the taken option ids, the revision's `pricing_hash`, the whole budget as `budget` (jsonb). Version 1, 2, ... per job. Write-once (trigger refuses update, delete, truncate). |
+| `job_budget_lines` | One row per line, every lane, unique on `(budget_id, key)` (B4). `line_id` where the tool sealed one. Write-once. |
+| `record_job_budget(...)` | The one writer, service role only. Checks the revision is the job's, frozen, with that hash; refuses a third decimal (B7); same budget again is a replay, a different one for the same revision is `job_budget_conflict`. |
+| `v_job_budget` | Each job's current version (lanes, `by_supplier`, totals, gaps), or `state = 'refused'` with `state_label = 'budget refused: <code>'` when the job has no stored budget and a refusal was recorded. Staff and service only. |
+
+Money is dollars, `numeric(12,2)`, ex GST unless the name says inc. Percents
+are `numeric(5,2)` for the commission rate (B10) and two decimals for the
+profit percents. `total_inc_gst = sell_ex_gst + gst` and the profit sums are
+table checks (B8). `staff_id` values are `public.users.id` (B9). `rule_id` is
+free text (B10).
+
+## At acceptance
+
+`recordJobBudgetOnAcceptance` (`_shared/job_budget/record_job_budget.ts`) runs
+at both send-quote acceptance sites, right after
+`freezeExpectedCostsOnAcceptance`, in its own try/catch. It never blocks or
+undoes an acceptance.
+
+1. Read the bound revision and its `budget`.
+2. Check the base budget adds up (`checkBudget`, `_shared/job_budget/budget_v1.ts`).
+3. Add the options the customer took (`readTakenQuoteOptions`) by the contract's
+   one formula (`budgetWithOptions`, B6), then check the result again.
+4. When options were taken, the result's sell, GST and total must equal the
+   acceptance record's accepted totals to the cent.
+5. Store it through `record_job_budget`.
+
+### A budget that does not add up (B2)
+
+The acceptance stands. Nothing is stored. One `job_budget_refused` job event
+records `{ code, at?, scope_revision_id }`. Job events are readable by trades,
+so the event never carries money. `v_job_budget` shows
+`budget refused: <code>`. Before the migration is applied the writer answers
+`store_missing` and writes no event.
+
+Codes come from `checkBudget` (`gst_mismatch`, `lane_total_mismatch`,
+`supplier_total_mismatch`, `gross_profit_mismatch`, `commission_mismatch`,
+`gap_not_named`, `key_not_unique`, `money_not_two_decimals`, ... one per
+failed add-up), from the formula (`option_not_in_budget`, ...), and from the
+writer: `pricing_hash_mismatch`, `budget_revision_mismatch`,
+`quote_options_unreadable`, `option_sell_mismatch`, `budget_conflict`,
+`budget_write_failed`.
+
+## The options formula (B6)
+
+`budgetWithOptions(base, takenIds)`: in whole cents, half away from zero, no
+division by 1.1. Each taken option adds one line keyed `option:<id>` to the
+lane it lands in (a supplier's `by_supplier` entry, a new one with delivery 0
+when the supplier is new; labour and the work order amount; or an other lane,
+created when missing, crew-paid adding to the work order amount). A taken
+option with no cost makes its lane `null` and adds a `no_cost` gap. Totals,
+commission (0 when gross profit is zero or less) and both percents are worked
+again. The shared worked examples A to D are in
+`_shared/job_budget/budget_examples.ts` and pass to the cent.
+
+## Who can see it (merge condition)
+
+The budget carries commission and the salesperson. It is staff and service
+only. Every read that hands pricing to a customer, a trade or a crew document:
+
+| Read | Audience | What happens to `budget` |
+| --- | --- | --- |
+| send-quote `view`, run quote page (`buildRunQuotePage`) | customer | `withoutBudget` on the job's pricing before the page is built; the page prints named fields only. |
+| send-quote `view`, client page (`buildClientPage`) | customer | The job read selects no pricing. |
+| send-quote `model` (customer 3D page) | customer | Reads scope artifacts only, no pricing. |
+| send-quote customer emails (send, send-runs, acceptance, decline) | customer | Built from named totals; no pricing record is attached or embedded. |
+| ops-api `my_jobs` | trade | `pricing_json` deleted from every card (existing). |
+| ops-api `trade_job_detail` | trade | `pricing_json` dropped from the payload (existing); the quote packer gets `withoutBudget(pricing)`; `scope_json` goes through `redactTradeScopeQuote`, whose `TRADE_SCOPE_QUOTE_KEYS` now drops `budget` at any depth. |
+| ops-api `trade_quote_extract` | trade | Built from the trade pack, which picks quote lines and terms only; `pricing_json` is on its refused keys. |
+| Crew scope of works, work orders (`my_work_orders`, `my_job_work_order`) | crew | Built from the redacted scope and the quote fill's lines (descriptions, no money). |
+
+Staff reads (`get_scope_revision_for_viewer`, `read_job_record`, the scoping
+tools through ghl-proxy, reporting) are unchanged and may show it. Proof:
+`ops-api/job_budget_strip_test.ts`.
+
+## Tests
+
+- `_shared/job_budget/budget_v1_test.ts`: the formula and examples A to D,
+  every add-up code, gaps, the one-figure patio and the allowance entry,
+  money to two decimals, the strip.
+- `_shared/job_budget/record_job_budget_test.ts`: the acceptance writer.
+- `ops-api/job_budget_strip_test.ts`: every read in the table above.
+- `supabase/tests/migration-contracts/20261113190000_job_budgets/`: privileges,
+  the writer, replay, conflict, revision and decimal refusals, write-once, the
+  view and the refused state; break and rollback proofs.
+
+## Rollout
+
+Apply `20261113190000_job_budgets.sql` before or with the matching
+`send-quote` deploy (the writer skips with `store_missing` until it is
+applied). The rollback (`supabase/rollbacks/20261113190000_job_budgets_down.sql`)
+drops the writer, the view and the guard and keeps every stored budget.

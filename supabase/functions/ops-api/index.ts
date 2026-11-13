@@ -657,6 +657,7 @@ import {
 // Scope-Memory-Saving M1 (issue #127) — full-content single-revision reader
 // backing the frozen-revision viewer. Hash-verifies canonical text, then
 // signs short-lived URLs for the private scope-artifacts bucket. Read-only.
+import { withoutBudget } from '../_shared/job_budget/budget_v1.ts'
 import {
   getScopeRevisionForViewer as _getScopeRevisionForViewer,
 } from '../_shared/scope_freeze/get_scope_revision_for_viewer.ts'
@@ -45973,6 +45974,10 @@ export const TRADE_SCOPE_QUOTE_KEYS = new Set([
   'labourCostEstimate',
   'materialCostEstimate',
   'commissionCostEstimate',
+  // Ruling 17: the job budget (commission, salesperson, every cost line) is
+  // staff only. The scoping tools freeze it as the pricing record's top-level
+  // `budget`; dropped here at any depth wherever it is carried.
+  'budget',
 ])
 // Walked, never dropped as objects: the quote narrative + quote-number pack.
 // A bare numeric/money value on these keys is still stripped. Nested objects
@@ -47058,7 +47063,7 @@ async function tradeJobDetail(
     documents: quoteDocsRes.error ? [] : (quoteDocsRes.data || []),
     jobType: jobRes.data?.type,
     liveScopeJson: jobRes.data?.scope_json,
-    livePricingJson: jobRes.data?.pricing_json,
+    livePricingJson: withoutBudget(jobRes.data?.pricing_json),
     isHenry: isHenryInstaller(viewer.email),
     customer: {
       name: jobRes.data?.client_name,

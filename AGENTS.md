@@ -5094,6 +5094,22 @@ legacy insert), and only send-quote's own sources (`send-quote`,
 `supabase/tests/migration-contracts/20260923233000_job_quote_values/`,
 `job_commercial_read_test.ts`.
 
+## The Job Budget Is Read From The Bound Revision Only, And Never Reaches A Customer Or Trade
+
+Ruling 17 step 1 (`20261113190000`, `docs/job-budget-v1.md`): at acceptance
+`recordJobBudgetOnAcceptance` stores the accepted revision's frozen
+`budget` (`budget.v1`) in `job_budgets` / `job_budget_lines` through the one
+writer `record_job_budget`, with the taken options added by `budgetWithOptions`
+(`_shared/job_budget/budget_v1.ts`, the one formula). Read it only from the
+`bound` revision, re-hashed; never from `jobs.pricing_json`. A budget that does
+not add up stores nothing and leaves one `job_budget_refused` job event (code
+only, never money: trades read job events); the acceptance always stands.
+`jobs.expected_costs` is untouched until step 5. The budget carries commission
+and the salesperson: any read that hands pricing or scope to a customer, trade
+or crew document strips it (`withoutBudget`, and `budget` is on
+`TRADE_SCOPE_QUOTE_KEYS`); a new such read must too, and joins the list in the
+doc and `ops-api/job_budget_strip_test.ts`.
+
 ## Booking confirmation authority
 
 Read/approval handoff, published availability freshness and ledger/outcome

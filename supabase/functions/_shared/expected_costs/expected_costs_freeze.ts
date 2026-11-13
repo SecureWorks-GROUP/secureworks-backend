@@ -262,7 +262,7 @@ async function fetchFrozenRevisionAsOfAcceptance(
 // A released quote may name a now-superseded A while the draft is already B.
 // Identity, job, frozen lifecycle, acceptance time and BOTH canonical payloads
 // are checked. No newest-by-time or price match can replace the declared A.
-async function fetchNamedAcceptedRevision(
+export async function fetchNamedAcceptedRevision(
   client: any,
   job_id: string,
   revision_id: string,
