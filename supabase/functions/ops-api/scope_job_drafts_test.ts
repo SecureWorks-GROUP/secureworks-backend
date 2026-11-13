@@ -410,7 +410,11 @@ Deno.test("scope drafts: acceptance uses the accepted source, never silently sub
   assertEquals(await releaseScopeJobDraftsOnAcceptance(client, job), {
     state: "released",
   });
+  // Ruling 14: the taken quote options are applied to the same revision first.
   assertEquals(client.calls, [{
+    action: "apply_quote_options_to_scope_drafts",
+    args: { p_job_id: job, p_scope_revision_id: accepted },
+  }, {
     action: "release_scope_job_drafts",
     args: {
       p_job_id: job,
@@ -448,7 +452,7 @@ Deno.test("scope drafts: acceptance with an owner approval missing is retained a
     state: "held_for_owner_approval",
     missing: ["price_approval", "work_order_approval"],
   });
-  assertEquals(client.calls.length, 1);
+  assertEquals(client.calls.map((c) => c.action), ["apply_quote_options_to_scope_drafts", "release_scope_job_drafts"]);
   // The database writes the held audit; the helper adds no fault event.
   assertEquals(client.events, []);
 });

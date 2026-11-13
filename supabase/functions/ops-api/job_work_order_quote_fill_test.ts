@@ -1822,3 +1822,94 @@ Deno.test("new patio tool: lines that do not make the quote's labour are kept, f
   assertEquals(labour.length, 2);
   assert(labour.every((l: any) => !l.counted && l.needs_review && l.flags.includes("labour_differs_from_quote")));
 });
+
+// Ruling 14 step 1 (contract 4.4): a taken crew option's sealed labour line
+// joins the work order and its total the agreed labour; an untaken one is not
+// there; an option record that cannot be read holds the draft for review.
+const GATE_OPTION = {
+  id: "gate", name: "Extra gate", goes: "crew",
+  labour_line: { line_key: "opt-gate", description: "Hang the extra gate", quantity: 1, unit: "each", rate: 200, total: 200 },
+};
+const LIGHT_OPTION = { id: "lights", name: "Lights", goes: "supplier", order_line: { name: "Light", qty: 2 } };
+// The option record sits on the client's current accepted document. Typed
+// "other" here so the fake's accepted-source read is unchanged.
+const OPTION_DOC = "doc-options";
+const optionDocs = (superseded_at: string | null = null) => [{ id: OPTION_DOC, job_id: JOB, type: "other", superseded_at }];
+
+Deno.test("R14 a taken crew option joins the filled draft and the agreed labour, and the draft still issues on its own", async () => {
+  const before = baseDb();
+  await fillJobWorkOrderDraftFromQuote(before, JOB);
+  const base = before.tables.work_orders[0];
+  const db = baseDb({
+    job_documents: optionDocs(),
+    quote_option_acceptances: [{
+      job_id: JOB,
+      job_document_id: OPTION_DOC,
+      offered: [GATE_OPTION, LIGHT_OPTION],
+      taken_option_ids: ["gate", "lights"],
+      taken_options: [GATE_OPTION, LIGHT_OPTION],
+    }],
+  } as any);
+  const outcome: any = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals(outcome.filled, true);
+  const wo = db.tables.work_orders[0];
+  assertEquals(wo.scope_items.length, base.scope_items.length + 1, "one line for the crew option, none for the supplier option");
+  const opt = wo.scope_items.find((l: any) => l.line_key === "option:gate");
+  assertEquals([opt.description, opt.qty, opt.unit, opt.total], ["Labour: Hang the extra gate", 1, "each", 200]);
+  assert(typeof base.agreed_labour_ex === "number", "the base quote carries agreed labour");
+  assertEquals(wo.agreed_labour_ex, base.agreed_labour_ex + 200);
+  assert(base.quote_filled_at, "the base fill is stamped");
+  assertEquals(Boolean(wo.quote_filled_at), Boolean(base.quote_filled_at), "issued on its own exactly as without options");
+});
+
+Deno.test("R14 a taken crew option with no sealed total holds the draft for the approver", async () => {
+  const noTotal = { ...GATE_OPTION, labour_line: { ...GATE_OPTION.labour_line, total: null } };
+  const db = baseDb({
+    job_documents: optionDocs(),
+    quote_option_acceptances: [{ job_id: JOB, job_document_id: OPTION_DOC, taken_option_ids: ["gate"], taken_options: [noTotal] }],
+  } as any);
+  await fillJobWorkOrderDraftFromQuote(db, JOB);
+  const wo = db.tables.work_orders[0];
+  assert(wo.scope_items.every((l: any) => l.flags.includes("quote_option_labour_unknown") && l.needs_review));
+  assertEquals(wo.quote_filled_at ?? null, null, "never stamped for the automatic issue");
+});
+
+Deno.test("R14 an option record that cannot be read holds the draft for the approver", async () => {
+  const db = baseDb({
+    job_documents: optionDocs(),
+    quote_option_acceptances: [{ job_id: JOB, job_document_id: OPTION_DOC, taken_option_ids: ["gate"], taken_options: [] }],
+  } as any);
+  await fillJobWorkOrderDraftFromQuote(db, JOB);
+  const wo = db.tables.work_orders[0];
+  assert(wo.scope_items.every((l: any) => l.flags.includes("quote_options_unreadable") && l.needs_review));
+  assert(!wo.scope_items.some((l: any) => l.line_key === "option:gate"));
+  assertEquals(wo.quote_filled_at ?? null, null);
+});
+
+Deno.test("R14 no option taken: the fill stamps the draft as before", async () => {
+  const db = baseDb({
+    job_documents: optionDocs(),
+    quote_option_acceptances: [{
+      job_id: JOB,
+      job_document_id: OPTION_DOC,
+      offered: [GATE_OPTION],
+      taken_option_ids: [],
+      taken_options: [],
+    }],
+  } as any);
+  await fillJobWorkOrderDraftFromQuote(db, JOB);
+  const wo = db.tables.work_orders[0];
+  assert(!wo.scope_items.some((l: any) => l.line_key.startsWith("option:")), "an untaken option is not on the work order");
+  assert(wo.quote_filled_at, "stamped as before");
+});
+
+Deno.test("R14 a record on a superseded (re-quoted) document is not applied", async () => {
+  const db = baseDb({
+    job_documents: optionDocs("2026-11-01T00:00:00Z"),
+    quote_option_acceptances: [{ job_id: JOB, job_document_id: OPTION_DOC, taken_option_ids: ["gate"], taken_options: [GATE_OPTION] }],
+  } as any);
+  await fillJobWorkOrderDraftFromQuote(db, JOB);
+  const wo = db.tables.work_orders[0];
+  assert(!wo.scope_items.some((l: any) => l.line_key === "option:gate"), "the old quote's option is not on the work order");
+  assert(wo.quote_filled_at, "stamped as with no options");
+});

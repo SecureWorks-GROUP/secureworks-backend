@@ -145,6 +145,19 @@ import { authorizeSendInvoiceAccess } from './send_invoice_access.ts'
 import { sendRunsJobTypeRefusal, sendRunsRequestRefusal } from './send_runs_request.ts'
 import { handleUploadPlans, resolveUploadPlansJob } from './upload_plans.ts'
 import {
+  acceptedPricing,
+  chooseOptions,
+  optionAcceptanceRecord,
+  optionRefusalMessage,
+  partyOptionDeposit,
+  readQuoteOptions,
+  tickedNothing,
+  type OptionChoice,
+  type QuoteOptionsOffer,
+} from './quote_options.ts'
+import { buildQuoteOptionsCard, QUOTE_OPTIONS_CSS } from './quote_options_page.ts'
+import { acceptDocumentWithOptions, loadDocumentOptions, readOptionAcceptances } from './quote_options_store.ts'
+import {
   decideSendQuoteAuth,
   jobOrgIdFromQuoteSendDocument,
   quoteSendMissingOrForeignRefusal,
@@ -858,7 +871,7 @@ serve(async (req: Request) => {
     //             body-supplied client_email / payment fields.
     let sendAuthMode: 'api_key' | 'jwt' = 'api_key'
     let sendAuthUser: SendQuoteAuthUser | null = null
-    if (path === 'send' || path === 'send-invoice' || path === 'send-runs') {
+    if (path === 'send' || path === 'send-invoice' || path === 'send-runs' || path === 'accept-for-customer') {
       const decided = await decideSendQuoteAuth({
         req,
         sb,
@@ -1574,7 +1587,21 @@ serve(async (req: Request) => {
       else if (latest.viewed_at) status = 'viewed'
       else if (latest.sent_at) status = 'sent'
 
+      // Ruling 14 read-back: the options taken on an accepted quote whose
+      // revision offered any. Absent: no options on that quote. A failed read is
+      // said, never shown as "no options".
+      let optionReadBack: Record<string, unknown> = {}
+      if (latest.accepted_at) {
+        const records = await readOptionAcceptances(sb, [latest.id])
+        if (records === null) optionReadBack = { accepted_options_unreadable: true }
+        else {
+          const row = records.get(latest.id)
+          if (row) optionReadBack = { accepted_option_ids: row.taken_option_ids || [] }
+        }
+      }
+
       return jsonResponse({
+        ...optionReadBack,
         status,
         quote_number: latest.quote_number,
         sent_at: latest.sent_at,
@@ -1796,12 +1823,25 @@ serve(async (req: Request) => {
         }
       }
 
+      // ── RULING 14: options the customer can tick ──
+      // Read from the released revision of this document. A quote with options
+      // is always shown on this page (never the HTML viewer redirect below),
+      // because the tick boxes and the live total live here.
+      let viewOptions: QuoteOptionsOffer | null = null
+      if (!doc.accepted_at && !doc.declined_at) {
+        const loaded = await loadDocumentOptions(sb, doc, sourceRunLabel)
+        if (loaded.kind === 'unreadable') return await htmlResponse(quoteViewRetryPage())
+        // The client's whole quote offers them on a shared fence too (the tool's
+        // party figures); a neighbour's document never does.
+        if (loaded.kind === 'offer' && !loaded.neighbour) viewOptions = loaded.offer
+      }
+
       // ── HTML REDIRECT (Slice 3) ──
       // Single-option docs with an html_url → redirect the client directly to the
       // interactive HTML quote. Docs with html_url NULL fall through to buildClientPage
       // (zero regression). Multi-option and per-run fencing paths have already returned
       // above, so this only fires for the single-doc case.
-      if (doc.html_url) {
+      if (doc.html_url && !viewOptions) {
         // html_url is uploaded best-effort by the client-side scoping tool and can be
         // absent on a significant portion of sent quotes. Verify the object exists before
         // redirecting; if missing, timed-out, or errored, fall through to the reliable
@@ -1827,7 +1867,7 @@ serve(async (req: Request) => {
       const acceptWords = !doc.accepted_at && !doc.declined_at
         ? await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel, job_contact_id: doc.job_contact_id ?? null })
         : null
-      return await htmlResponse(buildClientPage(doc, token, heroUrl, acceptWords))
+      return await htmlResponse(buildClientPage(doc, token, heroUrl, viewOptions, acceptWords))
     }
 
     // ── VARIATION ACCEPT/DECLINE ──
@@ -1869,19 +1909,71 @@ serve(async (req: Request) => {
       }
     }
 
-    // ── CLIENT ACCEPTS QUOTE ──
-    if (path === 'accept' && req.method === 'POST') {
-      const token = url.searchParams.get('token')
-      if (!token) return jsonResponse({ error: 'Token required' }, 400, corsHeaders)
+    // ── CLIENT ACCEPTS QUOTE (and, ruling 14, office phone acceptance) ──
+    // POST /accept?token= is the customer's link. POST /accept-for-customer is the
+    // office accepting for a customer on the phone: a signed-in office person
+    // (decideSendQuoteAuth, office roles, same tenant rule as /send) names the
+    // sent document and ticks the same option boxes. Both run the one acceptance
+    // below; only the reply differs (the office gets JSON, the customer a page).
+    const staffAccept = path === 'accept-for-customer' && req.method === 'POST'
+    if ((path === 'accept' && req.method === 'POST') || staffAccept) {
+      const acceptBody = await req.json().catch(() => ({})) as Record<string, unknown> | null
+      const tickedOptionIds = acceptBody && typeof acceptBody === 'object' && !Array.isArray(acceptBody)
+        ? acceptBody.option_ids
+        : undefined
+      const acceptVia: 'public_link' | 'staff_phone' = staffAccept ? 'staff_phone' : 'public_link'
+      const staffUserId: string | null = staffAccept ? (sendAuthUser?.id ?? null) : null
+      const acceptHtmlHeaders = { ...corsHeaders, 'Content-Type': 'text/html' }
+      const refuseAccept = (message: string, status = 200, code = 'acceptance_refused') =>
+        staffAccept
+          ? jsonResponse({ error: message, code }, status === 200 ? 409 : status, corsHeaders)
+          : new Response(errorPage(message), { status, headers: acceptHtmlHeaders })
+      const retryAccept = () =>
+        staffAccept
+          ? jsonResponse({ error: 'The quote could not be read just now. Nothing was saved; try again.', code: 'acceptance_read_failed' }, 503, corsHeaders)
+          : new Response(quoteViewRetryPage(), { status: 503, headers: acceptHtmlHeaders })
 
-      const { data: doc, error } = await sb
-        .from('job_documents')
-        .select('*, job_contacts(id, contact_label, client_name, share_percentage, quote_value_ex_gst, source_party_key)')
-        .eq('share_token', token)
-        .eq('sent_to_client', true)
-        .single()
+      let token: string | null = null
+      let doc: any = null
+      if (staffAccept) {
+        if (sendAuthMode !== 'jwt' || !sendAuthUser?.id) {
+          return jsonResponse({ error: 'Phone acceptance needs a signed-in office person', code: 'identified_staff_required' }, 403, corsHeaders)
+        }
+        const documentId = acceptBody?.document_id
+        if (typeof documentId !== 'string' || !documentId) {
+          return jsonResponse({ error: 'document_id required' }, 400, corsHeaders)
+        }
+        const { data: staffDoc, error: staffDocError } = await sb
+          .from('job_documents')
+          .select('*, job_contacts(id, contact_label, client_name, share_percentage, quote_value_ex_gst, source_party_key), jobs(org_id)')
+          .eq('id', documentId)
+          .eq('type', 'quote')
+          .eq('sent_to_client', true)
+          .maybeSingle()
+        if (staffDocError) return retryAccept()
+        const refused = quoteSendMissingOrForeignRefusal(
+          sendAuthMode,
+          !staffDoc,
+          staffDoc ? quoteSendTenantAccess(sendAuthMode, sendAuthUser?.orgId, staffDoc?.jobs?.org_id) : { ok: true },
+          'Document not found',
+        )
+        if (refused) return jsonResponse(refused.body, refused.status, corsHeaders)
+        doc = staffDoc
+        token = staffDoc.share_token || null
+      } else {
+        token = url.searchParams.get('token')
+        if (!token) return jsonResponse({ error: 'Token required' }, 400, corsHeaders)
 
-      if (error || !doc) return jsonResponse({ error: 'Quote not found' }, 404, corsHeaders)
+        const { data: linkDoc, error } = await sb
+          .from('job_documents')
+          .select('*, job_contacts(id, contact_label, client_name, share_percentage, quote_value_ex_gst, source_party_key)')
+          .eq('share_token', token)
+          .eq('sent_to_client', true)
+          .single()
+
+        if (error || !linkDoc) return jsonResponse({ error: 'Quote not found' }, 404, corsHeaders)
+        doc = linkDoc
+      }
 
       const sourceRunLabel = quoteDocumentRunLabel(doc)
 
@@ -1896,10 +1988,7 @@ serve(async (req: Request) => {
       // Scoped to whole-quote options only (run_label IS NULL): per-run fencing
       // acceptances have their own state machine below and must not be blocked.
       if (doc.superseded_at) {
-        return new Response(
-          errorPage('This option is no longer available — another option was already accepted.'),
-          { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
-        )
+        return refuseAccept('This option is no longer available — another option was already accepted.', 200)
       }
       if (doc.job_id && sourceRunLabel !== null) {
         // A fence-run link is acceptable only when it is its party's CURRENT
@@ -1920,16 +2009,10 @@ serve(async (req: Request) => {
         const { data: partyDocs, error: partyErr } = await partyQuery
         if (partyErr) {
           console.error('[accept] party current-document read failed:', partyErr.message)
-          return new Response(
-            errorPage('We could not confirm this quote right now. Please try again shortly.'),
-            { status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
-          )
+          return refuseAccept('We could not confirm this quote right now. Please try again shortly.', 503)
         }
         if (!quoteDocumentAcceptable(doc, partyDocs || [])) {
-          return new Response(
-            errorPage('This quote link is no longer current. Please open the latest quote we sent you.'),
-            { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
-          )
+          return refuseAccept('This quote link is no longer current. Please open the latest quote we sent you.', 200)
         }
       }
       if (doc.job_id && sourceRunLabel === null) {
@@ -1948,15 +2031,52 @@ serve(async (req: Request) => {
           : siblingQuery.is('job_contact_id', null)
         const { data: acceptedSiblings, error: acceptedSiblingsError } = await siblingQuery
         if (acceptedSiblingsError) {
-          return new Response(quoteViewRetryPage(), {
-            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
-          })
+          return retryAccept()
         }
         if (!quoteDocumentAcceptable(doc, acceptedSiblings || [])) {
-          return new Response(
-            errorPage('This option is no longer available — another option was already accepted.'),
-            { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
-          )
+          return refuseAccept('This option is no longer available — another option was already accepted.', 200)
+        }
+      }
+
+      // ── RULING 14: the options the customer ticked ──
+      // Read from the RELEASED revision of this document (the pricing that was
+      // sent), never the live job. A quote with no options is today's acceptance:
+      // optionPlan stays null and nothing below changes. Every refusal here is
+      // before any write, so the customer can correct the ticks and try again.
+      let optionPlan: {
+        offer: QuoteOptionsOffer
+        pricing: Record<string, unknown>
+        revisionId: string
+        shared: boolean
+        choice: Extract<OptionChoice, { ok: true }>
+      } | null = null
+      let optionsUnreadable: string | null = null
+      {
+        const loaded = await loadDocumentOptions(sb, doc, sourceRunLabel)
+        if (loaded.kind === 'unreadable') return retryAccept()
+        if (loaded.kind === 'offer') {
+          // Options are the client's alone (contract section 6): a shared
+          // fence's client takes them on their whole quote, with the tool's
+          // party figures; a neighbour's document offers none.
+          // A neighbour accepts their quote plainly: no option record is written
+          // for them, so the job's one option record is the client's.
+          if (loaded.neighbour) {
+            if (!tickedNothing(tickedOptionIds)) {
+              return refuseAccept(optionRefusalMessage('options_on_neighbour_quote'), 200, 'options_on_neighbour_quote')
+            }
+          } else {
+            const choice = chooseOptions(loaded.offer, tickedOptionIds)
+            if (!choice.ok) return refuseAccept(optionRefusalMessage(choice.reason), 200, choice.reason)
+            optionPlan = { offer: loaded.offer, pricing: loaded.pricing, revisionId: loaded.revisionId, shared: loaded.shared, choice }
+          }
+        } else if (!tickedNothing(tickedOptionIds)) {
+          const code = loaded.kind === 'invalid' ? loaded.reason : 'options_not_offered'
+          return refuseAccept(optionRefusalMessage(code), 200, code)
+        } else if (loaded.kind === 'invalid') {
+          // The offer cannot be checked, so nothing can be ticked: the base price
+          // is accepted (it never includes options) and the office is told below.
+          optionsUnreadable = loaded.reason
+          console.error('[accept] quote options unreadable; base price accepted:', JSON.stringify({ document_id: doc.id, reason: loaded.reason }))
         }
       }
 
@@ -1985,9 +2105,7 @@ serve(async (req: Request) => {
         ])
         if (quoteAcceptanceReadFailed([acceptancesRead, documentsRead, runItemsRead])) {
           console.error('[accept] pre-acceptance read failed; nothing written')
-          return new Response(quoteViewRetryPage(), {
-            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
-          })
+          return retryAccept()
         }
         acceptanceSnapshot = withPendingAcceptance({
           documents: documentsRead.data || [],
@@ -2000,11 +2118,51 @@ serve(async (req: Request) => {
       // kept with the acceptance below. A failed read never blocks accepting.
       const acceptWords = await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel, job_contact_id: doc.job_contact_id ?? null })
 
-      const { error: acceptError } = await sb
-        .from('job_documents')
-        .update({ accepted_at: acceptedAt })
-        .eq('id', doc.id)
-      if (acceptError) throw acceptError
+      if (optionPlan && doc.job_id) {
+        // Options decide money, so the acceptance and its record are one
+        // database transaction (accept_quote_document_with_options): the
+        // document is claimed once, and never accepted without the record of
+        // which options, at what total and deposit. A failed write writes
+        // nothing, so the customer's retry completes the same selection.
+        const accepted = await acceptDocumentWithOptions(sb, doc.id, acceptedAt, optionAcceptanceRecord({
+          jobId: doc.job_id,
+          documentId: doc.id,
+          revisionId: optionPlan.revisionId,
+          via: acceptVia,
+          staffUserId,
+          offer: optionPlan.offer,
+          choice: optionPlan.choice,
+        }))
+        if (!accepted.ok) {
+          console.error('[accept] option acceptance not written; nothing accepted:', JSON.stringify({ document_id: doc.id, reason: accepted.reason }))
+          return retryAccept()
+        }
+        if (!accepted.claimed) return jsonResponse({ error: 'Already accepted' }, 400, corsHeaders)
+      } else {
+        const { error: acceptError } = await sb
+          .from('job_documents')
+          .update({ accepted_at: acceptedAt })
+          .eq('id', doc.id)
+        if (acceptError) throw acceptError
+      }
+
+      if (doc.job_id && optionsUnreadable) {
+        try {
+          await sb.from('job_events').insert({
+            job_id: doc.job_id,
+            event_type: 'quote_options_unreadable',
+            detail_json: {
+              document_id: doc.id,
+              reason: optionsUnreadable,
+              message: 'This quote listed options that could not be read, so none could be ticked. The base price was accepted: ask the customer which options they want.',
+            },
+          })
+        } catch {
+          // The console line above is the record of last resort.
+        }
+      }
+      // The options the customer took: their record is written with the acceptance.
+      const optionsTaken = optionPlan ? optionPlan.choice.taken : []
 
       // ── SUPERSEDE SIBLING OPTIONS ON ACCEPT (money-path, awaited) ──
       // Right after the accepted_at write: mark the OTHER whole-quote options for
@@ -2042,7 +2200,9 @@ serve(async (req: Request) => {
         const sharedPayload = {
           quote_revision_id: doc.id,
           quote_number: doc.quote_number || null,
-          accepted_via: 'public_link',
+          accepted_via: acceptVia,
+          ...(staffUserId ? { accepted_by: staffUserId } : {}),
+          ...(optionPlan ? { accepted_option_ids: optionsTaken.map((o) => o.id) } : {}),
           contact_id: doc.job_contact_id || null,
           contact_name: doc.job_contacts?.client_name || null,
           run_label: doc.run_label || null,
@@ -2286,9 +2446,15 @@ serve(async (req: Request) => {
           }
 
           // Return "Next Steps" page for fully accepted run
+          if (staffAccept) {
+            return jsonResponse({ accepted: true, accepted_via: 'staff_phone', document_id: doc.id, run_label: runLabel, run_fully_accepted: true, deposit_invoice_failed: runInvoiceFailed }, 200, corsHeaders)
+          }
           return await htmlResponse(buildRunAcceptedPage(job, run, doc.job_contacts?.client_name || '', { invoiceFailed: runInvoiceFailed }))
         } else {
           // ── WAITING FOR OTHER PARTY ──
+          if (staffAccept) {
+            return jsonResponse({ accepted: true, accepted_via: 'staff_phone', document_id: doc.id, run_label: runLabel, run_fully_accepted: false }, 200, corsHeaders)
+          }
           return await htmlResponse(buildWaitingPage(job, run, doc.job_contacts?.client_name || '', runLabel))
         }
       }
@@ -2322,17 +2488,39 @@ serve(async (req: Request) => {
         // B1 follow-on: the job carries the price the customer accepted (accepted_job_price.ts), set before the
         // status, the expected-cost baseline, the acceptance event, the GHL note and the deposit read it. One quote
         // party only; a quote sent before #1271 has no released row and keeps the job's price as it is.
-        if (!isMultiContact && job) {
-          const priced = await setJobPriceToAcceptedQuote(sb, { job_id: doc.job_id, document_id: doc.id, job_pricing: job.pricing_json })
+        // Ruling 14: with an option offer, the accepted price is the tool's
+        // combination for the ticked set (quote_options.ts acceptedPricing); with
+        // none ticked it is the base price, naming that none was taken.
+        // A shared fence's client who took options moves the whole job's price
+        // too (the combination carries every party's share, only theirs changed).
+        let optionJobPriceHeld: string | null = null
+        if (job && (!isMultiContact || (optionPlan && optionsTaken.length > 0))) {
+          const optionPricing = optionPlan
+            ? acceptedPricing(optionPlan.pricing, optionPlan.offer, optionPlan.choice)
+            : undefined
+          const priced = await setJobPriceToAcceptedQuote(sb, {
+            job_id: doc.job_id,
+            document_id: doc.id,
+            job_pricing: job.pricing_json,
+            ...(optionPricing ? { pricing: optionPricing } : {}),
+          })
           if (priced.updated) {
             job.pricing_json = priced.pricing
             await sb.from('job_events').insert({
               job_id: doc.job_id,
               event_type: 'job_price_from_accepted_quote',
-              detail_json: { document_id: doc.id, quote_number: doc.quote_number || null, quote_revision_id: priced.revisionId },
+              detail_json: {
+                document_id: doc.id,
+                quote_number: doc.quote_number || null,
+                quote_revision_id: priced.revisionId,
+                ...(optionPricing ? { accepted_option_ids: optionsTaken.map((o) => o.id) } : {}),
+              },
             })
           } else if (priced.reason !== 'already_the_accepted_price') {
             console.warn('[accept] job price not set from the accepted quote:', JSON.stringify({ job_id: doc.job_id, document_id: doc.id, reason: priced.reason }))
+            // A deposit on the accepted options must not be raised against a job
+            // still priced without them (its invoice wording reads the job's total).
+            if (optionsTaken.length > 0) optionJobPriceHeld = priced.reason
           }
         }
 
@@ -2351,17 +2539,38 @@ serve(async (req: Request) => {
         // once the whole job is accepted, matching the accepted_at write above.
         if (newStatus === 'accepted') {
           try {
+            // Ruling 14 step 1: each taken option's cost joins its lane, read by
+            // the freeze from the job's option record whichever party accepted last.
             const efc = await freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id, quote_acceptance: true })
             console.log('[send-quote] expected-cost baseline', JSON.stringify({ job_id: doc.job_id, result: efc }))
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
           }
+          // Taken options are added to the drafts (work order lines, payer
+          // amounts, payment stages) before they are released.
           try {
             const { releaseScopeJobDraftsOnAcceptance } = await import('../_shared/scope_freeze/release_scope_job_drafts.ts')
             await releaseScopeJobDraftsOnAcceptance(sb, doc.job_id)
           } catch {
             console.error('[send-quote] scope work-order release held for retry (non-blocking); customer acceptance retained')
           }
+        }
+
+        // Ruling 14 step 1: which options the customer took and where each
+        // goes (supplier order, work order, office list). Ids, names and
+        // destinations only: job_events is readable by trades, so no amount.
+        if (optionsTaken.length > 0) {
+          try {
+            await sb.from('job_events').insert({
+              job_id: doc.job_id,
+              event_type: 'quote_options_taken',
+              detail_json: {
+                document_id: doc.id,
+                options: optionsTaken.map((o) => ({ id: o.id, name: o.name, goes: o.goes })),
+                message: `Customer took ${optionsTaken.length} quote option${optionsTaken.length === 1 ? '' : 's'}: ${optionsTaken.map((o) => `${o.name} (${o.goes === 'supplier' ? 'supplier order' : o.goes === 'crew' ? 'work order' : 'office list'})`).join(', ')}.`,
+              },
+            })
+          } catch { /* the record and the acceptance stand */ }
         }
 
         // Log rich event for Ops Dashboard attention panel
@@ -2378,12 +2587,17 @@ serve(async (req: Request) => {
           event_type: 'quote_accepted',
           detail_json: {
             document_id: doc.id,
-            accepted_via: 'share_link',
+            accepted_via: staffAccept ? 'staff_phone' : 'share_link',
+            ...(staffUserId ? { accepted_by: staffUserId } : {}),
+            ...(optionPlan ? {
+              accepted_option_ids: optionsTaken.map((o) => o.id),
+              offered_option_ids: optionPlan.offer.options.map((o) => o.id),
+            } : {}),
             accepted_at: new Date().toISOString(),
             job_number: job?.job_number || null,
             client_name: acceptorName,
             contact_label: contactLabel,
-            amount: totalIncGST || null,
+            amount: (optionsTaken.length > 0 && optionPlan ? optionPlan.choice.combination.totalIncGST : totalIncGST) || null,
             is_multi_contact: isMultiContact,
             new_status: newStatus,
             ...acceptSentenceRecord(acceptWords),
@@ -2518,12 +2732,21 @@ serve(async (req: Request) => {
         // D1F-1/D1F-2: a named party's deposit comes from the version they accepted
         // (a neighbour's from their share of it, never their live contact value);
         // held with a reason when that cannot be read or matched.
-        const partyDeposit = job?.id && doc.job_contact_id && doc.job_contacts
+        // Ruling 14: ticked options put the deposit on the accepted total: the
+        // tool's precomputed first payment for the ticked set. On a shared
+        // fence it is the client's own amount on that first payment.
+        const optionCombination = optionsTaken.length > 0 && optionPlan ? optionPlan.choice.combination : null
+        const optionDeposit = optionCombination
+          ? (isMultiContact
+            ? partyOptionDeposit(optionPlan!.pricing, optionCombination, optionsTaken[0].payer_id)
+            : optionCombination.deposit_inc_gst)
+          : null
+        const partyDeposit = !optionCombination && job?.id && doc.job_contact_id && doc.job_contacts
           ? await namedPartyDeposit(sb, doc)
           : null
         // A party whose quoted share is $0 (a neighbour paid for the only gate, say)
         // owes no deposit: 0 is a real answer, never read as "missing".
-        const partyPaysNothing = neighbourLetter(doc.job_contacts?.contact_label)
+        const partyPaysNothing = optionCombination ? false : neighbourLetter(doc.job_contacts?.contact_label)
           ? partyDeposit?.ok === true && partyDeposit.amount === 0
           : !!(doc.job_contact_id && doc.job_contacts &&
             doc.job_contacts.quote_value_ex_gst != null && Number(doc.job_contacts.quote_value_ex_gst) === 0)
@@ -2539,6 +2762,17 @@ serve(async (req: Request) => {
 
             // If this is a per-neighbour document, pass the contact info for portion-based invoicing
             let depositHeld: string | null = null
+            if (optionJobPriceHeld) depositHeld = 'quote_options_job_price_not_set'
+            else if (optionCombination && optionDeposit === null) depositHeld = 'quote_options_party_deposit_unknown'
+            else if (optionCombination && optionDeposit !== null) {
+              if (isMultiContact && doc.job_contact_id) invoiceBody.job_contact_id = doc.job_contact_id
+              invoiceBody.deposit_amount = optionDeposit
+              const pct = Number((optionPlan!.pricing.deposit as Record<string, unknown> | undefined)?.percent)
+              if (Number.isFinite(pct) && pct > 0) invoiceBody.deposit_percent = pct
+              // The tool's first payment is the whole deposit as sealed (council
+              // fee included where the tool bakes it in): never add it again.
+              invoiceBody.council_fees = 0
+            }
             if (partyDeposit) {
               invoiceBody.job_contact_id = doc.job_contact_id
               const deposit = partyDeposit
@@ -2648,15 +2882,30 @@ serve(async (req: Request) => {
           clientName: acceptorName,
           projectType: job?.type || 'project',
           address,
-          depositAmount: invoiceResult?.deposit_amount || acceptedDeposit.total_deposit_inc_gst || 0,
+          depositAmount: invoiceResult?.deposit_amount ||
+            (optionDeposit !== null ? optionDeposit : acceptedDeposit.total_deposit_inc_gst) || 0,
           depositDescription: acceptedDeposit.description || depositConfig.description || '',
           paymentUrl: invoiceResult?.payment_url || '',
           invoiceNumber: invoiceResult?.invoice_number || job?.job_number || '',
-          shareToken: token,
+          shareToken: token || undefined,
           isPatio,
           jobId: job?.id || '',
           invoiceFailed: !!invoiceFailure,
         })
+        if (staffAccept) {
+          return jsonResponse({
+            accepted: true,
+            accepted_via: 'staff_phone',
+            document_id: doc.id,
+            job_status: newStatus,
+            accepted_option_ids: optionPlan ? optionsTaken.map((o) => o.id) : null,
+            accepted_total_inc_gst: optionPlan ? optionPlan.choice.combination.totalIncGST : null,
+            deposit_invoice: invoiceResult
+              ? { invoice_number: invoiceResult.invoice_number || null, deposit_amount: invoiceResult.deposit_amount ?? null }
+              : null,
+            deposit_invoice_failed: !!invoiceFailure,
+          }, 200, corsHeaders)
+        }
         return new Response(nextStepsHtml, {
           status: 200,
           headers: { ...corsHeaders, 'Content-Type': 'text/html' },
@@ -2664,6 +2913,7 @@ serve(async (req: Request) => {
       }
 
       // Fallback if no job_id (shouldn't happen, but safe)
+      if (staffAccept) return jsonResponse({ accepted: true, accepted_via: 'staff_phone', document_id: doc.id, job_status: null }, 200, corsHeaders)
       const fallbackHtml = buildNextStepsPage({
         clientName: 'Customer',
         projectType: 'project',
@@ -4378,7 +4628,7 @@ export function buildQuoteEmail(opts: {
 // CLIENT-FACING QUOTE PAGE
 // ════════════════════════════════════════════════════════════
 
-function buildClientPage(doc: any, token: string, heroUrl: string | null = null, acceptWords: AcceptSentenceRead | null = null): string {
+function buildClientPage(doc: any, token: string, heroUrl: string | null = null, options: QuoteOptionsOffer | null = null, acceptWords: AcceptSentenceRead | null = null): string {
   // heroUrl retained in signature for backwards compat but not rendered — PDF has its own cover
   const isAccepted = !!doc.accepted_at
   const isDeclined = !!doc.declined_at
@@ -4477,6 +4727,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
       .topbar { padding: 12px 16px; }
       .container { padding: 16px 16px 40px; }
     }
+    ${options ? QUOTE_OPTIONS_CSS : ''}
   </style>
 </head>
 <body>
@@ -4514,6 +4765,8 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
   <!-- Actions + chrome -->
   <div class="container">
     ${statusHtml}
+
+    ${!isAccepted && !isDeclined && options ? buildQuoteOptionsCard(options) : ''}
 
     ${!isAccepted && !isDeclined ? `
     <div class="actions-card">
@@ -4576,6 +4829,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
         '<div style="font-size:36px;margin-bottom:12px">&#9989;</div>' +
         '<h3 style="color:#293C46;font-size:18px;margin-bottom:8px">Accept this quote?</h3>' +
         '<p style="color:#4C6A7C;font-size:14px;margin-bottom:20px">This confirms your agreement to the terms and conditions included.</p>' +
+        acceptConfirmOptionsLine() +
         '<div style="display:flex;gap:8px">' +
         '<button onclick="this.closest(\\'.confirm-overlay\\').remove()" style="flex:1;padding:12px;border:1px solid #ddd;border-radius:8px;background:#fff;font-size:15px;cursor:pointer;font-family:inherit">Cancel</button>' +
         '<button onclick="this.closest(\\'.confirm-overlay\\').remove();doAccept()" style="flex:1;padding:12px;border:none;border-radius:8px;background:#34C759;color:#fff;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit">Yes, Accept</button>' +
@@ -4583,6 +4837,16 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
       document.body.appendChild(overlay);
     }
     function doAccept() { respondToQuote('accept_confirmed'); }
+    // Ruling 14: the ticked options and their figures, when the quote offers any.
+    function acceptConfirmOptionsLine() {
+      if (typeof currentOptionFigures !== 'function') return '';
+      var f = currentOptionFigures();
+      if (!f) return '';
+      var n = tickedOptionIds().length;
+      return '<p style="color:#293C46;font-size:14px;margin-bottom:20px">' +
+        (n ? (n === 1 ? '1 option added. ' : n + ' options added. ') : 'No options added. ') +
+        'Total ' + f.total + ', deposit ' + f.deposit + '.</p>';
+    }
 
     async function respondToQuote(action, declineData) {
       if (action === 'accept') {
@@ -4603,6 +4867,9 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
       }
 
       var payload = {};
+      if (action === 'accept' && typeof tickedOptionIds === 'function') {
+        payload = { option_ids: tickedOptionIds() };
+      }
       if (action === 'decline' && declineData) {
         payload = {
           reason: declineData.reason,

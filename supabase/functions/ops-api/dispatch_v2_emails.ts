@@ -55,6 +55,7 @@
 // The fencing standing lines are NOT added to a photo-only order. With
 // photos AND real lines, the numbered lines come as usual, then
 // "Please also see attached." under them.
+import { goesOnSupplierCopy } from "../_shared/quote_options/supplier_copy_rule.ts";
 
 // Every supplier order email goes out from this mailbox, through Outlook.
 export const DISPATCH_V2_FROM_MAILBOX = "admin@secureworkswa.com.au";
@@ -562,12 +563,10 @@ export function dispatchV2DefaultCc(
 // ── The scope suggestion for the draft list ─────────────────────────────────
 
 // What never goes on supplier copy (the template's exclusions): calculated
-// concrete, tek screws, removal, labour, delivery fees.
-const EXCLUDED_SUGGESTION_RE =
-  /^concrete (bags|footings)|tek screw|removal|labour|delivery/i;
-
+// concrete, tek screws, removal, labour, delivery fees. One rule, shared with
+// the quote option checks (supplier_copy_rule.ts).
 export function dispatchV2SuggestionAllowed(description: unknown): boolean {
-  return !EXCLUDED_SUGGESTION_RE.test(String(description ?? ""));
+  return goesOnSupplierCopy(description);
 }
 
 // The draft list can be filled from the scope on a fencing or patio job that

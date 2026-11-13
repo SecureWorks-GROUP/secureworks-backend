@@ -185,6 +185,7 @@ import {
 } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
 import { approvedQuotePdf, markUnapprovedLegacySendSent, ownerPriceBeforeSend, quotePdfBase64, unapprovedSendKeyForQuickQuote } from '../_shared/scope_freeze/owner_price_approval.ts'
 import { releaseScopeJobDraftsOnAcceptance, releasesScopeDraftOnStatus } from '../_shared/scope_freeze/release_scope_job_drafts.ts'
+import { readJobQuoteOptionRecords } from '../_shared/quote_options/taken_options.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import type { CouncilStatus } from '../_shared/release_packet/manifest_types.ts'
 import {
@@ -19891,6 +19892,10 @@ async function jobDetail(
     }
   }
 
+  // Ruling 14 step 1: the quote options offered at acceptance, each taken or
+  // "offered, not taken" (drawn struck through). null = the read failed.
+  const quoteOptionRecords = opts.slim ? undefined : await readJobQuoteOptionRecords(client, String(job?.id ?? jobId))
+
   return {
     job: jobLite,
     group_work_order_enabled: await groupFeatureOn(client),
@@ -19935,6 +19940,11 @@ async function jobDetail(
     ...(closeoutBlock !== undefined ? { closeout: closeoutBlock } : {}),
     ...(depositFlag !== undefined ? { deposit_flag: depositFlag } : {}),
     ...(depositFlagUnreadable ? { deposit_flag_unreadable: true } : {}),
+    ...(quoteOptionRecords !== undefined
+      ? quoteOptionRecords === null
+        ? { quote_options: null, quote_options_unreadable: true }
+        : { quote_options: quoteOptionRecords }
+      : {}),
   }
 }
 

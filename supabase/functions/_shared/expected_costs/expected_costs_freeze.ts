@@ -44,6 +44,7 @@
 
 import { jsonHash } from '../release_packet/canonicalize.ts'
 import { readAcceptedQuoteCostSource } from './accepted_quote_cost_source.ts'
+import { readTakenQuoteOptions, takenOptionCost } from '../quote_options/taken_options.ts'
 
 // ── The canonical cost keys ──────────────────────────────────────────────────
 // Verified identical across live jobs.pricing_json and frozen
@@ -89,6 +90,22 @@ export type ExpectedCostsSnapshot = {
     total_cost_ex_gst: number | null
     margin_pct: number | null
   }
+  // Ruling 14 step 1: present only when the customer took quote options. Each
+  // taken option's cost (when entered) is already inside its lane and the
+  // total above; margin_pct is then null because the tool's margin is for
+  // the base price and is never re-worked here.
+  quote_options?: {
+    taken_option_ids: string[]
+    added_cost_ex_gst: number
+    cost_unknown_option_ids: string[]
+  }
+}
+
+/** A taken quote option's cost, from its sealed copy on the job's option record (taken_options.ts). */
+export type AcceptedOptionCost = {
+  id: string
+  cost_ex_gst: number | null
+  cost_kind: 'materials' | 'labour' | 'other'
 }
 
 export type FreezeExpectedCostsInput = {
@@ -125,6 +142,7 @@ export type FreezeExpectedCostsResult =
         | 'zero_filled_pricing' // lanes present but all 0 — fabricated placeholder, not a baseline
         | 'frozen_hash_mismatch_no_live' // frozen row failed verification, no live fallback
         | 'accepted_quote_source_unproven'
+        | 'quote_options_unreadable' // the job's option record could not be read; nothing written
       existing_confidence?: ExpectedCostConfidence
       source_reason?: string
     }
@@ -148,6 +166,10 @@ function coercePricing(v: unknown): Record<string, unknown> | null {
     }
   }
   return null
+}
+
+function roundCents(v: number): number {
+  return Math.round(v * 100) / 100
 }
 
 function finiteNumberOrNull(v: unknown): number | null {
@@ -383,6 +405,43 @@ export async function freezeExpectedCostsOnAcceptance(
     return { ok: true, snapshot: false, reason: 'zero_filled_pricing' }
   }
 
+  // Ruling 14 step 1: the options the customer took join only a real base
+  // baseline (checked above). They are read from the job's durable option
+  // record (the current accepted quote's), never from the request that
+  // happened to finish the acceptance, so the baseline is the same whichever
+  // party accepts last. An unreadable record writes nothing: the write-once
+  // baseline is never made without options the customer took.
+  const takenRead = await readTakenQuoteOptions(client, input.job_id)
+  if (takenRead.state === 'unreadable') {
+    return { ok: true, snapshot: false, reason: 'quote_options_unreadable' }
+  }
+  const taken: AcceptedOptionCost[] = []
+  if (takenRead.state === 'taken') {
+    for (const o of takenRead.options) {
+      const cost = takenOptionCost(o)
+      if (!cost) return { ok: true, snapshot: false, reason: 'quote_options_unreadable' }
+      taken.push(cost)
+    }
+  }
+  let optionsBlock: ExpectedCostsSnapshot['quote_options'] | undefined
+  let optionCost = 0
+  if (taken.length > 0) {
+    const unknownCost: string[] = []
+    for (const o of taken) {
+      const cost = finiteNumberOrNull(o.cost_ex_gst)
+      if (cost === null) { unknownCost.push(o.id); continue }
+      optionCost = roundCents(optionCost + cost)
+      if (o.cost_kind === 'materials' || o.cost_kind === 'labour') {
+        const before = lanes[o.cost_kind]?.amount_ex_gst ?? 0
+        lanes[o.cost_kind] = { amount_ex_gst: roundCents(before + cost) }
+      }
+    }
+    optionsBlock = {
+      taken_option_ids: taken.map((o) => o.id),
+      added_cost_ex_gst: optionCost,
+      cost_unknown_option_ids: unknownCost,
+    }
+  }
   const snapshot: ExpectedCostsSnapshot = {
     version: EXPECTED_COSTS_SCHEMA_VERSION,
     confidence,
@@ -393,9 +452,13 @@ export async function freezeExpectedCostsOnAcceptance(
     frozen_at: now_iso,
     lanes,
     totals: {
-      total_cost_ex_gst: finiteNumberOrNull(sourcePricing[TOTAL_COST_KEY]),
-      margin_pct: finiteNumberOrNull(sourcePricing[MARGIN_PCT_KEY]),
+      total_cost_ex_gst: (() => {
+        const base = finiteNumberOrNull(sourcePricing[TOTAL_COST_KEY])
+        return base === null || !optionsBlock ? base : roundCents(base + optionCost)
+      })(),
+      margin_pct: optionsBlock ? null : finiteNumberOrNull(sourcePricing[MARGIN_PCT_KEY]),
     },
+    ...(optionsBlock ? { quote_options: optionsBlock } : {}),
   }
 
   // Write-once guard #2 (race-safe): only write when still null. The DB trigger
@@ -423,6 +486,6 @@ export async function freezeExpectedCostsOnAcceptance(
     source_ref,
     scope_revision_id,
     expected_frozen_at: now_iso,
-    lanes_written,
+    lanes_written: EXPECTED_LANES.filter((l) => lanes[l] !== undefined),
   }
 }

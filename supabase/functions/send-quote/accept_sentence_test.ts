@@ -187,7 +187,7 @@ Deno.test('record: words and revision when present; nothing for an old quote; th
 // the same read, and buildClientPage puts the line above each Accept Quote.
 Deno.test('wiring: view page and both acceptance rows carry the sealed sentence', async () => {
   const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  assert(src.includes('return await htmlResponse(buildClientPage(doc, token, heroUrl, acceptWords))'))
+  assert(src.includes('return await htmlResponse(buildClientPage(doc, token, heroUrl, viewOptions, acceptWords))'))
   assertEquals(src.match(/readAcceptSentence\(sb, \{ id: doc\.id, run_label: doc\.run_label \?\? sourceRunLabel, job_contact_id: doc\.job_contact_id \?\? null \}\)/g)?.length, 3)
   assertEquals(src.match(/\.\.\.acceptSentenceRecord\(acceptWords\),/g)?.length, 2)
   const page = src.slice(src.indexOf('function buildClientPage('), src.indexOf('function buildRunQuotePage('))

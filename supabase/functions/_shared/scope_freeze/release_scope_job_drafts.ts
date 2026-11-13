@@ -1,10 +1,18 @@
 import { acceptedRevisionForOrders } from "../expected_costs/accepted_quote_cost_source.ts";
+import { readTakenQuoteOptions } from "../quote_options/taken_options.ts";
+
+// PostgREST: no such function (the migration 20261113150000 not applied yet).
+const FUNCTION_MISSING = new Set(["PGRST202", "42883"]);
 
 export type ScopeDraftReleaseOutcome =
   | { state: "not_prepared" | "already_released" | "released" }
   /** Acceptance retained; the issue waits for the owner-approved price and
    * work order on the accepted revision (20261109040000). Not a fault. */
   | { state: "held_for_owner_approval"; missing: string[] }
+  /** Ruling 14 step 1: the job's option record could not be read, so the
+   * drafts cannot be shown to carry what the customer took. Held; the
+   * acceptance, job price and deposit stand, and the next release retries. */
+  | { state: "held_for_quote_options"; reason: "quote_options_unreadable" }
   | { state: "release_unavailable" };
 
 /** TK-S28: a job status write that should release (or retry releasing) the
@@ -37,6 +45,20 @@ export async function releaseScopeJobDraftsOnAcceptance(
     if (error) throw error;
     if (!draft) return { state: "not_prepared" };
     if (draft.released_at) return { state: "already_released" };
+    // The work order, payer invoices and payment stages were sealed at the
+    // base price. Taken options are added to them first (below); an option
+    // record that cannot be read holds them, never releases them short.
+    const options = await readTakenQuoteOptions(client, jobId);
+    if (options.state === "unreadable") {
+      try {
+        await client.from("job_events").insert({
+          job_id: jobId,
+          event_type: "scope_job_draft_release_held",
+          detail_json: { reason: "quote_options_unreadable" },
+        });
+      } catch { /* The hold stands even if the diagnostic cannot be saved. */ }
+      return { state: "held_for_quote_options", reason: "quote_options_unreadable" };
+    }
     const source = await acceptedRevisionForOrders(client, jobId);
     if (source.kind === "unknown") {
       throw new Error("scope_drafts_accepted_source_unproven");
@@ -52,6 +74,21 @@ export async function releaseScopeJobDraftsOnAcceptance(
       if (job.error) throw job.error;
       revision = job.data?.expected_costs?.scope_revision_id || revision;
     }
+    // Ruling 14 step 1 (contract 4.4): each taken crew option's labour line
+    // joins the work order and its total the agreed labour; the payer
+    // amounts and payment stages become the accepted combination's. One
+    // transaction, checked against the frozen revision; a repeat replays.
+    // Asked on every release, taken or not: the database also holds drafts
+    // whose options record was superseded by an open re-quote. Before the
+    // migration (no such function) a job with no options releases as before.
+    const applied = await client.rpc("apply_quote_options_to_scope_drafts", {
+      p_job_id: jobId,
+      p_scope_revision_id: revision,
+    });
+    if (applied.error) {
+      const missing = FUNCTION_MISSING.has(String(applied.error?.code ?? ""));
+      if (!(missing && options.state === "none")) throw applied.error;
+    }
     const release = await client.rpc("release_scope_job_drafts", {
       p_job_id: jobId,
       p_scope_revision_id: revision,
@@ -66,16 +103,22 @@ export async function releaseScopeJobDraftsOnAcceptance(
       return { state: "held_for_owner_approval", missing };
     }
     return { state: "released" };
-  } catch {
-    // No request bodies, people, money or provider secrets in the audit.
+  } catch (e) {
+    // No request bodies, people, money or provider secrets in the audit: only
+    // the database's own refusal code (scope_drafts_* / scope_options_*).
+    const code = String((e as { message?: unknown })?.message ?? "");
+    const reason = /^scope_(drafts|options)_[a-z_]{1,80}$/.test(code)
+      ? code
+      : "accepted_source_or_release_unavailable";
     console.error(
       "[scope-job-drafts] acceptance retained; work-order release held",
+      reason,
     );
     try {
       await client.from("job_events").insert({
         job_id: jobId,
         event_type: "scope_job_draft_release_held",
-        detail_json: { reason: "accepted_source_or_release_unavailable" },
+        detail_json: { reason },
       });
     } catch { /* Acceptance stands even if the diagnostic cannot be saved. */ }
     return { state: "release_unavailable" };
