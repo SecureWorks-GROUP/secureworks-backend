@@ -5107,8 +5107,21 @@ only, never money: trades read job events); the acceptance always stands.
 `jobs.expected_costs` is untouched until step 5. The budget carries commission
 and the salesperson: any read that hands pricing or scope to a customer, trade
 or crew document strips it (`withoutBudget`, and `budget` is on
-`TRADE_SCOPE_QUOTE_KEYS`); a new such read must too, and joins the list in the
+`TRADE_SCOPE_QUOTE_KEYS`, and every key naming commission or the salesperson
+is dropped from a trade scope by `tradeScopePrivateKey`); a new such read must too, and joins the list in the
 doc and `ops-api/job_budget_strip_test.ts`.
+
+Step 2 (`20261113230000`, `ops-api/job_commission.ts`): the commission rate is
+`commission_rates` (fence 15, patio 8, of gross profit; append-only, changed
+only through `set_commission_rate` by an id in
+`commission_rate_settings.editor_user_ids`, never the server key), and each
+stored budget copies its commission into write-once `job_commissions` by
+trigger. On a job with a record, a commission line is accepted only from the
+named salesperson and only up to the expected amount; triggers on
+`trade_invoice_lines` and `trade_invoices` hold every write path, and
+`generate_trade_invoice` pre-checks the same rule. A new write path for
+commission lines needs nothing extra, but never count a draft or `ops-reject`
+invoice against the amount. Contract: `docs/job-budget-v1.md`, "Commission (step 2)".
 
 ## Booking confirmation authority
 

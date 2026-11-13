@@ -72,6 +72,8 @@ type World = {
   invoiceAnyJob?: unknown;
   managedVerticals?: string[];
   externalRefs?: Array<{ job_id: string; external_ref: string }>;
+  // Rows of v_job_commission (ruling 17 step 2); "error" fails the read.
+  commissions?: Array<Record<string, unknown>> | "error";
 };
 
 type Captured = { status: number; body: any; writes: string[]; reads: string[]; lineRows: any[] };
@@ -155,6 +157,13 @@ async function submit(extra_items: any[], world: World = {}, body: Record<string
       ));
     }
     if (table === "makesafe_job_details") return reply(world.externalRefs ?? []);
+    if (table === "v_job_commission") {
+      if (world.commissions === "error") {
+        return Promise.resolve(Response.json({ code: "XX000", message: "boom" }, { status: 500 }));
+      }
+      const jobs = filterValues(url, "job_id");
+      return reply((world.commissions ?? []).filter((row) => !jobs || jobs.includes(String(row.job_id))));
+    }
     if (table === "trade_rates") return reply([{ hourly_rate: 50, effective_from: "2026-01-01" }]);
     if (table === "trade_invoices") {
       if (method === "POST" || method === "PATCH" || method === "DELETE") {
@@ -214,8 +223,9 @@ function assertAccepted(out: Captured) {
 
 // ── The rules ───────────────────────────────────────────────────────────────
 
-Deno.test("extra job rules: four named rules, in order", () => {
+Deno.test("extra job rules: five named rules, in order", () => {
   assertEquals(EXTRA_JOB_BILLING_RULES.map((rule) => rule.name), [
+    "commission_named_salesperson",
     "booked_on_job",
     "commission_on_job_they_created",
     "manages_job_division",
@@ -237,6 +247,17 @@ Deno.test("extra job rules: four named rules, in order", () => {
   assertEquals(extraJobBillingRule({ lineType: "labour", job: { ...base, vertical: "makesafe" }, trade: { ...trade, isMakesafeManager: true } }), "manages_job_division");
   assertEquals(extraJobBillingRule({ lineType: "labour", job: base, trade: { ...trade, isMakesafeManager: true } }), null);
   assertEquals(extraJobBillingRule({ lineType: "labour", job: base, trade: { ...trade, invoiceAnyJob: true } }), "invoice_any_job_grant");
+  // Ruling 17 step 2: a job with a commission record takes commission from
+  // its named salesperson only, whoever created or manages it.
+  const named = (salespersonUserId: string | null) => ({ ...base, commission: { salespersonUserId } });
+  assertEquals(extraJobBillingRule({ lineType: "commission", job: named(TRADE_ID), trade }), "commission_named_salesperson");
+  assertEquals(extraJobBillingRule({ lineType: "commission", job: { ...named(OTHER_USER), createdBy: TRADE_ID }, trade }), null);
+  assertEquals(extraJobBillingRule({ lineType: "commission", job: named(OTHER_USER), trade: { ...trade, managedVerticals: ["fencing"] } }), null);
+  assertEquals(extraJobBillingRule({ lineType: "commission", job: named(OTHER_USER), trade: { ...trade, invoiceAnyJob: true } }), null);
+  assertEquals(extraJobBillingRule({ lineType: "commission", job: named(null), trade: { ...trade, id: "" } }), null);
+  // The record decides commission only; every other line keeps its rules.
+  assertEquals(extraJobBillingRule({ lineType: "labour", job: { ...named(OTHER_USER), bookedOn: true }, trade }), "booked_on_job");
+  assertEquals(extraJobBillingRule({ lineType: "labour", job: named(TRADE_ID), trade }), null);
 });
 
 // ── Through the real handler ────────────────────────────────────────────────
@@ -409,4 +430,100 @@ handlerTest("extra job: a padded valid job number is checked, resolved and saved
   const refused = await submit([line({ job_number: " ZZF-1002 " })], {}, { week_start: undefined });
   assertRefused(refused, "extra_job_not_allowed", "ZZF-1002");
   assertEquals(refused.body.jobs, ["ZZF-1002"]);
+});
+
+// ── Ruling 17 step 2: the commission record and its cap ─────────────────────
+
+const commissionRow = (jobId: string, over: Record<string, unknown> = {}) => ({
+  job_id: jobId,
+  commission_id: "5e1f0a52-0000-4000-8000-00000000e001",
+  budget_id: "5e1f0a52-0000-4000-8000-00000000e002",
+  version: 1,
+  state: "named",
+  salesperson_user_id: TRADE_ID,
+  rule_id: "fence_gross_profit_rate",
+  percent: 15,
+  expected_amount_ex_gst: 50,
+  claimed_ex_gst: 0,
+  remaining_ex_gst: 50,
+  ...over,
+});
+
+function assertCapRefused(out: Captured, code: string, jobRef: string, status = 409) {
+  assertEquals(out.status, status, JSON.stringify(out.body));
+  assertEquals(out.body.code, code);
+  assertEquals(out.body.saved, false);
+  assertEquals(out.body.commission_jobs, [jobRef]);
+  assertStringIncludes(out.body.userMessage, jobRef);
+  assertEquals(out.writes, [], "nothing is written");
+  // A refusal a trade reads never carries the commission amounts.
+  for (const amount of ["50", "40", "$"]) assert(!out.body.userMessage.includes(amount), `message carries ${amount}`);
+}
+
+handlerTest("commission record: the named salesperson may claim on a job they did not create, up to the amount", async () => {
+  // NOT_BOOKED was created by someone else; the record names this trade.
+  const out = await submit([line({ job_id: NOT_BOOKED }, "Commission")], { commissions: [commissionRow(NOT_BOOKED)] });
+  assertAccepted(out);
+  assertEquals(out.lineRows.map((row) => [row.line_type, row.job_id, row.line_total_ex]), [["commission", NOT_BOOKED, 20]]);
+  // Exactly the amount left is accepted.
+  assertAccepted(await submit([line({ job_id: NOT_BOOKED }, "Commission")], {
+    commissions: [commissionRow(NOT_BOOKED, { claimed_ex_gst: 30, remaining_ex_gst: 20 })],
+  }));
+});
+
+handlerTest("commission record: anyone but the named salesperson is refused, the job's creator, a manager and the grant included", async () => {
+  const other = [commissionRow(CREATED, { salesperson_user_id: OTHER_USER })];
+  const created = await submit([line({ job_id: CREATED }, "Commission")], { commissions: other });
+  assertEquals(created.status, 403, JSON.stringify(created.body));
+  assertEquals(created.body.code, "commission_not_salesperson");
+  assertEquals(created.body.commission_jobs, ["ZZF-1003"]);
+  assertStringIncludes(created.body.userMessage, "salesperson named on its accepted quote");
+  assertEquals(created.writes, []);
+  for (const world of [{ managedVerticals: ["fencing"] }, { invoiceAnyJob: true }]) {
+    const out = await submit([line({ job_id: CREATED }, "Commission")], { ...world, commissions: other });
+    assertEquals(out.body.code, "commission_not_salesperson", JSON.stringify(world));
+    assertEquals(out.writes, []);
+  }
+  // A record that names nobody lets nobody claim.
+  const nobody = await submit([line({ job_id: CREATED }, "Commission")], {
+    commissions: [commissionRow(CREATED, { state: "no_salesperson", salesperson_user_id: null, expected_amount_ex_gst: null })],
+  });
+  assertEquals(nobody.body.code, "commission_not_salesperson");
+  assertEquals(nobody.writes, []);
+});
+
+handlerTest("commission record: a claim past the amount is refused before any write, counting what is already claimed", async () => {
+  const out = await submit([line({ job_id: NOT_BOOKED }, "Commission")], {
+    commissions: [commissionRow(NOT_BOOKED, { claimed_ex_gst: 40, remaining_ex_gst: 10 })],
+  });
+  assertCapRefused(out, "commission_over_amount", "ZZF-1002");
+  // Two lines on one job add up: 20 + 20 past 30.
+  const two = await submit([line({ job_id: NOT_BOOKED }, "Commission"), line({ job_id: NOT_BOOKED }, "Commission")], {
+    commissions: [commissionRow(NOT_BOOKED, { expected_amount_ex_gst: 30, remaining_ex_gst: 30 })],
+  });
+  assertCapRefused(two, "commission_over_amount", "ZZF-1002");
+});
+
+handlerTest("commission record: a loss (amount 0) refuses any commission; a record with no amount refuses too", async () => {
+  assertCapRefused(await submit([line({ job_id: NOT_BOOKED }, "Commission")], {
+    commissions: [commissionRow(NOT_BOOKED, { expected_amount_ex_gst: 0, remaining_ex_gst: 0 })],
+  }), "commission_over_amount", "ZZF-1002");
+  assertCapRefused(await submit([line({ job_id: NOT_BOOKED }, "Commission")], {
+    commissions: [commissionRow(NOT_BOOKED, { state: "no_amount", expected_amount_ex_gst: null, remaining_ex_gst: null })],
+  }), "commission_amount_unknown", "ZZF-1002");
+});
+
+handlerTest("commission record: other lines on the job and jobs with no record keep today's rules", async () => {
+  // A booked job with a record naming someone else: materials still bill.
+  assertAccepted(await submit([line({ job_id: BOOKED })], { commissions: [commissionRow(BOOKED, { salesperson_user_id: OTHER_USER })] }));
+  // No record on CREATED: the creator's commission is accepted as before.
+  assertAccepted(await submit([line({ job_id: CREATED }, "Commission")], { commissions: [commissionRow(NOT_BOOKED)] }));
+});
+
+handlerTest("commission record: a record that cannot be read refuses the commission, nothing is saved", async () => {
+  const out = await submit([line({ job_id: CREATED }, "Commission")], { commissions: "error" });
+  assert(out.status >= 500, JSON.stringify(out.body));
+  assertEquals(out.writes, []);
+  // A submission with no commission line never reads it.
+  assertAccepted(await submit([line({ job_id: BOOKED })], { commissions: "error" }));
 });
