@@ -89,6 +89,7 @@ import {
   scopeEngineSealedLines,
 } from "./scope_engine_materials.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
+import { takenQuoteOptionOrderItems } from "./dispatch_quote_options.ts";
 // Tweak 4: the supplier picker rules and the name a box shows.
 import {
   dispatchV2BuildSupplierPicker,
@@ -1587,6 +1588,27 @@ export async function suggestDispatchV2Draft(
           : [];
       });
   }
+  // Ruling 14 step 1 (contract 4.4): each quote option the customer took that
+  // goes to a supplier is one more sealed line, in its own supplier's box
+  // (patio) or, with no supplier on it (a fence option), on the draft list.
+  // An untaken option is not here. An option record that cannot be read
+  // fills nothing, so the order is never sent short.
+  const taken = await takenQuoteOptionOrderItems(client, job.id);
+  if (taken.state === "unreadable") {
+    refuse(409, "quote_options_unreadable", "The quote options the customer took could not be read, so the list was not filled. Try again.");
+  }
+  for (const item of taken.items) {
+    if (!dispatchV2SuggestionAllowed(item.description)) continue;
+    const [line] = dispatchSuggestedLines([item]);
+    if (!line) continue;
+    suggested.push({
+      ...line,
+      scope_line_id: item.scope_line_id,
+      supplier_key: item.supplier_id,
+      supplier_name: item.supplier_name,
+    });
+  }
+  notes.push(...taken.notes);
   if (suggested.length === 0) {
     if (refill) {
       notes.push(

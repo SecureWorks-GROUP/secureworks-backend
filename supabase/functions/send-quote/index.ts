@@ -148,13 +148,14 @@ import {
   chooseOptions,
   optionAcceptanceRecord,
   optionRefusalMessage,
+  partyOptionDeposit,
   readQuoteOptions,
   tickedNothing,
   type OptionChoice,
   type QuoteOptionsOffer,
 } from './quote_options.ts'
 import { buildQuoteOptionsCard, QUOTE_OPTIONS_CSS } from './quote_options_page.ts'
-import { loadDocumentOptions, readOptionAcceptances, writeOptionAcceptance } from './quote_options_store.ts'
+import { acceptDocumentWithOptions, loadDocumentOptions, readOptionAcceptances } from './quote_options_store.ts'
 import {
   decideSendQuoteAuth,
   jobOrgIdFromQuoteSendDocument,
@@ -1825,7 +1826,9 @@ serve(async (req: Request) => {
       if (!doc.accepted_at && !doc.declined_at) {
         const loaded = await loadDocumentOptions(sb, doc, sourceRunLabel)
         if (loaded.kind === 'unreadable') return await htmlResponse(quoteViewRetryPage())
-        if (loaded.kind === 'offer' && !loaded.shared) viewOptions = loaded.offer
+        // The client's whole quote offers them on a shared fence too (the tool's
+        // party figures); a neighbour's document never does.
+        if (loaded.kind === 'offer' && !loaded.neighbour) viewOptions = loaded.offer
       }
 
       // ── HTML REDIRECT (Slice 3) ──
@@ -2042,10 +2045,11 @@ serve(async (req: Request) => {
         const loaded = await loadDocumentOptions(sb, doc, sourceRunLabel)
         if (loaded.kind === 'unreadable') return retryAccept()
         if (loaded.kind === 'offer') {
-          // Step 1 offers options online only on a one-party quote: a shared
-          // fence's party documents carry no per-party deposit for an option.
-          if (loaded.shared && !tickedNothing(tickedOptionIds)) {
-            return refuseAccept(optionRefusalMessage('options_on_shared_quote'), 200, 'options_on_shared_quote')
+          // Options are the client's alone (contract section 6): a shared
+          // fence's client takes them on their whole quote, with the tool's
+          // party figures; a neighbour's document offers none.
+          if (loaded.neighbour && !tickedNothing(tickedOptionIds)) {
+            return refuseAccept(optionRefusalMessage('options_on_neighbour_quote'), 200, 'options_on_neighbour_quote')
           }
           const choice = chooseOptions(loaded.offer, tickedOptionIds)
           if (!choice.ok) return refuseAccept(optionRefusalMessage(choice.reason), 200, choice.reason)
@@ -2095,32 +2099,13 @@ serve(async (req: Request) => {
         }, doc, sourceRunLabel, acceptedAt)
       }
 
-      if (optionPlan) {
-        // Options decide money, so the acceptance is claimed once: a second
-        // concurrent accept of the same document finds it taken and stops.
-        const { data: claimed, error: claimError } = await sb
-          .from('job_documents')
-          .update({ accepted_at: acceptedAt })
-          .eq('id', doc.id)
-          .is('accepted_at', null)
-          .select('id')
-        if (claimError) throw claimError
-        if (!claimed || claimed.length === 0) return jsonResponse({ error: 'Already accepted' }, 400, corsHeaders)
-      } else {
-        const { error: acceptError } = await sb
-          .from('job_documents')
-          .update({ accepted_at: acceptedAt })
-          .eq('id', doc.id)
-        if (acceptError) throw acceptError
-      }
-
-      // ── RULING 14: the acceptance record (which options, each price, the accepted total) ──
-      // Written once, after the claim. If it cannot be written the acceptance
-      // stands, the office is told, and a ticked option's money is held: no job
-      // price change and no deposit invoice until the office raises it by hand.
-      let optionRecordHeld: string | null = null
       if (optionPlan && doc.job_id) {
-        const written = await writeOptionAcceptance(sb, optionAcceptanceRecord({
+        // Options decide money, so the acceptance and its record are one
+        // database transaction (accept_quote_document_with_options): the
+        // document is claimed once, and never accepted without the record of
+        // which options, at what total and deposit. A failed write writes
+        // nothing, so the customer's retry completes the same selection.
+        const accepted = await acceptDocumentWithOptions(sb, doc.id, acceptedAt, optionAcceptanceRecord({
           jobId: doc.job_id,
           documentId: doc.id,
           revisionId: optionPlan.revisionId,
@@ -2129,32 +2114,36 @@ serve(async (req: Request) => {
           offer: optionPlan.offer,
           choice: optionPlan.choice,
         }))
-        if (!written.ok) {
-          optionRecordHeld = written.reason
-          console.error('[accept] option acceptance record not written:', JSON.stringify({ document_id: doc.id, reason: written.reason }))
+        if (!accepted.ok) {
+          console.error('[accept] option acceptance not written; nothing accepted:', JSON.stringify({ document_id: doc.id, reason: accepted.reason }))
+          return retryAccept()
         }
+        if (!accepted.claimed) return jsonResponse({ error: 'Already accepted' }, 400, corsHeaders)
+      } else {
+        const { error: acceptError } = await sb
+          .from('job_documents')
+          .update({ accepted_at: acceptedAt })
+          .eq('id', doc.id)
+        if (acceptError) throw acceptError
       }
-      if (doc.job_id && (optionRecordHeld || optionsUnreadable)) {
+
+      if (doc.job_id && optionsUnreadable) {
         try {
           await sb.from('job_events').insert({
             job_id: doc.job_id,
-            event_type: optionRecordHeld ? 'quote_options_record_failed' : 'quote_options_unreadable',
+            event_type: 'quote_options_unreadable',
             detail_json: {
               document_id: doc.id,
-              reason: optionRecordHeld || optionsUnreadable,
-              ticked_option_ids: optionPlan ? optionPlan.choice.taken.map((o) => o.id) : [],
-              message: optionRecordHeld
-                ? 'The options this customer ticked could not be saved. Their deposit invoice is held: check the options with them and raise it by hand.'
-                : 'This quote listed options that could not be read, so none could be ticked. The base price was accepted: ask the customer which options they want.',
+              reason: optionsUnreadable,
+              message: 'This quote listed options that could not be read, so none could be ticked. The base price was accepted: ask the customer which options they want.',
             },
           })
         } catch {
           // The console line above is the record of last resort.
         }
       }
-      // The options whose money follows the acceptance: none when the record is held.
-      const optionsTaken = optionPlan && !optionRecordHeld ? optionPlan.choice.taken : []
-      const optionMoneyHeld = !!(optionPlan && optionRecordHeld && optionPlan.choice.taken.length > 0)
+      // The options the customer took: their record is written with the acceptance.
+      const optionsTaken = optionPlan ? optionPlan.choice.taken : []
 
       // ── SUPERSEDE SIBLING OPTIONS ON ACCEPT (money-path, awaited) ──
       // Right after the accepted_at write: mark the OTHER whole-quote options for
@@ -2482,9 +2471,11 @@ serve(async (req: Request) => {
         // Ruling 14: with an option offer, the accepted price is the tool's
         // combination for the ticked set (quote_options.ts acceptedPricing); with
         // none ticked it is the base price, naming that none was taken.
+        // A shared fence's client who took options moves the whole job's price
+        // too (the combination carries every party's share, only theirs changed).
         let optionJobPriceHeld: string | null = null
-        if (!isMultiContact && job) {
-          const optionPricing = optionPlan && !optionRecordHeld
+        if (job && (!isMultiContact || (optionPlan && optionsTaken.length > 0))) {
+          const optionPricing = optionPlan
             ? acceptedPricing(optionPlan.pricing, optionPlan.offer, optionPlan.choice)
             : undefined
           const priced = await setJobPriceToAcceptedQuote(sb, {
@@ -2540,25 +2531,19 @@ serve(async (req: Request) => {
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
           }
-          if (optionMoneyHeld) {
-            // Ticked options whose record could not be saved: the drafts
-            // sealed at the base price stay held with the deposit (the
-            // quote_options_record_failed event above tells the office).
-            console.error('[send-quote] scope drafts held: ticked options not recorded')
-          } else {
-            try {
-              const { releaseScopeJobDraftsOnAcceptance } = await import('../_shared/scope_freeze/release_scope_job_drafts.ts')
-              await releaseScopeJobDraftsOnAcceptance(sb, doc.job_id)
-            } catch {
-              console.error('[send-quote] scope work-order release held for retry (non-blocking); customer acceptance retained')
-            }
+          // Taken options are added to the drafts (work order lines, payer
+          // amounts, payment stages) before they are released.
+          try {
+            const { releaseScopeJobDraftsOnAcceptance } = await import('../_shared/scope_freeze/release_scope_job_drafts.ts')
+            await releaseScopeJobDraftsOnAcceptance(sb, doc.job_id)
+          } catch {
+            console.error('[send-quote] scope work-order release held for retry (non-blocking); customer acceptance retained')
           }
         }
 
-        // Ruling 14 step 1: the office's list of the options the customer
-        // took and where each goes. The sealed work order, supplier order
-        // lines and payment stage drafts do not carry them yet, so the
-        // office adds each one by hand (contract 4.4).
+        // Ruling 14 step 1: which options the customer took and where each
+        // goes (supplier order, work order, office list). Ids, names and
+        // destinations only: job_events is readable by trades, so no amount.
         if (optionsTaken.length > 0) {
           try {
             await sb.from('job_events').insert({
@@ -2566,15 +2551,8 @@ serve(async (req: Request) => {
               event_type: 'quote_options_taken',
               detail_json: {
                 document_id: doc.id,
-                options: optionsTaken.map((o) => ({
-                  id: o.id,
-                  name: o.name,
-                  line: o.line,
-                  goes: o.goes,
-                  sell_inc_gst: o.sell_inc_gst,
-                  cost_ex_gst: o.cost_ex_gst,
-                })),
-                message: `Customer took ${optionsTaken.length} quote option${optionsTaken.length === 1 ? '' : 's'}: ${optionsTaken.map((o) => `${o.name} (${o.goes})`).join(', ')}. Add each to the ${[...new Set(optionsTaken.map((o) => o.goes === 'supplier' ? 'supplier order' : o.goes === 'crew' ? 'work order' : 'office list'))].join(', ')}.`,
+                options: optionsTaken.map((o) => ({ id: o.id, name: o.name, goes: o.goes })),
+                message: `Customer took ${optionsTaken.length} quote option${optionsTaken.length === 1 ? '' : 's'}: ${optionsTaken.map((o) => `${o.name} (${o.goes === 'supplier' ? 'supplier order' : o.goes === 'crew' ? 'work order' : 'office list'})`).join(', ')}.`,
               },
             })
           } catch { /* the record and the acceptance stand */ }
@@ -2739,15 +2717,20 @@ serve(async (req: Request) => {
         // (a neighbour's from their share of it, never their live contact value);
         // held with a reason when that cannot be read or matched.
         // Ruling 14: ticked options put the deposit on the accepted total: the
-        // tool's precomputed first payment for the ticked set, raised for the
-        // whole job (options are offered online only on a one-party quote).
-        const optionDeposit = optionsTaken.length > 0 && optionPlan ? optionPlan.choice.combination : null
-        const partyDeposit = !optionDeposit && job?.id && doc.job_contact_id && doc.job_contacts
+        // tool's precomputed first payment for the ticked set. On a shared
+        // fence it is the client's own amount on that first payment.
+        const optionCombination = optionsTaken.length > 0 && optionPlan ? optionPlan.choice.combination : null
+        const optionDeposit = optionCombination
+          ? (isMultiContact
+            ? partyOptionDeposit(optionPlan!.pricing, optionCombination, optionsTaken[0].payer_id)
+            : optionCombination.deposit_inc_gst)
+          : null
+        const partyDeposit = !optionCombination && job?.id && doc.job_contact_id && doc.job_contacts
           ? await namedPartyDeposit(sb, doc)
           : null
         // A party whose quoted share is $0 (a neighbour paid for the only gate, say)
         // owes no deposit: 0 is a real answer, never read as "missing".
-        const partyPaysNothing = optionDeposit ? false : neighbourLetter(doc.job_contacts?.contact_label)
+        const partyPaysNothing = optionCombination ? false : neighbourLetter(doc.job_contacts?.contact_label)
           ? partyDeposit?.ok === true && partyDeposit.amount === 0
           : !!(doc.job_contact_id && doc.job_contacts &&
             doc.job_contacts.quote_value_ex_gst != null && Number(doc.job_contacts.quote_value_ex_gst) === 0)
@@ -2763,10 +2746,11 @@ serve(async (req: Request) => {
 
             // If this is a per-neighbour document, pass the contact info for portion-based invoicing
             let depositHeld: string | null = null
-            if (optionMoneyHeld) depositHeld = 'quote_options_record_failed'
-            else if (optionJobPriceHeld) depositHeld = 'quote_options_job_price_not_set'
-            else if (optionDeposit) {
-              invoiceBody.deposit_amount = optionDeposit.deposit_inc_gst
+            if (optionJobPriceHeld) depositHeld = 'quote_options_job_price_not_set'
+            else if (optionCombination && optionDeposit === null) depositHeld = 'quote_options_party_deposit_unknown'
+            else if (optionCombination && optionDeposit !== null) {
+              if (isMultiContact && doc.job_contact_id) invoiceBody.job_contact_id = doc.job_contact_id
+              invoiceBody.deposit_amount = optionDeposit
               const pct = Number((optionPlan!.pricing.deposit as Record<string, unknown> | undefined)?.percent)
               if (Number.isFinite(pct) && pct > 0) invoiceBody.deposit_percent = pct
               // The tool's first payment is the whole deposit as sealed (council
@@ -2883,7 +2867,7 @@ serve(async (req: Request) => {
           projectType: job?.type || 'project',
           address,
           depositAmount: invoiceResult?.deposit_amount ||
-            (optionDeposit ? optionDeposit.deposit_inc_gst : acceptedDeposit.total_deposit_inc_gst) || 0,
+            (optionDeposit !== null ? optionDeposit : acceptedDeposit.total_deposit_inc_gst) || 0,
           depositDescription: acceptedDeposit.description || depositConfig.description || '',
           paymentUrl: invoiceResult?.payment_url || '',
           invoiceNumber: invoiceResult?.invoice_number || job?.job_number || '',
@@ -2899,12 +2883,11 @@ serve(async (req: Request) => {
             document_id: doc.id,
             job_status: newStatus,
             accepted_option_ids: optionPlan ? optionsTaken.map((o) => o.id) : null,
-            accepted_total_inc_gst: optionPlan && !optionRecordHeld ? optionPlan.choice.combination.totalIncGST : null,
+            accepted_total_inc_gst: optionPlan ? optionPlan.choice.combination.totalIncGST : null,
             deposit_invoice: invoiceResult
               ? { invoice_number: invoiceResult.invoice_number || null, deposit_amount: invoiceResult.deposit_amount ?? null }
               : null,
             deposit_invoice_failed: !!invoiceFailure,
-            options_record_failed: !!optionRecordHeld,
           }, 200, corsHeaders)
         }
         return new Response(nextStepsHtml, {

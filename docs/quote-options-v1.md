@@ -14,9 +14,10 @@ Optional extras on a quote, ticked by the customer on the Accept page or by staf
 
 - The server never adds GST, splits a deposit or rounds: it uses the combination after checking it adds up.
 - `POST /accept?token=` takes `{ option_ids }`. `POST /accept-for-customer` (identified office session, own tenant) takes `{ document_id, option_ids }` and runs the same acceptance with `accepted_via: staff_phone`.
-- Options are the client's only: a fence run document never shows them, and a job with more than one quote party refuses ticks (no per-party option deposit in the contract yet).
-- The deposit invoice is raised on the combination's `deposit_inc_gst` with `council_fees: 0` (the council fee is already inside it). With nothing ticked the request is the old one.
-- The record is written after the acceptance claim. If it cannot be written, the acceptance stands, the office gets `quote_options_record_failed`, and ticked option money (job price, deposit, drafts) is held.
+- Options are the client's only: a fence run document and a neighbour's (B, C...) quote never show them. On a shared fence the client's whole quote offers them, with the tool's party figures; the client's deposit is their amount on the combination's first stage (else their share at the deposit percent; unknown is held, never guessed: `partyOptionDeposit`).
+- The offer is checked strictly: every money figure a nonnegative whole-cent number, each combination's schedule (and stages when the base has them) complete and adding up, the deposit equal to the first payment and the first stage, the empty combination the same as the base. The accepted pricing never keeps the base schedule or stages.
+- The deposit invoice is raised on the combination's deposit with `council_fees: 0` (the council fee is already inside it). With nothing ticked the request is the old one.
+- An option acceptance is one database call, `accept_quote_document_with_options` (`20261113150000`): the document is claimed and its record written in one transaction. A failure writes nothing and the customer gets the retry page; a second tap claims nothing. Without the migration an offer with options cannot be accepted (retry page); a quote without options is unaffected.
 - `send-quote/status` returns `accepted_option_ids` for an accepted quote whose revision offered options.
 
 ## Record
@@ -25,11 +26,16 @@ Optional extras on a quote, ticked by the customer on the Accept page or by staf
 
 ## Downstream (contract 4.4)
 
-| Taken option | Now |
-|---|---|
-| Expected cost | `cost_ex_gst` joins its lane (materials or labour; other only the total) in the frozen baseline; `margin_pct` is null then |
-| Office list | `quote_options_taken` job event: each option and where it goes |
-| Scope draft work order, payer invoices, payment stages | Held (`scope_job_draft_release_held`, reason `quote_options_taken`): they were sealed at the base price |
-| Job work order fill | Every line flagged `quote_options_taken_not_in_lines`; never stamped for the automatic issue |
+Everything is read from the record's `taken_options` and `accepted_combination` (the option and combination exactly as sealed), never the live job, and the original sealed revision is never changed. A NOT-taken option is on none of these.
 
-Adding the option lines to the sealed drafts, the supplier order and the work order is not built yet; the office adds them by hand from the event.
+| Taken option | Where | Code |
+|---|---|---|
+| Crew | Its `labour_line` joins the scope draft work order and its total the agreed labour (a null total adds nothing and is named in the event); the payer draft invoices, totals and payment stages become the combination's. One transaction before release, checked against the frozen revision; a repeat replays | `apply_quote_options_to_scope_drafts`, called by `release_scope_job_drafts.ts`; `scope_payment_plan` reads the combination's stages |
+| Crew (job work order filled from the quote) | One line `option:<id>`; its total joins `agreed_labour_ex`. A missing line or total holds the draft for the approver | `job_work_order_quote_fill.ts` `addTakenCrewOptions` |
+| Supplier | Its `order_line` is one more sealed line: in its supplier's box (patio), or on the draft list with no supplier (fence) | `dispatch_quote_options.ts`, both Dispatch fills |
+| Office | Its `office_line` is on the job's office list: `job_detail.quote_options[].office_list` | `taken_options.ts` |
+| Expected cost | `cost_ex_gst` joins its lane in the frozen baseline | `expected_costs_freeze` |
+
+An option record that cannot be read holds each of them (release held, fill held for review, Dispatch refuses `quote_options_unreadable`); unknown is never "none".
+
+The owner work order decision is bound to the order's content, so on a job with the saved-revision switch on, a work order that took a crew option needs the owner's decision on its new content.

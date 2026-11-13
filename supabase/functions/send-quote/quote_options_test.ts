@@ -9,6 +9,7 @@ import {
   chooseOptions,
   optionAcceptanceRecord,
   optionRefusalMessage,
+  partyOptionDeposit,
   readQuoteOptions,
   type QuoteOptionsOffer,
 } from './quote_options.ts'
@@ -16,8 +17,8 @@ import { buildQuoteOptionsCard, optionFigures } from './quote_options_page.ts'
 import {
   loadDocumentOptions,
   optionFates,
+  acceptDocumentWithOptions,
   readOptionAcceptances,
-  writeOptionAcceptance,
 } from './quote_options_store.ts'
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -278,11 +279,13 @@ Deno.test('R14 the offer is read from the released revision; an old quote has no
   assertEquals((loaded as any).revisionId, 'rev-1')
 })
 
-Deno.test('R14 a fence run document never offers options; a shared job is marked shared', async () => {
+Deno.test('R14 a fence run document never offers options; a shared job offers them on the client quote, not a neighbour quote', async () => {
   const sb = fakeSb({ quote_revisions: release(patioPricing()), job_contacts: { data: [{ id: 'c1' }, { id: 'c2' }], error: null } })
   assertEquals(await loadDocumentOptions(sb, { id: 'd', job_id: 'j' }, 'RHS'), { kind: 'none' })
-  const shared = await loadDocumentOptions(sb, { id: 'd', job_id: 'j' }, null)
-  assertEquals((shared as any).shared, true)
+  const client = await loadDocumentOptions(sb, { id: 'd', job_id: 'j', job_contacts: { contact_label: 'A' } }, null)
+  assertEquals([client.kind, (client as any).shared, (client as any).neighbour], ['offer', true, false])
+  const neighbour = await loadDocumentOptions(sb, { id: 'd', job_id: 'j', job_contacts: { contact_label: 'B' } }, null)
+  assertEquals((neighbour as any).neighbour, true)
 })
 
 Deno.test('R14 a failed read is unreadable, never "no options"', async () => {
@@ -293,13 +296,40 @@ Deno.test('R14 a failed read is unreadable, never "no options"', async () => {
   assertEquals(await readOptionAcceptances(fakeSb({ quote_option_acceptances: { data: null, error: { code: 'x' } } }), ['d']), null)
 })
 
-Deno.test('R14 the record write reports a refusal instead of throwing', async () => {
-  const inserted: Record<string, unknown[]> = {}
-  const ok = await writeOptionAcceptance(fakeSb({}, inserted), { job_document_id: 'd' } as any)
-  assertEquals(ok, { ok: true })
-  assertEquals(inserted.quote_option_acceptances.length, 1)
-  const refused = await writeOptionAcceptance(fakeSb({ 'insert:quote_option_acceptances': { error: { code: '23505' } } }), {} as any)
-  assertEquals(refused, { ok: false, reason: '23505' })
+function rpcSb(answer: Result | (() => never)) {
+  const calls: Array<[string, any]> = []
+  return {
+    calls,
+    sb: {
+      from() { throw new Error('the acceptance never writes a table directly') },
+      rpc(fn: string, args: any) {
+        calls.push([fn, args])
+        return typeof answer === 'function' ? answer() : Promise.resolve(answer)
+      },
+    },
+  }
+}
+
+Deno.test('R14 the acceptance and its record are one database call; a failure accepts nothing', async () => {
+  const rec = { job_document_id: 'd' } as any
+  const ok = rpcSb({ data: { claimed: true }, error: null })
+  assertEquals(await acceptDocumentWithOptions(ok.sb, 'd', 't', rec), { ok: true, claimed: true })
+  assertEquals(ok.calls, [['accept_quote_document_with_options', { p_document_id: 'd', p_accepted_at: 't', p_record: rec }]])
+  assertEquals(await acceptDocumentWithOptions(rpcSb({ data: { claimed: false }, error: null }).sb, 'd', 't', rec), { ok: true, claimed: false })
+  // The migration not applied: the function is missing, so nothing is accepted and the customer retries.
+  assertEquals(await acceptDocumentWithOptions(rpcSb({ data: null, error: { code: 'PGRST202' } }).sb, 'd', 't', rec), { ok: false, reason: 'PGRST202' })
+  assertEquals(await acceptDocumentWithOptions(rpcSb({ data: null, error: null }).sb, 'd', 't', rec), { ok: false, reason: 'accept_answer_unreadable' })
+  assertEquals((await acceptDocumentWithOptions(rpcSb(() => { throw new Error('down') }).sb, 'd', 't', rec)).ok, false)
+})
+
+Deno.test('R14 the record carries the taken options and the ticked combination exactly as sealed', () => {
+  const pricing = patioPricing()
+  const offer = offerOf(pricing)
+  const choice = chooseOptions(offer, ['gutter'])
+  assert(choice.ok)
+  const record = optionAcceptanceRecord({ jobId: 'j', documentId: 'd', revisionId: 'r', via: 'public_link', staffUserId: null, offer, choice })
+  assertEquals(record.taken_options, [GUTTER])
+  assertEquals(record.accepted_combination, pricing.optional_extras.combinations[2])
 })
 
 // ── the handler's wiring, pinned by its source ───────────────────────────────
@@ -312,7 +342,8 @@ Deno.test('R14 options are chosen and checked before the acceptance is written',
   const write = SRC.indexOf('const acceptedAt = new Date().toISOString()', ACCEPT)
   assert(ACCEPT > 0 && plan > ACCEPT && write > plan)
   const between = SRC.slice(plan, write)
-  assert(between.includes("refuseAccept(optionRefusalMessage('options_on_shared_quote')"))
+  assert(between.includes("refuseAccept(optionRefusalMessage('options_on_neighbour_quote')"))
+  assert(!between.includes('loaded.shared &&'), 'a shared fence client may take options on the whole quote')
   assert(between.includes('chooseOptions(loaded.offer, tickedOptionIds)'))
   assert(between.includes("loaded.kind === 'unreadable') return retryAccept()"))
 })
@@ -325,28 +356,76 @@ Deno.test('R14 staff phone acceptance needs an identified office session on its 
   assert(head.includes("const acceptVia"), 'the way in is recorded')
 })
 
+Deno.test('R14 an option acceptance is claimed with its record in one call, and a failure accepts nothing', () => {
+  const call = SRC.indexOf('const accepted = await acceptDocumentWithOptions(sb, doc.id, acceptedAt, optionAcceptanceRecord({', ACCEPT)
+  assert(call > ACCEPT)
+  const block = SRC.slice(call, call + 1200)
+  assert(block.includes('if (!accepted.ok) {') && block.includes('return retryAccept()'))
+  assert(block.includes("if (!accepted.claimed) return jsonResponse({ error: 'Already accepted' }"))
+  assert(!SRC.includes("'quote_options_record_failed'"), 'no accepted document is ever left without its record')
+})
+
 Deno.test('R14 the deposit is raised on the accepted combination only when options were taken', () => {
-  const dep = SRC.indexOf('const optionDeposit = optionsTaken.length > 0 && optionPlan ? optionPlan.choice.combination : null', ACCEPT)
+  const dep = SRC.indexOf('const optionCombination = optionsTaken.length > 0 && optionPlan ? optionPlan.choice.combination : null', ACCEPT)
   assert(dep > ACCEPT)
   const block = SRC.slice(dep, dep + 3000)
-  assert(block.includes('invoiceBody.deposit_amount = optionDeposit.deposit_inc_gst'))
+  assert(block.includes('partyOptionDeposit(optionPlan!.pricing, optionCombination, optionsTaken[0].payer_id)'), 'a shared fence client pays their own share')
+  assert(block.includes('invoiceBody.deposit_amount = optionDeposit'))
   assert(block.includes('invoiceBody.council_fees = 0'), 'the council fee is inside the combination deposit, never added twice')
-  assert(block.includes("'quote_options_record_failed'"))
+  assert(block.includes("'quote_options_party_deposit_unknown'"))
   assert(block.includes("'quote_options_job_price_not_set'"))
 })
 
 Deno.test('R14 an old quote with no options sends the same deposit request as before', () => {
-  // With optionPlan null: optionsTaken is [], optionDeposit null, nothing held,
-  // and the deposit body keeps only its old keys.
-  assert(SRC.includes('const optionsTaken = optionPlan && !optionRecordHeld ? optionPlan.choice.taken : []'))
-  assert(SRC.includes('const optionMoneyHeld = !!(optionPlan && optionRecordHeld && optionPlan.choice.taken.length > 0)'))
-  const dep = SRC.indexOf('const optionDeposit =', ACCEPT)
+  // With optionPlan null: optionsTaken is [], optionCombination null, and the
+  // deposit body keeps only its old keys.
+  assert(SRC.includes('const optionsTaken = optionPlan ? optionPlan.choice.taken : []'))
+  const dep = SRC.indexOf('const optionCombination =', ACCEPT)
   const block = SRC.slice(dep, dep + 3000)
-  assert(/if \(optionDeposit[^)]*\)/.test(block), 'the option deposit keys are set only under optionDeposit')
+  assert(/else if \(optionCombination && optionDeposit !== null\)/.test(block), 'the option deposit keys are set only with a taken combination')
 })
 
-Deno.test('R14 taken options reach the expected cost and the office list; the base drafts are held', () => {
+Deno.test('R14 taken options reach the expected cost; their destinations follow from the record', () => {
   assert(SRC.includes('accepted_options: optionsTaken.map((o) => ({ id: o.id, cost_ex_gst: o.cost_ex_gst, cost_kind: o.cost_kind }))'))
   assert(SRC.includes("event_type: 'quote_options_taken'"))
-  assert(SRC.includes('if (optionMoneyHeld) {'))
+})
+
+// F3: contradictory deposit and payment structures are refused, never trusted.
+Deno.test('R14 a deposit that is not the first payment, a negative payment, or a missing schedule is refused', () => {
+  const cases: Array<[string, (b: any) => void]> = [
+    ['deposit not first payment', (b) => { b.combinations[1].deposit_inc_gst = 0 }],
+    ['negative payment', (b) => {
+      b.combinations[1].payment_schedule.payments[0].amount_inc_gst = -1
+      b.combinations[1].payment_schedule.payments[1].amount_inc_gst = 11441
+      b.combinations[1].deposit_inc_gst = -1
+    }],
+    ['missing schedule', (b) => { delete b.combinations[1].payment_schedule }],
+  ]
+  for (const [what, mut] of cases) {
+    assertEquals(readQuoteOptions(withBlock(mut)).kind, 'invalid', what)
+  }
+})
+
+Deno.test('R14 the accepted pricing never keeps the base payment schedule or stages', () => {
+  const pricing = patioPricing({ local_invoice_stages: { version: 1, stages: [] } })
+  delete pricing.local_invoice_stages
+  const offer = offerOf(pricing)
+  const choice = chooseOptions(offer, ['lights'])
+  assert(choice.ok)
+  const accepted = acceptedPricing(pricing, offer, choice)
+  assertEquals((accepted.payment_schedule as any).payments.map((p: any) => p.amount_inc_gst), [5720, 5720])
+  assertEquals('local_invoice_stages' in accepted, false)
+})
+
+Deno.test('R14 a shared fence: the client pays their share of the first payment', () => {
+  const pricing: any = { deposit: { percent: 50 } }
+  const combination: any = {
+    totalIncGST: 3740,
+    parties: [{ id: 'a', inc_gst: 2640 }, { id: 'b', inc_gst: 1100 }],
+    local_invoice_stages: { stages: [{ payers: [{ payer_id: 'a', amount_inc_gst: 1320 }, { payer_id: 'b', amount_inc_gst: 550 }] }] },
+  }
+  assertEquals(partyOptionDeposit(pricing, combination, 'a'), 1320)
+  delete combination.local_invoice_stages
+  assertEquals(partyOptionDeposit(pricing, combination, 'a'), 1320, 'no stages: the party total at the deposit percent')
+  assertEquals(partyOptionDeposit({}, combination, 'a'), null, 'unknown is never guessed')
 })

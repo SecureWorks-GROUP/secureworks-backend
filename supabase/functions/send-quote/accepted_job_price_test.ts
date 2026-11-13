@@ -101,5 +101,7 @@ Deno.test("B1 /accept sets the job's price from the accepted quote before the st
   assert(accept > 0 && runBranch > accept && wholeBranch > runBranch)
   assert(set > wholeBranch, "set in the whole-quote branch, not the run branch")
   assert(set < status && set < baseline && set < deposit, "before the status, the expected-cost baseline and the deposit")
-  assert(src.slice(wholeBranch, set).includes("if (!isMultiContact && job) {"), "one quote party only")
+  // One quote party only, except a shared fence whose client took options: the
+  // ticked combination is the whole job's price, every party's share in it.
+  assert(src.slice(wholeBranch, set).includes("if (job && (!isMultiContact || (optionPlan && optionsTaken.length > 0))) {"), "one quote party only, or the client's taken options")
 })

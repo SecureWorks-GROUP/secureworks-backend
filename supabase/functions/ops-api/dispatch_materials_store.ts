@@ -71,6 +71,7 @@ import {
   dispatchSightedOrderIds,
 } from "./dispatch_deliveries.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
+import { takenQuoteOptionOrderItems } from "./dispatch_quote_options.ts";
 
 export class DispatchMaterialsError extends Error {
   status: number;
@@ -1317,13 +1318,26 @@ export async function suggestDispatchMaterialLines(
     ctx,
     await acceptedRevisionForMaterialTake(client, job),
   );
-  const suggested = offer.lines;
+  // Ruling 14 step 1 (contract 4.4): the quote options the customer took
+  // that go to a supplier are on this order too; an untaken one is not. An
+  // option record that cannot be read suggests nothing.
+  const taken = await takenQuoteOptionOrderItems(client, job.id);
+  if (taken.state === "unreadable") {
+    throw new DispatchMaterialsError(
+      409,
+      "quote_options_unreadable",
+      "The quote options the customer took could not be read, so no lines were suggested. Try again.",
+    );
+  }
+  const suggested = [...offer.lines, ...dispatchSuggestedLines(taken.items)];
+  const optionNotes = taken.notes.length ? { quote_option_notes: taken.notes } : {};
   if (suggested.length === 0) {
     return {
       success: true,
       added: 0,
       lines: [],
       ...offerFields(offer),
+      ...optionNotes,
       counts: await readJobCounts(client, job.id),
     };
   }
@@ -1374,6 +1388,7 @@ export async function suggestDispatchMaterialLines(
     added: insertedRows.length,
     lines: insertedRows.map((row: any) => projectDispatchMaterialLine(row)),
     ...offerFields(offer),
+    ...optionNotes,
     counts: await readJobCounts(client, job.id),
   };
 }

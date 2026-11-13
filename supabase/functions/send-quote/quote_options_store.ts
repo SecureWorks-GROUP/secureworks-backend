@@ -4,12 +4,15 @@
 // that was sent, pricing_snapshot_json.raw), never from the live job.
 // The acceptance record lives in quote_option_acceptances
 // (20261113150000_quote_option_acceptances.sql): one row per accepted
-// document, written once and never changed.
-import { readAcceptedRelease } from './accepted_deposit.ts'
+// document, written once and never changed, in the SAME transaction that
+// marks the document accepted (accept_quote_document_with_options). A failed
+// write leaves the document unaccepted, so the customer's retry completes the
+// same selection; there is never an accepted document without its record.
+import { neighbourLetter, readAcceptedRelease } from './accepted_deposit.ts'
 import { readQuoteOptions, type OptionAcceptanceRecord, type QuoteOptionsOffer } from './quote_options.ts'
 
 // deno-lint-ignore no-explicit-any
-type Sb = { from: (table: string) => any }
+type Sb = { from: (table: string) => any; rpc?: (fn: string, args: Record<string, unknown>) => any }
 
 export type DocumentOptions =
   | { kind: 'none' }
@@ -20,8 +23,10 @@ export type DocumentOptions =
     offer: QuoteOptionsOffer
     pricing: Record<string, unknown>
     revisionId: string
-    /** More than one quote party on the job: options are the client's alone and step 1 offers them online only on a one-party job. */
+    /** More than one quote party on the job (a shared fence). Options are the client's alone. */
     shared: boolean
+    /** This document is a neighbour's (B, C...): it offers no tick boxes. */
+    neighbour: boolean
   }
 
 /**
@@ -31,7 +36,7 @@ export type DocumentOptions =
  */
 export async function loadDocumentOptions(
   sb: Sb,
-  doc: { id: string; job_id?: string | null },
+  doc: { id: string; job_id?: string | null; job_contacts?: { contact_label?: unknown } | null },
   runLabel: string | null,
 ): Promise<DocumentOptions> {
   if (!doc.job_id || runLabel !== null) return { kind: 'none' }
@@ -56,18 +61,40 @@ export async function loadDocumentOptions(
     pricing: release.pricing,
     revisionId: release.revisionId,
     shared: (parties?.data?.length ?? 0) > 1,
+    neighbour: neighbourLetter(doc.job_contacts?.contact_label) !== null,
   }
 }
 
-export type RecordWrite = { ok: true } | { ok: false; reason: string }
+export type OptionAcceptance =
+  | { ok: true; claimed: true }
+  | { ok: true; claimed: false }
+  | { ok: false; reason: string }
 
-export async function writeOptionAcceptance(sb: Sb, record: OptionAcceptanceRecord): Promise<RecordWrite> {
+/**
+ * Marks the document accepted and writes its option record in one database
+ * transaction. claimed false: someone else accepted it first (nothing written).
+ * ok false: nothing written at all (the migration not applied included), so
+ * the acceptance is NOT made and the customer retries the same selection.
+ */
+export async function acceptDocumentWithOptions(
+  sb: Sb,
+  documentId: string,
+  acceptedAt: string,
+  record: OptionAcceptanceRecord,
+): Promise<OptionAcceptance> {
   try {
-    const { error } = await sb.from('quote_option_acceptances').insert(record)
-    if (error) return { ok: false, reason: String(error?.code || error?.message || 'insert_failed') }
-    return { ok: true }
+    if (typeof sb.rpc !== 'function') return { ok: false, reason: 'rpc_unavailable' }
+    const { data, error } = await sb.rpc('accept_quote_document_with_options', {
+      p_document_id: documentId,
+      p_accepted_at: acceptedAt,
+      p_record: record,
+    })
+    if (error) return { ok: false, reason: String(error?.code || error?.message || 'accept_failed') }
+    if (data?.claimed === true) return { ok: true, claimed: true }
+    if (data?.claimed === false) return { ok: true, claimed: false }
+    return { ok: false, reason: 'accept_answer_unreadable' }
   } catch (e) {
-    return { ok: false, reason: (e as Error)?.message || 'insert_failed' }
+    return { ok: false, reason: (e as Error)?.message || 'accept_failed' }
   }
 }
 
