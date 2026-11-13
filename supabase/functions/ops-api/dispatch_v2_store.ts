@@ -90,6 +90,20 @@ import {
 } from "./scope_engine_materials.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
 import { takenQuoteOptionOrderItems } from "./dispatch_quote_options.ts";
+import {
+  cleanDispatchCostReason,
+  cleanDispatchUnitCost,
+  type DispatchBudget,
+  DispatchBudgetReadError,
+  DISPATCH_SUPPLIER_NOTE_MAX,
+  dispatchBudgetFillLines,
+  type DispatchLineCost,
+  dispatchLineCost,
+  type DispatchLineReason,
+  dispatchOrderCost,
+  readDispatchBudget,
+  readDispatchBudgetCostOn,
+} from "./dispatch_v2_budget_cost.ts";
 // Tweak 4: the supplier picker rules and the name a box shows.
 import {
   dispatchV2BuildSupplierPicker,
@@ -180,6 +194,9 @@ export const DISPATCH_V2_WRITE_ACTIONS = [
   "dispatch_v2_save_email",
   "dispatch_v2_discard_email",
   "dispatch_v2_send_email",
+  // Ruling 17 step 3: a named person's reason for a line over its budget
+  // line or not in the budget (dispatch_v2_budget_cost.ts).
+  "dispatch_v2_line_cost_reason",
 ] as const;
 
 export const DISPATCH_V2_ACTIONS = [
@@ -191,14 +208,14 @@ export const DISPATCH_V2_ACTIONS = [
 // provenance (production migration 20261019200000); a scope fill writes the
 // sealed scope revision and the engine's own line there (T20).
 const LINE_SELECT =
-  "id, job_id, supplier_id, description, quantity, unit, detail, profile, colour, status, purchase_order_id, dispatch_order_email_id, source, position, updated_at, source_kind, source_version_id, source_version, source_line_id";
+  "id, job_id, supplier_id, description, quantity, unit, detail, profile, colour, status, purchase_order_id, dispatch_order_email_id, source, position, updated_at, source_kind, source_version_id, source_version, source_line_id, budget_id, budget_line_key, cost_reason_id";
 const SCOPE_REVISION_KINDS = new Set(["fence_scope_revision", "patio_scope_revision"]);
 const BOX_SELECT =
   "id, supplier_id, supplier_name, position, is_main_supplier, created_at, delivery_date, delivery_date_set_at, delivery_date_confirmed_at, material_stage, material_stage_set_at, material_stage_set_by_email, paid_at, paid_by_email, pay_on, pay_on_set_at, pay_on_set_by_email, payment_reopened_at, order_date_mode, order_date_mode_set_at, order_date_mode_set_by_email";
 const PHOTO_SELECT =
   "id, job_id, supplier_id, file_name, content_type, size_bytes, storage_path, created_at, created_by_email";
 const EMAIL_SELECT =
-  "id, org_id, job_id, supplier_id, supplier_name, approved_email_id, work_type, is_main_supplier, standing_lines_included, status, team_cc_email, to_emails, cc_emails, subject, body_text, built_body_text, delivery_date, order_lines, photo_ids, test_sent_at, test_sent_to, test_sent_by_email, send_claimed_at, sent_at, sent_by_email, sent_from_mailbox, sent_to_emails, sent_cc_emails, sent_internet_message_id, sent_conversation_id, sent_graph_message_id, last_error, created_at, created_by_email, updated_at, updated_by_email, origin";
+  "id, org_id, job_id, supplier_id, supplier_name, approved_email_id, work_type, is_main_supplier, standing_lines_included, status, team_cc_email, to_emails, cc_emails, subject, body_text, built_body_text, delivery_date, order_lines, photo_ids, test_sent_at, test_sent_to, test_sent_by_email, send_claimed_at, sent_at, sent_by_email, sent_from_mailbox, sent_to_emails, sent_cc_emails, sent_internet_message_id, sent_conversation_id, sent_graph_message_id, last_error, created_at, created_by_email, updated_at, updated_by_email, origin, order_cost";
 // origin: migration 20261105170000_dispatch_v2_outlook_orders.sql ('outlook'
 // = recorded from an order Shaun sent from Outlook, contract section 3f.1).
 // on_account: migration 20261029120000_dispatch_v2_on_account_suppliers.sql
@@ -383,6 +400,135 @@ async function readJobLines(client: any, jobId: string): Promise<any[]> {
   }
 }
 
+// ── Ruling 17 step 3: the job budget's cost on each line ───────────────────
+
+// The budget a job's lines are costed against, or null: with the switch off
+// (or missing or unreadable) every Dispatch path runs exactly as before step
+// 3, and a job with no stored budget keeps today's path too. An unreadable
+// budget refuses: a line is never ordered as though the job had none.
+type BudgetCostState = { on: boolean; budget: DispatchBudget | null };
+
+async function readBudgetCostState(client: any, jobId: string): Promise<BudgetCostState> {
+  if (!await readDispatchBudgetCostOn(client)) return { on: false, budget: null };
+  try {
+    return { on: true, budget: await readDispatchBudget(client, jobId) };
+  } catch (error) {
+    if (error instanceof DispatchBudgetReadError) {
+      console.error("[dispatch_v2] job budget read failed:", error.message);
+      refuse(503, "budget_unreadable", "The job budget could not be read, so nothing was changed. Try again.");
+    }
+    throw error;
+  }
+}
+
+const REASON_SELECT =
+  "id, line_id, job_id, budget_id, budget_line_key, basis, reason, quantity, unit, unit_cost_ex_gst, given_by, given_by_email, given_at";
+
+function projectReason(row: any): DispatchLineReason {
+  return {
+    id: String(row.id),
+    basis: String(row.basis),
+    reason: String(row.reason),
+    quantity: Number(row.quantity),
+    unit: row.unit ?? null,
+    unit_cost_ex_gst: numberOrNull(row.unit_cost_ex_gst),
+    given_by: String(row.given_by),
+    given_by_email: row.given_by_email ?? null,
+    given_at: String(row.given_at),
+  };
+}
+
+// The current reasons the lines name (cost_reason_id), by reason id.
+async function readLineReasons(client: any, lines: any[]): Promise<Map<string, DispatchLineReason>> {
+  const ids = [...new Set(lines.map((l) => l?.cost_reason_id).filter((id) => typeof id === "string"))];
+  const out = new Map<string, DispatchLineReason>();
+  if (!ids.length) return out;
+  const { data, error } = await client.from("dispatch_line_cost_reasons")
+    .select(REASON_SELECT)
+    .in("id", ids);
+  if (error) readFailed("line cost reasons read", error);
+  for (const row of data || []) out.set(String(row.id), projectReason(row));
+  return out;
+}
+
+function costOf(line: any, budget: DispatchBudget, reasons: Map<string, DispatchLineReason>): DispatchLineCost {
+  const reason = line?.cost_reason_id ? reasons.get(String(line.cost_reason_id)) ?? null : null;
+  return dispatchLineCost(line, budget, reason);
+}
+
+// Every line on an order must be costed before the order is made or sent.
+function refuseUncosted(costed: Array<{ line: any; cost: DispatchLineCost }>): void {
+  const open = costed.filter((c) => !c.cost.resolved);
+  if (!open.length) return;
+  refuse(
+    409,
+    "line_cost_needs_reason",
+    `${open.length === 1 ? "A line on this order is" : `${open.length} lines on this order are`} over the job budget or not in it: ${open.map((c) => c.line.description).join(", ")}. Give a reason (and a unit cost where asked) on ${open.length === 1 ? "it" : "each"} before the order goes.`,
+    {
+      lines: open.map((c) => ({
+        id: c.line.id,
+        basis: c.cost.basis,
+        needs_unit_cost: c.cost.needs_unit_cost,
+        words: c.cost.words,
+      })),
+    },
+  );
+}
+
+// The line as the screen shows it, with its cost when the job has a budget.
+function projectCostedLine(
+  row: any,
+  budget: DispatchBudget | null,
+  reasons: Map<string, DispatchLineReason>,
+) {
+  const line = projectDispatchV2Line(row);
+  return budget ? { ...line, cost: costOf(row, budget, reasons) } : line;
+}
+
+// The panel's budget block and what it costs the lines with. Never refuses.
+async function readBudgetCostView(client: any, jobId: string, lines: any[]): Promise<{
+  budget: DispatchBudget | null;
+  reasons: Map<string, DispatchLineReason>;
+  view: null | Record<string, unknown>;
+}> {
+  const reasons = new Map<string, DispatchLineReason>();
+  if (!await readDispatchBudgetCostOn(client)) return { budget: null, reasons, view: null };
+  let budget: DispatchBudget | null;
+  try {
+    budget = await readDispatchBudget(client, jobId);
+  } catch (error) {
+    console.error("[dispatch_v2] job budget read failed:", error);
+    return { budget: null, reasons, view: { state: "unreadable" } };
+  }
+  if (!budget) return { budget: null, reasons, view: { state: "none" } };
+  try {
+    for (const [id, r] of await readLineReasons(client, lines)) reasons.set(id, r);
+  } catch (error) {
+    console.error("[dispatch_v2] line cost reasons read failed:", error);
+    return { budget: null, reasons, view: { state: "unreadable" } };
+  }
+  // Lines still to order (not in stock, not on a sent order) that need a reason.
+  const open = lines.filter((l) =>
+    l?.status !== "in_stock" && !l?.dispatch_order_email_id && !l?.purchase_order_id &&
+    !costOf(l, budget, reasons).resolved
+  ).length;
+  return {
+    budget,
+    reasons,
+    view: {
+      state: "ok",
+      budget_id: budget.id,
+      version: budget.version,
+      scope_revision_id: budget.scope_revision_id,
+      priced_by_line: budget.priced_by_line,
+      materials_ex_gst: budget.materials_ex_gst,
+      one_figure_ex_gst: budget.one_figure_ex_gst,
+      by_supplier: budget.by_supplier,
+      lines_needing_reason: open,
+    },
+  };
+}
+
 async function readBoxes(client: any, jobId: string): Promise<any[]> {
   const { data, error } = await client.from("job_material_suppliers")
     .select(BOX_SELECT)
@@ -556,6 +702,10 @@ export function projectDispatchV2Line(row: any) {
     // number), and the engine's own id for the line (patio). Null on a line
     // typed in, and on lines filled before T20.
     ...scopeProvenance(row),
+    // Ruling 17 step 3: the job budget line this line was filled from (key),
+    // and the line's current reason, or null.
+    budget_line_key: row?.budget_line_key ?? null,
+    cost_reason_id: row?.cost_reason_id ?? null,
     // Set once the line went out on a sent order email; the line is locked.
     sent_on_email_id: row?.dispatch_order_email_id ?? null,
     locked: lineLocked(row),
@@ -619,6 +769,9 @@ export function projectDispatchV2Email(row: any, nowMs = Date.now()) {
     is_main_supplier: row?.is_main_supplier === true,
     standing_lines_included: row?.standing_lines_included === true,
     line_count: (Array.isArray(row?.order_lines) ? row.order_lines : []).length,
+    // Ruling 17 step 3: each line's cost when the email was made (staff only;
+    // the email body never prints a dollar). Null with no budget or switch off.
+    order_cost: row?.order_cost ?? null,
     photo_ids: row?.photo_ids || [],
     empty_detail_lines: dispatchV2EmptyDetailLines(String(row?.body_text ?? "")),
     test: row?.test_sent_at
@@ -692,6 +845,11 @@ export async function readDispatchV2Materials(
     readApprovedFor(client, supplierIds, ctx),
     testSendDone(client, ctx),
   ]);
+  // Ruling 17 step 3: each line's cost when the switch is on and the job has a
+  // stored budget. A failed read never refuses the panel: it says so, and
+  // Make email and Send refuse until the budget can be read.
+  const cost = await readBudgetCostView(client, job.id, lines);
+  const project = (l: any) => projectCostedLine(l, cost.budget, cost.reasons);
   const mainId = dispatchV2MainSupplierId(boxes, lines);
   const teamCc = dispatchV2TeamCc(job.work_type);
   const nowMs = Date.parse(nowIso(ctx));
@@ -718,6 +876,9 @@ export async function readDispatchV2Materials(
     // the list already has lines). The fill uses the accepted revision when
     // the job has one.
     scope_seal: seal,
+    // Ruling 17 step 3: null while the switch is off. Else the job budget the
+    // lines are costed against (state ok), none stored (none), or unreadable.
+    budget: cost.view,
     // S08: null, or the scope lines came from an older sealed revision than
     // the one the order follows now: which ones, which revision, whether Fill
     // from the scope may refill them (nothing went out), and the plain words.
@@ -731,7 +892,7 @@ export async function readDispatchV2Materials(
       }
       : null,
     draft_list: {
-      lines: lines.filter((l) => !l.supplier_id).map(projectDispatchV2Line),
+      lines: lines.filter((l) => !l.supplier_id).map(project),
       photos: photos.filter((p) => !p.supplier_id).map(projectPhoto),
     },
     suppliers: boxes.map((box) => {
@@ -777,9 +938,7 @@ export async function readDispatchV2Materials(
           message:
             "This supplier has no approved order email. Ask Shaun to add one before sending.",
         },
-        lines: lines.filter((l) => String(l.supplier_id ?? "") === id).map(
-          projectDispatchV2Line,
-        ),
+        lines: lines.filter((l) => String(l.supplier_id ?? "") === id).map(project),
         photos: photos.filter((p) => String(p.supplier_id ?? "") === id).map(
           projectPhoto,
         ),
@@ -1462,6 +1621,8 @@ type FillLine = DispatchSuggestedLine &
     scope_line_id?: string | null;
     supplier_key?: string | null;
     supplier_name?: string | null;
+    // Ruling 17 step 3: the job budget line it was filled from.
+    budget_line_key?: string | null;
   };
 
 // Fill the draft list from the job's frozen scope revision (T20). With auto
@@ -1549,10 +1710,32 @@ export async function suggestDispatchV2Draft(
     }
     refill = state;
   }
+  // Ruling 17 step 3: with dispatch_budget_cost_v1 on, a job with a stored
+  // budget fills from the budget's materials (the budget is the order: one
+  // list), each line naming its budget line so its cost can be read. The
+  // budget must be the one sealed with the revision this fill reads.
+  const { budget } = await readBudgetCostState(client, job.id);
+  if (budget && budget.scope_revision_id !== revision.id) {
+    refuse(
+      409,
+      "budget_not_current_revision",
+      `The job budget was sealed with a different revision than revision ${revision.revision_number}, so the list was not filled. Check the accepted quote.`,
+      { scope_revision: revision },
+    );
+  }
+  const budgetFill = budget ? dispatchBudgetFillLines(budget) : null;
+  if (budgetFill && !budgetFill.ok) {
+    refuse(
+      409,
+      "supplier_note_too_long",
+      `A note to the supplier in the job budget is longer than ${DISPATCH_SUPPLIER_NOTE_MAX} characters, so the list was not filled. Shorten it in the quote tool.`,
+      { budget_line_keys: budgetFill.keys },
+    );
+  }
   // A fencing job scoped in the fence tool is read with the material ordering
   // rules (panels, posts, plinths, gates). A Scope Engine patio record lists
   // its sealed lines; anything else uses the older extractor (patio layout).
-  const fence = job.work_type === "fencing"
+  const fence = !budgetFill && job.work_type === "fencing"
     ? dispatchV2FenceLinesFromScope(sealedScope)
     : null;
   let suggested: FillLine[];
@@ -1562,7 +1745,10 @@ export async function suggestDispatchV2Draft(
       : []),
     ...(fence ? fence.notes : []),
   ];
-  if (fence) {
+  if (budgetFill?.ok) {
+    suggested = budgetFill.lines.map((l) => ({ ...l }));
+    notes.push(...budgetFill.notes);
+  } else if (fence) {
     suggested = fence.lines;
   } else {
     let items: any[];
@@ -1593,7 +1779,11 @@ export async function suggestDispatchV2Draft(
   // (patio) or, with no supplier on it (a fence option), on the draft list.
   // An untaken option is not here. An option record that cannot be read
   // fills nothing, so the order is never sent short.
-  const taken = await takenQuoteOptionOrderItems(client, job.id);
+  // A budget already holds the options the customer took (job_budgets is
+  // stored with them applied), so a budget fill adds none here.
+  const taken = budget
+    ? { state: "read" as const, items: [], notes: [] }
+    : await takenQuoteOptionOrderItems(client, job.id);
   if (taken.state === "unreadable") {
     refuse(409, "quote_options_unreadable", "The quote options the customer took could not be read, so the list was not filled. Try again.");
   }
@@ -1766,6 +1956,11 @@ export async function suggestDispatchV2Draft(
       source_version_id: revision.id,
       source_version: String(revision.revision_number),
       source_line_id: own,
+      // Only written on a budget fill, so a fill with the switch off sends
+      // exactly the columns it always did.
+      ...(budget && line.budget_line_key
+        ? { budget_id: budget.id, budget_line_key: line.budget_line_key }
+        : {}),
       position: after + index + 1,
       created_at: now,
       updated_at: now,
@@ -2497,6 +2692,19 @@ export async function makeDispatchV2Email(
       openEmail: open,
     }).mode;
   }
+  // Ruling 17 step 3: on a job with a stored budget (switch on) every line
+  // on the order must be costed: at or under its budget line, or with a named
+  // person's reason. The cost is kept beside the email, never printed in it.
+  // The standing lines stay as Shaun words them: the budget's concrete and
+  // screws they ask for are never on supplier copy, and stay on the budget.
+  const { budget } = await readBudgetCostState(client, job.id);
+  let orderCost: ReturnType<typeof dispatchOrderCost> | null = null;
+  if (budget) {
+    const reasons = await readLineReasons(client, info.orderable);
+    const costed = info.orderable.map((line: any) => ({ line, cost: costOf(line, budget, reasons) }));
+    refuseUncosted(costed);
+    orderCost = dispatchOrderCost(costed, budget);
+  }
   const built = dispatchV2BuildEmail({
     job,
     workType: job.work_type,
@@ -2531,6 +2739,10 @@ export async function makeDispatchV2Email(
     last_error: null,
     updated_at: now,
     updated_by_email: ctx.actor.email,
+    // Written when costed, and cleared on a rebuild that is not, so a held
+    // email never keeps an older cost. Left out otherwise: the switch off
+    // sends exactly the columns it always did.
+    ...(orderCost || open?.order_cost ? { order_cost: orderCost } : {}),
   };
   if (open) {
     const { data, error } = await client.from("dispatch_supplier_order_emails")
@@ -2902,6 +3114,22 @@ export async function sendDispatchV2Email(
 
   // A test goes only to admin@, never the supplier, so it is not an order.
   if (!test) {
+    // Ruling 17 step 3: an order on a job with a stored budget (switch on)
+    // goes only with its cost recorded against that budget when it was made,
+    // and with every line still costed (a reason is write-once and a line's
+    // new reason moves its stamp, which the line check above already reads).
+    const { budget } = await readBudgetCostState(client, job.id);
+    if (budget) {
+      const recorded = email.order_cost;
+      if (!recorded || typeof recorded !== "object") {
+        refuse(409, "order_cost_missing", "This email was made before its lines were costed from the job budget. Make the email again.");
+      }
+      if (recorded.budget_id !== budget.id) {
+        refuse(409, "budget_changed", "The job budget changed after this email was made. Make the email again.");
+      }
+      const reasons = await readLineReasons(client, info.orderable);
+      refuseUncosted(info.orderable.map((line: any) => ({ line, cost: costOf(line, budget, reasons) })));
+    }
     await (ctx.depositGate ?? assertJobDepositsBeforeWork)(
       client,
       String(job.id),
@@ -3085,6 +3313,98 @@ function sameStamp(a: unknown, b: unknown): boolean {
 
 // ── One entry for the action switch ─────────────────────────────────────────
 
+// Ruling 17 step 3: a named person's reason for one line over its budget
+// line, in another unit, with no budget cost, or not in the budget. The reason
+// covers the line's quantity and unit as they stand; a later rise needs a new
+// one. Where the budget gives no unit cost for the line, the person gives it.
+// Only a signed-in person gives a reason: the ops key is refused, so a reason
+// always names who. Reasons are append-only; the line names its current one.
+export async function giveDispatchV2LineCostReason(
+  client: any,
+  body: any,
+  ctx: DispatchV2Context,
+) {
+  const job = await loadJob(client, bodyJobId(body), ctx);
+  if (!ctx.actor.userId) {
+    refuse(403, "named_person_required", "A reason is given by a signed-in person, so it names who gave it. Sign in and give it from Dispatch.");
+  }
+  if (!isDispatchUuid(body?.line_id)) badRequest("line_id must be a uuid");
+  const reason = cleanDispatchCostReason(body?.reason);
+  if (!reason) badRequest("reason must be 3 to 500 characters");
+  const expected = expectedStamp(body?.expected_updated_at, true) as string;
+  const { on, budget } = await readBudgetCostState(client, job.id);
+  if (!on) refuse(409, "budget_cost_off", "Lines are not costed from the job budget yet, so no reason is needed.");
+  if (!budget) refuse(409, "no_budget", "This job has no stored budget, so its lines need no reason.");
+  const line = await readLine(client, body.line_id);
+  if (!line || String(line.job_id) !== job.id) {
+    refuse(409, "line_not_on_job", "That line is not on this job");
+  }
+  if (lineLocked(line)) lineIsLocked(line);
+  if (!sameStamp(line.updated_at, expected)) {
+    refuse(409, "line_changed", "This line changed somewhere else. Reload it.", {
+      line: projectDispatchV2Line(line),
+    });
+  }
+  const current = await readLineReasons(client, [line]);
+  const cost = costOf(line, budget, current);
+  if (cost.basis === "quantity_missing") {
+    refuse(409, "quantity_required", "Give the line a quantity before giving a reason.");
+  }
+  if (!cost.needs_reason) {
+    refuse(409, "line_within_budget", "This line is within its budget line, so it needs no reason.");
+  }
+  let unitCost: number | null = null;
+  if (cost.needs_unit_cost) {
+    unitCost = cleanDispatchUnitCost(body?.unit_cost_ex_gst);
+    if (unitCost === null) {
+      refuse(400, "unit_cost_required", "The budget has no unit cost for this line. Give one (dollars ex GST, two decimals at most) with the reason.");
+    }
+  } else if (body?.unit_cost_ex_gst !== undefined && body?.unit_cost_ex_gst !== null) {
+    badRequest("unit_cost_ex_gst is taken only where the budget has no unit cost for the line");
+  }
+  const now = nowIso(ctx);
+  const { data: given, error: givenError } = await client
+    .from("dispatch_line_cost_reasons")
+    .insert({
+      org_id: job.org_id,
+      job_id: job.id,
+      line_id: line.id,
+      budget_id: budget.id,
+      budget_line_key: line.budget_id === budget.id ? line.budget_line_key ?? null : null,
+      basis: cost.basis,
+      reason,
+      quantity: Number(line.quantity),
+      unit: line.unit ?? null,
+      unit_cost_ex_gst: unitCost,
+      given_by: ctx.actor.userId,
+      given_by_email: ctx.actor.email,
+      given_at: now,
+    })
+    .select(REASON_SELECT)
+    .single();
+  if (givenError) writeFailed("line cost reason insert", givenError);
+  const { data: updated, error: updateError } = await client
+    .from("job_material_lines")
+    .update({
+      cost_reason_id: given.id,
+      updated_at: now,
+      updated_by: ctx.actor.userId,
+      updated_by_email: ctx.actor.email,
+    })
+    .eq("id", line.id)
+    .eq("job_id", job.id)
+    .eq("updated_at", line.updated_at)
+    .select(LINE_SELECT);
+  if (updateError) writeFailed("line cost reason link", updateError);
+  const row = Array.isArray(updated) ? updated[0] : updated;
+  if (!row) {
+    // The reason row stays (append-only) and names nothing; the line is as it was.
+    refuse(409, "line_changed", "This line changed somewhere else, so the reason was not put on it. Reload it and give the reason again.");
+  }
+  const reasons = new Map<string, DispatchLineReason>([[String(given.id), projectReason(given)]]);
+  return { success: true, line: projectCostedLine(row, budget, reasons) };
+}
+
 export async function runDispatchV2Action(
   client: any,
   action: string,
@@ -3127,6 +3447,8 @@ export async function runDispatchV2Action(
       return await discardDispatchV2Email(client, body, ctx);
     case "dispatch_v2_send_email":
       return await sendDispatchV2Email(client, body, ctx);
+    case "dispatch_v2_line_cost_reason":
+      return await giveDispatchV2LineCostReason(client, body, ctx);
     default:
       refuse(400, "unknown_action", `Unknown action: ${action}`);
   }

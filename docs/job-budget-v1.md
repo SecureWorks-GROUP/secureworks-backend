@@ -126,6 +126,59 @@ Staff reads (`get_scope_revision_for_viewer`, `read_job_record`, the scoping
 tools through ghl-proxy, reporting) are unchanged and may show it. Proof:
 `ops-api/job_budget_strip_test.ts`.
 
+## Dispatch lines carry cost (step 3)
+
+Ruling 17 step 3: a Dispatch material line takes its unit cost and line cost
+from the job budget, and an order line over its budget line, or a line not in
+the budget, goes out only with a named person's reason recorded. Never
+silently $0, never silently over. Migration
+`20261114020000_dispatch_line_budget_cost.sql`; the rule is one module,
+`ops-api/dispatch_v2_budget_cost.ts`; the store is `ops-api/dispatch_v2_store.ts`.
+
+Switch: `feature_flags.dispatch_budget_cost_v1`, seeded off. Off, missing or
+unreadable: Dispatch fills, makes and sends exactly as before. On, for a job
+with a stored budget (the newest `job_budgets` version):
+
+| Step | What happens |
+| --- | --- |
+| Fill (`dispatch_v2_suggest_draft`) | Lines come from the budget's materials lines, each naming its budget line (`job_material_lines.budget_id` + `budget_line_key`). The budget must be for the job's current frozen revision, else `budget_not_current_revision`. A line's `note_to_supplier` rides as its detail (over 300 characters refuses `supplier_note_too_long`). Delivery and cutting lines, and lines that never go on a supplier order (tek screws, removal, labour), stay on the budget and are named in the fill notes. Taken options are already in the budget, so they are not added again. Standing lines are unchanged. |
+| Read (`dispatch_materials`) | Each line carries `cost` (basis, unit cost, line cost, needs a reason or not); the reply carries `budget` (state, version, totals by supplier, how many open lines need a reason). A budget read fault answers `budget: {state: 'unreadable'}`, never "no budget". |
+| Make the email | Every orderable line must be costed or carry a covering reason, else 409 `line_cost_needs_reason` naming the lines. The email row stores `order_cost` (`dispatch-order-cost.v1`: each line's basis and cost, the total, the supplier's budget). |
+| Send | Refuses `order_cost_missing` if the email was made without its cost, `budget_changed` if a newer budget was stored since, and `line_cost_needs_reason` if a line moved. |
+| Reason (`dispatch_v2_line_cost_reason`) | `job_id`, `line_id`, `reason` (3 to 500 characters), `expected_updated_at`, and `unit_cost_ex_gst` only where the budget has none. Signed-in staff only: the ops key is refused `named_person_required`, so every reason names who. |
+
+How a line is costed:
+
+| Basis | When | Needs |
+| --- | --- | --- |
+| `budget` | Linked, same unit, at or under the budget quantity | Nothing. Line cost = budget unit cost x quantity, whole cents half up. |
+| `one_figure` | A one-figure budget's line at or under quantity | Nothing. No per-line dollars: the job has one materials figure. |
+| `over_budget` | Over the budget quantity | A reason for that quantity and unit. The budget unit cost still applies (a one-figure line also needs a unit cost). |
+| `unit_changed` | Unit differs from the budget line | A reason and a unit cost. |
+| `no_budget_cost` | The budget line has no unit cost | A reason and a unit cost. |
+| `not_in_budget` | Typed in, or from an older budget | A reason and a unit cost. |
+| `quantity_missing` | No quantity | Never ordered, never costed. |
+
+With the switch on, a budget that cannot be read refuses the fill, the email,
+the send and a reason with 503 `budget_unreadable`, never treated as no budget.
+
+A reason covers the quantity and unit as they stood; a later rise needs a new
+one. Reasons are append-only (`dispatch_line_cost_reasons`, service role read
+and add only, RLS on); the line names its current one (`cost_reason_id`), and
+the database refuses a line naming another line's reason.
+
+What it never does: print a dollar on the supplier email (the body is built
+from the line text only; the director decides any change), cost the v1
+purchase order path or an order recorded from Outlook, or write a job event
+with money. Tests: `ops-api/dispatch_v2_budget_cost_test.ts` (the rule, on the
+tool's native budgets), the `budget ...` cases in
+`ops-api/dispatch_v2_store_test.ts`, and the migration contract
+`supabase/tests/migration-contracts/20261114020000_dispatch_line_budget_cost/`.
+
+Rollout: apply the migration before the matching `ops-api`; turn the switch on
+only on the owner's word. The rollback refuses while any line link, reason or
+order cost is recorded (turn the switch off instead).
+
 ## Tests
 
 - `_shared/job_budget/budget_v1_test.ts`: the formula, the tool's shared

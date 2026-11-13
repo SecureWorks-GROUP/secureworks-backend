@@ -7696,6 +7696,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'dispatch_v2_make_email':
       case 'dispatch_v2_save_email':
       case 'dispatch_v2_discard_email':
+      // Ruling 17 step 3: a signed-in person's reason for a line over its job
+      // budget line (dispatch_v2_budget_cost.ts). The ops key is refused inside.
+      case 'dispatch_v2_line_cost_reason':
       case 'dispatch_v2_send_email': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
           return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
