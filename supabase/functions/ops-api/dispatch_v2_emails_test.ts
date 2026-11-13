@@ -174,14 +174,18 @@ Deno.test("pickup: the opening line says pickup and there is no Address line", (
     "Hi Team, could we please order the following for pickup:",
   );
   assert(!built.body_text.includes("Address:"));
-  // Tweak 6: no Contact line on a pickup either.
-  assert(!built.body_text.includes("Contact:"));
+  // Tweak 6: never the client's phone on a pickup. Shaun, 13 Nov 2026: the
+  // client's first name sits on a Contact line straight under the Date.
   assert(!built.body_text.includes("0400 000 000"));
-  assert(!built.body_text.includes("Jeremy"));
-  assert(built.body_text.includes("Date: 2 November 2026"));
+  assertEquals(lines.slice(2, 5), [
+    "Date: 2 November 2026",
+    "Contact: (Jeremy)",
+    "",
+  ]);
+  assertEquals(built.missing, []);
   assertEquals(dispatchV2FulfilmentOf(built.body_text), "pickup");
   // A pickup with no site address and no client phone or name is not
-  // missing anything but its date.
+  // missing anything but its date, and has no Contact line at all.
   const bare = dispatchV2BuildEmail({
     job: { job_number: "SWF-1" },
     workType: "patio",
@@ -191,6 +195,8 @@ Deno.test("pickup: the opening line says pickup and there is no Address line", (
     fulfilment: "pickup",
   });
   assertEquals(bare.missing, ["date"]);
+  assert(!bare.body_text.includes("Contact:"));
+  assertEquals(dispatchV2EmptyDetailLines(bare.body_text), ["date"]);
   // Delivery (and no choice at all) keeps the Address line.
   for (const fulfilment of ["delivery", null, undefined] as const) {
     const d = dispatchV2BuildEmail({
@@ -545,6 +551,7 @@ Deno.test("photo only: no line and a photo says Please see attached, keeps the h
       "Hi Team, could we please order the following for pickup:",
       "",
       "Date: 10 November 2026",
+      "Contact: (Jeremy)",
       "",
       "Materials Needed:",
       "",

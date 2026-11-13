@@ -2689,6 +2689,7 @@ Deno.test("make email: a box with only a photo makes a photo-only email and send
       "Hi Team, could we please order the following for pickup:",
       "",
       "Date: 10 November 2026",
+      "Contact: (Jeremy)",
       "",
       "Materials Needed:",
       "",
