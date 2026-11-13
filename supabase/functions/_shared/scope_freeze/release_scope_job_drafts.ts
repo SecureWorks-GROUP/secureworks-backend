@@ -1,10 +1,15 @@
 import { acceptedRevisionForOrders } from "../expected_costs/accepted_quote_cost_source.ts";
+import { readTakenQuoteOptions } from "../quote_options/taken_options.ts";
 
 export type ScopeDraftReleaseOutcome =
   | { state: "not_prepared" | "already_released" | "released" }
   /** Acceptance retained; the issue waits for the owner-approved price and
    * work order on the accepted revision (20261109040000). Not a fault. */
   | { state: "held_for_owner_approval"; missing: string[] }
+  /** Ruling 14 step 1: the customer took quote options, which the drafts
+   * sealed at the base price do not carry yet. Held for the office; the
+   * acceptance, job price and deposit stand. */
+  | { state: "held_for_quote_options"; reason: "quote_options_taken" | "quote_options_unreadable" }
   | { state: "release_unavailable" };
 
 /** TK-S28: a job status write that should release (or retry releasing) the
@@ -37,6 +42,29 @@ export async function releaseScopeJobDraftsOnAcceptance(
     if (error) throw error;
     if (!draft) return { state: "not_prepared" };
     if (draft.released_at) return { state: "already_released" };
+    // The work order, payer invoices and payment stages were sealed without
+    // the options. Releasing them would issue labour and stage amounts short
+    // of what the customer accepted, so a job with a taken option (or an
+    // unreadable option record) holds them for the office.
+    const options = await readTakenQuoteOptions(client, jobId);
+    if (options.state !== "none") {
+      const reason = options.state === "taken"
+        ? "quote_options_taken" as const
+        : "quote_options_unreadable" as const;
+      try {
+        await client.from("job_events").insert({
+          job_id: jobId,
+          event_type: "scope_job_draft_release_held",
+          detail_json: {
+            reason,
+            ...(options.state === "taken"
+              ? { taken_option_ids: options.options.map((o) => o.id) }
+              : {}),
+          },
+        });
+      } catch { /* The hold stands even if the diagnostic cannot be saved. */ }
+      return { state: "held_for_quote_options", reason };
+    }
     const source = await acceptedRevisionForOrders(client, jobId);
     if (source.kind === "unknown") {
       throw new Error("scope_drafts_accepted_source_unproven");

@@ -31,6 +31,12 @@ import {
   type QuoteCostTable,
   type QuoteWorkOrderLines,
 } from "./quote_work_order_lines.ts";
+import { readTakenQuoteOptions } from "../_shared/quote_options/taken_options.ts";
+
+/** Ruling 14 step 1: the customer took quote options these lines do not carry. */
+export const QUOTE_OPTIONS_TAKEN_FLAG = "quote_options_taken_not_in_lines";
+/** The job's quote option record could not be read. */
+export const QUOTE_OPTIONS_UNREADABLE_FLAG = "quote_options_unreadable";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -392,6 +398,19 @@ async function linesForJob(
     ...quote.flags,
     ...result.flags.filter((f) => !LINE_SCOPED_RESULT_FLAGS.has(f)),
   ];
+  // Ruling 14 step 1: the lines come from the sealed quote without its
+  // options. A taken option (or an option record that cannot be read) asks
+  // the approver to add it by hand, and the draft is never issued on its own.
+  if (pricing) {
+    const options = await readTakenQuoteOptions(client, String(job.id));
+    if (options.state !== "none") {
+      reviewFlags.push(
+        options.state === "taken"
+          ? QUOTE_OPTIONS_TAKEN_FLAG
+          : QUOTE_OPTIONS_UNREADABLE_FLAG,
+      );
+    }
+  }
   if (reviewFlags.length > 0) result.needs_review = true;
   for (const line of result.lines) {
     for (const flag of reviewFlags) {
@@ -493,7 +512,11 @@ export async function fillJobWorkOrderDraftFromQuote(
   const labourFromScope = result.lines.some((l) =>
     l.flags.includes(QUOTE_LINE_FLAGS.labourFromScopeConfig)
   );
-  if (!draft.hand_edited_at && !labourFromScope) {
+  const optionsNotInLines = result.lines.some((l) =>
+    l.flags.includes(QUOTE_OPTIONS_TAKEN_FLAG) ||
+    l.flags.includes(QUOTE_OPTIONS_UNREADABLE_FLAG)
+  );
+  if (!draft.hand_edited_at && !labourFromScope && !optionsNotInLines) {
     patch.quote_filled_at = new Date().toISOString();
   }
   // The revision the lines came from, on the row itself (Dispatch S6, R7;

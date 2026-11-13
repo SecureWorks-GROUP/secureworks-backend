@@ -1822,3 +1822,39 @@ Deno.test("new patio tool: lines that do not make the quote's labour are kept, f
   assertEquals(labour.length, 2);
   assert(labour.every((l: any) => !l.counted && l.needs_review && l.flags.includes("labour_differs_from_quote")));
 });
+
+// Ruling 14 step 1: the quote's lines carry no options. A taken option (or an
+// unreadable option record) puts every line in review and the draft is never
+// stamped for the automatic issue.
+Deno.test("R14 a taken quote option puts the filled draft in review and keeps it from issuing on its own", async () => {
+  const db = baseDb({
+    quote_option_acceptances: [{
+      job_id: JOB,
+      offered: [{ id: "gutter", name: "Extra gutter", goes: "crew" }],
+      taken_option_ids: ["gutter"],
+    }],
+  } as any);
+  const outcome: any = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals(outcome.filled, true);
+  const wo = db.tables.work_orders[0];
+  assert(wo.scope_items.length > 0);
+  for (const line of wo.scope_items) {
+    assert(line.flags.includes("quote_options_taken_not_in_lines"));
+    assertEquals(line.needs_review, true);
+  }
+  assertEquals(wo.quote_filled_at ?? null, null, "never stamped for the automatic issue");
+});
+
+Deno.test("R14 no option taken: the fill stamps the draft as before", async () => {
+  const db = baseDb({
+    quote_option_acceptances: [{
+      job_id: JOB,
+      offered: [{ id: "gutter", name: "Extra gutter", goes: "crew" }],
+      taken_option_ids: [],
+    }],
+  } as any);
+  await fillJobWorkOrderDraftFromQuote(db, JOB);
+  const wo = db.tables.work_orders[0];
+  assert(!wo.scope_items.some((l: any) => l.flags.includes("quote_options_taken_not_in_lines")));
+  assert(wo.quote_filled_at, "stamped as before");
+});

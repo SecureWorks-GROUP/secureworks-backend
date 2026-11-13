@@ -14,12 +14,14 @@ export const SEND_QUOTE_STAFF_OPERATOR_ROLES = new Set([
   'ops_manager',
 ])
 
-export const QUOTE_SEND_OFFICE_PATHS = new Set(['send', 'send-invoice', 'send-runs'])
+export const QUOTE_SEND_OFFICE_PATHS = new Set(['send', 'send-invoice', 'send-runs', 'accept-for-customer'])
 
 export const QUOTE_SEND_AUTH_PATHS = new Set([
   'send',
   'send-invoice',
   'send-runs',
+  // Ruling 14: the office accepting a quote for a customer on the phone.
+  'accept-for-customer',
 ])
 
 export function isSendQuoteStaffOperatorRole(role: unknown): boolean {

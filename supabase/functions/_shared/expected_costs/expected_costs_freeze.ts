@@ -89,6 +89,22 @@ export type ExpectedCostsSnapshot = {
     total_cost_ex_gst: number | null
     margin_pct: number | null
   }
+  // Ruling 14 step 1: present only when the customer took quote options. Each
+  // taken option's cost (when entered) is already inside its lane and the
+  // total above; margin_pct is then null because the tool's margin is for
+  // the base price and is never re-worked here.
+  quote_options?: {
+    taken_option_ids: string[]
+    added_cost_ex_gst: number
+    cost_unknown_option_ids: string[]
+  }
+}
+
+/** A taken quote option's cost, from pricing_json.optional_extras (send-quote quote_options.ts). */
+export type AcceptedOptionCost = {
+  id: string
+  cost_ex_gst: number | null
+  cost_kind: 'materials' | 'labour' | 'other'
 }
 
 export type FreezeExpectedCostsInput = {
@@ -96,6 +112,10 @@ export type FreezeExpectedCostsInput = {
   // send-quote's actual acceptance only. A declared release-to-scope binding
   // takes precedence over time selection; other legacy callers stay unchanged.
   quote_acceptance?: boolean
+  // Ruling 14 step 1: the options the customer took on this acceptance. Each
+  // cost goes into its lane (materials or labour; 'other' only into the
+  // total) and into totalCostEstimate. Absent or empty: exactly as before.
+  accepted_options?: AcceptedOptionCost[]
   // Overridable clock for tests + so callers can pin frozen_at to the exact
   // accept moment. Defaults to now().
   now_iso?: string
@@ -148,6 +168,10 @@ function coercePricing(v: unknown): Record<string, unknown> | null {
     }
   }
   return null
+}
+
+function roundCents(v: number): number {
+  return Math.round(v * 100) / 100
 }
 
 function finiteNumberOrNull(v: unknown): number | null {
@@ -383,6 +407,27 @@ export async function freezeExpectedCostsOnAcceptance(
     return { ok: true, snapshot: false, reason: 'zero_filled_pricing' }
   }
 
+  // Taken quote options join only a real base baseline (checked above).
+  const taken = input.accepted_options ?? []
+  let optionsBlock: ExpectedCostsSnapshot['quote_options'] | undefined
+  let optionCost = 0
+  if (taken.length > 0) {
+    const unknownCost: string[] = []
+    for (const o of taken) {
+      const cost = finiteNumberOrNull(o.cost_ex_gst)
+      if (cost === null) { unknownCost.push(o.id); continue }
+      optionCost = roundCents(optionCost + cost)
+      if (o.cost_kind === 'materials' || o.cost_kind === 'labour') {
+        const before = lanes[o.cost_kind]?.amount_ex_gst ?? 0
+        lanes[o.cost_kind] = { amount_ex_gst: roundCents(before + cost) }
+      }
+    }
+    optionsBlock = {
+      taken_option_ids: taken.map((o) => o.id),
+      added_cost_ex_gst: optionCost,
+      cost_unknown_option_ids: unknownCost,
+    }
+  }
   const snapshot: ExpectedCostsSnapshot = {
     version: EXPECTED_COSTS_SCHEMA_VERSION,
     confidence,
@@ -393,9 +438,13 @@ export async function freezeExpectedCostsOnAcceptance(
     frozen_at: now_iso,
     lanes,
     totals: {
-      total_cost_ex_gst: finiteNumberOrNull(sourcePricing[TOTAL_COST_KEY]),
-      margin_pct: finiteNumberOrNull(sourcePricing[MARGIN_PCT_KEY]),
+      total_cost_ex_gst: (() => {
+        const base = finiteNumberOrNull(sourcePricing[TOTAL_COST_KEY])
+        return base === null || !optionsBlock ? base : roundCents(base + optionCost)
+      })(),
+      margin_pct: optionsBlock ? null : finiteNumberOrNull(sourcePricing[MARGIN_PCT_KEY]),
     },
+    ...(optionsBlock ? { quote_options: optionsBlock } : {}),
   }
 
   // Write-once guard #2 (race-safe): only write when still null. The DB trigger
@@ -423,6 +472,6 @@ export async function freezeExpectedCostsOnAcceptance(
     source_ref,
     scope_revision_id,
     expected_frozen_at: now_iso,
-    lanes_written,
+    lanes_written: EXPECTED_LANES.filter((l) => lanes[l] !== undefined),
   }
 }

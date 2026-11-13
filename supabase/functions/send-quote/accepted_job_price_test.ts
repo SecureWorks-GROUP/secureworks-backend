@@ -91,12 +91,12 @@ Deno.test("B1 samePricing ignores key order only", () => {
 
 Deno.test("B1 /accept sets the job's price from the accepted quote before the status, expected costs and deposit, whole quote with one party only", () => {
   const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url))
-  const accept = src.indexOf("if (path === 'accept' && req.method === 'POST')")
+  const accept = src.indexOf("if ((path === 'accept' && req.method === 'POST') || staffAccept)")
   const runBranch = src.indexOf("// ── PER-RUN ACCEPTANCE (multi-neighbour fencing) ──", accept)
   const wholeBranch = src.indexOf("// Track invoice result for Next Steps page (existing non-run flow)", runBranch)
-  const set = src.indexOf("setJobPriceToAcceptedQuote(sb, { job_id: doc.job_id, document_id: doc.id, job_pricing: job.pricing_json })", accept)
+  const set = src.indexOf("setJobPriceToAcceptedQuote(sb, {", accept)
   const status = src.indexOf("status: newStatus,", wholeBranch)
-  const baseline = src.indexOf("freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id, quote_acceptance: true })", wholeBranch)
+  const baseline = src.indexOf("freezeExpectedCostsOnAcceptance(sb, {", wholeBranch)
   const deposit = src.indexOf("action=send_acceptance_invoice", wholeBranch)
   assert(accept > 0 && runBranch > accept && wholeBranch > runBranch)
   assert(set > wholeBranch, "set in the whole-quote branch, not the run branch")

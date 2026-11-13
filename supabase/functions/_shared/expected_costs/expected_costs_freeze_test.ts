@@ -635,3 +635,48 @@ for (const table of ['job_documents', 'run_acceptances', 'job_variations', 'quot
     })
   }
 }
+
+// ── Ruling 14 step 1: taken quote options join the baseline ──────────────────
+
+Deno.test('R14 taken options: each cost joins its lane and the total; margin is withheld', async () => {
+  const client = makeMockClient({ jobs: [seedJob({ id: 'JO1', pricing_json: LIVE_PRICING })] })
+  const r = await freezeExpectedCostsOnAcceptance(client as any, {
+    job_id: 'JO1', now_iso: FROZE_AT,
+    accepted_options: [
+      { id: 'lights', cost_ex_gst: 180, cost_kind: 'materials' },
+      { id: 'gutter', cost_ex_gst: 600, cost_kind: 'labour' },
+      { id: 'permit', cost_ex_gst: 50, cost_kind: 'other' },
+      { id: 'blank', cost_ex_gst: null, cost_kind: 'materials' },
+    ],
+  })
+  assert(r.ok && r.snapshot === true)
+  const ec = (client._state.jobs[0] as any).expected_costs
+  assertEquals(ec.lanes.materials.amount_ex_gst, 724.5)
+  assertEquals(ec.lanes.labour.amount_ex_gst, 845)
+  assertEquals(ec.lanes.commission.amount_ex_gst, 168.825, 'commission is never moved by an option')
+  assertEquals(ec.totals.total_cost_ex_gst, 1788.33, 'other costs only reach the total')
+  assertEquals(ec.totals.margin_pct, null, 'the tool margin is for the base price')
+  assertEquals(ec.quote_options, {
+    taken_option_ids: ['lights', 'gutter', 'permit', 'blank'],
+    added_cost_ex_gst: 830,
+    cost_unknown_option_ids: ['blank'],
+  })
+})
+
+Deno.test('R14 no taken options: the baseline is exactly as before', async () => {
+  const a = makeMockClient({ jobs: [seedJob({ id: 'JO2', pricing_json: LIVE_PRICING })] })
+  const b = makeMockClient({ jobs: [seedJob({ id: 'JO2', pricing_json: LIVE_PRICING })] })
+  await freezeExpectedCostsOnAcceptance(a as any, { job_id: 'JO2', now_iso: FROZE_AT })
+  await freezeExpectedCostsOnAcceptance(b as any, { job_id: 'JO2', now_iso: FROZE_AT, accepted_options: [] })
+  assertEquals((a._state.jobs[0] as any).expected_costs, (b._state.jobs[0] as any).expected_costs)
+  assertEquals('quote_options' in (a._state.jobs[0] as any).expected_costs, false)
+})
+
+Deno.test('R14 options never make a baseline out of pricing with no cost lanes', async () => {
+  const client = makeMockClient({ jobs: [seedJob({ id: 'JO3', pricing_json: { totalExGST: 100 } })] })
+  const r = await freezeExpectedCostsOnAcceptance(client as any, {
+    job_id: 'JO3', now_iso: FROZE_AT,
+    accepted_options: [{ id: 'lights', cost_ex_gst: 180, cost_kind: 'materials' }],
+  })
+  assertEquals(r, { ok: true, snapshot: false, reason: 'no_cost_lanes' })
+})
