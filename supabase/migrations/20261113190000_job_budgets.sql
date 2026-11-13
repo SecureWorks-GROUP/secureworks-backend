@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS public.job_budget_lines (
   key                text NOT NULL CHECK (length(key) BETWEEN 1 AND 200),
   line_id            text,
   supplier_key       text,
+  kind               text CHECK (kind IS NULL OR kind IN ('item', 'delivery', 'cutting')),
   supplier_id        text,
   supplier_name      text,
   description        text,
@@ -84,7 +85,8 @@ CREATE TABLE IF NOT EXISTS public.job_budget_lines (
   cost_from          text,
   option_id          text,
   CONSTRAINT job_budget_lines_key_unique UNIQUE (budget_id, key),
-  CONSTRAINT job_budget_lines_supplier_key_on_materials CHECK ((lane = 'materials') = (supplier_key IS NOT NULL))
+  CONSTRAINT job_budget_lines_supplier_key_on_materials CHECK ((lane = 'materials') = (supplier_key IS NOT NULL)),
+  CONSTRAINT job_budget_lines_kind_on_materials CHECK ((lane = 'materials') = (kind IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS job_budget_lines_job_idx ON public.job_budget_lines (job_id);
 
@@ -215,13 +217,13 @@ BEGIN
   RETURNING id INTO v_id;
 
   INSERT INTO public.job_budget_lines (
-    budget_id, job_id, lane, key, line_id, supplier_key, supplier_id, supplier_name, description,
+    budget_id, job_id, lane, key, line_id, supplier_key, kind, supplier_id, supplier_name, description,
     quantity, unit, unit_cost_ex_gst, cost_ex_gst, in_total, paid_to, cost_from, option_id)
-  SELECT v_id, p_job_id, x.lane, x.key, x.line_id, x.supplier_key, x.supplier_id, x.supplier_name,
+  SELECT v_id, p_job_id, x.lane, x.key, x.line_id, x.supplier_key, x.kind, x.supplier_id, x.supplier_name,
          x.description, x.quantity, x.unit, x.unit_cost_ex_gst, x.cost_ex_gst, x.in_total, x.paid_to,
          x.cost_from, x.option_id
     FROM jsonb_to_recordset(p_lines) AS x(
-      lane text, key text, line_id text, supplier_key text, supplier_id text, supplier_name text,
+      lane text, key text, line_id text, supplier_key text, kind text, supplier_id text, supplier_name text,
       description text, quantity numeric, unit text, unit_cost_ex_gst numeric, cost_ex_gst numeric,
       in_total boolean, paid_to text, cost_from text, option_id text);
 

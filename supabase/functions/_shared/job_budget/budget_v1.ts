@@ -114,12 +114,37 @@ export function supplierKeyOf(supplier: unknown): string {
 /** The name the contract gives the no-supplier entry (T2). */
 export const NO_SUPPLIER_NAME = 'No supplier order'
 
+/** The by_supplier entry of the one figure for all materials (T1): no supplier of its own. */
+export const ONE_FIGURE_KEY = 'one_figure'
+
+/** What a materials line is: an item, or a delivery or cutting charge the supplier's order adds. */
+export const MATERIAL_KINDS = ['item', 'delivery', 'cutting'] as const
+export type MaterialKind = typeof MATERIAL_KINDS[number]
+
+/**
+ * The supplier_key a materials line or by_supplier entry was sealed with must be
+ * the one its supplier gives, or the one-figure entry, which has no supplier id.
+ * The fixings allowance (T2) has no supplier and so is the "none" entry.
+ */
+function sealedSupplierKey(raw: Record<string, unknown>, field: 'supplier_key' | 'key', at: string): string {
+  const key = str(raw[field])
+  if (!key) return refuse('supplier_key_missing', at)
+  const supplier = isRec(raw.supplier) ? raw.supplier : {}
+  if (key === ONE_FIGURE_KEY) {
+    if (str(supplier.id)) return refuse('supplier_key_mismatch', at)
+    return key
+  }
+  if (key !== supplierKeyOf(raw.supplier)) return refuse('supplier_key_mismatch', at)
+  return key
+}
+
 /** One line of any lane, read for the checks and for job_budget_lines. */
 export type BudgetLine = {
   lane: BudgetLane
   key: string
   line_id: string | null
   supplier_key: string | null
+  kind: MaterialKind | null
   supplier_id: string | null
   supplier_name: string | null
   description: string | null
@@ -145,11 +170,21 @@ function readLine(lane: BudgetLane, raw: unknown, i: number): BudgetLine {
     ? null
     : typeof raw.quantity === 'number' && Number.isFinite(raw.quantity) ? raw.quantity : refuse('line_quantity_invalid', key)
   const optionId = key.startsWith('option:') ? key.slice('option:'.length) : null
+  let kind: MaterialKind | null = null
+  let supplierKey: string | null = null
+  if (lane === 'materials') {
+    if (!MATERIAL_KINDS.includes(raw.kind as MaterialKind)) return refuse('line_kind_invalid', key)
+    kind = raw.kind as MaterialKind
+    supplierKey = sealedSupplierKey(raw, 'supplier_key', key)
+    // The one counted figure for all materials is the only line in the one_figure entry.
+    if (supplierKey === ONE_FIGURE_KEY && raw.cost_from !== 'one_figure') return refuse('supplier_key_mismatch', key)
+  }
   return {
     lane,
     key,
     line_id: lane === 'materials' ? str(raw.line_id) : null,
-    supplier_key: lane === 'materials' ? supplierKeyOf(raw.supplier) : null,
+    supplier_key: supplierKey,
+    kind,
     supplier_id: supplier ? str(supplier.id) : null,
     supplier_name: supplier ? str(supplier.name) : null,
     description: str(raw.description) ?? str(raw.task),
@@ -216,6 +251,16 @@ function check(raw: unknown): CheckedBudget {
   const totals = isRec(raw.totals) ? raw.totals : refuse('totals_missing')
   const gaps = Array.isArray(raw.gaps) ? raw.gaps : refuse('gaps_missing')
   if (typeof raw.complete !== 'boolean') return refuse('complete_missing')
+  // Only a budget the options formula made carries taken_option_ids: each a sealed option, in options order.
+  if (raw.taken_option_ids !== undefined) {
+    const ids = raw.taken_option_ids
+    const sealed = Array.isArray(raw.options) ? raw.options.map((o) => (isRec(o) ? str(o.option_id) : null)) : []
+    if (!Array.isArray(ids) || ids.length === 0 || ids.some((id) => typeof id !== 'string' || !sealed.includes(id))) {
+      return refuse('taken_option_ids_invalid')
+    }
+    const order = ids.map((id) => sealed.indexOf(id as string))
+    if (order.some((n, i) => i > 0 && n <= order[i - 1])) return refuse('taken_option_ids_invalid')
+  }
   if (raw.other !== undefined && !Array.isArray(raw.other)) return refuse('other_invalid')
   if (!Array.isArray(materials.lines) || !Array.isArray(materials.by_supplier)) return refuse('materials_invalid')
   if (!Array.isArray(labour.lines)) return refuse('labour_invalid')
@@ -265,13 +310,22 @@ function check(raw: unknown): CheckedBudget {
     if (supplierKeys.has(key)) return refuse('supplier_repeated', key)
     supplierKeys.add(key)
     // The no-supplier entry (fixings allowance, T2) is key "none", id null, named
-    // "No supplier order"; every other entry's key follows its supplier.
-    if (key !== supplierKeyOf(entry.supplier)) return refuse('supplier_key_mismatch', key)
+    // "No supplier order"; the one-figure entry (T1) is key "one_figure", id null;
+    // every other entry's key follows its supplier.
+    sealedSupplierKey(entry, 'key', key)
+    // Counted item and cutting lines add to lines_ex_gst, counted delivery lines to
+    // delivery_ex_gst; each counts once in the supplier's total. Lines riding along
+    // (in_total false: a one-figure job's order lines, not bought before) count nowhere.
     const own = lines.filter((l) => l.lane === 'materials' && l.supplier_key === key && l.in_total)
     const linesSum = moneyCents(entry.lines_ex_gst, `${key}.lines_ex_gst`)
-    if (linesSum !== addAll(own.map((l) => l.cost_cents))) return refuse('supplier_lines_mismatch', key)
+    if (linesSum !== addAll(own.filter((l) => l.kind !== 'delivery').map((l) => l.cost_cents))) {
+      return refuse('supplier_lines_mismatch', key)
+    }
     const surcharge = moneyCents(entry.surcharge_ex_gst, `${key}.surcharge_ex_gst`)
     const delivery = moneyCents(entry.delivery_ex_gst, `${key}.delivery_ex_gst`)
+    if (delivery !== addAll(own.filter((l) => l.kind === 'delivery').map((l) => l.cost_cents))) {
+      return refuse('supplier_delivery_mismatch', key)
+    }
     const total = moneyCents(entry.total_ex_gst, `${key}.total_ex_gst`)
     if (total !== addAll([linesSum, surcharge, delivery])) return refuse('supplier_total_mismatch', key)
     supplierTotals.push(total)
@@ -370,7 +424,9 @@ function pctOfSigned(v: unknown, at: string): number | null {
 /**
  * The base budget with the taken options added, by the contract's one formula.
  * Returns a new record (the input is not changed). Taken ids are applied in
- * the order of `options[]`. No option taken returns the base unchanged.
+ * the order of `options[]`, and the result records them, in that order, as
+ * `taken_option_ids` (contract section 5 step 4). No option taken returns the
+ * base unchanged, with no `taken_option_ids`.
  */
 export function budgetWithOptions(
   base: unknown,
@@ -392,89 +448,139 @@ function withOptions(base: unknown, takenIds: readonly string[]): Rec {
   const byId = new Map<string, Rec>()
   for (const o of options) if (isRec(o) && str(o.option_id)) byId.set(o.option_id as string, o)
   for (const id of takenIds) if (!byId.has(id)) return refuse('option_not_in_budget', `option:${id}`)
+  // Sealed options order, as the tool's formula takes them.
   const taken = options.filter((o): o is Rec => isRec(o) && takenIds.includes(o.option_id as string))
 
   const job = b.job as Rec
   const materials = b.materials as Rec
   const labour = b.labour as Rec
-  const gaps = b.gaps as unknown[]
+  if (!isRec(job) || !isRec(materials) || !isRec(labour) || !Array.isArray(materials.lines) || !Array.isArray(materials.by_supplier) || !Array.isArray(labour.lines)) {
+    return refuse('budget_unreadable')
+  }
   const other = (Array.isArray(b.other) ? b.other : (b.other = [])) as Rec[]
+  const gaps = (Array.isArray(b.gaps) ? b.gaps : (b.gaps = [])) as Rec[]
 
   let sell = moneyCents(job.sell_ex_gst, 'job.sell_ex_gst')
   let gst = moneyCents(job.gst, 'job.gst')
   let inc = moneyCents(job.total_inc_gst, 'job.total_inc_gst')
-  let labourAmount = moneyCents(labour.amount_ex_gst, 'labour.amount_ex_gst')
-  let workOrder = moneyCents(labour.work_order_amount_ex_gst, 'labour.work_order_amount_ex_gst')
-
   for (const o of taken) {
-    const id = o.option_id as string
-    const key = `option:${id}`
+    const key = `option:${o.option_id as string}`
     sell = add(sell, moneyCents(o.sell_ex_gst, `${key}.sell_ex_gst`) ?? refuse('option_sell_missing', key))
     gst = add(gst, moneyCents(o.gst, `${key}.gst`) ?? refuse('option_sell_missing', key))
     inc = add(inc, moneyCents(o.sell_inc_gst, `${key}.sell_inc_gst`) ?? refuse('option_sell_missing', key))
+  }
+  job.sell_ex_gst = dollars(sell)
+  job.gst = dollars(gst)
+  job.total_inc_gst = dollars(inc)
+
+  for (const o of taken) {
+    const key = `option:${o.option_id as string}`
     const cost = moneyCents(o.cost_ex_gst, `${key}.cost_ex_gst`)
-    const surcharge = cost === null ? 0 : moneyCents(o.surcharge_ex_gst ?? 0, `${key}.surcharge_ex_gst`) ?? 0
-    const line = isRec(o.line) ? o.line : {}
+    const x = isRec(o.line) ? o.line : {}
     const lands = isRec(o.lands) ? o.lands : refuse('option_lands_missing', key)
-    const description = str(line.description) ?? id
-    const quantity = typeof line.quantity === 'number' ? line.quantity : null
-    const unit = str(line.unit)
+    const description = typeof x.description === 'string' ? x.description : ''
+    const quantity = typeof x.quantity === 'number' ? x.quantity : 1
+    const unit = str(x.unit) ?? 'each'
 
     if (lands.lane === 'materials') {
-      const supplier = isRec(lands.supplier) ? lands.supplier : { id: null, name: null }
-      ;(materials.lines as unknown[]).push({
-        key, line_id: null,
-        supplier: { id: str(supplier.id), name: str(supplier.name), code: null },
-        description, quantity, unit, cut: null,
-        unit_cost_ex_gst: null, line_cost_ex_gst: dollars(cost),
-        in_total: true, cost_from: 'option', note_to_supplier: null,
-      })
-      const skey = supplierKeyOf(supplier)
+      const sup = isRec(lands.supplier) ? lands.supplier : {}
+      const supId = str(sup.id)
+      const supName = str(sup.name)
+      const skey = supplierKeyOf({ id: supId, name: supName })
       const entries = materials.by_supplier as Rec[]
       let entry = entries.find((e) => e.key === skey)
       if (!entry) {
-        // A supplier not yet on the job: no delivery was allowed for it (0, known).
-        entry = { key: skey, supplier: { id: str(supplier.id), name: str(supplier.name) ?? NO_SUPPLIER_NAME }, lines_ex_gst: 0, surcharge_ex_gst: 0, delivery_ex_gst: 0, total_ex_gst: 0 }
+        // A supplier new to the job: an entry with no delivery of its own.
+        entry = { key: skey, supplier: { id: supId, name: supName ?? '' }, lines_ex_gst: 0, surcharge_ex_gst: 0, delivery_ex_gst: 0, total_ex_gst: 0 }
         entries.push(entry)
       }
-      const lines = add(moneyCents(entry.lines_ex_gst, `${skey}.lines_ex_gst`), cost)
-      const sur = moneyCents(entry.surcharge_ex_gst, `${skey}.surcharge_ex_gst`)
-      const surNext = sur === null ? null : sur + surcharge
-      entry.lines_ex_gst = dollars(lines)
-      entry.surcharge_ex_gst = dollars(surNext)
-      entry.total_ex_gst = dollars(addAll([lines, surNext, moneyCents(entry.delivery_ex_gst, `${skey}.delivery_ex_gst`)]))
-      if (cost === null) gaps.push({ where: 'materials', key, code: 'no_cost', what: 'No cost' })
+      entry.surcharge_ex_gst = dollars(add(
+        moneyCents(entry.surcharge_ex_gst, `${skey}.surcharge_ex_gst`),
+        moneyCents(o.surcharge_ex_gst ?? 0, `${key}.surcharge_ex_gst`) ?? 0,
+      ))
+      ;(materials.lines as unknown[]).push({
+        key, description, quantity, unit, in_total: true,
+        line_id: null, supplier_key: skey, supplier: { id: supId, name: supName, code: null }, kind: 'item',
+        unit_cost_ex_gst: null, line_cost_ex_gst: dollars(cost), cost_from: cost === null ? 'none' : 'typed', note_to_supplier: null,
+      })
+      if (!supId) gaps.push({ where: 'materials', key, code: 'no_supplier_id', what: 'Supplier not on the list' })
     } else if (lands.lane === 'labour') {
       ;(labour.lines as unknown[]).push({ key, task: description, people: null, days: null, day_rate_ex_gst: null, amount_ex_gst: dollars(cost), in_total: true })
-      labourAmount = add(labourAmount, cost)
-      workOrder = add(workOrder, cost)
-      if (cost === null) gaps.push({ where: 'labour', key, code: 'no_cost', what: 'No cost' })
     } else if (OTHER_LANES.includes(lands.lane as OtherLane)) {
       const lane = lands.lane as OtherLane
-      const paidTo = lands.paid_to === 'supplier' || lands.paid_to === 'crew' ? lands.paid_to : 'office'
       let entry = other.find((e) => e.lane === lane)
       if (!entry) {
         entry = { lane, lines: [], total_ex_gst: 0 }
         other.push(entry)
       }
-      ;(entry.lines as unknown[]).push({ key, description, quantity, unit, cost_ex_gst: dollars(cost), in_total: true, paid_to: paidTo, supplier: null })
-      entry.total_ex_gst = dollars(add(moneyCents(entry.total_ex_gst, `${lane}.total_ex_gst`), cost))
-      if (paidTo === 'crew') workOrder = add(workOrder, cost)
-      if (cost === null) gaps.push({ where: `other:${lane}`, key, code: 'no_cost', what: 'No cost' })
+      ;(entry.lines as unknown[]).push({ key, description, quantity, unit, in_total: true, cost_ex_gst: dollars(cost), paid_to: str(lands.paid_to) ?? 'office', supplier: null })
     } else {
       return refuse('option_lane_unknown', key)
     }
   }
+  b.taken_option_ids = taken.map((o) => o.option_id as string)
+  return addUp(b)
+}
 
-  job.sell_ex_gst = dollars(sell)
-  job.gst = dollars(gst)
-  job.total_inc_gst = dollars(inc)
-  labour.amount_ex_gst = dollars(labourAmount)
-  labour.work_order_amount_ex_gst = dollars(workOrder)
-  const materialsTotal = addAll((materials.by_supplier as Rec[]).map((e) => moneyCents(e.total_ex_gst, `${e.key}.total_ex_gst`)))
+/**
+ * The record added up again from its lines (a new record; the input is not
+ * changed). The options formula ends with it; tests use it to finish the
+ * tool's shared example bases exactly as the tool does.
+ */
+export function budgetAddedUp(b: unknown): { ok: true; budget: Rec } | { ok: false; refusal: BudgetRefusal } {
+  try {
+    if (!isRec(b)) return refuse('budget_not_an_object')
+    return { ok: true, budget: addUp(structuredClone(b) as Rec) }
+  } catch (e) {
+    if (e instanceof Refused) return { ok: false, refusal: e.refusal }
+    return { ok: false, refusal: { code: 'budget_unreadable' } }
+  }
+}
+
+/**
+ * Adds the record up again from its lines, the way the tool's finish does: each
+ * supplier's item and cutting lines, its delivery lines and total; materials,
+ * labour and the work order; each other lane (empty lanes dropped, lanes in
+ * contract order); the totals; and the gaps (every counted line with no cost is
+ * a no_cost gap, other gaps kept).
+ */
+function addUp(b: Rec): Rec {
+  const lineCost = (l: Rec, field: string) => moneyCents(l[field], `${l.key}.cost`)
+  const counted = (l: Rec) => l.in_total !== false
+  const kept = (b.gaps as Rec[]).filter((g) => g.code !== 'no_cost')
+  const noCost: Rec[] = []
+  const materials = b.materials as Rec
+  const mLines = materials.lines as Rec[]
+  for (const s of materials.by_supplier as Rec[]) {
+    const mine = mLines.filter((l) => l.supplier_key === s.key && counted(l))
+    const items = addAll(mine.filter((l) => l.kind !== 'delivery').map((l) => lineCost(l, 'line_cost_ex_gst')))
+    const delivery = addAll(mine.filter((l) => l.kind === 'delivery').map((l) => lineCost(l, 'line_cost_ex_gst')))
+    s.lines_ex_gst = dollars(items)
+    s.delivery_ex_gst = dollars(delivery)
+    s.total_ex_gst = dollars(addAll([items, moneyCents(s.surcharge_ex_gst, `${s.key}.surcharge_ex_gst`), delivery]))
+  }
+  for (const l of mLines) if (counted(l) && lineCost(l, 'line_cost_ex_gst') === null) noCost.push({ where: 'materials', key: l.key, code: 'no_cost', what: 'No cost' })
+  const materialsTotal = addAll((materials.by_supplier as Rec[]).map((s) => moneyCents(s.total_ex_gst, `${s.key}.total_ex_gst`)))
   materials.total_ex_gst = dollars(materialsTotal)
-
-  const cost = addAll([materialsTotal, labourAmount, ...other.map((e) => moneyCents(e.total_ex_gst, `${e.lane}.total_ex_gst`))])
+  const labour = b.labour as Rec
+  const lLines = labour.lines as Rec[]
+  for (const l of lLines) if (counted(l) && lineCost(l, 'amount_ex_gst') === null) noCost.push({ where: 'labour', key: l.key, code: 'no_cost', what: 'No cost' })
+  const labourAmount = addAll(lLines.filter(counted).map((l) => lineCost(l, 'amount_ex_gst')))
+  labour.amount_ex_gst = dollars(labourAmount)
+  const other = (b.other as Rec[])
+    .filter((o) => Array.isArray(o.lines) && (o.lines as unknown[]).length > 0)
+    .sort((x, y) => OTHER_LANES.indexOf(x.lane as OtherLane) - OTHER_LANES.indexOf(y.lane as OtherLane))
+  b.other = other
+  for (const o of other) {
+    const ls = o.lines as Rec[]
+    for (const l of ls) if (counted(l) && lineCost(l, 'cost_ex_gst') === null) noCost.push({ where: `other:${o.lane}`, key: l.key, code: 'no_cost', what: 'No cost' })
+    o.total_ex_gst = dollars(addAll(ls.filter(counted).map((l) => lineCost(l, 'cost_ex_gst'))))
+  }
+  const crew = other.flatMap((o) => (o.lines as Rec[]).filter((l) => counted(l) && l.paid_to === 'crew'))
+  labour.work_order_amount_ex_gst = dollars(addAll([labourAmount, ...crew.map((l) => lineCost(l, 'cost_ex_gst'))]))
+  const cost = addAll([materialsTotal, labourAmount, ...other.map((o) => moneyCents(o.total_ex_gst, `${o.lane}.total_ex_gst`))])
+  const job = b.job as Rec
+  const sell = moneyCents(job.sell_ex_gst, 'job.sell_ex_gst')
   const gp = cost === null || sell === null ? null : sell - cost
   const commission = b.commission as Rec
   const com = commissionCents(gp, pctOf(commission.pct, 'commission.pct'))
@@ -489,7 +595,8 @@ function withOptions(base: unknown, takenIds: readonly string[]): Rec {
     profit_after_commission_ex_gst: dollars(after),
     profit_after_commission_pct: pct(pctHundredths(after, sell)),
   }
-  b.complete = gaps.length === 0
+  b.gaps = [...kept, ...noCost]
+  b.complete = (b.gaps as Rec[]).length === 0
   return b
 }
 

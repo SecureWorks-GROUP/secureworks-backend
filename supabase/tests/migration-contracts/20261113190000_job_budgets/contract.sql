@@ -60,7 +60,7 @@ DECLARE
     "commission_rule_id":"patio_commission_rate","commission_pct":8,"commission_ex_gst":278.8,
     "profit_after_commission_ex_gst":3206.2,"profit_after_commission_pct":32.06,
     "scoped_by_staff_id":"22222222-2222-4222-8222-222222222222","salesperson_staff_id":"22222222-2222-4222-8222-222222222222"}'::jsonb;
-  lines jsonb := '[{"lane":"materials","key":"m1","line_id":"sl-1","supplier_key":"sup-a","supplier_id":"sup-a","supplier_name":"Supplier A","description":"Roof sheets","quantity":10,"unit":"each","unit_cost_ex_gst":200,"cost_ex_gst":2000,"in_total":true,"cost_from":"supplier_price"},
+  lines jsonb := '[{"lane":"materials","key":"m1","line_id":"sl-1","supplier_key":"sup-a","kind":"item","supplier_id":"sup-a","supplier_name":"Supplier A","description":"Roof sheets","quantity":10,"unit":"each","unit_cost_ex_gst":200,"cost_ex_gst":2000,"in_total":true,"cost_from":"supplier_price"},
                    {"lane":"labour","key":"l1","description":"Build","cost_ex_gst":2800,"in_total":true,"paid_to":"crew"},
                    {"lane":"buffer","key":"b1","description":"Job buffer","cost_ex_gst":200,"in_total":true,"paid_to":"office"}]'::jsonb;
   r jsonb;
@@ -135,6 +135,20 @@ BEGIN
   EXCEPTION WHEN unique_violation THEN refused := true;
   END;
   IF NOT refused THEN RAISE EXCEPTION 'job budget contract: two lines with one key were stored'; END IF;
+  refused := false;
+  BEGIN
+    PERFORM public.record_job_budget(job, rev2, h2, ARRAY[]::text[], budget, summary,
+      lines || '[{"lane":"materials","key":"m9","supplier_key":"sup-a","kind":"freight","cost_ex_gst":1,"in_total":true}]'::jsonb);
+  EXCEPTION WHEN check_violation THEN refused := true;
+  END;
+  IF NOT refused THEN RAISE EXCEPTION 'job budget contract: a materials line of an unknown kind was stored'; END IF;
+  refused := false;
+  BEGIN
+    PERFORM public.record_job_budget(job, rev2, h2, ARRAY[]::text[], budget, summary,
+      lines || '[{"lane":"materials","key":"m9","supplier_key":"sup-a","cost_ex_gst":1,"in_total":true}]'::jsonb);
+  EXCEPTION WHEN check_violation THEN refused := true;
+  END;
+  IF NOT refused THEN RAISE EXCEPTION 'job budget contract: a materials line with no kind was stored'; END IF;
 
   -- A later accepted revision is version 2 and becomes the current one.
   r := public.record_job_budget(job, rev2, h2, ARRAY['o1'], budget, summary, lines);

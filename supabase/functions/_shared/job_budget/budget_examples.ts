@@ -15,8 +15,10 @@ export function patioBase(): Record<string, unknown> {
     materials: {
       priced_by_line: true,
       lines: [
-        { key: 'm1', line_id: 'sl-1', supplier: { id: 'sup-a', name: 'Supplier A', code: null }, description: 'Roof sheets', quantity: 10, unit: 'each', cut: null, unit_cost_ex_gst: 200, line_cost_ex_gst: 2000, in_total: true, cost_from: 'supplier_price', note_to_supplier: null },
-        { key: 'm2', line_id: 'sl-2', supplier: { id: 'sup-a', name: 'Supplier A', code: null }, description: 'Posts', quantity: 4, unit: 'each', cut: null, unit_cost_ex_gst: 250, line_cost_ex_gst: 1000, in_total: true, cost_from: 'typed', note_to_supplier: null },
+        { key: 'm1', line_id: 'sl-1', supplier_key: 'sup-a', supplier: { id: 'sup-a', name: 'Supplier A', code: null }, kind: 'item', description: 'Roof sheets', quantity: 10, unit: 'each', cut: null, unit_cost_ex_gst: 200, line_cost_ex_gst: 2000, in_total: true, cost_from: 'supplier_price', note_to_supplier: null },
+        { key: 'm2', line_id: 'sl-2', supplier_key: 'sup-a', supplier: { id: 'sup-a', name: 'Supplier A', code: null }, kind: 'item', description: 'Posts', quantity: 4, unit: 'each', cut: null, unit_cost_ex_gst: 250, line_cost_ex_gst: 1000, in_total: true, cost_from: 'typed', note_to_supplier: null },
+        // The supplier's delivery is a line of that supplier (draft 3): it adds to delivery_ex_gst, not lines_ex_gst.
+        { key: 'sup-a:delivery', line_id: 'ZZTEST-delivery', supplier_key: 'sup-a', supplier: { id: 'sup-a', name: 'Supplier A', code: null }, kind: 'delivery', description: 'Delivery', quantity: 1, unit: 'job', cut: null, unit_cost_ex_gst: 120, line_cost_ex_gst: 120, in_total: true, cost_from: 'supplier_price', note_to_supplier: null },
       ],
       by_supplier: [
         { key: 'sup-a', supplier: { id: 'sup-a', name: 'Supplier A' }, lines_ex_gst: 3000, surcharge_ex_gst: 45, delivery_ex_gst: 120, total_ex_gst: 3165 },
@@ -56,7 +58,8 @@ export function fenceLossBase(): Record<string, unknown> {
     materials: {
       priced_by_line: true,
       lines: [
-        { key: 'fence:panel_kits', line_id: null, supplier: { id: 'sup-f', name: 'Supplier F', code: null }, description: 'Panel kits', quantity: 7, unit: 'each', cut: null, unit_cost_ex_gst: 100, line_cost_ex_gst: 700, in_total: true, cost_from: 'supplier_price', note_to_supplier: null },
+        { key: 'fence:panel_kits', line_id: null, supplier_key: 'sup-f', supplier: { id: 'sup-f', name: 'Supplier F', code: null }, kind: 'item', description: 'Panel kits', quantity: 7, unit: 'each', cut: null, unit_cost_ex_gst: 100, line_cost_ex_gst: 700, in_total: true, cost_from: 'supplier_price', note_to_supplier: null },
+        { key: 'sup-f:delivery', line_id: null, supplier_key: 'sup-f', supplier: { id: 'sup-f', name: 'Supplier F', code: null }, kind: 'delivery', description: 'Delivery', quantity: 1, unit: 'job', cut: null, unit_cost_ex_gst: 80, line_cost_ex_gst: 80, in_total: true, cost_from: 'supplier_price', note_to_supplier: null },
       ],
       by_supplier: [
         { key: 'sup-f', supplier: { id: 'sup-f', name: 'Supplier F' }, lines_ex_gst: 700, surcharge_ex_gst: 0, delivery_ex_gst: 80, total_ex_gst: 780 },

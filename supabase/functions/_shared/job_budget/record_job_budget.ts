@@ -66,6 +66,7 @@ export function linesForStore(lines: BudgetLine[]): Record<string, unknown>[] {
     key: l.key,
     line_id: l.line_id,
     supplier_key: l.supplier_key,
+    kind: l.kind,
     supplier_id: l.supplier_id,
     supplier_name: l.supplier_name,
     description: l.description,
@@ -154,9 +155,10 @@ export async function recordJobBudgetOnAcceptance(client: any, jobId: string): P
 
     const taken = await readTakenQuoteOptions(client, jobId)
     if (taken.state === 'unreadable') return await refuse(client, jobId, revisionId, 'quote_options_unreadable')
-    const takenIds = taken.state === 'taken' ? taken.options.map((o) => o.id) : []
-    const applied = budgetWithOptions(base, takenIds)
+    const applied = budgetWithOptions(base, taken.state === 'taken' ? taken.options.map((o) => o.id) : [])
     if (!applied.ok) return await refuse(client, jobId, revisionId, applied.refusal.code, applied.refusal.at)
+    // The ids as the applied budget records them (sealed options order), kept beside it in the row.
+    const takenIds = Array.isArray(applied.budget.taken_option_ids) ? applied.budget.taken_option_ids as string[] : []
     const checked = checkBudget(applied.budget)
     if (!checked.ok) return await refuse(client, jobId, revisionId, checked.refusal.code, checked.refusal.at)
 

@@ -7,6 +7,7 @@ import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.t
 import { canonicalize, jsonHash } from '../release_packet/canonicalize.ts'
 import { recordJobBudgetOnAcceptance } from './record_job_budget.ts'
 import { EXPECTED, patioBase } from './budget_examples.ts'
+import native from './fixtures/native-budgets.json' with { type: 'json' }
 
 type Row = Record<string, unknown>
 type State = Record<string, Row[]>
@@ -95,8 +96,24 @@ Deno.test('a bound accepted revision with a budget is stored as given, nothing t
   assertEquals(call.p_taken_option_ids, [])
   const s = call.p_summary as Row
   assertEquals([s.sell_ex_gst, s.gst, s.total_inc_gst, s.commission_ex_gst, s.profit_after_commission_ex_gst], [10000, 1000, 11000, 278.8, 3206.2])
-  assertEquals((call.p_lines as Row[]).map((l) => l.key), ['m1', 'm2', 'l1', 'x1', 'b1'])
+  assertEquals((call.p_lines as Row[]).map((l) => [l.key, l.kind ?? null]), [['m1', 'item'], ['m2', 'item'], ['sup-a:delivery', 'delivery'], ['l1', null], ['x1', null], ['b1', null]])
+  assertEquals('taken_option_ids' in (call.p_budget as Row), false, 'nothing taken: the base as sealed')
   assertEquals(f.state.job_events.length, 0)
+})
+
+Deno.test('the exact native budgets of both trades are stored, a local seal\'s null revision id included', async () => {
+  for (const [name, budget] of Object.entries(native.budgets)) {
+    const f = await fixture({ total: 1, budget })
+    const r = await recordJobBudgetOnAcceptance(f.client, J)
+    assertEquals(r.outcome, 'recorded', `${name}: ${JSON.stringify(r)}`)
+    assertEquals(f.rpcCalls.length, 1, name)
+    assertEquals(f.state.job_events.length, 0, name)
+  }
+  // The one-figure aggregate keeps its sealed supplier_key; its riding order lines keep theirs.
+  const f = await fixture({ budget: native.budgets.patio_one_figure })
+  await recordJobBudgetOnAcceptance(f.client, J)
+  const lines = f.rpcCalls[0].p_lines as Row[]
+  assertEquals(lines.filter((l) => l.in_total && l.lane === 'materials').map((l) => [l.supplier_key, l.cost_from]), [['one_figure', 'one_figure']])
 })
 
 Deno.test('a taken option is added by the formula and must equal the accepted totals', async () => {
@@ -106,6 +123,7 @@ Deno.test('a taken option is added by the formula and must equal the accepted to
   const s = f.rpcCalls[0].p_summary as Row
   assertEquals([s.sell_ex_gst, s.cost_before_commission_ex_gst, s.commission_ex_gst], [EXPECTED.A.sell, EXPECTED.A.cost, EXPECTED.A.com])
   assertEquals(f.rpcCalls[0].p_taken_option_ids, ['o1'])
+  assertEquals((f.rpcCalls[0].p_budget as Row).taken_option_ids, ['o1'], 'kept on the applied budget too (section 5 step 4)')
   assert((f.rpcCalls[0].p_lines as Row[]).some((l) => l.key === 'option:o1' && l.cost_ex_gst === 180))
 })
 

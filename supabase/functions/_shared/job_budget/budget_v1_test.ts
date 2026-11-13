@@ -2,8 +2,10 @@
 // Ruling 17 step 1: the budget's checks, the options formula (the contract's
 // worked examples, to the cent) and the strip.
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
-import { budgetWithOptions, checkBudget, commissionCents, moneyCents, withoutBudget } from './budget_v1.ts'
+import { budgetAddedUp, budgetWithOptions, checkBudget, commissionCents, moneyCents, withoutBudget } from './budget_v1.ts'
 import { EXPECTED, fenceLossBase, patioBase } from './budget_examples.ts'
+import toolExamples from './fixtures/options-examples.json' with { type: 'json' }
+import native from './fixtures/native-budgets.json' with { type: 'json' }
 
 function applied(base: Record<string, unknown>, taken: readonly string[]) {
   const out = budgetWithOptions(base, taken)
@@ -29,6 +31,7 @@ Deno.test('R17 options formula: example A, one supplier option, to the cent', ()
     commission_ex_gst: e.com, profit_after_commission_ex_gst: e.after, profit_after_commission_pct: e.after_pct,
   })
   assertEquals(b.complete, e.complete)
+  assertEquals(b.taken_option_ids, ['o1'], 'the applied budget records what was taken (section 5 step 4)')
   assert(checkBudget(b).ok, 'the result passes the same checks as a sealed budget')
 })
 
@@ -39,7 +42,10 @@ Deno.test('R17 options formula: example B, a supplier and a crew option', () => 
   assertEquals([b.labour.amount_ex_gst, b.labour.work_order_amount_ex_gst], [e.labour, e.work_order])
   assertEquals([b.totals.cost_before_commission_ex_gst, b.totals.gross_profit_ex_gst, b.totals.gross_profit_pct], [e.cost, e.gp, e.gp_pct])
   assertEquals([b.totals.commission_ex_gst, b.totals.profit_after_commission_ex_gst, b.totals.profit_after_commission_pct], [e.com, e.after, e.after_pct])
+  assertEquals(b.taken_option_ids, ['o1', 'o2'])
   assert(checkBudget(b).ok)
+  // Taken in another order, the record keeps the sealed options order.
+  assertEquals(applied(patioBase(), ['o2', 'o1']).taken_option_ids, ['o1', 'o2'])
 })
 
 Deno.test('R17 options formula: example C, an option with no cost is null with a gap, never 0', () => {
@@ -77,6 +83,7 @@ Deno.test('R17 options formula: example D, a loss made good, and the rounding tr
 
 Deno.test('R17 options formula: nothing taken is the base unchanged; a taken id the budget lacks is refused', () => {
   assertEquals(applied(patioBase(), []), patioBase())
+  assertEquals('taken_option_ids' in applied(patioBase(), []), false, 'no option taken: the base, no ids')
   const out = budgetWithOptions(patioBase(), ['nope'])
   assertEquals(out, { ok: false, refusal: { code: 'option_not_in_budget', at: 'option:nope' } })
   // A supplier not yet on the job gets its own entry, delivery 0 (known, not unknown).
@@ -134,25 +141,97 @@ Deno.test('R17 checks: an unknown cost must be named as a gap, and a loss pays n
   assertEquals((checkBudget(loss) as any).refusal.code, 'commission_mismatch')
 })
 
-Deno.test('R17 checks: a one-figure patio adds only its in_total lines (T1), the allowance has its own entry (T2)', () => {
-  const b = patioBase() as any
-  b.materials.priced_by_line = false
-  // Two order lines ride along with no cost; one figure carries the materials.
-  b.materials.lines = [
-    { ...b.materials.lines[0], key: 'ride1', line_cost_ex_gst: null, unit_cost_ex_gst: null, in_total: false, cost_from: 'none' },
-    { ...b.materials.lines[1], key: 'ride2', line_cost_ex_gst: null, unit_cost_ex_gst: null, in_total: false, cost_from: 'none' },
-    { key: 'one', line_id: null, supplier: { id: 'sup-a', name: 'Supplier A', code: null }, description: 'Materials', quantity: 1, unit: 'job', cut: null, unit_cost_ex_gst: null, line_cost_ex_gst: 2900, in_total: true, cost_from: 'one_figure', note_to_supplier: null },
-    { key: 'fixings', line_id: null, supplier: { id: null, name: null, code: null }, description: 'Fixings allowance', quantity: 1, unit: 'job', cut: null, unit_cost_ex_gst: null, line_cost_ex_gst: 100, in_total: true, cost_from: 'allowance', note_to_supplier: null },
-  ]
-  b.materials.by_supplier = [
-    { key: 'sup-a', supplier: { id: 'sup-a', name: 'Supplier A' }, lines_ex_gst: 2900, surcharge_ex_gst: 45, delivery_ex_gst: 120, total_ex_gst: 3065 },
-    { key: 'none', supplier: { id: null, name: 'No supplier order' }, lines_ex_gst: 100, surcharge_ex_gst: 0, delivery_ex_gst: 0, total_ex_gst: 100 },
-  ]
-  const out = checkBudget(b)
+Deno.test('R17 checks: a supplier delivery line adds to delivery, not to the item lines (draft 3)', () => {
+  const out = checkBudget(native.budgets.delivery)
   assert(out.ok, JSON.stringify(out))
-  const lines = out.budget.lines
-  assertEquals(lines.filter((l) => !l.in_total).map((l) => l.key), ['ride1', 'ride2'])
-  assertEquals(lines.find((l) => l.key === 'fixings')?.supplier_key, 'none')
+  const lines = out.budget.lines.filter((l) => l.lane === 'materials')
+  assertEquals(lines.map((l) => [l.key, l.kind, l.supplier_key]), [['m1', 'item', 'sup-a'], ['m2', 'item', 'sup-a'], ['sup-a:delivery', 'delivery', 'sup-a']])
+  const bad = (mut: (b: any) => void) => {
+    const b = structuredClone(native.budgets.delivery) as any
+    mut(b)
+    const r = checkBudget(b)
+    return r.ok ? 'ok' : r.refusal.code
+  }
+  // The delivery counted in the item lines too, or left out of delivery, is refused.
+  assertEquals(bad((b) => { b.materials.by_supplier[0].lines_ex_gst = 3120 }), 'supplier_lines_mismatch')
+  assertEquals(bad((b) => { b.materials.by_supplier[0].delivery_ex_gst = 0 }), 'supplier_delivery_mismatch')
+  assertEquals(bad((b) => { b.materials.lines[2].kind = 'freight' }), 'line_kind_invalid')
+  assertEquals(bad((b) => { delete b.materials.lines[0].kind }), 'line_kind_invalid')
+  // The sealed supplier_key is read, not worked out again, and must be its supplier's.
+  assertEquals(bad((b) => { b.materials.lines[0].supplier_key = 'sup-b' }), 'supplier_key_mismatch')
+  assertEquals(bad((b) => { delete b.materials.lines[0].supplier_key }), 'supplier_key_missing')
+})
+
+Deno.test('R17 checks: a one-figure patio (T1), the exact native shape: one counted figure in the one_figure entry', () => {
+  for (const name of ['one_figure', 'patio_one_figure'] as const) {
+    const b = native.budgets[name] as any
+    const out = checkBudget(b)
+    assert(out.ok, `${name}: ${JSON.stringify(out)}`)
+    const lines = out.budget.lines.filter((l) => l.lane === 'materials')
+    const counted = lines.filter((l) => l.in_total)
+    assertEquals(counted.map((l) => [l.supplier_key, l.cost_from]), [['one_figure', 'one_figure']])
+    // The order lines ride along with no cost under their real supplier, and are not gaps.
+    assert(lines.filter((l) => !l.in_total).every((l) => l.cost_cents === null && l.supplier_key !== 'one_figure'))
+    assertEquals(out.budget.summary.gap_count, 0)
+    // A real supplier's entry may be all zeros.
+    assert(b.materials.by_supplier.some((e: any) => e.key !== 'one_figure' && e.total_ex_gst === 0))
+  }
+  const bad = (mut: (b: any) => void) => {
+    const b = structuredClone(native.budgets.one_figure) as any
+    mut(b)
+    const r = checkBudget(b)
+    return r.ok ? 'ok' : r.refusal.code
+  }
+  // The one_figure entry has no supplier id, and only the one figure may sit in it.
+  assertEquals(bad((b) => { b.materials.by_supplier[1].supplier.id = 'sup-a' }), 'supplier_key_mismatch')
+  assertEquals(bad((b) => { b.materials.lines[2].supplier = { id: 'sup-a', name: 'Supplier A' } }), 'supplier_key_mismatch')
+  assertEquals(bad((b) => { b.materials.lines[2].cost_from = 'typed' }), 'supplier_key_mismatch')
+})
+
+Deno.test('R17 checks: the fixings allowance (T2) is its own "none" entry, counted, not a gap', () => {
+  const b = structuredClone(native.budgets.one_figure) as any
+  b.materials.lines.push({ key: 'patio:fixings-allowance', line_id: null, supplier_key: 'none', supplier: { id: null, name: null, code: null }, kind: 'item', description: 'Fixings allowance', quantity: 1, unit: 'job', cut: null, unit_cost_ex_gst: 100, line_cost_ex_gst: 100, in_total: true, cost_from: 'allowance', note_to_supplier: null })
+  b.materials.by_supplier.push({ key: 'none', supplier: { id: null, name: 'No supplier order' }, lines_ex_gst: 0, surcharge_ex_gst: 0, delivery_ex_gst: 0, total_ex_gst: 0 })
+  const done = budgetAddedUp(b)
+  assert(done.ok)
+  const out = checkBudget(done.budget)
+  assert(out.ok, JSON.stringify(out))
+  assertEquals(out.budget.lines.find((l) => l.key === 'patio:fixings-allowance')?.supplier_key, 'none')
+  assertEquals(out.budget.summary.materials_cents, 326500)
+  assertEquals(out.budget.summary.gap_count, 0)
+})
+
+Deno.test('R17 checks: native sealed, saved and reopened budgets of both trades pass as given', () => {
+  for (const [name, b] of Object.entries(native.budgets)) {
+    const out = checkBudget(b)
+    assert(out.ok, `${name}: ${JSON.stringify(out)}`)
+    // Adding up again changes nothing: the record is what the tool made.
+    const again = budgetAddedUp(b)
+    assert(again.ok)
+    assertEquals(again.budget, b, name)
+  }
+  // The fence's suppliers not on the list are named gaps: stored, complete false.
+  const fence = checkBudget(native.budgets.fence_standard)
+  assert(fence.ok)
+  assertEquals(fence.budget.summary.complete, false)
+})
+
+Deno.test('R17 options formula: the tool\'s own shared examples (verify/r17-budget/options-examples.json), every case', () => {
+  for (const tc of toolExamples.cases) {
+    const raw = structuredClone((toolExamples.bases as any)[tc.base]) as any
+    // The examples' made-up staff ids are not users.id (B9); give them one so the checks run.
+    for (const who of [raw.job.scoped_by, raw.job.salesperson, raw.commission.salesperson]) who.staff_id = '22222222-2222-4222-8222-222222222222'
+    const base = budgetAddedUp(raw)
+    assert(base.ok)
+    assert(checkBudget(base.budget).ok, `${tc.name}: base`)
+    const b = applied(base.budget, tc.taken)
+    const e = tc.expect as any
+    assertEquals([b.job.sell_ex_gst, b.job.gst, b.job.total_inc_gst], [e.sell_ex_gst, e.gst, e.total_inc_gst], tc.name)
+    for (const k of Object.keys(b.totals)) assertEquals(b.totals[k], e[k], `${tc.name}: ${k}`)
+    assertEquals(b.taken_option_ids, tc.taken.length ? tc.taken : undefined, tc.name)
+    const out = checkBudget(b)
+    assert(out.ok, `${tc.name}: ${JSON.stringify(out)}`)
+  }
 })
 
 Deno.test('R17 money is dollars to two decimals; a third decimal is refused, never rounded', () => {

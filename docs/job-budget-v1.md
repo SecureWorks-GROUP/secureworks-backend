@@ -30,7 +30,7 @@ both). No operator share of profit is recorded anywhere.
 | Object | What it is |
 | --- | --- |
 | `job_budgets` | One row per accepted revision: the totals as columns, the taken option ids, the revision's `pricing_hash`, the whole budget as `budget` (jsonb). Version 1, 2, ... per job. Write-once (trigger refuses update, delete, truncate). |
-| `job_budget_lines` | One row per line, every lane, unique on `(budget_id, key)` (B4). `line_id` where the tool sealed one. Write-once. |
+| `job_budget_lines` | One row per line, every lane, unique on `(budget_id, key)` (B4). `line_id` where the tool sealed one. A materials line keeps its sealed `supplier_key` and `kind` (`item`, `delivery`, `cutting`); other lanes have neither. Write-once. |
 | `record_job_budget(...)` | The one writer, service role only. Checks the revision is the job's, frozen, with that hash; refuses a third decimal (B7); same budget again is a replay, a different one for the same revision is `job_budget_conflict`. |
 | `v_job_budget` | Each job's current version (lanes, `by_supplier`, totals, gaps), or `state = 'refused'` with `state_label = 'budget refused: <code>'` when the job has no stored budget and a refusal was recorded. Staff and service only. |
 
@@ -64,12 +64,30 @@ so the event never carries money. `v_job_budget` shows
 `store_missing` and writes no event.
 
 Codes come from `checkBudget` (`gst_mismatch`, `lane_total_mismatch`,
-`supplier_total_mismatch`, `gross_profit_mismatch`, `commission_mismatch`,
+`supplier_lines_mismatch`, `supplier_delivery_mismatch`, `supplier_key_mismatch`,
+`line_kind_invalid`, `supplier_total_mismatch`, `gross_profit_mismatch`, `commission_mismatch`,
 `gap_not_named`, `key_not_unique`, `money_not_two_decimals`, ... one per
 failed add-up), from the formula (`option_not_in_budget`, ...), and from the
 writer: `pricing_hash_mismatch`, `budget_revision_mismatch`,
 `quote_options_unreadable`, `option_sell_mismatch`, `budget_conflict`,
 `budget_write_failed`.
+
+### Materials as the tool seals them (contract draft 3)
+
+- Each materials line carries the `supplier_key` of the `by_supplier` entry it
+  adds to, and a `kind`. The checks read that key, never work it out again,
+  and it must be the line's supplier's (its id, `name:<name>`, or `none`).
+- An entry's `lines_ex_gst` is its counted `item` and `cutting` lines; its
+  `delivery_ex_gst` is its counted `delivery` lines; its total is lines plus
+  surcharge plus delivery, each counted once.
+- One figure for all materials (T1): `priced_by_line: false`, one counted line
+  (`cost_from: one_figure`, no supplier id) in the `one_figure` entry. The order
+  lines ride along under their own suppliers with `in_total: false` and no
+  cost, are not gaps, and those suppliers' entries may be all zeros.
+- The fixings allowance (T2): one counted line, `cost_from: allowance`, in the
+  `none` entry ("No supplier order"), not a gap.
+- `job.scope_revision_id` is null on a local seal; when it is set it must be
+  the accepted revision's id (`budget_revision_mismatch` otherwise).
 
 ## The options formula (B6)
 
@@ -80,8 +98,13 @@ when the supplier is new; labour and the work order amount; or an other lane,
 created when missing, crew-paid adding to the work order amount). A taken
 option with no cost makes its lane `null` and adds a `no_cost` gap. Totals,
 commission (0 when gross profit is zero or less) and both percents are worked
-again. The shared worked examples A to D are in
-`_shared/job_budget/budget_examples.ts` and pass to the cent.
+again, the way the tool's `finish` adds a budget up. The result records
+`taken_option_ids` in sealed options order (contract section 5 step 4), the
+same list stored in the row; nothing taken leaves the base unchanged, with no
+`taken_option_ids`. The tool's own shared examples
+(`verify/r17-budget/options-examples.json`, copied verbatim to
+`_shared/job_budget/fixtures/options-examples.json`) and the examples in
+`_shared/job_budget/budget_examples.ts` pass to the cent.
 
 ## Who can see it (merge condition)
 
@@ -105,9 +128,11 @@ tools through ghl-proxy, reporting) are unchanged and may show it. Proof:
 
 ## Tests
 
-- `_shared/job_budget/budget_v1_test.ts`: the formula and examples A to D,
-  every add-up code, gaps, the one-figure patio and the allowance entry,
-  money to two decimals, the strip.
+- `_shared/job_budget/budget_v1_test.ts`: the formula, the tool's shared
+  examples and A to D (with `taken_option_ids`), every add-up code, gaps,
+  supplier delivery lines, the exact native one-figure patio and allowance
+  entry, the native sealed budgets of both trades
+  (`fixtures/native-budgets.json`), money to two decimals, the strip.
 - `_shared/job_budget/record_job_budget_test.ts`: the acceptance writer.
 - `ops-api/job_budget_strip_test.ts`: every read in the table above.
 - `supabase/tests/migration-contracts/20261113190000_job_budgets/`: privileges,
