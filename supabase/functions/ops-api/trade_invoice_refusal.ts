@@ -10,6 +10,8 @@
 // that is not a recognised refusal is still a plain sentence; the internal
 // detail goes only to the function log.
 
+import { JOB_LABOUR_CAP_EXCEEDED, JOB_LABOUR_CAP_TRADE_MESSAGE } from "./job_labour_cap.ts";
+
 /** Every action that reads or writes a trade's own invoice or pay claim. */
 export const TRADE_INVOICE_ROUTE_ACTIONS: ReadonlySet<string> = new Set([
   "generate_trade_invoice",
@@ -58,6 +60,13 @@ export type TradeInvoiceRefusal = {
 const KNOWN_REFUSALS: ReadonlyArray<
   { match: RegExp; code: string; error: string; status?: number }
 > = [
+  {
+    // Ruling 17 step 4: the database's labour cap (job_labour_cap.ts). No
+    // figure: the maximum is the office's.
+    match: new RegExp(JOB_LABOUR_CAP_EXCEEDED),
+    code: JOB_LABOUR_CAP_EXCEEDED,
+    error: JOB_LABOUR_CAP_TRADE_MESSAGE,
+  },
   {
     match: /work-order invoice source is no longer complete/i,
     code: "work_order_not_complete",

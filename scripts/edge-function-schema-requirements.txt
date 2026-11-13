@@ -1232,3 +1232,9 @@ ops-api|supabase/migrations/20261112090000_trade_invoice_commission_super_base.s
 xero-sync|supabase/migrations/20261112090000_trade_invoice_commission_super_base.sql|column|trade_invoices.super_base_ex
 ops-api|supabase/migrations/20261112140000_makesafe_company_restoration_recipients.sql|column|makesafe_companies.restoration_recipients
 ops-api|supabase/migrations/20261112190000_makesafe_company_restoration_cc.sql|column|makesafe_companies.restoration_cc
+# Ruling 17 step 4: the labour cap. job_labour_cap and raise_job_labour_cap call
+# the two functions, so ops-api must not deploy ahead of the migration. While
+# job_labour_budget_v1 is off (as seeded) nothing else reads them.
+ops-api|supabase/migrations/20261114030000_job_labour_cap.sql|table|job_labour_cap_raises
+ops-api|supabase/migrations/20261114030000_job_labour_cap.sql|function|job_labour_cap_state
+ops-api|supabase/migrations/20261114030000_job_labour_cap.sql|function|raise_job_labour_cap

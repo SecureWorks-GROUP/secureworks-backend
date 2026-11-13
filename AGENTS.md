@@ -5110,6 +5110,15 @@ or crew document strips it (`withoutBudget`, and `budget` is on
 `TRADE_SCOPE_QUOTE_KEYS`); a new such read must too, and joins the list in the
 doc and `ops-api/job_budget_strip_test.ts`.
 
+Step 4 (`20261114030000`, behind `job_labour_budget_v1`, seeded off): the
+budget's `labour.pay` decides how the crew is paid. On `hourly_capped` the job
+is invoiced by the hour and the database refuses trade invoice labour past the
+maximum plus the approver's raises (`job_labour_cap_exceeded`, deferred guard,
+one read `job_labour_cap_state`); only `raise_job_labour_cap` lifts it, for an
+approver `owner_approval_authority` names, against the job's current budget.
+Never re-derive the cap in TypeScript, never let a trade read it, and never
+make a billed invoice moving on (approved, paid) refusable by it.
+
 ## Booking confirmation authority
 
 Read/approval handoff, published availability freshness and ledger/outcome
