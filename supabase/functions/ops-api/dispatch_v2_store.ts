@@ -2809,9 +2809,10 @@ async function emailAttachments(client: any, email: any) {
 // admin@ only and records it in the test_* columns: the email stays held and
 // nothing is stamped. A test copy is optional (Shaun, 26 Oct). A real send
 // needs an approved order email for the supplier, the Date,
-// Address and Contact lines filled in (a pickup has no Address or Contact
-// line), the box's lines unchanged since the email was made, and at least
-// one line or one photo on the email (Tweak 5).
+// Address and Contact lines filled in (a pickup has no Address line, and its
+// "(First name)" Contact line is never required), the box's lines unchanged
+// since the email was made, and at least one line or one photo on the email
+// (Tweak 5).
 export async function sendDispatchV2Email(
   client: any,
   body: any,

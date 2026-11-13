@@ -36,10 +36,12 @@
 // the email's own opening line is the record (dispatchV2FulfilmentOf), so an
 // email edited by hand to say pickup counts as a pickup too.
 //
-// Pickup has no Contact line either (Tweak 6, Shaun 5 Nov 2026): the client's
-// phone is for a driver on site, and nobody delivers a pickup. So a pickup
-// never needs the client's name or phone, and a missing one never stops it.
-// A delivery keeps its Contact line, and an empty one still stops the send.
+// Pickup never carries the client's phone (Tweak 6, Shaun 5 Nov 2026): the
+// phone is for a driver on site, and nobody delivers a pickup. Shaun, 13 Nov
+// 2026: a pickup does name the client, as "Contact: (First name)" under the
+// Date line. A job with no client name leaves the line out, and a pickup is
+// never stopped for a missing contact. A delivery keeps its full Contact
+// line, and an empty one still stops the send.
 //
 // An order that is just a photo (Tweak 5, Shaun 5 Nov 2026): a box with a
 // photo and no material line can make its email. Under "Materials Needed:"
@@ -202,9 +204,22 @@ export function dispatchV2AddressText(job: any): string {
 // "phone (First name)", as the template asks. Either part may be missing.
 export function dispatchV2ContactText(job: any): string {
   const phone = cleanLine(job?.client_phone);
-  const firstName = cleanLine(job?.client_name).split(" ")[0] || "";
+  const firstName = clientFirstName(job);
   if (phone && firstName) return `${phone} (${firstName})`;
   return phone || (firstName ? `(${firstName})` : "");
+}
+
+// A pickup's Contact line: "(First name)" only, never the client's phone
+// (Tweak 6, 5 Nov 2026). Shaun, 13 Nov 2026: a pickup email still names the
+// client under the Date line, so the supplier can match the order to the job.
+// "" when the job has no client name (the line is then left out).
+export function dispatchV2PickupContactText(job: any): string {
+  const firstName = clientFirstName(job);
+  return firstName ? `(${firstName})` : "";
+}
+
+function clientFirstName(job: any): string {
+  return cleanLine(job?.client_name).split(" ")[0] || "";
 }
 
 function cleanLine(value: unknown): string {
@@ -336,8 +351,9 @@ export type DispatchV2Built = {
   // photo, and "Please see attached for materials needed." in the body.
   photo_only: boolean;
   // Which of Date / Address / Contact came out empty. A send is refused while
-  // any is still empty in the body. A pickup has neither an Address nor a
-  // Contact line, so neither can be missing on a pickup.
+  // any is still empty in the body. A pickup has no Address line and its
+  // Contact line is only there when the client has a name, so neither can be
+  // missing on a pickup.
   missing: ("date" | "address" | "contact")[];
 };
 
@@ -347,7 +363,8 @@ export function dispatchV2BuildEmail(input: {
   isMainSupplier: boolean;
   lines: any[];
   deliveryDate: string | null;
-  // Default delivery. A pickup has no Address line and no Contact line.
+  // Default delivery. A pickup has no Address line, and its Contact line is
+  // "(First name)" only.
   fulfilment?: DispatchV2Fulfilment | null;
   // Default "date". ASAP writes "Date: ASAP" and ignores deliveryDate.
   dateMode?: DispatchV2DateMode | null;
@@ -361,8 +378,11 @@ export function dispatchV2BuildEmail(input: {
     ? DISPATCH_V2_ASAP_DATE_TEXT
     : dispatchV2DeliveryDateText(input.deliveryDate) ?? "";
   const address = pickup ? "" : dispatchV2AddressText(input.job);
-  // Tweak 6: a pickup leaves the client's phone and name out altogether.
-  const contact = pickup ? "" : dispatchV2ContactText(input.job);
+  // Tweak 6: a pickup leaves the client's phone out. Shaun, 13 Nov 2026: it
+  // keeps "Contact: (First name)" under the Date line.
+  const contact = pickup
+    ? dispatchV2PickupContactText(input.job)
+    : dispatchV2ContactText(input.job);
   const photos = Math.max(0, Math.floor(Number(input.photoCount) || 0));
   // A line with no words on it (an empty row) is not a line.
   const built: DispatchV2BuiltLine[] = (input.lines || []).map((line) => ({
@@ -397,7 +417,9 @@ export function dispatchV2BuildEmail(input: {
     "",
     `Date: ${dateText}`.trimEnd(),
     ...(pickup ? [] : [`Address: ${address}`.trimEnd()]),
-    ...(pickup ? [] : [`Contact: ${contact}`.trimEnd()]),
+    // A pickup with no client name leaves its Contact line out (a pickup
+    // never waits on a contact); a delivery always has the line.
+    ...(pickup && !contact ? [] : [`Contact: ${contact}`.trimEnd()]),
     "",
     "Materials Needed:",
     "",
