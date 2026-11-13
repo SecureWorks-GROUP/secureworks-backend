@@ -16,8 +16,14 @@ const FENCE_GATE = {
 const CREW = { id: "c", name: "Crew", goes: "crew", sealed: { labour_line: { description: "x", total: 100 } } };
 const OFFICE = { id: "o", name: "Skip", goes: "office", sealed: { office_line: { description: "Skip", quantity: 1 } } };
 
+/** The read answer, or the test fails: narrows the union for the checks below. */
+function readItems(out: ReturnType<typeof takenOptionOrderItems>) {
+  if (out.state !== "read") throw new Error(`expected read, got ${out.state}`);
+  return out;
+}
+
 Deno.test("R14 dispatch: a taken supplier option is one sealed order line in its supplier's box", () => {
-  const out = takenOptionOrderItems([LIGHTS, CREW, OFFICE]);
+  const out = readItems(takenOptionOrderItems([LIGHTS, CREW, OFFICE]));
   assertEquals(out.items.map((i) => [i.description, i.quantity, i.unit, i.scope_line_id, i.supplier_id, i.supplier_name]),
     [["LED downlight", 2, "each", "sl-1", "elec", "Sparky Supplies"]]);
   assertEquals(out.notes, ["Taken quote option on this order: Two downlights."]);
@@ -25,7 +31,7 @@ Deno.test("R14 dispatch: a taken supplier option is one sealed order line in its
 });
 
 Deno.test("R14 dispatch: a fence option with no supplier is held on the draft list, never in a guessed box", () => {
-  const out = takenOptionOrderItems([FENCE_GATE]);
+  const out = readItems(takenOptionOrderItems([FENCE_GATE]));
   assertEquals(out.items.map((i) => [i.description, i.supplier_id]), [["Gate kit", null]]);
 });
 
