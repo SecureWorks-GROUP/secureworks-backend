@@ -324,6 +324,7 @@ import {
 } from './restoration_stage_store.ts'
 import { setRestorationWorkOrderAction } from './restoration_work_order.ts'
 import { RestorationWorkflowError } from './restoration_workflow.ts'
+import { renderRestorationReportAction } from './restoration_report_store.ts'
 import {
   BUILDER_WORK_ORDER_VALUE_NOT_READ as _BUILDER_WORK_ORDER_VALUE_NOT_READ,
   INSURANCE_REPAIR_STAGES,
@@ -10261,6 +10262,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'restoration_mark_quote_sent':
       case 'restoration_record_quote_decision':
       case 'restoration_board':
+      case 'restoration_render_report':
       case 'restoration_set_stage': {
         const restorationRead = action === 'restoration_plan' || action === 'restoration_board'
         if (
@@ -24758,6 +24760,16 @@ export async function dispatchRestorationAction(
         return json(result)
       }
       case 'restoration_set_stage': return json(await setRestorationStageAction(client, body, caller))
+      // The job's restoration report PDF (docs/restoration-board-v1.md,
+      // "Report"). dry_run is the default and writes nothing; a live call files
+      // the PDF as the job's makesafe_report document through the one attach
+      // path. It sends nothing and moves no stage.
+      case 'restoration_render_report':
+        return json(await renderRestorationReportAction(client, body, caller, {
+          persistPdf: persistMakesafeDocumentPdfBytes,
+          attachDocument: (attachBody) => attachMakesafeDocument(client, attachBody),
+          fetchPhoto: fetchRestorationReportPhoto,
+        }))
       default: return json({ error: `Unknown action: ${action}` }, 400)
     }
   } catch (error) {
@@ -24766,6 +24778,31 @@ export async function dispatchRestorationAction(
     }
     throw error
   }
+}
+
+// A job photo's bytes for the restoration report: a resized copy from Storage
+// when it will make one (a 30-photo report stays a few megabytes), else the
+// photo itself. Raw bytes all the way: never a base64 or string copy.
+async function fetchRestorationReportPhoto(
+  media: { id: string; storage_url: string },
+): Promise<{ bytes: Uint8Array; mime: string } | null> {
+  const resized = roofReportPhotoTransformUrl(media.storage_url, 1400, 72)
+  for (const source of [resized, media.storage_url]) {
+    if (!source || !/^https:\/\//i.test(source)) continue
+    try {
+      const response = await fetch(source)
+      if (!response.ok) continue
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      // jsPDF embeds JPEG and PNG only; a resized copy in any other format
+      // (the transform can answer WebP) is passed over for the photo itself.
+      const jpeg = bytes[0] === 0xff && bytes[1] === 0xd8
+      const png = bytes[0] === 0x89 && bytes[1] === 0x50
+      if (jpeg || png) return { bytes, mime: png ? 'image/png' : 'image/jpeg' }
+    } catch {
+      // Try the next source; the action refuses when none can be read.
+    }
+  }
+  return null
 }
 
 // ══════════════════════════════════════════════════════════════
