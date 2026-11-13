@@ -493,6 +493,9 @@ clear_job_deposit_flag # probe=source-only
 job_auto_start_sweep # probe=source-only
 # Reminder texts before a scheduled job's first work day, 12:00 Perth (job_schedule_reminders.ts)
 job_schedule_reminder_sweep # probe=source-only
+# Ruling 17 step 4: a job paid hourly up to a maximum (job_labour_cap.ts). Staff read; the raise is an approver's signed-in write
+job_labour_cap # probe=source-only
+raise_job_labour_cap # probe=source-only
 
 # Tracking correction GET is refused before any provider reads or writes.
 xero_correct_bill_tracking # probe=bounded-refusal

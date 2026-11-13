@@ -2,6 +2,7 @@
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
 import { setCouncilRequired } from './council_mark.ts'
+import { jobLabourCapRefusal } from './job_labour_cap.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
 import { SelfAllocationRefusal, selfAllocateForInvoice } from './trade_self_allocation.ts'
@@ -10604,6 +10605,26 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         })
         return json(result.body, result.status)
       }
+      // Ruling 17 step 4: a job paid hourly up to a maximum. The cap is the
+      // database's (20261114030000_job_labour_cap.sql); job_labour_cap.ts.
+      case 'job_labour_cap':
+      case 'raise_job_labour_cap': {
+        const { jobLabourCapAction } = await import('./job_labour_cap.ts')
+        const result = await jobLabourCapAction(
+          client,
+          action,
+          req.method,
+          req.method === 'GET' ? { job_id: url.searchParams.get('job_id') } : body,
+          {
+            staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+            signedIn: authMode === 'jwt',
+            orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+            userId: authMode === 'jwt' ? authUser?.id || null : null,
+            email: authMode === 'jwt' ? authUser?.email || null : null,
+          },
+        )
+        return json(result.body, result.status)
+      }
       case 'read_scope_payment_stages':
       case 'confirm_scope_payment_stage': {
         const { scopePaymentStagesAction } = await import('./scope_payment_stages.ts')
@@ -16523,6 +16544,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       return json({ success: false, error: err.message, code: err.code, reasons: err.reasons }, err.status)
     }
     console.error('[ops-api] ERROR:', err)
+    // Ruling 17 step 4: the labour cap's refusal is a plain 409 on any door.
+    const labourCap = jobLabourCapRefusal(err)
+    if (labourCap) return json({ ok: false, code: labourCap.code, error: labourCap.message }, labourCap.status)
     // A trade invoice door never shows the trade a raw database or server
     // sentence: a guard refusal is a plain 409, anything else a plain 500.
     if (auditAction && TRADE_INVOICE_ROUTE_ACTIONS.has(auditAction)) {

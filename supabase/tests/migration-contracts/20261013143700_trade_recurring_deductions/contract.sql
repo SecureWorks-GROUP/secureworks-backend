@@ -368,6 +368,10 @@ UPDATE public.trade_recurring_deductions
 SET amount = 120
 WHERE user_id = '1de0c710-0000-4000-8000-000000000001' AND first_week_start = '2026-10-12';
 
+-- The labour cap's deferred guards (20261114030000) queue an event for each invoice line written
+-- above; run them now so the re-applied migration's ALTER TABLE has no pending trigger events.
+SET CONSTRAINTS ALL IMMEDIATE;
+
 \ir ../../../migrations/20261013143700_trade_recurring_deductions.sql
 
 DO $$

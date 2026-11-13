@@ -357,6 +357,12 @@ jobs:
             supabase/functions/_shared/job_budget/record_job_budget_test.ts
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/job_budget_strip_test.ts
+          # Ruling 17 step 4: the pay mode from the budget, the labour cap's
+          # doors and refusal, and the work order filled from the budget.
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/job_labour_cap_test.ts \
+            supabase/functions/ops-api/job_work_order_quote_fill_test.ts \
+            supabase/functions/ops-api/trade_invoice_mode_test.ts
 
       # A scope draft prepare registers each sealed payer as a job party and
       # never loses the saved drafts when that registration is refused

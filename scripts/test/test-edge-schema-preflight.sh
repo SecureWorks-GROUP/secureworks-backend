@@ -1078,7 +1078,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Scheduled-job reminder texts: the switch, the once-a-day
                       # record, the run log and the noon cron trigger
                       # (job_schedule_reminders.ts).
-                      ("20261113120000", "job_schedule_reminders")]:
+                      ("20261113120000", "job_schedule_reminders"),
+                      # Ruling 17 step 4: the hourly labour cap, its raises
+                      # and the switch (job_labour_cap.ts).
+                      ("20261114030000", "job_labour_cap")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
