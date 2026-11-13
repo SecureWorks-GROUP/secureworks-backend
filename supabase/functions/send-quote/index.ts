@@ -113,6 +113,7 @@ import {
 } from '../_shared/release_packet/build_v2_augmentation.ts'
 import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from './quote_run.ts'
 import { depositHeldMessage, namedPartyDeposit, neighbourLetter, readAcceptedRelease, runDepositFromRelease } from './accepted_deposit.ts'
+import { acceptSentenceHtml, acceptSentenceRecord, readAcceptSentence, type AcceptSentenceRead } from './accept_sentence.ts'
 import { buildCouncilKickoffEmail, councilKickoffApplies, sendCouncilKickoffEmail } from './council_kickoff_email.ts'
 import { setJobPriceToAcceptedQuote } from './accepted_job_price.ts'
 import {
@@ -1740,7 +1741,11 @@ serve(async (req: Request) => {
             const isNeighbour = doc.job_contact_id && fullJob.job_contacts?.some(
               (c: any) => c.id === doc.job_contact_id && !c.is_primary
             )
-            return await htmlResponse(buildRunQuotePage(doc, token, run, fullJob, isNeighbour ? 'neighbour' : 'client'))
+            // Ruling 11 item 8: the run's sealed sentence beside Accept Quote.
+            const runAcceptWords = !doc.accepted_at && !doc.declined_at
+              ? await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel, job_contact_id: doc.job_contact_id ?? null })
+              : null
+            return await htmlResponse(buildRunQuotePage(doc, token, run, fullJob, isNeighbour ? 'neighbour' : 'client', runAcceptWords))
           }
         }
       }
@@ -1817,7 +1822,12 @@ serve(async (req: Request) => {
         // Object missing — fall through to the reliable server-rendered client page below
       }
 
-      return await htmlResponse(buildClientPage(doc, token, heroUrl))
+      // Ruling 11 item 8: the sealed "You are accepting: ..." sentence beside
+      // Accept Quote. No sealed sentence (every older quote): the page is as before.
+      const acceptWords = !doc.accepted_at && !doc.declined_at
+        ? await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel, job_contact_id: doc.job_contact_id ?? null })
+        : null
+      return await htmlResponse(buildClientPage(doc, token, heroUrl, acceptWords))
     }
 
     // ── VARIATION ACCEPT/DECLINE ──
@@ -1986,6 +1996,10 @@ serve(async (req: Request) => {
         }, doc, sourceRunLabel, acceptedAt)
       }
 
+      // Ruling 11 item 8: what was accepted, in the sealed design's own words,
+      // kept with the acceptance below. A failed read never blocks accepting.
+      const acceptWords = await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel, job_contact_id: doc.job_contact_id ?? null })
+
       const { error: acceptError } = await sb
         .from('job_documents')
         .update({ accepted_at: acceptedAt })
@@ -2033,6 +2047,7 @@ serve(async (req: Request) => {
           contact_name: doc.job_contacts?.client_name || null,
           run_label: doc.run_label || null,
           quote_value_ex_gst: doc.job_contacts?.quote_value_ex_gst ?? null,
+          ...acceptSentenceRecord(acceptWords),
         }
         const legacyAcceptRow = {
           event_type: 'quote.accepted',
@@ -2371,6 +2386,7 @@ serve(async (req: Request) => {
             amount: totalIncGST || null,
             is_multi_contact: isMultiContact,
             new_status: newStatus,
+            ...acceptSentenceRecord(acceptWords),
             message: `${acceptorName}${contactLabel ? ' (' + contactLabel + ')' : ''} accepted quote${job?.job_number ? ' for ' + job.job_number : ''}${isMultiContact ? ' — status: ' + newStatus : ''}`,
           },
         })
@@ -4362,10 +4378,12 @@ export function buildQuoteEmail(opts: {
 // CLIENT-FACING QUOTE PAGE
 // ════════════════════════════════════════════════════════════
 
-function buildClientPage(doc: any, token: string, heroUrl: string | null = null): string {
+function buildClientPage(doc: any, token: string, heroUrl: string | null = null, acceptWords: AcceptSentenceRead | null = null): string {
   // heroUrl retained in signature for backwards compat but not rendered — PDF has its own cover
   const isAccepted = !!doc.accepted_at
   const isDeclined = !!doc.declined_at
+  // Ruling 11 item 8: empty unless the released quote sealed the sentence.
+  const acceptingLine = acceptSentenceHtml(acceptWords)
 
   // Mobile card display fields — omit gracefully if absent
   const mobQuoteRef = doc.quote_number || ''
@@ -4413,6 +4431,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
     .btn { display: inline-block; padding: 13px 32px; border-radius: 8px; font-size: 15px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; text-align: center; width: 100%; margin-bottom: 8px; font-family: inherit; }
     .btn-accept { background: #34C759; color: #fff; }
     .btn-decline { background: transparent; color: #FF6B60; border: 1px solid #FF6B60; }
+    .accept-sentence { color: #fff; font-size: 15px; font-weight: 600; line-height: 1.45; margin-bottom: 14px; }
     .btn-view-pdf { background: #F15A29; color: #fff; display: inline-block; width: auto; padding: 13px 40px; }
     .btn:hover { opacity: 0.88; }
     /* Decline form */
@@ -4485,6 +4504,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
       <a href="${doc.pdf_url}" download class="btn-mob-secondary">Download PDF</a>
       ${!isAccepted && !isDeclined ? `
       <div class="mob-actions-sep">
+        ${acceptingLine}
         <button class="btn btn-accept" onclick="respondToQuote('accept')" style="margin-bottom:8px;">Accept Quote</button>
         <button class="btn btn-decline" onclick="showDeclineForm()">Decline</button>
       </div>` : statusHtml ? `<div class="mob-actions-sep">${statusHtml}</div>` : ''}
@@ -4498,6 +4518,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
     ${!isAccepted && !isDeclined ? `
     <div class="actions-card">
       <p style="color:rgba(255,255,255,0.7);font-size:14px;margin-bottom:16px;">Happy with the quote? Accept below to confirm and we'll be in touch to schedule your project.</p>
+      ${acceptingLine}
       <button class="btn btn-accept" onclick="respondToQuote('accept')">Accept Quote</button>
       <button class="btn btn-decline" onclick="showDeclineForm()">Decline</button>
     </div>
@@ -4629,7 +4650,9 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
 // PER-RUN FENCING QUOTE PAGE (multi-neighbour)
 // ════════════════════════════════════════════════════════════
 
-function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerType: string): string {
+function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerType: string, acceptWords: AcceptSentenceRead | null = null): string {
+  // Ruling 11 item 8: empty unless the released quote sealed this run's words.
+  const acceptingLine = acceptSentenceHtml(acceptWords)
   const clientName = job?.client_name || 'Customer'
   const clientAddress = job?.site_address || ''
   const suburb = job?.site_suburb || ''
@@ -4768,6 +4791,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
     .btn-accept { background: #34C759; color: #fff; }
     .btn-decline { background: #f5f5f7; color: #FF3B30; border: 1px solid #FF3B30; }
     .btn:hover { opacity: 0.9; }
+    .accept-sentence { color: #293C46; font-size: 15px; font-weight: 600; line-height: 1.45; margin-bottom: 14px; }
     .footer { text-align: center; color: #999; font-size: 12px; padding: 24px; }
     @media print {
       body { background: #fff; }
@@ -4809,6 +4833,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
       ${!isAccepted && !isDeclined ? `
       <div class="no-print" style="margin-top:24px;padding-top:24px;border-top:1px solid #eee;">
         <p style="color:#4C6A7C;font-size:14px;margin-bottom:16px;">Happy with this quote? Accept below to confirm.</p>
+        ${acceptingLine}
         <button class="btn btn-accept" onclick="respondToQuote('accept')">Accept Quote</button>
         <button class="btn btn-decline" onclick="respondToQuote('decline')">Decline</button>
       </div>
