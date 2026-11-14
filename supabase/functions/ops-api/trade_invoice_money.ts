@@ -78,11 +78,20 @@ export type TradeInvoiceMoney = {
 };
 
 export const TRADE_INVOICE_EMPLOYER_SUPER_BASIS = "employer_12_v2";
-export type TradeInvoiceSuperBasis = typeof TRADE_INVOICE_EMPLOYER_SUPER_BASIS;
+// Super on top (owner, 13 Nov 2026): a trade listed in trade_super_on_top is
+// paid the whole amount earned and the company pays the 12% super on top,
+// like a group share, but on an ordinary invoice. Nothing is withheld.
+// Kept apart from employer_12_v2 because the database ties that one to
+// group shares only (trade_invoice_lines_group_share_snapshot).
+export const TRADE_INVOICE_SUPER_ON_TOP_BASIS = "super_on_top_v1";
+export type TradeInvoiceSuperBasis =
+  | typeof TRADE_INVOICE_EMPLOYER_SUPER_BASIS
+  | typeof TRADE_INVOICE_SUPER_ON_TOP_BASIS;
 
 export function resolveTradeInvoiceSuperBasis(value: unknown): TradeInvoiceSuperBasis | null {
   if (value === null || value === undefined) return null;
   if (value === TRADE_INVOICE_EMPLOYER_SUPER_BASIS) return value;
+  if (value === TRADE_INVOICE_SUPER_ON_TOP_BASIS) return value;
   throw new TradeInvoiceMoneyError(
     "MONEY_SPLIT_INVALID",
     "Trade invoice super basis is not recognised and cannot be pushed to Xero",
@@ -789,6 +798,19 @@ export function formatTradeInvoiceSuperWithheldDescription(
   tradeName?: unknown,
 ): string {
   const name = String(tradeName || "").trim() || "the trade";
+  if (money.super_basis === TRADE_INVOICE_SUPER_ON_TOP_BASIS) {
+    return [
+      `Superannuation Guarantee ${rateLabel(money.super_rate)} of submitted total${
+        money.super_base_ex !== null && money.super_base_ex !== undefined ? " less commission" : ""
+      }`,
+      `Submitted total ${moneyLabel(money.gross_earned)}. Super remittance ${
+        moneyLabel(money.super_amount)
+      } paid by the company on top. Nothing withheld. Amount payable ${
+        moneyLabel(money.net_pay)
+      }.`,
+      `Paid to the super fund separately. Not part of the amount payable to ${name}`,
+    ].join("\n");
+  }
   if (money.super_basis === TRADE_INVOICE_EMPLOYER_SUPER_BASIS) {
     return [
       `Superannuation Guarantee ${rateLabel(money.super_rate)} of submitted total`,

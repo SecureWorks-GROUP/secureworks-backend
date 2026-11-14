@@ -696,7 +696,13 @@ import {
   type TradeInvoiceXeroLine,
   validatePersistedTradeInvoiceMoney,
   withTradeInvoiceRecurringDeduction,
+  TRADE_INVOICE_EMPLOYER_SUPER_BASIS,
 } from './trade_invoice_money.ts'
+import {
+  resolveSuperOnTopBasisForPreview,
+  resolveSuperOnTopBasisForSubmit,
+  TradeSuperOnTopUnreadable,
+} from './trade_super_on_top.ts'
 import {
   getRunningInvoiceDraft,
   RunningDraftError,
@@ -2308,6 +2314,13 @@ function tradeInvoiceMoney(
   } catch (error) {
     return tradeInvoiceMoneyApiError(error)
   }
+}
+
+function superOnTopApiError(error: unknown): never {
+  if (error instanceof TradeSuperOnTopUnreadable) {
+    throw new ApiError('Could not check how super is paid for you. Nothing was saved. Try again in a minute.', 503, { code: error.code, userMessage: 'Could not check how super is paid for you. Nothing was saved. Try again in a minute.' })
+  }
+  throw error
 }
 
 function persistedTradeInvoiceMoney(value: unknown): TradeInvoiceMoney {
@@ -13440,10 +13453,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             )
             const sourceWorkOrderDate = weeklyWorkOrderBusinessDate(wo)
             const woInvoiceDate = new Date().toISOString().slice(0, 10)
+            // Super on top (trade_super_on_top.ts): dated by the invoice day.
+            const woSuperBasis = await resolveSuperOnTopBasisForSubmit(client, String(tradeUser.id), woInvoiceDate)
+              .catch((error) => superOnTopApiError(error))
             const woMoney = tradeInvoiceMoney(
               invoiceTotals.subtotal_ex,
               woGstOn,
               woInvoiceDate,
+              woSuperBasis,
             )
             const subtotal = woMoney.gross_earned
             const gst = woMoney.gst_amount
@@ -13861,7 +13878,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // invoice will carry, so the trade sees it before submitting.
             const { money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(
               client,
-              tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd),
+              tradeInvoiceMoney(
+                draftSubtotal,
+                draftGstOn,
+                draftWeekEnd,
+                resolvedShares.length
+                  ? null
+                  : await resolveSuperOnTopBasisForPreview(client, String(tradeUser.id), draftWeekStart || draftWeekEnd),
+              ),
               { userId: tradeUser.id, weekStart: draftWeekStart || null },
             )
 
@@ -15083,9 +15107,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // subtotal, super and GST below are untouched by it. An invoice
             // with no week carries none; it is marked for the office when the
             // trade has a deduction that week.
+            // Super on top (owner, 13 Nov 2026; trade_super_on_top.ts): a trade on
+            // the list is paid the whole gross and the company pays the 12% on
+            // top, from the week their row starts. A group share keeps the
+            // group's own basis, so an invoice carrying one never takes it.
+            const invoiceCarriesGroupShare = extraLineItems.some((line: any) =>
+              line?.group_share_id || String(line?.line_type || '').toLowerCase() === 'group share'
+            )
+            const invoiceSuperBasis = groupInvoiceBasis.superBasis
+              ?? (invoiceCarriesGroupShare
+                ? null
+                : await resolveSuperOnTopBasisForSubmit(client, String(tradeUser.id), week_start || invoiceEarningsDate)
+                  .catch((error) => superOnTopApiError(error)))
             const { money, decision: recurringDeduction } = await applyTradeRecurringDeduction(
               client,
-              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, groupInvoiceBasis.superBasis, invoiceCommissionEx),
+              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, invoiceSuperBasis, invoiceCommissionEx),
               {
                 userId: tradeUser.id,
                 weekStart: week_start || null,
@@ -16110,7 +16146,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               })
             }
 
-            const groupCrewRelease = officeReviewHold && money.super_basis
+            const groupCrewRelease = officeReviewHold && money.super_basis === TRADE_INVOICE_EMPLOYER_SUPER_BASIS
               ? await releaseGroupCrewBills(client, String(invoice.id), `user:${tradeUser.id}`)
               : null
             if (officeReviewHold) {
@@ -57426,7 +57462,12 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   // submitting. It is taken off this preview only when the preview covers it.
   // A failed rule read is logged and shows no deduction; it never fails the
   // hours view. The submit path does not share that leniency.
-  let previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding)
+  let previewMoney = tradeInvoiceMoney(
+    subtotal,
+    previewGstOn,
+    weekEnding,
+    await resolveSuperOnTopBasisForPreview(client, String(userId), weekStart || weekEnding),
+  )
   let previewRecurringDeduction: TradeRecurringDeductionDecision | null = null
   try {
     const previewed = await applyTradeRecurringDeduction(client, previewMoney, { userId, weekStart })
