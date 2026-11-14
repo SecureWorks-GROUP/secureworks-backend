@@ -483,7 +483,10 @@ jobs:
       # invoice, once per invoice week, never below zero, and no other trade's
       # invoice changes in any figure or field. Drives the real ops-api request
       # handler with every database call answered by a fetch stub, plus the
-      # money and audit PDF suites the deduction is built on.
+      # money and audit PDF suites the deduction is built on. The same handler
+      # run proves a failed submit leaves one trade_invoice_events row
+      # (submit_refused, 11 Nov 2026) and a submit that goes through leaves none;
+      # trade_invoice_submit_refused_test.ts holds what that row may carry.
       - name: Test trade recurring deductions
         run: |
           deno test --allow-env --allow-net=127.0.0.1 --allow-read \
@@ -491,6 +494,7 @@ jobs:
             supabase/functions/ops-api/trade_invoice_money_test.ts \
             supabase/functions/ops-api/trade_invoice_money_audit_test.ts \
             supabase/functions/ops-api/trade_invoice_pdf_test.ts \
+            supabase/functions/ops-api/trade_invoice_submit_refused_test.ts \
             supabase/functions/ops-api/trade_money_test.ts
 
       # Automated money messages are off (captain, 30 Sep 2026). Drives the

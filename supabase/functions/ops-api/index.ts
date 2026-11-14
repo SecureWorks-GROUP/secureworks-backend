@@ -854,7 +854,7 @@ import { presentTradeInvoiceBillOutcome } from './trade_invoice_bill_outcome.ts'
 import { ExtraRateRuleError, extraLineRateHold, listExtraRateRules, loadExtraRateRules, setExtraRateRule, type ExtraRateHold } from './trade_invoice_extra_rate_rule.ts'
 import { findNoWeekClaimConflict, isNoWeekClaimRefusal, NO_WEEK_CLAIM_MESSAGE, NO_WEEK_CLAIM_REFUSAL } from './trade_invoice_no_week_claim.ts'
 import { isTradeInvoiceNumberCollision, nextTradeInvoiceNumber, tradeInvoiceDay, tradeInvoiceInitials } from './trade_invoice_number.ts'
-import { recordTradeInvoiceEvent } from './trade_invoice_events.ts'
+import { recordTradeInvoiceEvent, recordTradeSubmitRefused, TRADE_SUBMIT_ACTIONS } from './trade_invoice_events.ts'
 import { acknowledgeTradeInvoiceLine, TradeInvoiceLineAckError } from './trade_invoice_line_ack.ts'
 import { createOrReuseTradeXeroBill, findLiveTradeBillsByNumber, TradeXeroBillSearchError } from './trade_invoice_xero_existing_bill.ts'
 import { markTradeInvoiceReadyForXero, resolveStuckTradeInvoice, STUCK_TRADE_INVOICE_STATUS, StuckTradeInvoiceError } from './trade_invoice_stuck.ts'
@@ -5969,6 +5969,32 @@ export async function _readInsuranceEvidenceAction(
 // (e.g. that a retired action answers `Unknown action`). serve() still only
 // starts when this module is the entrypoint.
 export async function _opsApiRequestHandlerForTest(req: Request): Promise<Response> {
+  // A trade invoice submit the server refuses, or that fails, leaves one
+  // trade_invoice_events row (submit_refused): who, which door, which week and
+  // the code and message the trade was shown. Every answer leaves through
+  // here, so a refusal returned as a 4xx and one thrown are recorded alike.
+  // The record never changes the answer.
+  const tradeSubmit: TradeSubmitAudit = { client: null, action: null, userId: null, body: null }
+  const response = await opsApiRequest(req, tradeSubmit)
+  if (tradeSubmit.client && tradeSubmit.action && tradeSubmit.userId && response.status >= 400) {
+    let responseBody: unknown = null
+    try { responseBody = await response.clone().json() } catch { responseBody = null }
+    await recordTradeSubmitRefused(tradeSubmit.client, {
+      action: tradeSubmit.action,
+      userId: tradeSubmit.userId,
+      status: response.status,
+      requestBody: tradeSubmit.body,
+      responseBody,
+    })
+  }
+  return response
+}
+
+// Filled in by the trade dispatch once the trade is signed in, and only for
+// the two submit doors (TRADE_SUBMIT_ACTIONS).
+type TradeSubmitAudit = { client: any; action: string | null; userId: string | null; body: unknown }
+
+async function opsApiRequest(req: Request, tradeSubmit: TradeSubmitAudit): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   // ── Unauthenticated deploy-lane version probe ──
@@ -12915,6 +12941,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'clock_event':
       case 'submit_makesafe_report': {
         const tradeUser = await authTrade(req, client)
+        if (action && TRADE_SUBMIT_ACTIONS.has(action)) {
+          tradeSubmit.client = client
+          tradeSubmit.action = action
+          tradeSubmit.userId = tradeUser.id
+          tradeSubmit.body = body
+        }
         // Dispatcher = the ops manager / admin who runs the board: see-all view of
         // every job plus the full open MakeSafe pool (other trades see only their
         // own). A vertical manager (users.managed_verticals contains the vertical,
