@@ -735,6 +735,7 @@ jobs:
             supabase/functions/ghl-webhook-receiver/receiver_t1_test.ts \
             supabase/functions/ghl-webhook-receiver/receiver_customer_replied_test.ts \
             supabase/functions/ghl-webhook-receiver/receiver_user_replied_test.ts \
+            supabase/functions/ghl-webhook-receiver/hugo_line_router_test.ts \
             supabase/functions/ghl-webhook/message_webhook_test.ts
 
       # Slice C1a: ghl-proxy send_sms through the one writer
