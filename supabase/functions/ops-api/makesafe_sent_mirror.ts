@@ -19,6 +19,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 
+import { chunkByUrlBudget } from "./makesafe_compact_reads.ts";
 import { ADMIN_SENT_MAILBOX, SENT_FOLDER } from "./makesafe_story.ts";
 
 export { ADMIN_SENT_MAILBOX, SENT_FOLDER };
@@ -45,8 +46,12 @@ export interface GraphSentMessage {
   subject?: string | null;
   bodyPreview?: string | null;
   hasAttachments?: boolean | null;
-  from?: { emailAddress?: { address?: string | null; name?: string | null } } | null;
-  sender?: { emailAddress?: { address?: string | null; name?: string | null } } | null;
+  from?:
+    | { emailAddress?: { address?: string | null; name?: string | null } }
+    | null;
+  sender?:
+    | { emailAddress?: { address?: string | null; name?: string | null } }
+    | null;
   toRecipients?: Array<{ emailAddress?: { address?: string | null } }> | null;
   ccRecipients?: Array<{ emailAddress?: { address?: string | null } }> | null;
   body?: { contentType?: string | null; content?: string | null } | null;
@@ -75,7 +80,10 @@ export function computeSentWindow(
 
 // ── message -> emails row ─────────────────────────────────────────────────────
 function addressOf(
-  holder: { emailAddress?: { address?: string | null; name?: string | null } } | null | undefined,
+  holder:
+    | { emailAddress?: { address?: string | null; name?: string | null } }
+    | null
+    | undefined,
 ): { address: string | null; name: string | null } {
   const ea = holder?.emailAddress;
   return { address: ea?.address ?? null, name: ea?.name ?? null };
@@ -131,6 +139,35 @@ export function mapSentMessageToEmailRow(
   };
 }
 
+// One row per Graph id. A repeated id in one upsert makes Postgres reject the
+// whole statement ("ON CONFLICT DO UPDATE command cannot affect row a second
+// time"), so the page would 500 with nothing stored. The first copy wins.
+export function sentMessagesById(
+  messages: GraphSentMessage[],
+): GraphSentMessage[] {
+  const byId = new Map<string, GraphSentMessage>();
+  for (const message of messages) {
+    if (!message?.id || byId.has(message.id)) continue;
+    byId.set(message.id, message);
+  }
+  return [...byId.values()];
+}
+
+function dbErrorText(error: unknown): string {
+  if (typeof error === "string" && error.trim()) return error;
+  if (error && typeof error === "object") {
+    const row = error as {
+      message?: unknown;
+      details?: unknown;
+      code?: unknown;
+    };
+    for (const part of [row.message, row.details, row.code]) {
+      if (typeof part === "string" && part.trim()) return part;
+    }
+  }
+  return "unknown database error";
+}
+
 // The freshest received_at across a batch (drives the cursor advance).
 export function maxReceivedAt(msgs: GraphSentMessage[]): string | null {
   let max: string | null = null;
@@ -163,10 +200,11 @@ export interface SentMirrorResult {
 
 // ── DB action: mirror the admin@ Sent-Items folder into `emails` ──────────────
 // Idempotent: the emails upsert conflict-targets post_id, and an email_events_raw
-// 'created' audit row is inserted ONLY for messages not already in the store. The
-// watermark advances to the freshest received message so the next run is
-// incremental. FAIL-CLOSED reads: a DB error throws (the caller returns 500) rather
-// than persist a half-mirrored state or a wrongly-advanced cursor.
+// 'created' audit row is inserted ONLY when that mailbox does not already have
+// one for the message. The watermark advances to the freshest received message
+// so the next run is incremental, and only after every chunk has committed.
+// FAIL-CLOSED: a dedupe read, upsert, or audit insert error throws (the caller
+// returns 500) rather than advancing the cursor over mail that did not land.
 export async function makesafeSentMirror(
   client: any,
   deps: SentMirrorDeps,
@@ -174,11 +212,15 @@ export async function makesafeSentMirror(
   const nowIso = deps.nowIso ?? new Date().toISOString();
 
   // Read the per-mailbox watermark (reuses the sync engine's cursor table).
-  const { data: cursorRow, error: cursorErr } = await client.from("mail_sync_cursors")
+  const { data: cursorRow, error: cursorErr } = await client.from(
+    "mail_sync_cursors",
+  )
     .select("last_completed_max, overlap_seconds")
     .eq("mailbox", ADMIN_SENT_MAILBOX)
     .maybeSingle();
-  if (cursorErr) throw new Error(`mail_sync_cursors read failed: ${cursorErr.message}`);
+  if (cursorErr) {
+    throw new Error(`mail_sync_cursors read failed: ${cursorErr.message}`);
+  }
   const overlapSeconds = deps.overlapSeconds ??
     (cursorRow?.overlap_seconds ?? SENT_OVERLAP_SECONDS);
 
@@ -192,23 +234,55 @@ export async function makesafeSentMirror(
 
   let upserted = 0;
   let newEvents = 0;
-  if (messages.length) {
-    const ids = messages.map((m) => m.id).filter(Boolean);
-    // Which of these are already in the store (so the audit event is written ONCE
-    // per message, never re-appended on a re-mirror of the same window).
-    const { data: existing, error: existErr } = await client.from("emails")
+  // Graph ids are ~152 chars and the Sent folder is read in pages of 50, then
+  // concatenated. One PostgREST GET `.in(post_id, every id)` puts that whole
+  // list in the URL. 52 live ids already exceed the ~8KB URL the runtime
+  // rejects as `TypeError: Invalid URL`, and the cursor never moved, so every
+  // run sent the entire 90-day backlog. Chunk with the same URL budget as the
+  // other post-id reads. The watermark moves only after every chunk's upsert
+  // and audit insert have succeeded, so a failed chunk is retried and the
+  // post_id primary key keeps a message from landing twice.
+  const unique = sentMessagesById(messages);
+  if (messages.length && unique.length === 0) {
+    throw new Error(
+      "sent mirror: Graph messages had no ids; nothing stored and the cursor was not moved",
+    );
+  }
+  const byId = new Map(unique.map((message) => [message.id, message]));
+  for (
+    const chunkIds of chunkByUrlBudget(unique.map((message) => message.id))
+  ) {
+    const chunk = chunkIds.map((id) => byId.get(id)!);
+    // Audit idempotency is the created event, not the email row. The email
+    // upsert is conflict-safe on its own; gating the event on the email row
+    // dropped the audit forever when the insert failed after the upsert.
+    const { data: existing, error: existErr } = await client.from(
+      "email_events_raw",
+    )
       .select("post_id")
-      .in("post_id", ids);
-    if (existErr) throw new Error(`emails (existing post_ids) read failed: ${existErr.message}`);
-    const existingIds = new Set((existing || []).map((e: any) => e.post_id));
+      .eq("mailbox", ADMIN_SENT_MAILBOX)
+      .eq("change_type", "created")
+      .in("post_id", chunkIds);
+    if (existErr) {
+      throw new Error(
+        `sent mirror dedupe read failed: ${dbErrorText(existErr)}`,
+      );
+    }
+    const existingIds = new Set(
+      (existing || []).map((e: any) => e.post_id).filter(Boolean),
+    );
 
-    const rows = messages.map((m) => mapSentMessageToEmailRow(m, nowIso));
+    const rows = chunk.map((m) => mapSentMessageToEmailRow(m, nowIso));
     const { error: upsertErr } = await client.from("emails")
       .upsert(rows, { onConflict: "post_id" });
-    if (upsertErr) throw new Error(`emails upsert (sent mirror) failed: ${upsertErr.message}`);
-    upserted = rows.length;
+    if (upsertErr) {
+      throw new Error(
+        `emails upsert (sent mirror) failed: ${dbErrorText(upsertErr)}`,
+      );
+    }
+    upserted += rows.length;
 
-    const newRows = messages.filter((m) => m.id && !existingIds.has(m.id));
+    const newRows = chunk.filter((m) => !existingIds.has(m.id));
     if (newRows.length) {
       const events = newRows.map((m) => ({
         mailbox: ADMIN_SENT_MAILBOX,
@@ -218,9 +292,15 @@ export async function makesafeSentMirror(
         conversation_id: m.conversationId || null,
         page_meta: { source: "admin_sent_mirror", folder: SENT_FOLDER },
       }));
-      const { error: evErr } = await client.from("email_events_raw").insert(events);
-      if (evErr) throw new Error(`email_events_raw insert (sent mirror) failed: ${evErr.message}`);
-      newEvents = events.length;
+      const { error: evErr } = await client.from("email_events_raw").insert(
+        events,
+      );
+      if (evErr) {
+        throw new Error(
+          `email_events_raw insert (sent mirror) failed: ${dbErrorText(evErr)}`,
+        );
+      }
+      newEvents += events.length;
     }
   }
 
@@ -236,7 +316,11 @@ export async function makesafeSentMirror(
       overlap_seconds: overlapSeconds,
       updated_at: nowIso,
     }, { onConflict: "mailbox" });
-    if (curErr) throw new Error(`mail_sync_cursors upsert (sent mirror) failed: ${curErr.message}`);
+    if (curErr) {
+      throw new Error(
+        `mail_sync_cursors upsert (sent mirror) failed: ${dbErrorText(curErr)}`,
+      );
+    }
   }
 
   return {
@@ -281,7 +365,9 @@ export async function fetchAdminSentMessages(
     "toRecipients,ccRecipients,subject,bodyPreview,hasAttachments,body";
   const filter = encodeURIComponent(`receivedDateTime ge ${sinceIso}`);
   let url: string | null =
-    `${GRAPH}/users/${encodeURIComponent(mailbox)}/mailFolders/sentItems/messages` +
+    `${GRAPH}/users/${
+      encodeURIComponent(mailbox)
+    }/mailFolders/sentItems/messages` +
     `?$filter=${filter}&$top=50&$select=${select}&$orderby=receivedDateTime desc`;
 
   const out: GraphSentMessage[] = [];
@@ -289,7 +375,11 @@ export async function fetchAdminSentMessages(
     const res = await deps.graphFetch(url, token, { refresh });
     if (!res.ok) {
       const bodyText = await res.text().catch(() => "");
-      throw new Error(`admin@ sentItems fetch failed: ${res.status} ${bodyText.slice(0, 200)}`);
+      throw new Error(
+        `admin@ sentItems fetch failed: ${res.status} ${
+          bodyText.slice(0, 200)
+        }`,
+      );
     }
     const data = await res.json();
     for (const m of (data?.value ?? []) as GraphSentMessage[]) {
