@@ -3,8 +3,14 @@
 DO $$
 BEGIN
   IF to_regprocedure('public.job_cost_close(uuid[],date)') IS NOT NULL
-     OR to_regprocedure('public.job_cost_close_policy()') IS NOT NULL THEN
+     OR to_regprocedure('public.job_cost_close_policy()') IS NOT NULL
+     OR to_regprocedure('public.jobs_record_status_move()') IS NOT NULL THEN
     RAISE EXCEPTION 'job cost close rollback: a function is still there';
+  END IF;
+  IF to_regclass('public.job_status_moves') IS NOT NULL
+     OR EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.jobs'::regclass
+                  AND tgname IN ('trg_jobs_record_status_created', 'trg_jobs_record_status_changed')) THEN
+    RAISE EXCEPTION 'job cost close rollback: the status record or its trigger is still there';
   END IF;
   IF md5(pg_get_viewdef('public.v_job_profit'::regclass, true)) <> '578270db501761330fad0b46412aac95' THEN
     RAISE EXCEPTION 'job cost close rollback: v_job_profit changed';
@@ -26,7 +32,9 @@ END $$;
 DO $$
 BEGIN
   IF to_regprocedure('public.job_cost_close(uuid[],date)') IS NULL
-     OR (public.job_cost_close_policy() ->> 'quiet_days')::int <> 30 THEN
+     OR (public.job_cost_close_policy() ->> 'quiet_days')::int <> 30
+     OR to_regclass('public.job_status_moves') IS NULL
+     OR EXISTS (SELECT 1 FROM public.jobs j WHERE NOT EXISTS (SELECT 1 FROM public.job_status_moves m WHERE m.job_id = j.id)) THEN
     RAISE EXCEPTION 'job cost close rollback: the migration did not apply again';
   END IF;
   IF has_function_privilege('anon', 'public.job_cost_close(uuid[],date)'::regprocedure, 'EXECUTE')

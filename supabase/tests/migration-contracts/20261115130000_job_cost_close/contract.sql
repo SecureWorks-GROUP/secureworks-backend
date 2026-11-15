@@ -80,6 +80,24 @@
 --                                                                    open (their order is not known)
 --   CC-56  repair, invoiced, stage complete with no stage move on record, in_progress 1 Aug, invoiced 10 Aug
 --                                                                    final on 19 Sep, finished on 10 Aug by status
+-- Writers that change a job's status and log something other than a status move (round 6):
+--   CC-57  fencing, complete 10 Aug, callback opened 1 Nov, resolved 10 Nov (no status move logged)
+--                                                                    settling, finished on 10 Nov by status, final on 10 Dec
+--   CC-58  fencing, invoiced 15 Aug, callback opened 10 Nov and not resolved          open
+--   CC-59  restoration make-safe, complete 10 Aug, stage to works 1 Nov (status in_progress), to closed 10 Nov
+--          (status complete), both logged only as restoration stage moves
+--                                                                    settling, finished on 10 Nov by status, final on 10 Dec
+--   CC-60  fencing, complete 10 Aug, a new quote accepted 1 Oct, invoiced 10 Nov
+--                                                                    settling, finished on 10 Nov by status, final on 10 Dec
+--   CC-61  restoration make-safe, invoiced 10 Aug, stage back to works 1 Nov, to invoiced 10 Nov
+--                                                                    settling, finished on 10 Nov by status, final on 10 Dec
+--   CC-62  fencing, complete 10 Aug, row last changed 1 Nov, status record began 1 Nov (a job that existed
+--          before the record)                                       settling, finished on 10 Aug, final on 1 Dec
+--          (the history floor: a move nobody logged could be as late as 1 Nov)
+--   CC-63  make-safe, invoiced 25 Aug, complete 5 Aug then scheduled 1 Sep, the move to scheduled naming no old
+--          status                                                    open (it left a finished status after the invoice)
+-- And the record itself (section 4): a status change by anyone writes a job_status_moves row naming both
+-- statuses, and a make-safe taken from complete back to accepted is open again.
 
 \set ON_ERROR_STOP on
 
@@ -110,8 +128,11 @@ BEGIN
      OR p -> 'invoice_finish_statuses' <> '["accepted", "scheduled", "processing"]'::jsonb
      OR p -> 'invoice_never_finishes_subtypes' <> '["restoration"]'::jsonb
      OR p -> 'closed_statuses' <> '["archived"]'::jsonb
-     OR p -> 'reopen_event_types' <> '["makesafe_reattend"]'::jsonb
+     OR p -> 'reopen_event_types' <> '["makesafe_reattend", "quote_accepted", "quote_run_declined", "callback_opened"]'::jsonb
      OR p ->> 'reopen_note_prefix' <> 'Job reopened'
+     OR p ->> 'callback_opened_event' <> 'callback_opened' OR p ->> 'callback_resolved_event' <> 'callback_resolved'
+     OR NOT (p -> 'status_events') ?& ARRAY['status_changed', 'status_change', 'restoration_stage_changed',
+                                           'quote_accepted', 'quote_run_declined', 'callback_opened', 'callback_resolved']
      OR p -> 'reopened_statuses' <> '["rectification"]'::jsonb
      OR p -> 'did_not_go_ahead_statuses' <> '["cancelled", "lost"]'::jsonb
      OR NOT (p -> 'finished_statuses') @> '["complete", "invoiced", "archived"]'::jsonb
@@ -125,6 +146,29 @@ BEGIN
      OR (p -> 'not_cost_reasons') @> '["no_cost_linked"]'::jsonb
      OR (p -> 'not_cost_reasons') @> '["materials_not_linked"]'::jsonb THEN
     RAISE EXCEPTION 'job cost close contract: the policy is not cost-close-v1 as written: %', p;
+  END IF;
+  -- The record of status moves: the service role reads it and nothing else reads or writes it; the trigger
+  -- function runs with its owner's rights and nobody may call it.
+  IF to_regclass('public.job_status_moves') IS NULL
+     OR has_table_privilege('anon', 'public.job_status_moves', 'SELECT')
+     OR has_table_privilege('authenticated', 'public.job_status_moves', 'SELECT')
+     OR NOT has_table_privilege('service_role', 'public.job_status_moves', 'SELECT')
+     OR has_table_privilege('service_role', 'public.job_status_moves', 'INSERT')
+     OR has_table_privilege('service_role', 'public.job_status_moves', 'UPDATE')
+     OR has_table_privilege('service_role', 'public.job_status_moves', 'DELETE')
+     OR NOT (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.job_status_moves'::regclass) THEN
+    RAISE EXCEPTION 'job cost close contract: job_status_moves must be readable by the service role only, with row security on';
+  END IF;
+  IF NOT (SELECT prosecdef FROM pg_proc WHERE oid = 'public.jobs_record_status_move()'::regprocedure)
+     OR has_function_privilege('anon', 'public.jobs_record_status_move()'::regprocedure, 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.jobs_record_status_move()'::regprocedure, 'EXECUTE')
+     OR (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.jobs'::regclass
+           AND tgname IN ('trg_jobs_record_status_created', 'trg_jobs_record_status_changed') AND tgenabled <> 'D') <> 2 THEN
+    RAISE EXCEPTION 'job cost close contract: the status trigger is not in place as written';
+  END IF;
+  -- Every job that existed when the record began has a row.
+  IF EXISTS (SELECT 1 FROM public.jobs j WHERE NOT EXISTS (SELECT 1 FROM public.job_status_moves m WHERE m.job_id = j.id)) THEN
+    RAISE EXCEPTION 'job cost close contract: a job has no status record';
   END IF;
   -- Job Profit itself is not touched.
   IF md5(pg_get_viewdef('public.v_job_profit'::regclass, true)) <> '578270db501761330fad0b46412aac95' THEN
@@ -144,7 +188,7 @@ SELECT ('cc000000-0000-4000-8000-0000000000' || lpad(v.n::text, 2, '0'))::uuid, 
        CASE WHEN v.type = 'fencing'
             THEN '{"lanes": {"labour": {"amount_ex_gst": 500}, "materials": {"amount_ex_gst": 700}, "commission": {"amount_ex_gst": 0}}}'::jsonb END,
        timestamptz '2026-07-01T00:00:00Z',
-       CASE WHEN v.n = 34 THEN timestamptz '2026-11-01T02:00:00Z' ELSE timestamptz '2026-07-01T00:00:00Z' END,
+       CASE WHEN v.n IN (34, 62) THEN timestamptz '2026-11-01T02:00:00Z' ELSE timestamptz '2026-07-01T00:00:00Z' END,
        v.completed::timestamptz
 FROM (VALUES
   (1,  'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
@@ -202,8 +246,23 @@ FROM (VALUES
   (53, 'processing',    'makesafe', '{}', NULL),
   (54, 'complete',      'fencing',  '{}', NULL),
   (55, 'processing',    'repair',   '{"repair_stage": "complete"}', NULL),
-  (56, 'invoiced',      'repair',   '{"repair_stage": "complete"}', NULL)
+  (56, 'invoiced',      'repair',   '{"repair_stage": "complete"}', NULL),
+  (57, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (58, 'invoiced',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (59, 'complete',      'makesafe', '{"ses_family": "restoration", "restoration_stage": {"stage": "closed"}}', '2026-08-10T02:00:00Z'),
+  (60, 'invoiced',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (61, 'invoiced',      'makesafe', '{"ses_family": "restoration", "restoration_stage": {"stage": "invoiced"}}', NULL),
+  (62, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (63, 'scheduled',     'makesafe', '{}', NULL)
 ) AS v(n, status, type, meta, completed);
+
+-- The trigger wrote a 'created' row for each job just now. A real job's row is written when it is created, so
+-- date each one to its job's creation. CC-62 stands for a job that existed before the record began: its row is
+-- the baseline written the day the record began.
+UPDATE public.job_status_moves m SET moved_at = j.created_at
+  FROM public.jobs j WHERE j.id = m.job_id AND j.job_number LIKE 'CC-%';
+UPDATE public.job_status_moves SET source = 'baseline', moved_at = timestamptz '2026-11-01T02:00:00Z'
+ WHERE job_id = 'cc000000-0000-4000-8000-000000000062';
 
 -- Status and stage moves on record. Most jobs have none, as most of production's older jobs have none.
 INSERT INTO public.job_events (job_id, event_type, detail_json, created_at) VALUES
@@ -251,6 +310,25 @@ INSERT INTO public.job_events (job_id, event_type, detail_json, created_at) VALU
   ('cc000000-0000-4000-8000-000000000055', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-08-01T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000056', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-08-01T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000056', 'status_changed', '{"new_status": "invoiced"}',      timestamptz '2026-08-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000057', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-07-20T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000057', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000057', 'callback_opened', '{"issue_description": "gate drags"}', timestamptz '2026-11-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000057', 'callback_resolved', '{"resolution_notes": "rehung"}',  timestamptz '2026-11-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000058', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000058', 'status_changed', '{"new_status": "invoiced"}',      timestamptz '2026-08-15T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000058', 'callback_opened', '{"issue_description": "post leaning"}', timestamptz '2026-11-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000059', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000059', 'restoration_stage_changed', '{"from_stage": "closed", "to_stage": "works", "job_status": "in_progress", "prior_job_status": "complete"}', timestamptz '2026-11-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000059', 'restoration_stage_changed', '{"from_stage": "works", "to_stage": "closed", "job_status": "complete", "prior_job_status": "in_progress"}', timestamptz '2026-11-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000060', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-07-20T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000060', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000060', 'quote_accepted', '{"document_id": null, "accepted_via": "share_link", "new_status": "accepted"}', timestamptz '2026-10-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000060', 'status_changed', '{"new_status": "invoiced"}',      timestamptz '2026-11-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000061', 'status_changed', '{"new_status": "invoiced"}',      timestamptz '2026-08-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000061', 'restoration_stage_changed', '{"from_stage": "invoiced", "to_stage": "works", "job_status": "in_progress"}', timestamptz '2026-11-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000061', 'restoration_stage_changed', '{"from_stage": "works", "to_stage": "invoiced", "job_status": "invoiced"}', timestamptz '2026-11-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000063', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-05T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000063', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-09-01T02:00:00Z'),
   -- A normal run through the finished statuses does not move the finish day: CC-01 was invoiced, then archived.
   ('cc000000-0000-4000-8000-000000000001', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-08-01T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000001', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:01Z'),
@@ -359,7 +437,14 @@ INSERT INTO cc_key VALUES
   ('CC-53', 'final',          '2026-09-24', true,  '2026-08-25', 'first_invoice',    NULL),
   ('CC-54', 'settling',       '2026-12-10', true,  '2026-11-10', 'status',           NULL),
   ('CC-55', 'open',           NULL,         false, NULL,         NULL,               NULL),
-  ('CC-56', 'final',          '2026-09-19', true,  '2026-08-10', 'status',           NULL);
+  ('CC-56', 'final',          '2026-09-19', true,  '2026-08-10', 'status',           NULL),
+  ('CC-57', 'settling',       '2026-12-10', true,  '2026-11-10', 'status',           NULL),
+  ('CC-58', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-59', 'settling',       '2026-12-10', true,  '2026-11-10', 'status',           NULL),
+  ('CC-60', 'settling',       '2026-12-10', true,  '2026-11-10', 'status',           NULL),
+  ('CC-61', 'settling',       '2026-12-10', true,  '2026-11-10', 'status',           NULL),
+  ('CC-62', 'settling',       '2026-12-01', true,  '2026-08-10', 'work_done',        NULL),
+  ('CC-63', 'open',           NULL,         false, NULL,         NULL,               NULL);
 
 DO $$
 DECLARE r record; out text := ''; ids uuid[];
@@ -426,7 +511,7 @@ BEGIN
   IF (SELECT count(*) FROM public.job_cost_close(one, date '2026-09-19')) <> 1 THEN
     RAISE EXCEPTION 'job cost close contract: asked for one job, got another count';
   END IF;
-  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 56 THEN
+  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 63 THEN
     RAISE EXCEPTION 'job cost close contract: null ids did not return every job';
   END IF;
   IF (SELECT count(*) FROM public.job_cost_close()) <> (SELECT count(*) FROM public.v_job_profit) THEN
@@ -449,6 +534,13 @@ VALUES ('cc000000-0000-4000-8000-000000000001', 'CC-M2-01', 'BM2-CC-01', 'CC Ste
 UPDATE public.jobs SET status = 'rectification' WHERE job_number = 'CC-13';
 UPDATE public.jobs SET status = 'in_progress' WHERE job_number = 'CC-02';
 UPDATE public.makesafe_job_details SET cycle_number = 2 WHERE job_id = 'cc000000-0000-4000-8000-000000000027';
+-- CC-44 was final by its first invoice. Taken to complete and then back to accepted by a writer that logs nothing,
+-- as the service role (ops-api's role).
+SET LOCAL ROLE service_role;
+UPDATE public.jobs SET status = 'complete' WHERE job_number = 'CC-44';
+UPDATE public.jobs SET status = 'accepted' WHERE job_number = 'CC-44';
+UPDATE public.jobs SET client_name = client_name WHERE job_number = 'CC-44';
+RESET ROLE;
 INSERT INTO public.makesafe_job_details (job_id, cycle_number, reopen_reason)
 VALUES ('cc000000-0000-4000-8000-000000000009', 1, 'Builder asked us back');
 DO $$
@@ -472,6 +564,19 @@ BEGIN
   SELECT * INTO r FROM public.job_cost_close(ARRAY['cc000000-0000-4000-8000-000000000009'::uuid], date '2026-11-15');
   IF r.cost_state IS DISTINCT FROM 'open' OR r.finished THEN
     RAISE EXCEPTION 'job cost close contract: CC-09 reopened: % finished %', r.cost_state, r.finished;
+  END IF;
+  -- The record: a created row and two changed rows for CC-44, each naming both statuses; an update that left
+  -- the status alone wrote nothing.
+  IF (SELECT string_agg(source || ':' || COALESCE(from_status, '-') || '>' || to_status, ',' ORDER BY id)
+        FROM public.job_status_moves WHERE job_id = 'cc000000-0000-4000-8000-000000000044')
+     IS DISTINCT FROM 'created:->processing,changed:processing>complete,changed:complete>accepted' THEN
+    RAISE EXCEPTION 'job cost close contract: CC-44''s status record is %',
+      (SELECT string_agg(source || ':' || COALESCE(from_status, '-') || '>' || to_status, ',' ORDER BY id)
+         FROM public.job_status_moves WHERE job_id = 'cc000000-0000-4000-8000-000000000044');
+  END IF;
+  SELECT * INTO r FROM public.job_cost_close(ARRAY['cc000000-0000-4000-8000-000000000044'::uuid], date '2026-11-15');
+  IF r.cost_state IS DISTINCT FROM 'open' OR r.finished THEN
+    RAISE EXCEPTION 'job cost close contract: CC-44 back at accepted from complete: % finished %', r.cost_state, r.finished;
   END IF;
   -- CC-27 is at complete: a second attendance does not open it, its status still finishes it.
   SELECT * INTO r FROM public.job_cost_close(ARRAY['cc000000-0000-4000-8000-000000000027'::uuid], date '2026-11-15');

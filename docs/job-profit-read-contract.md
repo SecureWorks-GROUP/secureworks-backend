@@ -157,8 +157,18 @@ overdue. The signature also carries the job's variations.
 
 Is a job's cost final, and if not, what is it waiting on. `job_cost_close(job_ids, as_of)`
 (migration 20261115130000, service role only) works the answer out from Job Profit's own row on
-every read. Nothing is stored, no person closes a job, and `v_job_profit` is untouched. Every number
+every read. The answer is not stored, no person closes a job, and `v_job_profit` is untouched. Every number
 and list is in `job_cost_close_policy()` (`cost-close-v1`) and changes only by migration.
+
+The same migration adds `job_status_moves`: the database's own record of every job status move,
+written by a trigger on `jobs` whoever makes the change (a row when a job is created, one per status
+change naming both statuses, and one baseline row per job that existed when the record began). The
+rule dates a finish by the last time the job went back to work, and the application's events are not
+a complete record of that: five independent reviews each found another writer that changes
+`jobs.status` and logs something else or nothing (a restoration stage move, a quote accepted on a
+finished job, a declined quote run, a callback, a booking moving `accepted` to `processing`). The
+trigger cannot be got around by a new writer. It never fails the change it records (an error is
+caught and logged as a warning). Service role reads the table; nothing else reads or writes it.
 
 | `cost_state` | Means |
 |---|---|
@@ -170,7 +180,8 @@ and list is in `job_cost_close_policy()` (`cost-close-v1`) and changes only by m
 
 - **Finished** is where the job stands now, never a day on the job alone: a job sent back to work
   keeps its old `completed_at` and its old sign-off. Read in this order:
-  - A job in `rectification` is never finished.
+  - A job in `rectification` is never finished, and neither is a job with a callback open (a
+    `callback_opened` event with no `callback_resolved` after it).
   - A cancelled or lost job is finished as `did_not_go_ahead` when it holds cost or a cost is still
     to come (`pending_cost_reasons` in the policy: an open or unbilled order, a bill not placed or
     not confirmed, unapproved trade charges), so it reads `waiting`, not `not_applicable`.
@@ -201,18 +212,30 @@ and list is in `job_cost_close_policy()` (`cost-close-v1`) and changes only by m
   - A day stands only while the status has not moved to a working one after it. A working move is
     a move to any status that is not finished; for a make-safe or a job with a repair stage, whose
     status is not its stage, a move to a resting status (`invoice_finish_statuses`) is not one.
-    Reopening or re-attending a make-safe puts it back to `accepted` and writes no status move:
-    the re-attend leaves a `makesafe_reattend` event and the reopen a note starting `Job reopened`
-    (`reopen_event_types`, `reopen_note_prefix`), and each counts as a working move. A complete
+    A move out of a finished status is a working move wherever it lands (the old status is read
+    from the event, or is the status the last logged move set). Reopening or re-attending a
+    make-safe, a quote accepted, a quote run declined and a callback opened each put a job back to
+    work and may log no status move; each leaves its own event (`reopen_event_types`, and a note
+    starting `Job reopened`) and each counts as a working move. A complete
     stage with no stage move on record stands only when no working move is on record either. A
     stage day that does not stand gives way to the status move. The invoice carries a day and no
     time, so a working status move on the invoice day itself leaves it standing (a make-safe is
     attended and invoiced on one day); a reopen or a re-attend on that day does not.
-  - The new status is read from `new_status`, `to` or `status` in the event, the three keys the
-    writers use.
+  - The moves read are `job_status_moves` (complete from the day the record began) and, for the
+    time before, the events in `status_events`: `status_changed` and `status_change` (new status
+    under `new_status`, `to` or `status`), `restoration_stage_changed` (`job_status`), and the
+    events that set a status without naming it (`quote_accepted`, `quote_run_declined`,
+    `callback_opened`, `callback_resolved`).
+  - **The history floor.** Before the record began, a status move nobody logged cannot be later
+    than the day the job row last changed (`jobs.updated_at`, stamped by trigger on every update).
+    So the quiet count never starts before the earlier of that day and the day the job's record
+    began. A job untouched for 30 days loses nothing; one touched recently waits out the
+    difference once, and from 30 days after the record began the floor no longer holds anything.
+    Measured on production on 15 Nov 2026 (rehearsed with the record starting that day): 22 jobs
+    that would otherwise be final read `settling` because of it.
   - `finished_basis` names the day used: `work_done`, `repair_stage`, `first_invoice`, `status`
     (a status move, or no day on record), `did_not_go_ahead` (no day).
-  - The quiet count runs from the later of the finish day and the newest cost. A finished job with
+  - The quiet count runs from the latest of the finish day, the newest cost and the history floor. A finished job with
     no day on record counts from the later of the newest cost and the day the job record last
     changed (`jobs.updated_at`), so an old cost never closes a job finished yesterday. With no
     cost date it reads `waiting` on `no_cost_date`; with a cost date and no day at all, `waiting`
@@ -225,8 +248,9 @@ and list is in `job_cost_close_policy()` (`cost-close-v1`) and changes only by m
   - Known limit: a make-safe past its first attendance that rests at `accepted`, `scheduled` or
     `processing` stays `open` until its card reaches a finished status, even when its invoice came
     after the last attendance. Only its first invoice day is read.
-  - Known limit: a status changed outside the application leaves no event. The job is then
-    finished or not by where it stands, and dated by what is on record.
+  - A status changed outside the application, or by a writer that logs nothing, is in
+    `job_status_moves` from the day the record began. Before that, it is bounded by the history
+    floor.
 - **A cost reason** is any `completeness` code or non-ok `cost_flag`, except the ones that are about
   revenue or structure and not cost (`not_cost_reasons` in the policy: a missing or draft customer
   invoice, an unbilled variation, a holding job, a missing expected-cost lane, a Xero Project linked

@@ -24,3 +24,7 @@ ALTER TABLE public.makesafe_job_details
   ADD COLUMN IF NOT EXISTS reopen_reason text;
 GRANT SELECT ON public.makesafe_job_details TO service_role;
 GRANT SELECT ON public.job_events TO service_role;
+-- ops-api changes job statuses as the service role, which on production holds every right on jobs (read 15 Nov
+-- 2026). The contract changes a status as that role to prove the status record is written for a caller that
+-- cannot write the record itself.
+GRANT SELECT, UPDATE ON public.jobs TO service_role;
