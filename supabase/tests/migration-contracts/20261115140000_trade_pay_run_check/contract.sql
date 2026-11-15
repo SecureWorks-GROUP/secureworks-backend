@@ -59,7 +59,16 @@ INSERT INTO public.users (id, name) VALUES
   ('00000000-0000-0000-0000-0000000000b3', 'Long Day'),
   ('00000000-0000-0000-0000-0000000000b4', 'Unbooked'),
   ('00000000-0000-0000-0000-0000000000b5', 'Other Org'),
-  ('00000000-0000-0000-0000-0000000000b6', 'Low Rate');
+  ('00000000-0000-0000-0000-0000000000b6', 'Low Rate'),
+  ('00000000-0000-0000-0000-0000000000b7', 'Total Unread'),
+  ('00000000-0000-0000-0000-0000000000b8', 'Bill Raised'),
+  ('00000000-0000-0000-0000-0000000000b9', 'Line Edited'),
+  ('00000000-0000-0000-0000-0000000000c0', 'No Agreed'),
+  ('00000000-0000-0000-0000-0000000000c1', 'Make Safe'),
+  ('00000000-0000-0000-0000-0000000000c2', 'Crew Share'),
+  ('00000000-0000-0000-0000-0000000000c3', 'Tuesday Week'),
+  ('00000000-0000-0000-0000-0000000000c4', 'Reissued'),
+  ('00000000-0000-0000-0000-0000000000c5', 'Next Week');
 
 INSERT INTO public.trade_rates (user_id, hourly_rate, effective_from, effective_to) VALUES
   ('00000000-0000-0000-0000-0000000000a1', 50, '2026-01-01', NULL),
@@ -68,17 +77,21 @@ INSERT INTO public.trade_rates (user_id, hourly_rate, effective_from, effective_
   ('00000000-0000-0000-0000-0000000000a9', 50, '2026-11-01', NULL),
   ('00000000-0000-0000-0000-0000000000b0', 50, '2026-01-01', NULL),
   ('00000000-0000-0000-0000-0000000000b4', 50, '2026-01-01', NULL),
-  ('00000000-0000-0000-0000-0000000000b6', 50, '2026-01-01', NULL);
+  ('00000000-0000-0000-0000-0000000000b6', 50, '2026-01-01', NULL),
+  ('00000000-0000-0000-0000-0000000000c1', 50, '2026-01-01', NULL);
 
 INSERT INTO public.work_orders (id, agreed_labour_ex) VALUES
   ('00000000-0000-0000-0000-00000000c001', 800),
-  ('00000000-0000-0000-0000-00000000c002', 1000);
+  ('00000000-0000-0000-0000-00000000c002', 1000),
+  ('00000000-0000-0000-0000-00000000c003', 500),
+  ('00000000-0000-0000-0000-00000000c004', 800);
 
 INSERT INTO public.job_assignments (user_id, job_id, status, scheduled_date, scheduled_end, hourly_rate) VALUES
   ('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-00000000d001', 'confirmed', '2026-11-10', NULL, NULL),
   ('00000000-0000-0000-0000-0000000000a9', '00000000-0000-0000-0000-00000000d001', 'confirmed', '2026-11-09', '2026-11-13', NULL),
   ('00000000-0000-0000-0000-0000000000b0', '00000000-0000-0000-0000-00000000d002', 'confirmed', '2026-11-11', NULL, 70),
   ('00000000-0000-0000-0000-0000000000b6', '00000000-0000-0000-0000-00000000d007', 'confirmed', '2026-11-10', NULL, NULL),
+  ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-00000000d008', 'confirmed', '2026-11-12', NULL, NULL),
   -- a cancelled booking does not count as booked
   ('00000000-0000-0000-0000-0000000000b4', '00000000-0000-0000-0000-00000000d003', 'cancelled', '2026-11-12', NULL, NULL);
 
@@ -110,6 +123,27 @@ INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, invo
   ('00000000-0000-0000-0000-0000000f0018', '00000000-0000-0000-0000-00000000e001', '00000000-0000-0000-0000-0000000000a1', '2026-10-26', 'paid',           'INV-18', 'hourly', false, 0,   50,   NULL, 0,   'x18', 'PAID',     50),
   ('00000000-0000-0000-0000-0000000f0019', '00000000-0000-0000-0000-00000000e002', '00000000-0000-0000-0000-0000000000b5', '2026-11-09', 'pushed_to_xero', 'INV-19', 'hourly', false, 0,   75,   NULL, 0,   NULL,  NULL,       NULL);
 
+-- Review findings, 15 Nov 2026: a bill whose total was never read, a bill raised by hand in Xero,
+-- an invoice line edited in Xero, a work order with nothing agreed, make-safe labour, a crew share
+-- (no week_start; its 12% super sits inside the share, so it is above the agreed $500 and is not
+-- stopped for it), a non-Monday week_start, a reissue beside its voided bill, and a week after.
+INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, invoice_number, invoice_source,
+                                   gst_on, gst, net_pay, recurring_deduction_amount, xero_adjustments_ex,
+                                   xero_adjustment_lines, xero_bill_id, xero_bill_status, xero_bill_total,
+                                   submitted_at, created_at) VALUES
+  ('00000000-0000-0000-0000-0000000f0021', '00000000-0000-0000-0000-00000000e001', '00000000-0000-0000-0000-0000000000b7', '2026-11-09', 'pushed_to_xero', 'INV-21', 'hourly', false, 0, 300,  NULL, NULL, NULL, 'x21', 'DRAFT', NULL, NULL, NULL),
+  ('00000000-0000-0000-0000-0000000f0022', '00000000-0000-0000-0000-00000000e001', '00000000-0000-0000-0000-0000000000b8', '2026-11-09', 'pushed_to_xero', 'INV-22', 'hourly', false, 0, 1000, NULL, 500,
+     '[{"kind":"office_line","amount":500}]'::jsonb, 'x22', 'DRAFT', 1500, NULL, NULL),
+  ('00000000-0000-0000-0000-0000000f0023', '00000000-0000-0000-0000-00000000e001', '00000000-0000-0000-0000-0000000000b9', '2026-11-09', 'pushed_to_xero', 'INV-23', 'hourly', false, 0, 400,  NULL, 0,
+     '[{"kind":"unexplained","amount":0}]'::jsonb, 'x23', 'DRAFT', 400, NULL, NULL),
+  ('00000000-0000-0000-0000-0000000f0024', '00000000-0000-0000-0000-00000000e001', '00000000-0000-0000-0000-0000000000c0', '2026-11-09', 'pushed_to_xero', 'INV-24', 'hourly', false, 0, 5000, NULL, 0, NULL, 'x24', 'DRAFT', 5000, NULL, NULL),
+  ('00000000-0000-0000-0000-0000000f0025', '00000000-0000-0000-0000-00000000e001', '00000000-0000-0000-0000-0000000000c1', '2026-11-09', 'pushed_to_xero', 'INV-25', 'hourly', false, 0, 720,  NULL, 0, NULL, 'x25', 'DRAFT', 720, NULL, NULL),
+  ('00000000-0000-0000-0000-0000000f0026', '00000000-0000-0000-0000-00000000e001', '00000000-0000-0000-0000-0000000000c2', NULL,         'paid',           'INV-26', 'hourly', false, 0, 560,  NULL, 0, NULL, 'x26', 'PAID',  560, '2026-11-11T02:00:00Z', '2026-11-11T02:00:00Z'),
+  ('00000000-0000-0000-0000-0000000f0027', '00000000-0000-0000-0000-00000000e001', '00000000-0000-0000-0000-0000000000c3', '2026-11-10', 'pushed_to_xero', 'INV-27', 'hourly', false, 0, 250,  NULL, 0, NULL, 'x27', 'DRAFT', 250, NULL, NULL),
+  ('00000000-0000-0000-0000-0000000f0028', '00000000-0000-0000-0000-00000000e001', '00000000-0000-0000-0000-0000000000c4', '2026-11-09', 'pushed_to_xero', 'INV-28', 'hourly', false, 0, 800,  NULL, 0, NULL, 'x28', 'VOIDED', 800, NULL, NULL),
+  ('00000000-0000-0000-0000-0000000f0029', '00000000-0000-0000-0000-00000000e001', '00000000-0000-0000-0000-0000000000c4', '2026-11-09', 'pushed_to_xero', 'INV-29', 'hourly', false, 0, 800,  NULL, 0, NULL, 'x29', 'DRAFT', 800, NULL, NULL),
+  ('00000000-0000-0000-0000-0000000f0030', '00000000-0000-0000-0000-00000000e001', '00000000-0000-0000-0000-0000000000c5', '2026-11-16', 'pushed_to_xero', 'INV-30', 'hourly', false, 0, 100,  NULL, 0, NULL, NULL,  NULL,    NULL, NULL, NULL);
+
 INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, job_number, line_type, line_total_ex, hourly_rate,
                                         total_hours, baseline_hours, flag_type, work_date, job_work_order_id) VALUES
   ('00000000-0000-0000-0000-0000000f0001', '00000000-0000-0000-0000-00000000d001', 'SWF-1', 'labour',     1000, 50, 20, NULL, NULL, '2026-11-10', NULL),
@@ -123,7 +157,12 @@ INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, job_number, li
   ('00000000-0000-0000-0000-0000000f0011', NULL,                                   NULL,    'labour',     200,  NULL, 4, NULL, NULL, NULL, NULL),
   ('00000000-0000-0000-0000-0000000f0014', '00000000-0000-0000-0000-00000000d006', 'SWF-6', 'labour',     500,  NULL, 10, 6, 'hours_over_baseline', NULL, NULL),
   ('00000000-0000-0000-0000-0000000f0015', '00000000-0000-0000-0000-00000000d003', 'SWF-3', 'labour',     400,  50, 8, NULL, NULL, '2026-11-12', NULL),
-  ('00000000-0000-0000-0000-0000000f0020', '00000000-0000-0000-0000-00000000d007', 'SWF-7', 'labour',     360,  45, 8, NULL, NULL, '2026-11-10', NULL);
+  ('00000000-0000-0000-0000-0000000f0020', '00000000-0000-0000-0000-00000000d007', 'SWF-7', 'labour',     360,  45, 8, NULL, NULL, '2026-11-10', NULL),
+  ('00000000-0000-0000-0000-0000000f0024', '00000000-0000-0000-0000-00000000d009', 'SWF-9', 'work order', 5000, NULL, NULL, NULL, NULL, NULL, NULL),
+  ('00000000-0000-0000-0000-0000000f0025', '00000000-0000-0000-0000-00000000d008', 'SWMS-8', 'make safe', 720,  90, 8, NULL, NULL, '2026-11-12', NULL),
+  ('00000000-0000-0000-0000-0000000f0026', '00000000-0000-0000-0000-00000000d010', 'SWP-10', 'group share', 560, NULL, NULL, NULL, NULL, NULL, '00000000-0000-0000-0000-00000000c003'),
+  ('00000000-0000-0000-0000-0000000f0028', '00000000-0000-0000-0000-00000000d011', 'SWF-11', 'work order', 800,  NULL, NULL, NULL, NULL, NULL, '00000000-0000-0000-0000-00000000c004'),
+  ('00000000-0000-0000-0000-0000000f0029', '00000000-0000-0000-0000-00000000d011', 'SWF-11', 'work order', 800,  NULL, NULL, NULL, NULL, NULL, '00000000-0000-0000-0000-00000000c004');
 
 CREATE TEMP TABLE pay_check ON COMMIT DROP AS
   SELECT public.trade_pay_run_check('2026-11-15'::date, 2, NULL) AS r;
@@ -143,8 +182,8 @@ BEGIN
   IF r->>'rule' <> 'trade-pay-check-v1' OR r->>'from_week' <> '2026-11-02' OR r->>'to_week' <> '2026-11-09' THEN
     RAISE EXCEPTION 'pay check header wrong: %', r - 'invoices';
   END IF;
-  IF (SELECT count(*) FROM pay_rows) <> 17 THEN
-    RAISE EXCEPTION 'pay check should list 17 invoices (no draft, rejected, older week), got %: %',
+  IF (SELECT count(*) FROM pay_rows) <> 26 THEN
+    RAISE EXCEPTION 'pay check should list 26 invoices (no draft, rejected, older week), got %: %',
       (SELECT count(*) FROM pay_rows), (SELECT array_agg(inv ORDER BY inv) FROM pay_rows);
   END IF;
 
@@ -165,7 +204,16 @@ BEGIN
       ('INV-14', 'clean',   ARRAY[]::text[],                                ARRAY['hours_over_expected']),
       ('INV-15', 'clean',   ARRAY[]::text[],                                ARRAY['day_not_booked']),
       ('INV-19', 'stopped', ARRAY['not_in_xero'],                           ARRAY[]::text[]),
-      ('INV-20', 'clean',   ARRAY[]::text[],                                ARRAY[]::text[])
+      ('INV-20', 'clean',   ARRAY[]::text[],                                ARRAY[]::text[]),
+      ('INV-21', 'stopped', ARRAY['xero_total_not_read'],                   ARRAY[]::text[]),
+      ('INV-22', 'stopped', ARRAY['xero_changed_by_hand'],                  ARRAY[]::text[]),
+      ('INV-23', 'stopped', ARRAY['xero_changed_by_hand'],                  ARRAY[]::text[]),
+      ('INV-24', 'stopped', ARRAY['work_order_not_agreed'],                 ARRAY[]::text[]),
+      ('INV-25', 'stopped', ARRAY['rate_above_office'],                     ARRAY[]::text[]),
+      ('INV-26', 'clean',   ARRAY[]::text[],                                ARRAY[]::text[]),
+      ('INV-27', 'clean',   ARRAY[]::text[],                                ARRAY[]::text[]),
+      ('INV-28', 'stopped', ARRAY['second_invoice_same_week', 'xero_bill_voided'], ARRAY[]::text[]),
+      ('INV-29', 'clean',   ARRAY[]::text[],                                ARRAY[]::text[])
     ) AS v(inv, verdict, stops, notes) LOOP
     SELECT * INTO got FROM pay_rows WHERE pay_rows.inv = want.inv;
     IF NOT FOUND THEN
@@ -190,17 +238,36 @@ BEGIN
        <> 'The rate on SWF-1 is $60.00 an hour, above the office rate of $50.00.' THEN
     RAISE EXCEPTION 'pay check: rate stop must use the rate on the day worked: %', (SELECT e->'stops' FROM pay_rows WHERE inv = 'INV-9');
   END IF;
+  IF (SELECT e->'stops'->0->>'text' FROM pay_rows WHERE inv = 'INV-22')
+       <> 'The Xero bill was changed by hand to pay $500.00 more.'
+     OR (SELECT e->'stops'->0->>'text' FROM pay_rows WHERE inv = 'INV-23')
+       <> 'A line from the invoice was changed by hand in Xero.' THEN
+    RAISE EXCEPTION 'pay check: changed-by-hand words wrong: %, %',
+      (SELECT e->'stops' FROM pay_rows WHERE inv = 'INV-22'), (SELECT e->'stops' FROM pay_rows WHERE inv = 'INV-23');
+  END IF;
+  IF (SELECT e->'notes'->0->>'text' FROM pay_rows WHERE inv = 'INV-5')
+       <> 'The office changed the bill in Xero by -$50.00.' THEN
+    RAISE EXCEPTION 'pay check: a negative change must read -$50.00: %', (SELECT e->'notes' FROM pay_rows WHERE inv = 'INV-5');
+  END IF;
+  -- A crew share counts in the Perth week it was sent; a Tuesday week_start stays in its week.
+  IF (SELECT e->>'week_start' FROM pay_rows WHERE inv = 'INV-26') <> '2026-11-09'
+     OR NOT (SELECT paid FROM pay_rows WHERE inv = 'INV-26') THEN
+    RAISE EXCEPTION 'pay check: crew share week or paid wrong: %', (SELECT e FROM pay_rows WHERE inv = 'INV-26');
+  END IF;
+  IF EXISTS (SELECT 1 FROM pay_rows WHERE inv = 'INV-30') THEN
+    RAISE EXCEPTION 'pay check: an invoice for the week after as_of must be left out';
+  END IF;
   IF (SELECT (e->>'invoice_pays')::numeric FROM pay_rows WHERE inv = 'INV-5') <> 350 THEN
     RAISE EXCEPTION 'pay check: invoice_pays must take off the deduction and add the Xero lines';
   END IF;
 
   -- Counts and order: unpaid stopped first, then unpaid clean, then paid.
-  IF r->'counts' <> jsonb_build_object('invoices', 17, 'clean', 7, 'stopped', 10, 'to_pay', 15,
-                                       'to_pay_clean', 6, 'to_pay_stopped', 9) THEN
+  IF r->'counts' <> jsonb_build_object('invoices', 26, 'clean', 10, 'stopped', 16, 'to_pay', 23,
+                                       'to_pay_clean', 8, 'to_pay_stopped', 15) THEN
     RAISE EXCEPTION 'pay check counts wrong: %', r->'counts';
   END IF;
   IF (r->'invoices'->0->>'verdict') <> 'stopped' OR (r->'invoices'->0->>'paid')::boolean
-     OR NOT (r->'invoices'->16->>'paid')::boolean THEN
+     OR NOT (r->'invoices'->25->>'paid')::boolean THEN
     RAISE EXCEPTION 'pay check order wrong: unpaid stopped first, paid last';
   END IF;
 
@@ -213,7 +280,7 @@ BEGIN
     RAISE EXCEPTION 'pay check: weeks must be clamped to 1..26';
   END IF;
   IF (SELECT count(*) FROM jsonb_array_elements(public.trade_pay_run_check('2026-11-15', 1, NULL)->'invoices') e
-      WHERE e->>'week_start' <> '2026-11-09') <> 0 THEN
+      WHERE (e->>'week_start')::date NOT BETWEEN '2026-11-09' AND '2026-11-15') <> 0 THEN
     RAISE EXCEPTION 'pay check: one week must read only the week of as_of';
   END IF;
 END $$;

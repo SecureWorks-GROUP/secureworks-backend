@@ -56,7 +56,8 @@ export function payRunCheckParams(
   }
   let pWeeks = 2;
   if (weeks != null && String(weeks).trim() !== "") {
-    const n = Number(String(weeks).trim());
+    const w = String(weeks).trim();
+    const n = /^\d{1,2}$/.test(w) ? Number(w) : NaN;
     if (!Number.isInteger(n) || n < 1 || n > 26) {
       throw new TradePayRunCheckError("weeks must be a whole number from 1 to 26");
     }
@@ -76,7 +77,8 @@ export async function readTradePayRunCheck(
     error || !data || typeof data !== "object" ||
     (data as any).rule !== "trade-pay-check-v1" ||
     !Array.isArray((data as any).invoices) ||
-    !(data as any).counts || typeof (data as any).counts !== "object"
+    !(data as any).counts || typeof (data as any).counts !== "object" ||
+    (data as any).counts.invoices !== (data as any).invoices.length
   ) {
     throw new TradePayRunCheckError(
       `The pay-run check could not be read: ${error?.message ?? "no answer"}`,

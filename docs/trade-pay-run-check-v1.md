@@ -26,8 +26,10 @@ bill, and changes no invoice. Approving and paying stay with a person.
 | `weeks` | 2 | A whole number from 1 to 26, or 400. |
 
 The window is the `weeks` Monday-to-Sunday pay weeks ending with the week that
-holds `as_of`. An invoice is in it when its `week_start` is, and its status is
-not `draft` or `ops-reject`.
+holds `as_of`. An invoice is in it when its pay week is, and its status is not
+`draft` or `ops-reject`. The pay week is `week_start`; a crew share invoice has
+none, so it counts in the Monday week (Perth) it was sent (`submitted_at`, else
+`created_at`). The answer's `week_start` is that pay week.
 
 **Who may call it:** staff only (admin, owner, ops_manager) or the server key.
 It is in no trade, routine, lead-installer or agent-read list, because it names
@@ -77,9 +79,12 @@ which would read as "every bill clean".
 | `not_in_xero` | The invoice has no Xero bill. |
 | `xero_bill_voided` | Its Xero bill is VOIDED or DELETED. |
 | `xero_amount_differs` | The Xero bill total is more than 5 cents from `invoice_pays`. |
-| `work_order_over_agreed` | The agreed-amount lines (`work order`, `group share`) on one job work order, across every live invoice of every trade and any week, add up to more than `work_orders.agreed_labour_ex`. Every invoice holding such a line is stopped. |
-| `rate_above_office` | An hourly labour line's rate is above the trade's office rate on that day (`trade_rates`) and is not the rate on the trade's booking for that job (`job_assignments.hourly_rate`). Trades set their own rate on each job (owner, 15 Nov 2026), so a rate at or below the office rate passes. With no office rate on file the rate is not judged. |
-| `line_on_no_job` | A labour or agreed-amount line has no job. |
+| `xero_total_not_read` | The invoice has a Xero bill whose total has not been read yet, so it cannot be compared. |
+| `xero_changed_by_hand` | The bill was changed in Xero to pay the trade more (`xero_adjustments_ex` above 0), or one of the invoice's own lines was edited in Xero (a `xero_adjustment_lines` entry of kind `unexplained`). `invoice_pays` adds back every Xero change, so without this stop a changed bill would always match. |
+| `work_order_over_agreed` | The `work order` lines on one job work order, across every live invoice of every trade and any week (bills voided or deleted in Xero left out), add up to more than `work_orders.agreed_labour_ex`. Every invoice holding such a line is stopped. Crew shares (`group share`) are left out: each share carries 12% super inside it, so the shares add up to more than the agreed labour, and the group work order's own release already holds the shares until they add up to its pool. |
+| `work_order_not_agreed` | A `work order` line whose work order has no agreed amount on file, so nothing can say the amount is right. |
+| `rate_above_office` | An hourly labour line's rate (`labour`, `general labour`, `make safe`) is above the trade's office rate on that day (`trade_rates`) and is not the rate on the trade's booking for that job (`job_assignments.hourly_rate`). Trades set their own rate on each job (owner, 15 Nov 2026), so a rate at or below the office rate passes. With no office rate on file the rate is not judged. |
+| `line_on_no_job` | A labour, make safe or agreed-amount line has no job. |
 | `second_invoice_same_week` | Another live invoice of the same source from the same trade for the same week. |
 
 ## Notes: shown, never stop a bill
@@ -88,16 +93,25 @@ which would read as "every bill clean".
 |---|---|
 | `hours_over_expected` | The line already carries flag `hours_over_baseline`. |
 | `labour_over_agreed` | All labour on a job work order (agreed-amount lines plus hourly, fencing, patio and decking lines, every trade) is above the agreed amount, while the agreed-amount lines alone are not. |
-| `day_not_booked` | An hourly line's day has no non-cancelled booking of that trade on that job. A note, not a stop: on 15 Nov 2026, 43 of 88 time lines in ten weeks were on days with no booking, so bookings are not reliable enough to stop pay on. |
-| `changed_in_xero` | The office added lines to the bill in Xero. |
+| `day_not_booked` | An hourly or make safe line's day has no non-cancelled booking of that trade on that job. A note, not a stop: on 15 Nov 2026, 43 of 88 time lines in ten weeks were on days with no booking, so bookings are not reliable enough to stop pay on. |
+| `changed_in_xero` | The office took money off the bill in Xero (a loan repayment, say). A change that pays more is a stop. |
 
 ## Measured before release
 
-Rehearsed read-only on production on 15 Nov 2026 over 11 weeks: 103 invoices,
-97 clean, 6 stopped, every stop a real problem. By stop (an invoice can carry
-more than one): not in Xero 1, Xero total differs 2, second invoice in the same
-week 2, work order over the agreed amount 1, rate above the office rate 2. 46
-invoices carried notes. Of the 5 invoices not yet paid, 4 were clean.
+Rehearsed read-only on production on 15 Nov 2026 over 11 weeks (the final
+body, after the second review): 106 invoices, 3 of them crew shares. 76 clean,
+30 stopped. Invoices by stop (an invoice can carry more than one): no agreed
+amount on the work order 24, Xero total differs 2, second invoice in the same
+week 2, rate above the office rate 2 (one line at $710.00 an hour), not in Xero
+1, work order over the agreed amount 1. 24 of the 30 are stopped only because
+their work order has no agreed amount on file: putting an agreed amount on
+every work order is what turns those clean. 46 invoices carried notes. Of the 5
+invoices not yet paid, 3 were clean; the other 2 are one not in Xero and one
+whose two work orders have no agreed amount.
+
+Leaving the crew shares out of the agreed sums took the work order over agreed
+stops from 4 invoices to 1: the 3 shares on SWP-261247 add up to $2,428.57
+against $2,160.00 agreed, which is the 12% super inside each share.
 
 ## Not in v1
 

@@ -1,11 +1,12 @@
--- Deliberately take away the booking rate: a trade paid the rate on their booking for a job would
--- then be stopped as "rate differs". The contract must fail on that invoice.
+-- Deliberately take away the "pays more than the invoice" half of the changed-by-hand stop. Because
+-- invoice_pays adds every change made in Xero back in, a bill raised by hand would then read as
+-- matching and go through as clean. The contract must fail on that invoice.
 DO $$
 DECLARE d text := pg_get_functiondef('public.trade_pay_run_check(date,integer,uuid)'::regprocedure);
-DECLARE needle text := 'AND a.hourly_rate IS NOT NULL AND abs(a.hourly_rate - l.hourly_rate) <= 0.005';
+DECLARE needle text := 'AND (COALESCE(i.xero_adjustments_ex, 0) > 0.005';
 BEGIN
   IF position(needle IN d) = 0 THEN
-    RAISE EXCEPTION 'break: the booking rate test was not found';
+    RAISE EXCEPTION 'break: the changed-by-hand test was not found';
   END IF;
-  EXECUTE replace(d, needle, 'AND false');
+  EXECUTE replace(d, needle, 'AND (false');
 END $$;

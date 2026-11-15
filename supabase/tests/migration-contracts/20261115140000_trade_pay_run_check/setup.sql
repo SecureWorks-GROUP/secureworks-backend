@@ -29,7 +29,10 @@ ALTER TABLE public.trade_invoices
   ADD COLUMN IF NOT EXISTS xero_adjustments_ex numeric,
   ADD COLUMN IF NOT EXISTS xero_bill_id text,
   ADD COLUMN IF NOT EXISTS xero_bill_status text,
-  ADD COLUMN IF NOT EXISTS xero_bill_total numeric;
+  ADD COLUMN IF NOT EXISTS xero_bill_total numeric,
+  ADD COLUMN IF NOT EXISTS xero_adjustment_lines jsonb,
+  ADD COLUMN IF NOT EXISTS submitted_at timestamptz,
+  ADD COLUMN IF NOT EXISTS created_at timestamptz;
 
 CREATE TABLE IF NOT EXISTS public.trade_invoice_lines (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
 ALTER TABLE public.trade_invoice_lines

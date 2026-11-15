@@ -62,7 +62,7 @@ Deno.test("pay-run check: a bad date or week count is refused, not guessed", () 
       d,
     );
   }
-  for (const w of ["0", "27", "1.5", "two"]) {
+  for (const w of ["0", "27", "1.5", "two", "0x10", "1e1", "-2"]) {
     assertThrows(
       () => payRunCheckParams(null, w, ORG),
       TradePayRunCheckError,
@@ -117,6 +117,8 @@ Deno.test("pay-run check: an unreadable answer is a 503, never 'every bill clean
       { data: { rule: "trade-pay-check-v1", counts: {} }, error: null },
       { data: { rule: "trade-pay-check-v1", invoices: [] }, error: null },
       { data: "trade-pay-check-v1", error: null },
+      // A list that does not match its own count is not shown.
+      { data: { ...ANSWER, invoices: [] }, error: null },
     ]
   ) {
     const err = await assertRejects(
