@@ -30,7 +30,9 @@
 --   a finished status (finished_statuses), for a job with no repair stage;
 --   a repair stage of complete (jobs.metadata.repair_stage), for a job that carries a repair stage. Its stage,
 --     not its status, is where a repair stands (measured: a repair at complete with its stage still on_site),
---     and an invoice does not finish it. Archived (closed_statuses) also finishes it: the card was put away;
+--     and an invoice does not finish it. The stage stands while no working status move is on record after it
+--     reached complete; one sent back to work with its stage left at complete is finished again only by a
+--     finished status. Archived (closed_statuses) also finishes it: the card was put away;
 --   an approved customer invoice, for a make-safe that has no repair stage, is not restoration work, is still on
 --     its first attendance (makesafe_job_details.cycle_number 1 and no reopen_reason) and sits at one of the
 --     statuses an invoiced make-safe rests at (invoice_finish_statuses; measured: accepted, scheduled,
@@ -49,9 +51,11 @@
 --     the first move into a finished status after the last move out of one (job_events status_changed).
 -- A day stands only while the status has not moved to a working one after it. A working move is a move to any
 -- status that is not finished; for a make-safe or a job with a repair stage, whose status is not its stage,
--- a move to a resting status (invoice_finish_statuses) is not one. A stage day or an invoice day that does not
--- stand gives way to the first move into a finished status after the last move out of one, and an invoice
--- that does not stand finishes nothing.
+-- a move to a resting status (invoice_finish_statuses) is not one. Reopening or re-attending a make-safe puts
+-- it back to accepted with no status move on record; each leaves its own job_events row (reopen_event_types,
+-- reopen_note_prefix) and each counts as a working move. A stage day or an invoice day that does not stand
+-- gives way to the first move into a finished status after the last move out of one, and a stage or an
+-- invoice that does not stand finishes nothing.
 -- With no finish day on record at all, the quiet count runs from the newer of the last cost and the day the job
 -- record last changed (jobs.updated_at), so a job put away today is not final today.
 -- finished_basis names what dated it: work_done (completed_at or a sign-off), first_invoice, repair_stage,
@@ -109,6 +113,8 @@ AS $policy$
     'invoice_never_finishes_subtypes', jsonb_build_array('restoration'),
     'repair_finished_stages', jsonb_build_array('complete'),
     'closed_statuses', jsonb_build_array('archived'),
+    'reopen_event_types', jsonb_build_array('makesafe_reattend'),
+    'reopen_note_prefix', 'Job reopened',
     'not_cost_reasons', jsonb_build_array('missing_client_invoice', 'draft_revenue', 'holding_job',
                                           'variation_not_invoiced', 'variation_invoice_unchecked',
                                           'expected_cost_lane_missing', 'xero_project_linked_by_contact_only'),
@@ -120,7 +126,7 @@ AS $policy$
 $policy$;
 
 COMMENT ON FUNCTION public.job_cost_close_policy() IS
-  'Job cost close (20261115130000): the numbers and lists job_cost_close reads. quiet_days: Perth days with no new cost, after the newer of the finish day and the last cost, before a finished job''s cost is final. finished_statuses: the statuses that finish a job with no repair stage; a day on the job never does by itself. did_not_go_ahead_statuses: cancelled or lost. reopened_statuses: never finished while here. invoice_marks_finished_types: work types whose first approved customer invoice marks the finish, only at a status in invoice_finish_statuses, never for a subtype in invoice_never_finishes_subtypes or a job with a restoration stage, never a job with a repair stage, never one reopened or past its first attendance. repair_finished_stages: values of jobs.metadata.repair_stage that mean the repair is finished. closed_statuses: statuses that finish a job carrying a repair stage whatever its stage. not_cost_reasons: Job Profit reasons that are not about cost and never hold a close. pending_cost_reasons: reasons that say a cost is still to come, so a cancelled or lost job carrying one is waiting, not out of scope. Change only by migration. Service role only.';
+  'Job cost close (20261115130000): the numbers and lists job_cost_close reads. quiet_days: Perth days with no new cost, after the newer of the finish day and the last cost, before a finished job''s cost is final. finished_statuses: the statuses that finish a job with no repair stage; a day on the job never does by itself. did_not_go_ahead_statuses: cancelled or lost. reopened_statuses: never finished while here. invoice_marks_finished_types: work types whose first approved customer invoice marks the finish, only at a status in invoice_finish_statuses, never for a subtype in invoice_never_finishes_subtypes or a job with a restoration stage, never a job with a repair stage, never one reopened or past its first attendance. repair_finished_stages: values of jobs.metadata.repair_stage that mean the repair is finished. closed_statuses: statuses that finish a job carrying a repair stage whatever its stage. reopen_event_types and reopen_note_prefix: the job_events rows a re-attend and a reopen leave (a re-attend its own event type, a reopen a note whose text starts with the prefix); each puts the job back to work without a status move on record, so each counts as a working move. not_cost_reasons: Job Profit reasons that are not about cost and never hold a close. pending_cost_reasons: reasons that say a cost is still to come, so a cancelled or lost job carrying one is waiting, not out of scope. Change only by migration. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.job_cost_close(p_job_ids uuid[] DEFAULT NULL, p_as_of date DEFAULT NULL)
 RETURNS TABLE (
@@ -160,25 +166,40 @@ AS $fn$
            ARRAY(SELECT jsonb_array_elements_text(p.pol -> 'invoice_never_finishes_subtypes')) AS invoice_never_subtypes,
            ARRAY(SELECT jsonb_array_elements_text(p.pol -> 'repair_finished_stages')) AS repair_finished_stages,
            ARRAY(SELECT jsonb_array_elements_text(p.pol -> 'closed_statuses')) AS closed_statuses,
+           ARRAY(SELECT jsonb_array_elements_text(p.pol -> 'reopen_event_types')) AS reopen_event_types,
+           p.pol ->> 'reopen_note_prefix' AS reopen_note_prefix,
            ARRAY(SELECT jsonb_array_elements_text(p.pol -> 'not_cost_reasons')) AS not_cost_reasons,
            ARRAY(SELECT jsonb_array_elements_text(p.pol -> 'pending_cost_reasons')) AS pending_cost_reasons,
            COALESCE(p_as_of, (now() AT TIME ZONE 'Australia/Perth')::date) AS as_of
       FROM (SELECT public.job_cost_close_policy() AS pol) p
   ), moves AS (
     -- Status moves on record, each marked finished or not, and resting or not. Read once, by event type,
-    -- never per job.
+    -- never per job. The writers name the new status new_status, to or status.
     SELECT e.job_id, e.created_at,
-           COALESCE(e.detail_json ->> 'new_status', e.detail_json ->> 'to') = ANY (pr.finished_statuses) AS to_finished,
-           COALESCE(e.detail_json ->> 'new_status', e.detail_json ->> 'to') = ANY (pr.invoice_finish_statuses) AS to_resting
+           st.to_status = ANY (pr.finished_statuses) AS to_finished,
+           st.to_status = ANY (pr.invoice_finish_statuses) AS to_resting,
+           false AS reopen
       FROM public.job_events e CROSS JOIN params pr
+     CROSS JOIN LATERAL (
+       SELECT COALESCE(e.detail_json ->> 'new_status', e.detail_json ->> 'to', e.detail_json ->> 'status') AS to_status) st
      WHERE e.event_type IN ('status_changed', 'status_change')
-       AND COALESCE(e.detail_json ->> 'new_status', e.detail_json ->> 'to') IS NOT NULL
+       AND st.to_status IS NOT NULL
+       AND (p_job_ids IS NULL OR e.job_id = ANY (p_job_ids))
+    UNION ALL
+    -- Reopening or re-attending a make-safe puts the job back to accepted and writes no status move. Each
+    -- leaves its own row, and each is a return to work.
+    SELECT e.job_id, e.created_at, false, false, true
+      FROM public.job_events e CROSS JOIN params pr
+     WHERE (e.event_type = ANY (pr.reopen_event_types)
+            OR (e.event_type = 'note'
+                AND left(e.detail_json ->> 'note', length(pr.reopen_note_prefix)) = pr.reopen_note_prefix))
        AND (p_job_ids IS NULL OR e.job_id = ANY (p_job_ids))
   ), worked AS (
-    -- The last time the job's status moved to one that is not finished, and the last time it moved to one
-    -- that is neither finished nor a resting status.
+    -- The last time the job's status moved to one that is not finished, the last time it moved to one that
+    -- is neither finished nor a resting status, and the last time it was reopened or re-attended.
     SELECT m.job_id, max(m.created_at) AS back_to_work_at,
-           max(m.created_at) FILTER (WHERE NOT m.to_resting) AS active_at
+           max(m.created_at) FILTER (WHERE NOT m.to_resting) AS active_at,
+           max(m.created_at) FILTER (WHERE m.reopen) AS reopened_at
       FROM moves m WHERE NOT m.to_finished GROUP BY m.job_id
   ), refinished AS (
     -- The first move into a finished status at or after the last move to any status that is not finished.
@@ -212,7 +233,7 @@ AS $fn$
                         AND NOT EXISTS (SELECT 1 FROM public.job_client_signoffs r
                                          WHERE r.job_id = jp.job_id AND r.method = 'revoked'
                                            AND r.created_at >= s.created_at))) AS done_at,
-           w.back_to_work_at, w.active_at, rf.refinished_at, sg.stage_done_at
+           w.back_to_work_at, w.active_at, w.reopened_at, rf.refinished_at, sg.stage_done_at
       FROM public.v_job_profit jp
       JOIN public.jobs j ON j.id = jp.job_id
       LEFT JOIN public.makesafe_job_details d ON d.job_id = jp.job_id
@@ -231,11 +252,17 @@ AS $fn$
            COALESCE(s.repair_stage = ANY (pr.repair_finished_stages), false) AS stage_finished,
            iv.invoice_finish_on,
            -- A recorded day stands only while the status has not moved to a working one after it. The invoice
-           -- carries a day and no time, so a working move on the invoice day itself leaves it standing.
+           -- carries a day and no time, so a working move on the invoice day itself leaves it standing (a
+           -- make-safe is attended and invoiced on one day); a reopen or a re-attend on that day does not.
            s.done_at IS NOT NULL AND (wk.work_at IS NULL OR wk.work_at <= s.done_at) AS done_ok,
-           s.stage_done_at IS NOT NULL AND (wk.work_at IS NULL OR wk.work_at <= s.stage_done_at) AS stage_ok,
+           -- The stage stands when no working move is on record, or the stage moved to complete at or after
+           -- the last one. A complete stage with no stage move on record and a working move on record does
+           -- not stand: their order is not known.
+           COALESCE(s.repair_stage = ANY (pr.repair_finished_stages), false)
+             AND (wk.work_at IS NULL OR (s.stage_done_at IS NOT NULL AND wk.work_at <= s.stage_done_at)) AS stage_stands,
            iv.invoice_finish_on IS NOT NULL
-             AND (wk.work_at IS NULL OR (wk.work_at AT TIME ZONE 'Australia/Perth')::date <= iv.invoice_finish_on) AS inv_ok,
+             AND (wk.work_at IS NULL OR (wk.work_at AT TIME ZONE 'Australia/Perth')::date <= iv.invoice_finish_on)
+             AND (s.reopened_at IS NULL OR (s.reopened_at AT TIME ZONE 'Australia/Perth')::date < iv.invoice_finish_on) AS inv_ok,
            pr.pending_cost_reasons,
            ARRAY(SELECT u.r
                    FROM unnest(s.completeness || CASE WHEN s.cost_flag <> 'ok' THEN ARRAY[s.cost_flag] ELSE ARRAY[]::text[] END)
@@ -253,38 +280,43 @@ AS $fn$
      CROSS JOIN LATERAL (
        SELECT CASE WHEN s.work_type = ANY (pr.invoice_types) AND s.repair_stage IS NULL AND s.invoiced_ex > 0
                         AND s.first_attendance AND NOT s.has_restoration_stage
-                        AND COALESCE(s.work_subtype, '') <> ALL (pr.invoice_never_subtypes)
+                        AND NOT EXISTS (SELECT 1 FROM unnest(pr.invoice_never_subtypes) n(sub)
+                                         WHERE strpos(lower(COALESCE(s.work_subtype, '')), n.sub) > 0)
                    THEN s.first_invoice_date END AS invoice_finish_on) iv
   ), marked AS (
     SELECT r.*, r.cost_reasons && r.pending_cost_reasons AS cost_pending
       FROM reasoned r
   ), judged AS (
-    -- Where the job stands now decides. A finish day alone finishes nothing.
+    -- Where the job stands now decides. A finish day alone finishes nothing. A repair is finished by its
+    -- stage while the stage stands; one sent back to work after its stage reached complete is finished again
+    -- only by a finished status. An answer that cannot be worked out is not finished.
     SELECT m.*,
-           CASE WHEN m.reopened THEN false
-                WHEN m.did_not_go_ahead THEN m.actual_cost_events > 0 OR m.cost_pending
-                WHEN m.has_stage THEN m.stage_finished OR m.closed_status
-                ELSE m.finished_status OR (m.inv_ok AND m.invoice_status)
-           END AS finished
+           COALESCE(CASE WHEN m.reopened THEN false
+                         WHEN m.did_not_go_ahead THEN m.actual_cost_events > 0 OR m.cost_pending
+                         WHEN m.has_stage THEN m.closed_status OR m.stage_stands
+                                               OR (m.stage_finished AND m.finished_status)
+                         ELSE m.finished_status OR (m.inv_ok AND m.invoice_status)
+                    END, false) AS finished
       FROM marked m
   ), evidenced AS (
     -- Two days per finished job, each null when the records do not give it.
     --   done_on: the work day (completed_at or a sign-off), when it stands.
     --   base_on: the day the job came to stand where it stands.
-    --     A repair finished by its stage: the day the stage moved to complete, when it stands; else the first
-    --     move into a finished status after the last move out of one.
+    --     A repair whose stage stands: the day the stage moved to complete, when that move is on record; else
+    --     the first move into a finished status after the last move out of one.
     --     A job at a finished status: that first move into a finished status, or for a make-safe whose invoice
     --     stands the invoice day when it is earlier (it has stood finished since the invoice, and putting the
     --     card away later does not restart the count).
     --     A make-safe finished by its invoice alone: the invoice day.
     SELECT j.*,
            CASE WHEN j.done_ok THEN (j.done_at AT TIME ZONE 'Australia/Perth')::date END AS done_on,
-           CASE WHEN j.has_stage AND j.stage_finished AND j.stage_ok
+           CASE WHEN j.has_stage AND j.stage_stands AND j.stage_done_at IS NOT NULL
                   THEN (j.stage_done_at AT TIME ZONE 'Australia/Perth')::date
                 WHEN j.has_stage OR NOT j.inv_ok THEN j.refinished_on
                 WHEN j.finished_status THEN LEAST(j.invoice_finish_on, j.refinished_on)
                 ELSE j.invoice_finish_on END AS base_on,
-           CASE WHEN j.has_stage AND j.stage_finished AND (j.stage_ok OR j.refinished_on IS NULL) THEN 'repair_stage'
+           CASE WHEN j.has_stage AND j.stage_stands AND (j.stage_done_at IS NOT NULL OR j.refinished_on IS NULL)
+                  THEN 'repair_stage'
                 WHEN j.has_stage OR NOT j.inv_ok THEN 'status'
                 WHEN j.finished_status AND j.refinished_on < j.invoice_finish_on THEN 'status'
                 ELSE 'first_invoice' END AS base_basis

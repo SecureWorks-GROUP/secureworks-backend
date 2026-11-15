@@ -174,17 +174,20 @@ and list is in `job_cost_close_policy()` (`cost-close-v1`) and changes only by m
   - A cancelled or lost job is finished as `did_not_go_ahead` when it holds cost or a cost is still
     to come (`pending_cost_reasons` in the policy: an open or unbilled order, a bill not placed or
     not confirmed, unapproved trade charges), so it reads `waiting`, not `not_applicable`.
-  - A job that carries a repair stage is finished by stage `complete` whatever its status (the
-    Repairs board moves the stage, not the status), or by status `archived` (`closed_statuses`).
-    No other status and no invoice finishes a repair.
+  - A job that carries a repair stage is finished by stage `complete` while the stage stands
+    (below), whatever its status (the Repairs board moves the stage, not the status), or by status
+    `archived` (`closed_statuses`). One sent back to work after its stage reached `complete`, with
+    the stage left there, is open until it reaches a finished status again. An invoice never
+    finishes a repair, and a stage that is not `complete` is finished only by `archived`.
   - Every other job is finished by a finished status (`complete`, `invoiced`, `final_payment`,
     `get_review`, `archived`). A make-safe is also finished by its first counted invoice, but only
     while it rests at `accepted`, `scheduled` or `processing` (`invoice_finish_statuses`: where
     invoiced make-safes sit on production; `in_progress` and every other working status keep it
     open), only on its first attendance (`makesafe_job_details.cycle_number` 1 and no
-    `reopen_reason`), never for restoration work (a restoration stage on the job, or work
-    subtype `restoration`: restoration is invoiced before the works), and only while the invoice
-    stands (below): one raised before the job went back to `in_progress` finishes nothing.
+    `reopen_reason`), never for restoration work (a restoration stage on the job, or a work
+    subtype that contains `restoration`: restoration is invoiced before the works), and only while
+    the invoice stands (below): one raised before the job went back to `in_progress`, was reopened
+    or was re-attended finishes nothing.
 - **`finished_on` and `finished_basis`.** The finish day is the later of two days, so a job
   finished a second time is never dated by its first finish and a job is never dated before it
   came to stand where it stands. A job cannot go from `open` to `final` in a day.
@@ -197,9 +200,16 @@ and list is in `job_cost_close_policy()` (`cost-close-v1`) and changes only by m
     not restart the count).
   - A day stands only while the status has not moved to a working one after it. A working move is
     a move to any status that is not finished; for a make-safe or a job with a repair stage, whose
-    status is not its stage, a move to a resting status (`invoice_finish_statuses`) is not one. A
+    status is not its stage, a move to a resting status (`invoice_finish_statuses`) is not one.
+    Reopening or re-attending a make-safe puts it back to `accepted` and writes no status move:
+    the re-attend leaves a `makesafe_reattend` event and the reopen a note starting `Job reopened`
+    (`reopen_event_types`, `reopen_note_prefix`), and each counts as a working move. A complete
+    stage with no stage move on record stands only when no working move is on record either. A
     stage day that does not stand gives way to the status move. The invoice carries a day and no
-    time, so a working move on the invoice day itself leaves it standing.
+    time, so a working status move on the invoice day itself leaves it standing (a make-safe is
+    attended and invoiced on one day); a reopen or a re-attend on that day does not.
+  - The new status is read from `new_status`, `to` or `status` in the event, the three keys the
+    writers use.
   - `finished_basis` names the day used: `work_done`, `repair_stage`, `first_invoice`, `status`
     (a status move, or no day on record), `did_not_go_ahead` (no day).
   - The quiet count runs from the later of the finish day and the newest cost. A finished job with
@@ -210,14 +220,21 @@ and list is in `job_cost_close_policy()` (`cost-close-v1`) and changes only by m
   - Known limit: an invoiced make-safe at a resting status is taken as attended; no attendance
     record is read. One nobody attended holds no labour, so Job Profit's own reasons keep it
     `waiting`. Measured 15 Nov 2026: 216 of 285 such make-safes carry a trade report or a
-    completed booking; 69 carry neither.
+    completed booking; of the 69 that carry neither, 24 wait on a cost reason and 43 hold a dated
+    cost with nothing missing.
+  - Known limit: a make-safe past its first attendance that rests at `accepted`, `scheduled` or
+    `processing` stays `open` until its card reaches a finished status, even when its invoice came
+    after the last attendance. Only its first invoice day is read.
+  - Known limit: a status changed outside the application leaves no event. The job is then
+    finished or not by where it stands, and dated by what is on record.
 - **A cost reason** is any `completeness` code or non-ok `cost_flag`, except the ones that are about
   revenue or structure and not cost (`not_cost_reasons` in the policy: a missing or draft customer
   invoice, an unbilled variation, a holding job, a missing expected-cost lane, a Xero Project linked
   by contact only). Every other code holds a close, `text_matched_lines` included, and so does a code
   Job Profit adds later. So `final` says the cost is complete; it does not say the job was invoiced.
 - **Nothing is frozen.** A cost that lands on a final job moves it back to `settling` with a later
-  `final_on`; a job put back into rectification or any working status reads `open`. `as_of` moves
+  `final_on`; a job put back into rectification or any working status reads `open`, and so does a
+  repair or a resting make-safe reopened, re-attended or sent back to work. `as_of` moves
   only the day the quiet count is measured to: the costs, the status and the reasons are always
   today's, so it is not a read of how the job stood on an earlier day. Measured on production on 15 Nov 2026:
   of 261 jobs finished by 15 Aug, 22 took a cost more than 30 days after going quiet and 11 more than 90.

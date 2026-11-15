@@ -61,6 +61,25 @@
 --                                                                    final on 24 Sep by first_invoice (the invoice has a day, no time)
 --   CC-45  fencing, done 10 Aug, moved to in_progress and to complete at the same instant on 1 Nov
 --                                                                    settling, finished on 1 Nov by status, final on 1 Dec
+--   CC-46  make-safe, complete 10 Aug, reopened 1 Nov (a note, no status move), invoiced status 10 Nov
+--                                                                    settling, finished on 10 Nov by status, final on 10 Dec
+--   CC-47  make-safe with no details row, complete 10 Aug, invoiced 25 Aug, reopened 10 Nov, now accepted
+--                                                                    open (the reopen is on record)
+--   CC-48  repair, stage complete 1 Aug, status sent back to in_progress 20 Oct, stage left at complete
+--                                                                    open (the stage no longer stands)
+--   CC-49  repair, stage complete 1 Aug, rectification 20 Oct, scheduled 1 Nov, stage left at complete
+--                                                                    open
+--   CC-50  make-safe, processing, invoiced 25 Aug, re-attended 1 Nov, details still say cycle 1
+--                                                                    open (the re-attend is on record)
+--   CC-51  make-safe whose family is "restoration works", processing, invoiced       open
+--   CC-52  make-safe, processing, invoiced 25 Aug, re-attended that same day         open
+--   CC-53  make-safe, processing, re-attended 1 Aug, first invoice 25 Aug            final on 24 Sep by first_invoice
+--   CC-54  fencing, complete, the move to complete on 10 Nov written with the key "status"
+--                                                                    settling, finished on 10 Nov by status, final on 10 Dec
+--   CC-55  repair, processing, stage complete with no stage move on record, in_progress 1 Aug on record
+--                                                                    open (their order is not known)
+--   CC-56  repair, invoiced, stage complete with no stage move on record, in_progress 1 Aug, invoiced 10 Aug
+--                                                                    final on 19 Sep, finished on 10 Aug by status
 
 \set ON_ERROR_STOP on
 
@@ -91,6 +110,8 @@ BEGIN
      OR p -> 'invoice_finish_statuses' <> '["accepted", "scheduled", "processing"]'::jsonb
      OR p -> 'invoice_never_finishes_subtypes' <> '["restoration"]'::jsonb
      OR p -> 'closed_statuses' <> '["archived"]'::jsonb
+     OR p -> 'reopen_event_types' <> '["makesafe_reattend"]'::jsonb
+     OR p ->> 'reopen_note_prefix' <> 'Job reopened'
      OR p -> 'reopened_statuses' <> '["rectification"]'::jsonb
      OR p -> 'did_not_go_ahead_statuses' <> '["cancelled", "lost"]'::jsonb
      OR NOT (p -> 'finished_statuses') @> '["complete", "invoiced", "archived"]'::jsonb
@@ -170,7 +191,18 @@ FROM (VALUES
   (42, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
   (43, 'processing',    'repair',   '{"repair_stage": "complete"}', NULL),
   (44, 'processing',    'makesafe', '{}', NULL),
-  (45, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z')
+  (45, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (46, 'invoiced',      'makesafe', '{}', NULL),
+  (47, 'accepted',      'makesafe', '{}', NULL),
+  (48, 'in_progress',   'repair',   '{"repair_stage": "complete"}', NULL),
+  (49, 'scheduled',     'repair',   '{"repair_stage": "complete"}', NULL),
+  (50, 'processing',    'makesafe', '{}', NULL),
+  (51, 'processing',    'makesafe', '{"ses_family": "restoration works"}', NULL),
+  (52, 'processing',    'makesafe', '{}', NULL),
+  (53, 'processing',    'makesafe', '{}', NULL),
+  (54, 'complete',      'fencing',  '{}', NULL),
+  (55, 'processing',    'repair',   '{"repair_stage": "complete"}', NULL),
+  (56, 'invoiced',      'repair',   '{"repair_stage": "complete"}', NULL)
 ) AS v(n, status, type, meta, completed);
 
 -- Status and stage moves on record. Most jobs have none, as most of production's older jobs have none.
@@ -201,6 +233,24 @@ INSERT INTO public.job_events (job_id, event_type, detail_json, created_at) VALU
   ('cc000000-0000-4000-8000-000000000044', 'status_changed', '{"new_status": "processing"}',    timestamptz '2026-08-25T06:00:00Z'),
   ('cc000000-0000-4000-8000-000000000045', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-11-01T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000045', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-11-01T02:00:00Z'),
+  -- A reopen and a re-attend put the job back to accepted and write no status move: a note and an event of their own.
+  ('cc000000-0000-4000-8000-000000000046', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000046', 'note', '{"note": "Job reopened: builder asked us back", "cycle": 2, "reopened_by": "ops_dashboard", "draft_id": null}', timestamptz '2026-11-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000046', 'status_changed', '{"new_status": "invoiced"}',      timestamptz '2026-11-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000047', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000047', 'note', '{"note": "Job reopened: builder asked us back", "cycle": 2, "reopened_by": "ops_dashboard", "draft_id": null}', timestamptz '2026-11-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000048', 'repair_stage_changed', '{"from_stage": "on_site", "to_stage": "complete"}', timestamptz '2026-08-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000048', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-10-20T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000049', 'repair_stage_changed', '{"from_stage": "on_site", "to_stage": "complete"}', timestamptz '2026-08-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000049', 'status_changed', '{"new_status": "rectification"}', timestamptz '2026-10-20T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000049', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-11-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000050', 'makesafe_reattend', '{"reason": "Builder asked us back", "cycle_number": 2, "previous_status": "processing"}', timestamptz '2026-11-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000052', 'makesafe_reattend', '{"reason": "Builder asked us back", "cycle_number": 2, "previous_status": "processing"}', timestamptz '2026-08-25T00:30:00Z'),
+  ('cc000000-0000-4000-8000-000000000053', 'makesafe_reattend', '{"reason": "Builder asked us back", "cycle_number": 2, "previous_status": "processing"}', timestamptz '2026-08-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000054', 'status_change',  '{"status": "complete", "source": "trade_report"}', timestamptz '2026-11-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000055', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-08-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000056', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-08-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000056', 'status_changed', '{"new_status": "invoiced"}',      timestamptz '2026-08-10T02:00:00Z'),
   -- A normal run through the finished statuses does not move the finish day: CC-01 was invoiced, then archived.
   ('cc000000-0000-4000-8000-000000000001', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-08-01T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000001', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:01Z'),
@@ -212,7 +262,9 @@ INSERT INTO public.makesafe_job_details (job_id, cycle_number, reopen_reason) VA
   ('cc000000-0000-4000-8000-000000000021', 2, NULL),
   ('cc000000-0000-4000-8000-000000000022', 1, 'Builder asked us back'),
   ('cc000000-0000-4000-8000-000000000023', 2, NULL),
-  ('cc000000-0000-4000-8000-000000000027', 1, NULL);
+  ('cc000000-0000-4000-8000-000000000027', 1, NULL),
+  ('cc000000-0000-4000-8000-000000000046', 2, 'Builder asked us back'),
+  ('cc000000-0000-4000-8000-000000000050', 1, NULL);
 
 -- Approved customer invoices, dated 25 Aug: every job (4 has no cost and is still invoiced) but 7, 8, 10 and 26.
 INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, line_items, raw_json, job_id)
@@ -296,7 +348,18 @@ INSERT INTO cc_key VALUES
   ('CC-42', 'settling',       '2026-12-10', true,  '2026-11-10', 'status',           NULL),
   ('CC-43', 'final',          '2026-09-19', true,  '2026-08-01', 'repair_stage',     NULL),
   ('CC-44', 'final',          '2026-09-24', true,  '2026-08-25', 'first_invoice',    NULL),
-  ('CC-45', 'settling',       '2026-12-01', true,  '2026-11-01', 'status',           NULL);
+  ('CC-45', 'settling',       '2026-12-01', true,  '2026-11-01', 'status',           NULL),
+  ('CC-46', 'settling',       '2026-12-10', true,  '2026-11-10', 'status',           NULL),
+  ('CC-47', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-48', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-49', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-50', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-51', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-52', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-53', 'final',          '2026-09-24', true,  '2026-08-25', 'first_invoice',    NULL),
+  ('CC-54', 'settling',       '2026-12-10', true,  '2026-11-10', 'status',           NULL),
+  ('CC-55', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-56', 'final',          '2026-09-19', true,  '2026-08-10', 'status',           NULL);
 
 DO $$
 DECLARE r record; out text := ''; ids uuid[];
@@ -363,7 +426,7 @@ BEGIN
   IF (SELECT count(*) FROM public.job_cost_close(one, date '2026-09-19')) <> 1 THEN
     RAISE EXCEPTION 'job cost close contract: asked for one job, got another count';
   END IF;
-  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 45 THEN
+  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 56 THEN
     RAISE EXCEPTION 'job cost close contract: null ids did not return every job';
   END IF;
   IF (SELECT count(*) FROM public.job_cost_close()) <> (SELECT count(*) FROM public.v_job_profit) THEN
