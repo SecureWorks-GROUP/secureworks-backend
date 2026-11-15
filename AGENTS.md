@@ -1060,9 +1060,10 @@ secureworks-jarvis) and 28 s for every other. The call took 21.7 s and 27.1 s on
 15 Nov 2026 and stopped the reader on 2 and 3 Nov at the old limit. Three things follow. A
 later `CREATE OR REPLACE` of the due list must say `SET statement_timeout = '45s'` or it drops
 the setting without a word (an edit made through `pg_get_functiondef`, as `20261104175000`
-does, keeps it). The rollbacks that replace the function (`20261102210000`'s and earlier) drop
-it too, and `20261104175000`'s rollback pins the whole definition and refuses while it is set:
-roll `20261115092000` back first and apply it again after. The five earlier contracts that pin
+does, keeps it, provided the definition it pins includes the setting). The rollbacks that
+replace the function (`20261102210000`'s and earlier) drop it too, and `20261104175000` pins
+the whole definition, so its rollback and a re-run of it both refuse while it is set: roll
+`20261115092000` back first and apply it again after. The five earlier contracts that pin
 the due list's settings accept it with or without this one (ledger store, notes freshness,
 scoping pipeline, finished wake, rebuild order); a new setting on it widens those five.
 The time limit is room, not a fix: the judge (9.5 s) and the unread-row ordering (4.3 s for 76
