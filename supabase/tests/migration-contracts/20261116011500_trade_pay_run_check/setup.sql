@@ -1,4 +1,4 @@
--- Prerequisites for 20261115140000_trade_pay_run_check. Creates only what the check reads and
+-- Prerequisites for 20261116011500_trade_pay_run_check. Creates only what the check reads and
 -- what earlier registered cases may not have made. Every statement is IF NOT EXISTS, so it sits
 -- on top of whatever the registered stack already holds.
 DO $$

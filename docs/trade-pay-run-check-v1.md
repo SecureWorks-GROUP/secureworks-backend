@@ -1,7 +1,7 @@
 # Trade pay-run check, v1 (`trade-pay-check-v1`)
 
 Owner: CFO thread "Integrate trade app redesign end to end", 15 Nov 2026.
-Migration: `supabase/migrations/20261115140000_trade_pay_run_check.sql`.
+Migration: `supabase/migrations/20261116011500_trade_pay_run_check.sql`.
 Door: `ops-api?action=trade_pay_run_check` (`ops-api/trade_pay_run_check.ts`).
 
 ## What it is for

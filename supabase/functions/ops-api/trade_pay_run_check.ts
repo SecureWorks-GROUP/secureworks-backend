@@ -1,6 +1,6 @@
 // deno-lint-ignore-file no-explicit-any
 // ════════════════════════════════════════════════════════════
-// Trade pay-run check: the staff read (20261115140000, rule trade-pay-check-v1).
+// Trade pay-run check: the staff read (20261116011500, rule trade-pay-check-v1).
 //
 //   trade_pay_run_check  GET  ?as_of=YYYY-MM-DD (default today, Perth)
 //                             &weeks=N (1..26, default 2)

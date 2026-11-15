@@ -1,4 +1,4 @@
--- Contract for 20261115140000_trade_pay_run_check: every stop and note fires on the case it
+-- Contract for 20261116011500_trade_pay_run_check: every stop and note fires on the case it
 -- names and on no other, a clean invoice stays clean, drafts, rejected invoices, other weeks and
 -- other orgs are left out, the week count is clamped, and only the service role may call it.
 
@@ -15,7 +15,7 @@ BEGIN
   IF NOT has_function_privilege('service_role', fn, 'EXECUTE') THEN
     RAISE EXCEPTION 'trade pay-run check must be callable by the service role';
   END IF;
-  IF COALESCE(obj_description(fn, 'pg_proc'), '') NOT LIKE 'Trade pay-run check, rule trade-pay-check-v1 (20261115140000)%' THEN
+  IF COALESCE(obj_description(fn, 'pg_proc'), '') NOT LIKE 'Trade pay-run check, rule trade-pay-check-v1 (20261116011500)%' THEN
     RAISE EXCEPTION 'trade pay-run check comment is missing its rule name';
   END IF;
 END $$;

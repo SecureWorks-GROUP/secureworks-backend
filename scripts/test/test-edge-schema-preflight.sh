@@ -1087,7 +1087,7 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261115143000", "job_cost_close"),
                       # Weekly pay-run check for trade invoices
                       # (trade_pay_run_check.ts).
-                      ("20261115140000", "trade_pay_run_check")]:
+                      ("20261116011500", "trade_pay_run_check")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
