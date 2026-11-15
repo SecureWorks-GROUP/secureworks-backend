@@ -356,7 +356,7 @@ AS $$
             'not_in_intake', r.r_not_in_intake,
             'rows_short_of_bill', r.r_short),
           'over_allocated', jsonb_build_object('bills', r.over_bills, 'ex', r.over_ex, 'counted', false,
-            'reads', 'Per bill of 0 or more that is not trade-app labour: Job Profit''s job rows + its holding-job rows + the not-a-job claim (the greater of Bills to place and bookkeeping''s evidence) - bill, when above 0. Rows are summed with their signs. A trade-app labour bill is read whole, so it is never over allocated.'),
+            'reads', 'Per bill of 0 or more that is not trade-app labour: Job Profit''s job rows + the greater of its holding-job rows and the not-a-job claim (itself the greater of Bills to place and bookkeeping''s evidence) - bill, when above 0. Rows are summed with their signs. Holding-job rows and the not-a-job claim can name the same lines, so they are not added. A trade-app labour bill is read whole, so it is never over allocated.'),
           'negative_bill', jsonb_build_object('bills', r.neg_bills, 'ex', r.neg_ex, 'inc', r.neg_inc, 'counted', false),
           'parts_add_up', (r.on_job_ex + r.mirror_ex + r.overhead_ex + r.unplaced_ex = COALESCE(d.ex, 0)),
           'parts_check', 'on_job + trade_app_labour + overhead + unplaced against the bills read directly from the copy; unplaced is each bill''s remainder, so this catches a bill dropped or counted twice, not a mis-sorted dollar'),
