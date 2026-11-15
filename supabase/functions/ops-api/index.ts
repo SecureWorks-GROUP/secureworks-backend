@@ -13221,7 +13221,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
             // Verify user is the DESIGNATED lead on this job (is_lead), never
             // via job_assignments.role — see tradeLeadJobIds.
-            const { data: lineData } = await client.from('trade_invoice_lines').select('job_id, group_share_id, line_type').eq('id', line_id).single()
+            const { data: lineData } = await client.from('trade_invoice_lines').select('job_id, group_share_id, line_type, line_total_ex, override_amount').eq('id', line_id).single()
             if (!lineData) throw new ApiError('Line not found', 404)
             if (lineData.group_share_id || String(lineData.line_type || '').toLowerCase() === 'group share') {
               throw new ApiError('A group share is only visible to its owner.', 403)
@@ -13238,11 +13238,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             } else if (reviewAction === 'adjust') {
               // The new amount replaces the line's old one on the job's work
               // order total, and may not take it over (work_order_total_cap.ts).
-              await _assertWithinWorkOrderTotal(client, tradeUser, [{
-                job_id: lineData.job_id,
-                line_type: lineData.line_type,
-                line_total_ex: Number(overrideAmt) || 0,
-              }], [String(line_id)])
+              // A lowered line is never refused; a raised one is checked even
+              // when the new amount is 0 or less (a deduction raised towards 0).
+              const oldAmount = Number(lineData.override_amount ?? lineData.line_total_ex) || 0
+              if ((Number(overrideAmt) || 0) > oldAmount) {
+                await _assertWithinWorkOrderTotal(client, tradeUser, [{
+                  job_id: lineData.job_id,
+                  line_type: lineData.line_type,
+                  line_total_ex: Number(overrideAmt) || 0,
+                }], [String(line_id)], true)
+              }
               updates.acknowledgment_status = 'acknowledged'
               updates.override_amount = Number(overrideAmt) || 0
               updates.override_by = tradeUser.id
@@ -17876,6 +17881,7 @@ export async function _assertWithinWorkOrderTotal(
   tradeUser: { id: string; orgId: string },
   lines: ReadonlyArray<{ job_id?: unknown; line_type?: unknown; line_total_ex?: unknown }>,
   excludeLineIds: readonly string[] = [],
+  force = false,
 ): Promise<void> {
   const capFailed = (where: string) => {
     console.error('[ops-api] work order cap unreadable:', where)
@@ -17890,6 +17896,7 @@ export async function _assertWithinWorkOrderTotal(
     refusal = await checkWorkOrderTotalCap(client, {
       lines,
       excludeLineIds,
+      force,
       loadModes: async (jobIds) => {
         // Only a job with an approved job work order carrying its agreed
         // labour can be capped, so a week of hourly jobs reads nothing more.

@@ -15,7 +15,7 @@
 //   Hourly jobs, group work orders and jobs with no agreed amount keep their
 //   own rules; the pay-run check stops a work order with no agreed amount.
 // - Every line on the job counts (hours, the work order line, deductions,
-//   any type a client sends, travel) except commission and materials
+//   travel, materials, any type a client sends) except commission
 //   (NOT_AGAINST_WORK_ORDER_LINE_TYPES). Commission has its own cap
 //   (job_commission.ts).
 // - Billed is JOB_WORK_ORDER_BILLED_INVOICE_STATUSES: a draft, a rejected or a
@@ -40,19 +40,19 @@ import {
 } from "./job_work_orders.ts";
 
 /**
- * Line types that never count against a work order: commission (its own cap,
- * job_commission.ts) and materials. Every other line on a capped job
+ * The one line type that never counts against a work order: commission, which
+ * has its own cap (job_commission.ts). Every other line on a capped job
  * counts, whatever its type: labour, the work order line, any deduction
- * (negative), and any type the client sends that is not on this list
- * ("decking", "other", "install" ...), so a new or odd type cannot bill
- * around the work order. Travel counts too: on 13 Nov 2026 a work order
- * invoice carried a travel line equal to the work order amount on two jobs
- * (SW-INV-SL-261113-016); travel past the work order is an office variation.
+ * (negative), travel, materials, and any type the client sends ("decking",
+ * "other", "install" ...). The line type is the client's word, so a type
+ * left out would be a label that bills around the work order. Travel and
+ * materials past the work order are an office variation (on 13 Nov 2026 a
+ * work order invoice carried a travel line equal to the work order amount on
+ * two jobs, SW-INV-SL-261113-016; no materials line was billed in the 120
+ * days before).
  */
 export const NOT_AGAINST_WORK_ORDER_LINE_TYPES: ReadonlySet<string> = new Set([
   "commission",
-  "materials",
-  "material",
 ]);
 
 export function countsAgainstWorkOrder(lineType: unknown): boolean {
@@ -94,11 +94,14 @@ export function workOrderTotalCapRefusal(input: {
   billedEx: ReadonlyMap<string, number>;
   /** Labour on the invoice being sent, per job, ex GST. */
   incomingEx: ReadonlyMap<string, number>;
+  /** Check a job even when its incoming is 0 or less (a raised deduction). */
+  force?: boolean;
 }): WorkOrderTotalCapRefusal | null {
   const over: WorkOrderTotalCapRefusal["jobs"] = [];
   for (const job of input.jobs) {
     const incoming = input.incomingEx.get(job.jobId) ?? 0;
-    if (cents(incoming) <= 0) continue;
+    if (!input.incomingEx.has(job.jobId)) continue;
+    if (!input.force && cents(incoming) <= 0) continue;
     const billed = input.billedEx.get(job.jobId) ?? 0;
     if (cents(billed) + cents(incoming) <= cents(job.allowedEx)) continue;
     over.push({
@@ -215,11 +218,15 @@ export async function checkWorkOrderTotalCap(client: any, input: {
   loadModes: (jobIds: string[]) => Promise<readonly WorkOrderCapMode[]>;
   jobRefs: (jobIds: string[]) => Promise<ReadonlyMap<string, string>>;
   excludeLineIds?: readonly string[];
+  /**
+   * A changed line that goes up: check its job even when the new amount is
+   * 0 or less (a deduction raised towards 0 lifts the job's total).
+   */
+  force?: boolean;
 }): Promise<WorkOrderTotalCapRefusal | null> {
   const incoming = incomingLabourByJob(input.lines);
-  const jobIds = [...incoming].filter(([, ex]) => cents(ex) > 0).map(([id]) =>
-    id
-  );
+  const jobIds = [...incoming].filter(([, ex]) => input.force || cents(ex) > 0)
+    .map(([id]) => id);
   if (jobIds.length === 0) return null;
   const capped = (await input.loadModes(jobIds)).filter((m) =>
     m.invoice_mode === "work_order" && m.work_order_agreed_ex != null &&
@@ -241,5 +248,6 @@ export async function checkWorkOrderTotalCap(client: any, input: {
     jobs: facts.jobs,
     billedEx: facts.billedEx,
     incomingEx: incoming,
+    force: input.force,
   });
 }

@@ -94,7 +94,7 @@ Deno.test("cap: a job with no labour on this invoice, or not capped, is never re
   );
 });
 
-Deno.test("incoming: every line but commission and materials counts per job; deductions come off", () => {
+Deno.test("incoming: every line but commission counts per job; deductions come off", () => {
   const out = incomingLabourByJob([
     { job_id: JOB, line_type: "work order", line_total_ex: 2160 },
     {
@@ -114,12 +114,16 @@ Deno.test("incoming: every line but commission and materials counts per job; ded
     },
     { job_id: JOB, line_total_ex: 5 },
   ]);
-  assertEquals(out.get(JOB), 1845, "travel counts against the work order");
+  assertEquals(
+    out.get(JOB),
+    2145,
+    "travel and materials count against the work order",
+  );
   assertEquals(out.size, 1);
   assert(countsAgainstWorkOrder("Labour"));
   assert(countsAgainstWorkOrder("other"));
   assert(countsAgainstWorkOrder(null));
-  assert(!countsAgainstWorkOrder(" Materials "));
+  assert(countsAgainstWorkOrder(" Materials "));
   assert(!countsAgainstWorkOrder("commission"));
   assert(countsAgainstWorkOrder("Travel"));
 });
@@ -219,7 +223,11 @@ Deno.test("facts: billed labour counts live invoices only; approved customer var
       { jobId: JOB, ref: "SWF-1", agreedEx: 2000, workOrderId: WO },
     ],
   );
-  assertEquals(facts.billedEx.get(JOB), 1250, "an odd line type still counts");
+  assertEquals(
+    facts.billedEx.get(JOB),
+    1550,
+    "every type but commission counts",
+  );
   assertEquals(facts.jobs, [{ jobId: JOB, ref: "SWF-1", allowedEx: 2150 }]);
 });
 
@@ -257,7 +265,11 @@ Deno.test("wiring: every door that saves or changes a trade line checks the cap 
     adjust > 0 && adjustCap > adjust && adjustCap < update,
     "a lead's adjust checks before it writes",
   );
-  assertStringIncludes(src.slice(adjustCap, update), "[String(line_id)]");
+  assertStringIncludes(
+    src.slice(adjustCap, update),
+    "[String(line_id)], true)",
+  );
+  assertStringIncludes(src.slice(adjust, adjustCap), "> oldAmount");
 
   // The guard: 409 over, 503 unreadable, nothing saved either way.
   const guardAt = src.indexOf(
@@ -327,14 +339,14 @@ Deno.test("check: a new line over what is left is refused; a hourly job is never
   assertEquals(hourly, null);
   let read = false;
   await checkWorkOrderTotalCap(client, {
-    lines: [{ job_id: JOB, line_type: "materials", line_total_ex: 9999 }],
+    lines: [{ job_id: JOB, line_type: "commission", line_total_ex: 9999 }],
     loadModes: () => {
       read = true;
       return Promise.resolve([MODE]);
     },
     jobRefs: refs,
   });
-  assertEquals(read, false, "materials alone never reads the work order");
+  assertEquals(read, false, "commission alone never reads the work order");
 });
 
 Deno.test("check: a lead's adjust replaces the line's old amount, never adds to it", async () => {
@@ -358,4 +370,35 @@ Deno.test("check: a lead's adjust replaces the line's old amount, never adds to 
     excludeLineIds: ["crew"],
   });
   assertEquals(raised?.jobs[0].most_this_invoice_ex, 400);
+});
+
+Deno.test("check: a deduction raised to 0 is checked; without force it would slip through", async () => {
+  const client = fakeClient({
+    lines: [
+      line("lead", "approved", "work order", 2000),
+      line("crew", "approved", "labour", 400),
+      line("ded", "approved", "crew_work_order_deduction", -400),
+    ],
+  });
+  const raised = {
+    lines: [{
+      job_id: JOB,
+      line_type: "crew_work_order_deduction",
+      line_total_ex: 0,
+    }],
+    loadModes: () => Promise.resolve([MODE]),
+    jobRefs: refs,
+    excludeLineIds: ["ded"],
+  };
+  assertEquals(
+    await checkWorkOrderTotalCap(client, raised),
+    null,
+    "unforced: 0 is never checked",
+  );
+  const forced = await checkWorkOrderTotalCap(client, {
+    ...raised,
+    force: true,
+  });
+  assertEquals(forced?.code, "work_order_total_over_agreed");
+  assertEquals(forced?.jobs[0].most_this_invoice_ex, 0);
 });
