@@ -18,6 +18,7 @@
 import { jobProfitRollupAction } from "./job_profit_rollup.ts";
 import { readJobProfitOrderSources } from "./job_profit_order_sources.ts";
 import { readJobDispatchOrders } from "./job_dispatch_orders.ts";
+import { readJobCostClose, readJobCostCloseMany } from "./job_cost_close.ts";
 import {
   type FrozenAcceptance,
   INSTALLER_RULE_PROBE,
@@ -74,6 +75,8 @@ export const JOB_PROFIT_LABELS = {
     "Company view: expected against actual cost counts only jobs whose actual cost is complete (cost_flag ok or text_matched_lines) and whose expected cost names every lane (no expected_cost_lane_missing). A job with an expected cost but partial actual cost (no cost linked, materials not linked, labour missing, unclassified or incomplete lines) is not comparable and is counted in jobs_with_expected_not_comparable instead. A group with no publishable job reads profit and margin as null (Unknown), never 0.",
   dispatch_orders:
     "Dispatch orders on the job (each supplier order email sent from Dispatch, and each purchase order that is not a draft or cancelled) with the supplier bills linked to each by rule, never by a person: the bill is from the order's supplier and carries a supplier ref saved for that order, our job number, our PO number (on the bill or the supplier's PDF of it), or the job's site address on the bill or that PDF when it matches one order of that supplier; never the same amount alone. rule says which matched and matched_in where (bill or supplier_pdf). ordered, billed and not_billed are counts of orders. A linked bill's amount is the bill's own, ex GST; cost_on_this_job says whether Job Profit counts that bill on this job. A link never places a bill or changes any total. unclear_bills name this order and another, so neither is linked. status unknown: the orders or links could not be read; never read that as not billed.",
+  cost_close:
+    "Whether the job's cost is final (job_cost_close, worked out from this job's own Job Profit row on every read; nothing is stored). cost_state: not_applicable (the holding job, or a cancelled or lost job that holds no cost and has none still to come), open (the work is not finished, or the job was sent back to work), waiting (finished; waiting_on names what stands between the job and a final cost), settling (finished, nothing outstanding, but quiet for fewer than quiet_days; final_on is the day it turns final if nothing else lands) or final (final_on is the day it became final and closed_by the rule; no person closes a job). A cost that lands later reopens it by itself. It says the cost is complete, not that every line is evidenced: that is line_evidence. ok false with a reason: the state could not be read and is unknown, never open and never final. On a list it is cost_close.by_job, and a job missing there is unknown.",
   holding_jobs:
     "Holding jobs (costs parked on a bucket card, not a customer's job) are in no company, work-type or month total; their figures are reported on their own under holding_jobs.",
 } as const;
@@ -628,6 +631,8 @@ export async function jobProfitAction(
     }
   }
 
+  // The cost close read takes seconds on production data, so it runs while the other reads below run.
+  const costClose = readJobCostClose(client, String(summary.job_id));
   return {
     status: 200,
     body: {
@@ -642,6 +647,7 @@ export async function jobProfitAction(
       revenue_events: revenueEvents,
       timeline: buildJobProfitTimeline(costEvents, revenueEvents),
       line_evidence: await readJobLineEvidence(client, summary.job_id),
+      cost_close: await costClose,
       labels: JOB_PROFIT_LABELS,
       ...(await patioExpectedPart(client, patioScope, patioFrozen, summary)),
     },
@@ -809,10 +815,15 @@ export async function jobProfitListAction(
     };
   }
   const rows: unknown[] = data || [];
+  const page = rows.slice(0, f.limit);
   return {
     status: 200,
     body: {
-      jobs: rows.slice(0, f.limit),
+      jobs: page,
+      cost_close: await readJobCostCloseMany(
+        client,
+        page.map((r: any) => r?.job_id),
+      ),
       has_more: rows.length > f.limit,
       limit: f.limit,
       offset: f.offset,

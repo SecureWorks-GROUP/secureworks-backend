@@ -340,6 +340,62 @@ Deno.test("job_profit_list: pages past the first, and says when another follows"
   );
 });
 
+Deno.test("job_profit_list: the page's cost close is asked for its own jobs only, and a failed read is unknown", async () => {
+  const jobs = ["a", "b", "c"].map((job_id) => ({ job_id, work_type: "fencing" }));
+  const closeRow = (job_id: string, cost_state: string, extra: Record<string, unknown> = {}) => ({
+    job_id,
+    cost_state,
+    cost_final: cost_state === "final",
+    final_on: null,
+    closed_by: null,
+    finished: cost_state !== "open",
+    waiting_on: [],
+    ...extra,
+  });
+  const c: any = fakeClient({ v_job_profit: jobs });
+  const seen: unknown[] = [];
+  c.rpc = (fn: string, args: unknown) => {
+    seen.push([fn, args]);
+    return Promise.resolve({
+      data: [
+        closeRow("a", "final", { final_on: "2026-09-19", closed_by: "rule:cost-close-v1" }),
+        closeRow("b", "open"),
+        // A job the page did not ask for, and a final with no day: neither is repeated.
+        closeRow("z", "final", { final_on: "2026-09-19", closed_by: "rule:cost-close-v1" }),
+      ],
+      error: null,
+    });
+  };
+  const out = await jobProfitListAction(c, new URLSearchParams("limit=2"));
+  assertEquals(out.status, 200);
+  const body = out.body as any;
+  assertEquals(body.jobs.map((j: any) => j.job_id), ["a", "b"]);
+  assertEquals(seen, [["job_cost_close", { p_job_ids: ["a", "b"] }]], "only the page's jobs, one read");
+  assertEquals(body.cost_close.ok, true);
+  assertEquals(Object.keys(body.cost_close.by_job).sort(), ["a", "b"]);
+  assertEquals(body.cost_close.by_job.a.cost_state, "final");
+  assertEquals(body.cost_close.by_job.a.final_on, "2026-09-19");
+  assertEquals(body.cost_close.by_job.b.cost_state, "open");
+  assertEquals(body.has_more, true);
+
+  const bad: any = fakeClient({ v_job_profit: jobs });
+  bad.rpc = () => Promise.resolve({ data: null, error: { message: "timeout" } });
+  const failed = await jobProfitListAction(bad, new URLSearchParams("limit=2"));
+  assertEquals(failed.status, 200, "the figures still return when the cost close read fails");
+  assertEquals((failed.body as any).jobs.length, 2);
+  assertEquals((failed.body as any).cost_close, { ok: false, reason: "cost close read failed: timeout" });
+
+  const empty: any = fakeClient({ v_job_profit: [] });
+  let asked = 0;
+  empty.rpc = () => {
+    asked++;
+    return Promise.resolve({ data: [], error: null });
+  };
+  const none = await jobProfitListAction(empty, new URLSearchParams("limit=2"));
+  assertEquals((none.body as any).cost_close, { ok: true, by_job: {} });
+  assertEquals(asked, 0, "an empty page asks the engine nothing");
+});
+
 Deno.test("rollup: expected and quoted count only jobs the engine gave a quote figure", async () => {
   const row = (over: Record<string, unknown>) => ({
     work_type: "fencing",
@@ -779,17 +835,25 @@ Deno.test("job_profit: line evidence comes with the figures; a failed read is un
   const r1 = await jobProfitAction(ok, new URLSearchParams(`job_id=${JOB}`));
   assertEquals(r1.status, 200);
   assertEquals((r1.body as any).line_evidence, { status: "provisional", items: 3, evidenced: 1 });
-  assertEquals(seen, [["job_profit_line_evidence", { p_job_id: JOB }]]);
+  // The cost close read starts first and runs while the other reads run.
+  assertEquals(seen, [
+    ["job_cost_close", { p_job_ids: [JOB] }],
+    ["job_profit_line_evidence", { p_job_id: JOB }],
+  ]);
+  // The cost close read rides beside the figures: an answer that is not its rows is unknown.
+  assertEquals((r1.body as any).cost_close, { ok: false, reason: "cost close read returned nothing" });
 
   const bad: any = fakeClient(tables);
   bad.rpc = () => Promise.resolve({ data: null, error: { message: "timeout" } });
   const r2 = await jobProfitAction(bad, new URLSearchParams(`job_id=${JOB}`));
   assertEquals(r2.status, 200, "figures still return when the evidence read fails");
   assertEquals((r2.body as any).line_evidence.status, "unknown");
+  assertEquals((r2.body as any).cost_close, { ok: false, reason: "cost close read failed: timeout" });
 
   const none: any = fakeClient(tables);
   const r3 = await jobProfitAction(none, new URLSearchParams(`job_id=${JOB}`));
   assertEquals((r3.body as any).line_evidence.status, "unknown");
+  assertEquals((r3.body as any).cost_close, { ok: false, reason: "cost close is not readable here" });
 });
 
 // When each trade charged (finish line A5, owner ask 1, coordinator spot-check
