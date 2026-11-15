@@ -39,8 +39,19 @@ BEGIN
                AND a.attnotnull AND a.attname <> 'id' LOOP
       EXECUTE format('ALTER TABLE public.%I ALTER COLUMN %I DROP NOT NULL', t, c.attname);
     END LOOP;
+    -- An earlier case may create the table with a uuid id and no default.
+    IF EXISTS (SELECT 1 FROM pg_attribute a
+               WHERE a.attrelid = format('public.%I', t)::regclass AND a.attname = 'id'
+                 AND a.atttypid = 'uuid'::regtype AND NOT a.atthasdef) THEN
+      EXECUTE format('ALTER TABLE public.%I ALTER COLUMN id SET DEFAULT gen_random_uuid()', t);
+    END IF;
   END LOOP;
 END $$;
+
+-- Rows earlier cases left in the shared stack (one is in the week under test) are set aside
+-- inside this transaction, so the verdicts below are about these fixtures alone.
+TRUNCATE public.trade_invoice_lines, public.trade_invoices, public.trade_rates, public.job_assignments,
+  public.work_orders CASCADE;
 
 -- Org A and B; one trade per case.
 INSERT INTO public.users (id, name) VALUES
