@@ -34,3 +34,26 @@ ALTER TABLE public.jobs ADD COLUMN IF NOT EXISTS is_callback boolean DEFAULT fal
 GRANT SELECT ON public.job_assignments TO service_role;
 -- Production's service role reads the Dispatch order views (read 15 Nov 2026).
 GRANT SELECT ON public.v_dispatch_orders, public.v_dispatch_order_bills TO service_role;
+-- The day a cost reached its job. Production's job_materials_facts carries created_at, and Bookkeeping's line
+-- evidence is kept per revision in bookkeeping_line_evidence (read 15 Nov 2026); the registered stack has
+-- neither, so both are stood up here in production's shape. Production's service role reads work orders,
+-- variations and purchase orders; the stack's does not.
+ALTER TABLE public.job_materials_facts ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
+CREATE TABLE IF NOT EXISTS public.bookkeeping_line_evidence (
+  revision text NOT NULL,
+  xero_invoice_id text,
+  xero_line_item_id text,
+  amount_ex_gst numeric,
+  allocation text,
+  job_number text,
+  job_id uuid,
+  evidenced boolean,
+  basis text,
+  outcome text,
+  document_ref text,
+  trade_invoice_line_id uuid,
+  fact jsonb
+);
+GRANT SELECT ON public.bookkeeping_line_evidence, public.bookkeeping_evidence_revisions, public.work_orders,
+  public.job_variations, public.purchase_orders, public.trade_invoices, public.xero_invoices,
+  public.job_materials_facts, public.v_job_cost_events TO service_role;

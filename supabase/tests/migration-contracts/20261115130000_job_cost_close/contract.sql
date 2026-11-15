@@ -122,6 +122,18 @@
 --   CC-76  restoration make-safe, complete 10 Aug, its quote sent to the builder and not decided   open
 --   CC-77  repair, complete, stage complete 1 Aug, moved to on_site 1 Nov, complete again with no stage move
 --          on record                                                 settling, finished on 1 Nov by status, final 1 Dec
+--   CC-78  fencing, complete, done 10 Aug, a bill dated 20 Aug placed on it on 14 Nov
+--                                                                    settling, final 14 Dec (counted from when it landed)
+--   CC-79  fencing, complete, done 10 Aug, a variation with a cost estimate approved 10 Nov, no cost since
+--                                                                    waiting on variation_cost_not_in
+--   CC-80  fencing, complete, done 10 Aug, a variation waiting for the client's approval   open
+--   CC-81  fencing, complete, done 10 Aug, a crew work order accepted at 800 of labour, 500 on the job
+--                                                                    waiting on work_order_not_billed
+--   CC-82  fencing, cancelled, holding cost, a crew visit booked for 20 Nov                open
+--   CC-83  fencing, complete, done 10 Aug, a Dispatch order sent 5 Nov, matched only by an older bill (5 Aug)
+--                                                                    waiting on dispatch_order_not_billed
+--   CC-84  fencing, complete, done 10 Aug, a variation approved 1 Sep and its cost in on 5 Sep
+--                                                                    final 5 Oct
 -- And the record itself (section 4): a status change by anyone writes a job_status_moves row naming both
 -- statuses, and a make-safe taken from complete back to accepted is open again.
 
@@ -165,7 +177,14 @@ BEGIN
      OR NOT (p -> 'not_cost_reasons') @> '["missing_client_invoice", "variation_not_invoiced"]'::jsonb
      OR NOT (p -> 'pending_cost_reasons') @> '["open_purchase_orders", "ordered_not_billed", "installer_bill_unconfirmed"]'::jsonb
      OR (p -> 'pending_cost_reasons') @> '["no_cost_linked"]'::jsonb
-     OR NOT (p -> 'pending_cost_reasons') @> '["dispatch_order_not_billed"]'::jsonb
+     OR NOT (p -> 'pending_cost_reasons') @> '["dispatch_order_not_billed", "work_order_not_billed", "variation_cost_not_in"]'::jsonb
+     OR p -> 'variation_open_statuses' <> '["pending_approval", "sent"]'::jsonb
+     OR NOT (p -> 'variation_dead_statuses') @> '["declined", "cancelled", "rejected"]'::jsonb
+     OR NOT (p -> 'work_order_dead_statuses') @> '["draft", "cancelled", "declined", "rejected"]'::jsonb
+     OR (p -> 'work_order_dead_statuses') @> '["complete"]'::jsonb
+     OR (p ->> 'work_order_tolerance_ex')::numeric <> 1
+     OR (p -> 'not_cost_reasons') @> '["work_order_not_billed"]'::jsonb
+     OR (p -> 'not_cost_reasons') @> '["variation_cost_not_in"]'::jsonb
      OR p -> 'restoration_open_quote_statuses' <> '["draft", "sent"]'::jsonb
      OR (p -> 'finished_statuses') @> '["in_progress"]'::jsonb
      OR (p -> 'finished_statuses') @> '["scheduled"]'::jsonb
@@ -295,7 +314,14 @@ FROM (VALUES
   (74, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
   (75, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
   (76, 'complete',      'makesafe', '{"ses_family": "restoration", "restoration": {"mode": "assess_and_quote", "quotes": [{"revision": 1, "status": "sent"}]}}', '2026-08-10T02:00:00Z'),
-  (77, 'complete',      'repair',   '{"repair_stage": "complete"}', NULL)
+  (77, 'complete',      'repair',   '{"repair_stage": "complete"}', NULL),
+  (78, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (79, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (80, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (81, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (82, 'cancelled',     'fencing',  '{}', NULL),
+  (83, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (84, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z')
 ) AS v(n, status, type, meta, completed);
 UPDATE public.jobs SET is_callback = true WHERE job_number = 'CC-69';
 INSERT INTO public.job_assignments (job_id, status, scheduled_date, role, is_ghost) VALUES
@@ -310,6 +336,26 @@ INSERT INTO public.job_assignments (job_id, status, scheduled_date, role, is_gho
 INSERT INTO public.dispatch_supplier_order_emails (org_id, job_id, supplier_id, supplier_name, status, subject, sent_at)
 VALUES ('00000000-0000-0000-0000-000000000001', 'cc000000-0000-4000-8000-000000000075', gen_random_uuid(), 'CC Posts',
         'sent', 'Order for CC-75', timestamptz '2026-08-01T02:00:00Z');
+INSERT INTO public.job_assignments (job_id, status, scheduled_date, role, is_ghost) VALUES
+  ('cc000000-0000-4000-8000-000000000082', 'scheduled', date '2026-11-20', 'lead', false);
+INSERT INTO public.job_variations (job_id, variation_number, description, amount, cost_estimate, status, accepted_at, approved_at) VALUES
+  ('cc000000-0000-4000-8000-000000000079', 1, 'Extra gate', 1000, 600, 'approved',
+   timestamptz '2026-11-10T02:00:00Z', timestamptz '2026-11-10T03:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000080', 1, 'Extra gate', 1000, 600, 'pending_approval', NULL, NULL),
+  ('cc000000-0000-4000-8000-000000000084', 1, 'Extra panel', 400, 300, 'approved',
+   timestamptz '2026-09-01T02:00:00Z', timestamptz '2026-09-01T03:00:00Z');
+-- CC-81: a crew's work order accepted at 800 of labour (a job's own work order is approved by its own path).
+INSERT INTO public.work_orders (org_id, job_id, status, kind, wo_number, agreed_labour_ex, scope_items, created_at, accepted_at)
+VALUES ('00000000-0000-0000-0000-000000000001', 'cc000000-0000-4000-8000-000000000081', 'accepted', 'crew', 'WO-CC-81', 800,
+        '[]', timestamptz '2026-08-01T02:00:00Z', timestamptz '2026-08-02T02:00:00Z');
+-- CC-83: a bill from August in Xero, its reference naming the job, and a replacement order sent from Dispatch on 5 Nov.
+INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, line_items, raw_json, reference, created_at)
+VALUES ('00000000-0000-0000-0000-000000000001', 'CC-OLD-83', 'BO-CC-83', 'ACCPAY', 'PAID', 'CC Posts', 600, 660, date '2026-08-05',
+        jsonb_build_array(jsonb_build_object('Description', 'Posts', 'AccountCode', '310', 'LineAmount', 600, 'TaxAmount', 60)),
+        '{"LineAmountTypes": "Exclusive"}'::jsonb, 'CC-83', timestamptz '2026-08-06T02:00:00Z');
+INSERT INTO public.dispatch_supplier_order_emails (org_id, job_id, supplier_id, supplier_name, status, subject, sent_at)
+VALUES ('00000000-0000-0000-0000-000000000001', 'cc000000-0000-4000-8000-000000000083', gen_random_uuid(), 'CC Posts',
+        'sent', 'Order for CC-83', timestamptz '2026-11-05T02:00:00Z');
 
 -- The trigger wrote a 'created' row for each job just now. A real job's row is written when it is created, so
 -- date each one to its job's creation. CC-62 stands for a job that existed before the record began: its row is
@@ -429,6 +475,13 @@ UNION ALL
 SELECT j.id, 'CC-M-' || right(j.job_number, 2), 'BM-CC-' || right(j.job_number, 2), 'CC Steel', 'materials', 'actual', 600, 'high',
        CASE WHEN j.job_number = 'CC-02' THEN date '2026-07-20' ELSE date '2026-08-20' END, 'manual_queue'
 FROM public.jobs j WHERE j.job_number LIKE 'CC-%' AND j.type = 'fencing' AND j.job_number NOT IN ('CC-03', 'CC-04', 'CC-07', 'CC-26');
+INSERT INTO public.job_materials_facts (job_id, xero_invoice_id, invoice_number, contact_name, lane, kind, amount_ex_gst, confidence, fact_date, automation_source) VALUES
+  ('cc000000-0000-4000-8000-000000000078', 'CC-LATE-78', 'BLT-CC-78', 'CC Steel', 'materials', 'actual', 900, 'high', date '2026-08-20', 'manual_queue'),
+  ('cc000000-0000-4000-8000-000000000084', 'CC-VAR-84', 'BV-CC-84', 'CC Steel', 'materials', 'actual', 300, 'high', date '2026-09-05', 'manual_queue');
+-- Each placement was made on the day of its cost: the cost reached its job that day. CC-78's August bill was
+-- placed on 14 Nov.
+UPDATE public.job_materials_facts SET created_at = fact_date::timestamptz + interval '2 hours' WHERE xero_invoice_id LIKE 'CC-%';
+UPDATE public.job_materials_facts SET created_at = timestamptz '2026-11-14T02:00:00Z' WHERE xero_invoice_id = 'CC-LATE-78';
 
 INSERT INTO public.job_client_signoffs (job_id, method, waiver_reason, captured_by_actor, created_at) VALUES
   ('cc000000-0000-4000-8000-000000000014', 'office_waiver', 'Customer away, office signed', 'contract@test', timestamptz '2026-08-14T02:00:00Z'),
@@ -526,7 +579,14 @@ INSERT INTO cc_key VALUES
   ('CC-74', 'open',           NULL,         false, NULL,         NULL,               NULL),
   ('CC-75', 'waiting',        NULL,         true,  '2026-08-10', 'work_done',        'dispatch_order_not_billed'),
   ('CC-76', 'open',           NULL,         false, NULL,         NULL,               NULL),
-  ('CC-77', 'settling',       '2026-12-01', true,  '2026-11-01', 'status',           NULL);
+  ('CC-77', 'settling',       '2026-12-01', true,  '2026-11-01', 'status',           NULL),
+  ('CC-78', 'settling',       '2026-12-14', true,  '2026-08-10', 'work_done',        NULL),
+  ('CC-79', 'waiting',        NULL,         true,  '2026-08-10', 'work_done',        'variation_cost_not_in'),
+  ('CC-80', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-81', 'waiting',        NULL,         true,  '2026-08-10', 'work_done',        'work_order_not_billed'),
+  ('CC-82', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-83', 'waiting',        NULL,         true,  '2026-08-10', 'work_done',        'dispatch_order_not_billed'),
+  ('CC-84', 'final',          '2026-10-05', true,  '2026-08-10', 'work_done',        NULL);
 
 DO $$
 DECLARE r record; out text := ''; ids uuid[];
@@ -593,7 +653,7 @@ BEGIN
   IF (SELECT count(*) FROM public.job_cost_close(one, date '2026-09-19')) <> 1 THEN
     RAISE EXCEPTION 'job cost close contract: asked for one job, got another count';
   END IF;
-  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 77 THEN
+  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 84 THEN
     RAISE EXCEPTION 'job cost close contract: null ids did not return every job';
   END IF;
   IF (SELECT count(*) FROM public.job_cost_close()) <> (SELECT count(*) FROM public.v_job_profit) THEN
@@ -613,6 +673,7 @@ END $$;
 --    sent back to work opens again whatever days it still carries.
 INSERT INTO public.job_materials_facts (job_id, xero_invoice_id, invoice_number, contact_name, lane, kind, amount_ex_gst, confidence, fact_date, automation_source)
 VALUES ('cc000000-0000-4000-8000-000000000001', 'CC-M2-01', 'BM2-CC-01', 'CC Steel', 'materials', 'actual', 50, 'high', date '2026-11-01', 'manual_queue');
+UPDATE public.job_materials_facts SET created_at = timestamptz '2026-11-01T02:00:00Z' WHERE xero_invoice_id = 'CC-M2-01';
 UPDATE public.jobs SET status = 'rectification' WHERE job_number = 'CC-13';
 UPDATE public.jobs SET status = 'in_progress' WHERE job_number = 'CC-02';
 UPDATE public.makesafe_job_details SET cycle_number = 2 WHERE job_id = 'cc000000-0000-4000-8000-000000000027';
