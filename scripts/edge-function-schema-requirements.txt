@@ -1240,3 +1240,7 @@ xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|colum
 xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|column|xero_bank_transaction_lines.xero_type
 xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|table|xero_accounts
 ops-api|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|function|xero_spend_revenue_monthly
+# ops-api job_profit and job_profit_list ask the cost close rule beside the
+# Job Profit figures (job_cost_close.ts).
+ops-api|supabase/migrations/20261115130000_job_cost_close.sql|function|job_cost_close
+ops-api|supabase/migrations/20261115130000_job_cost_close.sql|function|job_cost_close_policy
