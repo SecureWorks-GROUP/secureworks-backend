@@ -1519,6 +1519,7 @@ import {
 } from './materials_ai.ts'
 // TP-01 Xero tie-out (20261029121500): staff read, bills by month and bucket.
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
+import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
 import { jobTraceAction, jobTraceView } from './job_trace.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
@@ -9776,6 +9777,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }))
         } catch (err) {
           if (err instanceof XeroTieoutError) throw new ApiError(err.message, err.status)
+          throw err
+        }
+      }
+
+      // Trade pay-run check (trade-pay-check-v1): every live trade invoice in
+      // the pay weeks, clean or stopped with plain reasons, so the bookkeeper
+      // approves the clean bills in one batch. Read only; staff by the front
+      // door (not in any trade, routine or agent-read list). Contract:
+      // docs/trade-pay-run-check-v1.md.
+      case 'trade_pay_run_check': {
+        try {
+          return json(await readTradePayRunCheck(client, {
+            asOf: url.searchParams.get('as_of'),
+            weeks: url.searchParams.get('weeks'),
+            // Never substitute the server org for a JWT caller with a missing profile org.
+            orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
+          }))
+        } catch (err) {
+          if (err instanceof TradePayRunCheckError) throw new ApiError(err.message, err.status)
           throw err
         }
       }
