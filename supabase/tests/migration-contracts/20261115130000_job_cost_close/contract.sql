@@ -111,6 +111,17 @@
 --   CC-69  fencing, invoiced, done 10 Aug, flagged as a callback with no callback event      open
 --   CC-70  fencing, complete, done 10 Aug, a crew visit booked for 20 Nov                    open
 --          (CC-01 carries a ghost visit that day and stays final)
+--   CC-71  fencing, complete, done 10 Aug, a crew visit on 14 Nov marked complete
+--                                                                    settling, finished on 10 Aug, final on 14 Dec
+--          (the visit's labour bill has 30 days to arrive)
+--   CC-72  fencing, complete, done 10 Aug, a confirmed booking from 10 to 20 Nov            open
+--   CC-73  fencing, complete, done 10 Aug, a crew clocked on 1 Nov and not off              open
+--   CC-74  fencing, complete, done 10 Aug, a crew allocated with no day                     open
+--   CC-75  fencing, complete, done 10 Aug, a Dispatch supplier order sent 1 Aug, no bill linked
+--                                                                    waiting on dispatch_order_not_billed
+--   CC-76  restoration make-safe, complete 10 Aug, its quote sent to the builder and not decided   open
+--   CC-77  repair, complete, stage complete 1 Aug, moved to on_site 1 Nov, complete again with no stage move
+--          on record                                                 settling, finished on 1 Nov by status, final 1 Dec
 -- And the record itself (section 4): a status change by anyone writes a job_status_moves row naming both
 -- statuses, and a make-safe taken from complete back to accepted is open again.
 
@@ -154,6 +165,8 @@ BEGIN
      OR NOT (p -> 'not_cost_reasons') @> '["missing_client_invoice", "variation_not_invoiced"]'::jsonb
      OR NOT (p -> 'pending_cost_reasons') @> '["open_purchase_orders", "ordered_not_billed", "installer_bill_unconfirmed"]'::jsonb
      OR (p -> 'pending_cost_reasons') @> '["no_cost_linked"]'::jsonb
+     OR NOT (p -> 'pending_cost_reasons') @> '["dispatch_order_not_billed"]'::jsonb
+     OR p -> 'restoration_open_quote_statuses' <> '["draft", "sent"]'::jsonb
      OR (p -> 'finished_statuses') @> '["in_progress"]'::jsonb
      OR (p -> 'finished_statuses') @> '["scheduled"]'::jsonb
      OR (p -> 'finished_statuses') @> '["accepted"]'::jsonb
@@ -275,12 +288,28 @@ FROM (VALUES
   (67, 'processing',    'makesafe', '{}', NULL),
   (68, 'processing',    'repair',   '{"repair_stage": "complete"}', NULL),
   (69, 'invoiced',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
-  (70, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z')
+  (70, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (71, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (72, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (73, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (74, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (75, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (76, 'complete',      'makesafe', '{"ses_family": "restoration", "restoration": {"mode": "assess_and_quote", "quotes": [{"revision": 1, "status": "sent"}]}}', '2026-08-10T02:00:00Z'),
+  (77, 'complete',      'repair',   '{"repair_stage": "complete"}', NULL)
 ) AS v(n, status, type, meta, completed);
 UPDATE public.jobs SET is_callback = true WHERE job_number = 'CC-69';
 INSERT INTO public.job_assignments (job_id, status, scheduled_date, role, is_ghost) VALUES
   ('cc000000-0000-4000-8000-000000000070', 'scheduled', date '2026-11-20', 'lead', false),
-  ('cc000000-0000-4000-8000-000000000001', 'scheduled', date '2026-11-20', 'observer', true);
+  ('cc000000-0000-4000-8000-000000000001', 'scheduled', date '2026-11-20', 'observer', true),
+  ('cc000000-0000-4000-8000-000000000071', 'complete',  date '2026-11-14', 'lead', false),
+  ('cc000000-0000-4000-8000-000000000072', 'confirmed', date '2026-11-10', 'lead', false),
+  ('cc000000-0000-4000-8000-000000000074', 'scheduled', NULL,              'lead', false);
+UPDATE public.job_assignments SET scheduled_end = date '2026-11-20' WHERE job_id = 'cc000000-0000-4000-8000-000000000072';
+INSERT INTO public.job_assignments (job_id, status, scheduled_date, role, is_ghost, clocked_on_at) VALUES
+  ('cc000000-0000-4000-8000-000000000073', 'scheduled', date '2026-11-01', 'lead', false, timestamptz '2026-11-01T00:00:00Z');
+INSERT INTO public.dispatch_supplier_order_emails (org_id, job_id, supplier_id, supplier_name, status, subject, sent_at)
+VALUES ('00000000-0000-0000-0000-000000000001', 'cc000000-0000-4000-8000-000000000075', gen_random_uuid(), 'CC Posts',
+        'sent', 'Order for CC-75', timestamptz '2026-08-01T02:00:00Z');
 
 -- The trigger wrote a 'created' row for each job just now. A real job's row is written when it is created, so
 -- date each one to its job's creation. CC-62 stands for a job that existed before the record began: its row is
@@ -366,6 +395,8 @@ INSERT INTO public.job_events (job_id, event_type, detail_json, created_at) VALU
   ('cc000000-0000-4000-8000-000000000067', 'status_changed', '{"new_status": "processing", "old_status": "scheduled"}', timestamptz '2026-09-01T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000068', 'repair_stage_changed', '{"from_stage": "on_site", "to_stage": "complete"}', timestamptz '2026-08-01T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000068', 'repair_stage_changed', '{"from_stage": "complete", "to_stage": "on_site"}', timestamptz '2026-10-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000077', 'repair_stage_changed', '{"from_stage": "on_site", "to_stage": "complete"}', timestamptz '2026-08-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000077', 'repair_stage_changed', '{"from_stage": "complete", "to_stage": "on_site"}', timestamptz '2026-11-01T02:00:00Z'),
   -- A normal run through the finished statuses does not move the finish day: CC-01 was invoiced, then archived.
   ('cc000000-0000-4000-8000-000000000001', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-08-01T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000001', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:01Z'),
@@ -488,7 +519,14 @@ INSERT INTO cc_key VALUES
   ('CC-67', 'final',          '2026-09-24', true,  '2026-08-25', 'first_invoice',    NULL),
   ('CC-68', 'open',           NULL,         false, NULL,         NULL,               NULL),
   ('CC-69', 'open',           NULL,         false, NULL,         NULL,               NULL),
-  ('CC-70', 'open',           NULL,         false, NULL,         NULL,               NULL);
+  ('CC-70', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-71', 'settling',       '2026-12-14', true,  '2026-08-10', 'work_done',        NULL),
+  ('CC-72', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-73', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-74', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-75', 'waiting',        NULL,         true,  '2026-08-10', 'work_done',        'dispatch_order_not_billed'),
+  ('CC-76', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-77', 'settling',       '2026-12-01', true,  '2026-11-01', 'status',           NULL);
 
 DO $$
 DECLARE r record; out text := ''; ids uuid[];
@@ -555,7 +593,7 @@ BEGIN
   IF (SELECT count(*) FROM public.job_cost_close(one, date '2026-09-19')) <> 1 THEN
     RAISE EXCEPTION 'job cost close contract: asked for one job, got another count';
   END IF;
-  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 70 THEN
+  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 77 THEN
     RAISE EXCEPTION 'job cost close contract: null ids did not return every job';
   END IF;
   IF (SELECT count(*) FROM public.job_cost_close()) <> (SELECT count(*) FROM public.v_job_profit) THEN
@@ -584,6 +622,9 @@ SET LOCAL ROLE service_role;
 UPDATE public.jobs SET status = 'complete' WHERE job_number = 'CC-44';
 UPDATE public.jobs SET status = 'accepted' WHERE job_number = 'CC-44';
 UPDATE public.jobs SET client_name = client_name WHERE job_number = 'CC-44';
+-- CC-43 was final by its stage. Its stage moved back to on_site by a writer that logs nothing, then complete again.
+UPDATE public.jobs SET metadata = jsonb_set(metadata, '{repair_stage}', '"on_site"') WHERE job_number = 'CC-43';
+UPDATE public.jobs SET metadata = jsonb_set(metadata, '{repair_stage}', '"complete"') WHERE job_number = 'CC-43';
 RESET ROLE;
 INSERT INTO public.makesafe_job_details (job_id, cycle_number, reopen_reason)
 VALUES ('cc000000-0000-4000-8000-000000000009', 1, 'Builder asked us back');
@@ -617,6 +658,18 @@ BEGIN
     RAISE EXCEPTION 'job cost close contract: CC-44''s status record is %',
       (SELECT string_agg(source || ':' || COALESCE(from_status, '-') || '>' || to_status, ',' ORDER BY id)
          FROM public.job_status_moves WHERE job_id = 'cc000000-0000-4000-8000-000000000044');
+  END IF;
+  -- CC-43: two stage rows in the record. Its stage left complete after it last reached complete on record (the
+  -- record stamps both moves the same instant, and the move back to complete comes after it only in the record's
+  -- order), so the stage no longer stands and its status, processing, does not finish it.
+  IF (SELECT string_agg(COALESCE(from_status, '-') || '>' || to_status, ',' ORDER BY id)
+        FROM public.job_status_moves WHERE job_id = 'cc000000-0000-4000-8000-000000000043' AND source = 'repair_stage')
+     IS DISTINCT FROM 'complete>on_site,on_site>complete' THEN
+    RAISE EXCEPTION 'job cost close contract: CC-43''s stage record is wrong';
+  END IF;
+  SELECT * INTO r FROM public.job_cost_close(ARRAY['cc000000-0000-4000-8000-000000000043'::uuid], date '2026-11-15');
+  IF r.cost_state = 'final' THEN
+    RAISE EXCEPTION 'job cost close contract: CC-43 reads final after its stage moved back with no event';
   END IF;
   SELECT * INTO r FROM public.job_cost_close(ARRAY['cc000000-0000-4000-8000-000000000044'::uuid], date '2026-11-15');
   IF r.cost_state IS DISTINCT FROM 'open' OR r.finished THEN

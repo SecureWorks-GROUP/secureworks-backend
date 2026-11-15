@@ -32,3 +32,5 @@ GRANT SELECT, UPDATE ON public.jobs TO service_role;
 -- stack applies; its service role reads job_assignments. Both stood up here as production has them.
 ALTER TABLE public.jobs ADD COLUMN IF NOT EXISTS is_callback boolean DEFAULT false;
 GRANT SELECT ON public.job_assignments TO service_role;
+-- Production's service role reads the Dispatch order views (read 15 Nov 2026).
+GRANT SELECT ON public.v_dispatch_orders, public.v_dispatch_order_bills TO service_role;

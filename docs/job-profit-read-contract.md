@@ -162,7 +162,8 @@ and list is in `job_cost_close_policy()` (`cost-close-v1`) and changes only by m
 
 The same migration adds `job_status_moves`: the database's own record of every job status move,
 written by a trigger on `jobs` whoever makes the change (a row when a job is created, one per status
-change naming both statuses, and one baseline row per job that existed when the record began). The
+change naming both statuses, one per repair stage change (`source` `repair_stage`, old and new stage
+in the from and to columns), and one baseline row per job that existed when the record began). The
 rule dates a finish by the last time the job went back to work, and the application's events are not
 a complete record of that: five independent reviews each found another writer that changes
 `jobs.status` and logs something else or nothing (a restoration stage move, a quote accepted on a
@@ -182,11 +183,16 @@ caught and logged as a warning). Service role reads the table; nothing else read
   keeps its old `completed_at` and its old sign-off. Read in this order:
   - A job in `rectification` is never finished, and neither is a job with a callback open
     (`jobs.is_callback`, or a `callback_opened` event with no `callback_resolved` after it), nor a
-    job with a crew visit still to come (a `job_assignments` row at `scheduled` or `confirmed`, not
-    a ghost or observer, dated on or after `as_of`): labour not yet worked.
+    job with a crew visit still to come: a `job_assignments` row that is not a ghost or observer,
+    not cancelled and not complete, and either has no date yet, ends on or after `as_of` (its
+    `scheduled_end`, else its `scheduled_date`), or is clocked on and not off. A live row dated in
+    the past is not read as a visit to come (production carries stale bookings on finished jobs).
+    Nor is a job finished while a restoration quote on it is still `draft` or `sent`
+    (`restoration_open_quote_statuses`): the builder's answer decides the works.
   - A cancelled or lost job is finished as `did_not_go_ahead` when it holds cost or a cost is still
     to come (`pending_cost_reasons` in the policy: an open or unbilled order, a bill not placed or
-    not confirmed, unapproved trade charges), so it reads `waiting`, not `not_applicable`.
+    not confirmed, unapproved trade charges, a Dispatch order with no bill), so it reads `waiting`,
+    not `not_applicable`.
   - A job that carries a repair stage is finished by stage `complete` while the stage stands
     (below), whatever its status (the Repairs board moves the stage, not the status), or by status
     `archived` (`closed_statuses`). One sent back to work after its stage reached `complete`, with
@@ -226,8 +232,9 @@ caught and logged as a warning). Service role reads the table; nothing else read
     starting `Job reopened`) and each counts as a working move. A complete
     stage with no stage move on record stands only when no working move is on record either, and a
     stage stands only while no stage move to another stage is on record after it last reached
-    `complete`. A
-    stage day that does not stand gives way to the status move. The invoice carries a day and no
+    `complete` (stage moves are read from `repair_stage_changed` events and from the record). A
+    stage day that does not stand gives way to the status move, and a repair finished by its
+    status is never dated before the day its stage last left `complete`. The invoice carries a day and no
     time, so a working status move on the invoice day itself leaves it standing (a make-safe is
     attended and invoiced on one day); a reopen or a re-attend on that day does not.
   - The moves read are `job_status_moves` (complete from the day the record began) and, for the
@@ -244,9 +251,11 @@ caught and logged as a warning). Service role reads the table; nothing else read
     that would otherwise be final read `settling` because of it.
   - `finished_basis` names the day used: `work_done`, `repair_stage`, `first_invoice`, `status`
     (a status move, or no day on record), `did_not_go_ahead` (no day).
-  - The quiet count runs from the latest of the finish day, the newest cost and the history floor. A finished job with
-    no day on record counts from the later of the newest cost and the day the job record last
-    changed (`jobs.updated_at`), so an old cost never closes a job finished yesterday. With no
+  - The quiet count runs from the latest of the finish day, the newest cost, the history floor and
+    the last crew visit (the latest `scheduled_end`, `scheduled_date` or clock-off day of a booking
+    that was not cancelled), so labour worked after the finish day restarts it. A finished job with
+    no day on record counts from the latest of the newest cost, the last crew visit and the day the
+    job record last changed (`jobs.updated_at`), so an old cost never closes a job finished yesterday. With no
     cost date it reads `waiting` on `no_cost_date`; with a cost date and no day at all, `waiting`
     on `no_finish_day`.
   - Known limit: an invoiced make-safe at a resting status is taken as attended; no attendance
@@ -264,7 +273,9 @@ caught and logged as a warning). Service role reads the table; nothing else read
   revenue or structure and not cost (`not_cost_reasons` in the policy: a missing or draft customer
   invoice, an unbilled variation, a holding job, a missing expected-cost lane, a Xero Project linked
   by contact only). Every other code holds a close, `text_matched_lines` included, and so does a code
-  Job Profit adds later. So `final` says the cost is complete; it does not say the job was invoiced.
+  Job Profit adds later. The rule adds one reason of its own, `dispatch_order_not_billed`: a
+  supplier order emailed from Dispatch (`v_dispatch_orders` kind `dispatch_v2_email`) with no bill
+  linked in `v_dispatch_order_bills`, a cost Job Profit's own row does not see yet. So `final` says the cost is complete; it does not say the job was invoiced.
 - **Nothing is frozen.** A cost that lands on a final job moves it back to `settling` with a later
   `final_on`; a job put back into rectification or any working status reads `open`, and so does a
   repair or a resting make-safe reopened, re-attended or sent back to work. `as_of` moves
