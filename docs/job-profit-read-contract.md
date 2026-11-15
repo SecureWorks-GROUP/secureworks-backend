@@ -198,7 +198,8 @@ reads or writes it.
     to come (`pending_cost_reasons` in the policy: an open or unbilled order, a bill not placed or
     not confirmed, unapproved trade charges, a Dispatch order, work order or costed variation with
     no bill), so it reads `waiting`, not `not_applicable`. One that still has something under way
-    (a callback, a crew visit to come, an undecided restoration quote or variation) reads `open`.
+    (a callback, a crew visit to come or in the last 30 days, an undecided restoration quote or
+    variation) reads `open`.
   - A job that carries a repair stage is finished by stage `complete` while the stage stands
     (below), whatever its status (the Repairs board moves the stage, not the status), or by status
     `archived` (`closed_statuses`). One sent back to work after its stage reached `complete`, with
@@ -294,16 +295,21 @@ reads or writes it.
   Job Profit adds later. The rule adds reasons of its own:
   - `dispatch_order_not_billed`: a supplier order emailed from Dispatch (`v_dispatch_orders` kind
     `dispatch_v2_email`) with no bill linked in `v_dispatch_order_bills` that is dated on or after
-    the order and is itself a cost on this job, a cost Job Profit's own row does not see yet
+    the order and is itself a counted cost on this job, a cost Job Profit's own row does not see yet
     (17 jobs on 15 Nov 2026).
   - `work_order_not_billed`: work orders that are not dead (`work_order_dead_statuses`: draft,
-    cancelled, void, declined, rejected) agree more labour (`agreed_labour_ex`) than the labour on
-    the job's cost, by more than `work_order_tolerance_ex` ($1). A job work order and the crew work
+    cancelled, void, declined, rejected) agree more labour (`agreed_labour_ex`) than the labour Job
+    Profit counts on the job (`is_actual`: an installer bill a person marked not job related is
+    not counted), by more than `work_order_tolerance_ex` ($1). A job work order and the crew work
     orders under it describe the same labour, so the larger of the two totals counts, never their
     sum (57 jobs on 15 Nov 2026; some will be work orders agreed above what was finally billed,
     which a person settles by cancelling or adjusting the work order).
-  - `variation_cost_not_in`: a variation carrying a cost estimate was accepted or approved after the
-    newest cost reached the job.
+  - `variation_cost_not_in`: a variation that is agreed (not `pending_approval` or `sent`, not
+    dead) carries a cost estimate, and the cost Job Profit counts that reached the job after it was
+    agreed is less than half the estimate (`variation_cost_cover_share`). It is agreed when accepted
+    or approved, or when made for a staff variation auto-approved under the limit (which carries
+    neither time). A cost bought before the variation was agreed does not cover it; a person
+    settles that by adjusting the estimate.
   So `final` says the cost is complete; it does not say the job was invoiced.
 - **Nothing is frozen.** A cost that lands on a final job moves it back to `settling` with a later
   `final_on`; a job put back into rectification or any working status reads `open`, and so does a

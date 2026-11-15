@@ -182,7 +182,8 @@ BEGIN
      OR NOT (p -> 'variation_dead_statuses') @> '["declined", "cancelled", "rejected"]'::jsonb
      OR NOT (p -> 'work_order_dead_statuses') @> '["draft", "cancelled", "declined", "rejected"]'::jsonb
      OR (p -> 'work_order_dead_statuses') @> '["complete"]'::jsonb
-     OR (p ->> 'work_order_tolerance_ex')::numeric <> 1
+     OR (p ->> 'work_order_tolerance_ex')::numeric IS DISTINCT FROM 1
+     OR (p ->> 'variation_cost_cover_share')::numeric IS DISTINCT FROM 0.5
      OR (p -> 'not_cost_reasons') @> '["work_order_not_billed"]'::jsonb
      OR (p -> 'not_cost_reasons') @> '["variation_cost_not_in"]'::jsonb
      OR p -> 'restoration_open_quote_statuses' <> '["draft", "sent"]'::jsonb
@@ -741,6 +742,106 @@ BEGIN
   IF r.cost_state IS DISTINCT FROM 'final' OR r.finished_basis IS DISTINCT FROM 'work_done' THEN
     RAISE EXCEPTION 'job cost close contract: CC-27 at complete on a second attendance: % by %', r.cost_state, r.finished_basis;
   END IF;
+END $$;
+
+-- 4b. Ninth review: CC-85 to CC-91.
+--   CC-85  a crew work order agreed at 2000, 500 of labour counted, and a 1500 installer bill on the job that a
+--          person marked not job related (Job Profit does not count it): waiting on the work order
+--   CC-86  the same without that bill (control)
+--   CC-87  a costed variation (600) agreed hours after a small late bill landed the same Perth day, no cost since
+--   CC-88  the same, agreed the next day (control)
+--   CC-89  cancelled after a crew attended on 10 Nov, no bill yet: its labour bill has 30 days to arrive
+--   CC-90  a costed variation agreed 10 Nov and only an unrelated 5 placed since: not its cost
+--   CC-91  a staff variation auto-approved 14 Nov (no accepted or approved time) with a cost estimate, no cost
+INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at, updated_at, completed_at)
+SELECT ('cc000000-0000-4000-8000-0000000000' || lpad(v.n::text, 2, '0'))::uuid, '00000000-0000-0000-0000-000000000001',
+       v.status, 'fencing', 'CC-' || lpad(v.n::text, 2, '0'), false, '{}'::jsonb, '{}',
+       '{"lanes": {"labour": {"amount_ex_gst": 500}, "materials": {"amount_ex_gst": 700}, "commission": {"amount_ex_gst": 0}}}'::jsonb,
+       timestamptz '2026-07-01T00:00:00Z', timestamptz '2026-07-01T00:00:00Z', v.completed::timestamptz
+FROM (VALUES
+  (85, 'complete',  '2026-08-10T02:00:00Z'),   -- WO 2000 agreed, 500 labour actual, 1500 installer bill marked not job related
+  (86, 'complete',  '2026-08-10T02:00:00Z'),   -- control: same without the not-job-related bill
+  (87, 'complete',  '2026-08-10T02:00:00Z'),   -- costed variation agreed the same Perth day the last cost landed
+  (88, 'complete',  '2026-08-10T02:00:00Z'),   -- control: agreed the next day
+  (89, 'cancelled', NULL),                     -- cancelled after a crew attended on 10 Nov, no bill yet
+  (90, 'complete',  '2026-08-10T02:00:00Z'),   -- costed variation agreed 10 Nov, an unrelated small cost lands 12 Nov
+  (91, 'complete',  '2026-08-10T02:00:00Z')    -- a staff variation auto approved 14 Nov with a cost estimate, no cost
+) AS v(n, status, completed);
+UPDATE public.job_status_moves m SET moved_at = j.created_at FROM public.jobs j
+ WHERE j.id = m.job_id AND j.job_number IN ('CC-85','CC-86','CC-87','CC-88','CC-89','CC-90','CC-91');
+
+-- Customer invoices on the jobs that went ahead.
+INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, line_items, raw_json, job_id, created_at)
+SELECT '00000000-0000-0000-0000-000000000001', 'CC9-S-' || right(j.job_number, 2), 'INV-CC9-' || right(j.job_number, 2), 'ACCREC', 'AUTHORISED', 'CC Customer',
+       3000, 3300, date '2026-08-25',
+       jsonb_build_array(jsonb_build_object('Description', 'Work', 'AccountCode', '200', 'LineAmount', 3000, 'TaxAmount', 300)),
+       '{"LineAmountTypes": "Exclusive"}'::jsonb, j.id, timestamptz '2026-08-25T02:00:00Z'
+FROM public.jobs j WHERE j.job_number IN ('CC-85','CC-86','CC-87','CC-88','CC-89','CC-90','CC-91') AND j.status <> 'cancelled';
+
+-- Labour 500 and materials 600 placed on 20 Aug on every job that went ahead.
+INSERT INTO public.job_materials_facts (job_id, xero_invoice_id, invoice_number, contact_name, lane, kind, amount_ex_gst, confidence, fact_date, automation_source, created_at)
+SELECT j.id, 'CC9-L-' || right(j.job_number, 2), 'BL-CC9-' || right(j.job_number, 2), 'CC Installer', 'labour', 'actual', 500, 'high', date '2026-08-20', 'manual_queue', timestamptz '2026-08-20T02:00:00Z'
+FROM public.jobs j WHERE j.job_number IN ('CC-85','CC-86','CC-87','CC-88','CC-89','CC-90','CC-91') AND j.status <> 'cancelled'
+UNION ALL
+SELECT j.id, 'CC9-M-' || right(j.job_number, 2), 'BM-CC9-' || right(j.job_number, 2), 'CC Steel', 'materials', 'actual', 600, 'high', date '2026-08-20', 'manual_queue', timestamptz '2026-08-20T02:00:00Z'
+FROM public.jobs j WHERE j.job_number IN ('CC-85','CC-86','CC-87','CC-88','CC-89','CC-90','CC-91') AND j.status <> 'cancelled';
+
+-- CC-85 / CC-86: a crew work order accepted at 2000 of labour; 500 of labour is on each job.
+INSERT INTO public.work_orders (org_id, job_id, status, kind, wo_number, agreed_labour_ex, scope_items, created_at, accepted_at)
+SELECT '00000000-0000-0000-0000-000000000001', j.id, 'accepted', 'crew', 'WO-' || j.job_number, 2000, '[]',
+       timestamptz '2026-08-01T02:00:00Z', timestamptz '2026-08-02T02:00:00Z'
+FROM public.jobs j WHERE j.job_number IN ('CC-85', 'CC-86');
+-- CC-85 only: an installer bill (account 306) linked to the job in Xero, which a person marked not job related.
+INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, line_items, raw_json, job_id, created_at)
+VALUES ('00000000-0000-0000-0000-000000000001', 'CC9-NJR-01', 'BI-CC-85', 'ACCPAY', 'AUTHORISED', 'Other Installer', 1500, 1650, date '2026-08-20',
+        jsonb_build_array(jsonb_build_object('LineItemID', 'li-1', 'Description', 'Install labour', 'AccountCode', '306', 'LineAmount', 1500, 'TaxAmount', 150)),
+        '{"LineAmountTypes": "Exclusive"}'::jsonb, 'cc000000-0000-4000-8000-000000000085', timestamptz '2026-08-20T02:00:00Z');
+INSERT INTO public.materials_reconciliation_queue (xero_invoice_id, invoice_number, sub_total, status, closed_reason)
+VALUES ('CC9-NJR-01', 'BI-CC-85', 1500, 'not_job_related', 'not ours');
+
+-- CC-87: a late bill placed on 10 Nov 02:00 UTC (10 Nov Perth), a costed variation approved 10 Nov 06:00 UTC.
+-- CC-88: the same, the variation approved 11 Nov.
+INSERT INTO public.job_materials_facts (job_id, xero_invoice_id, invoice_number, contact_name, lane, kind, amount_ex_gst, confidence, fact_date, automation_source, created_at) VALUES
+  ('cc000000-0000-4000-8000-000000000087', 'CC9-LATE-03', 'BLT-CC-87', 'CC Steel', 'materials', 'actual', 90, 'high', date '2026-08-20', 'manual_queue', timestamptz '2026-11-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000088', 'CC9-LATE-04', 'BLT-CC-88', 'CC Steel', 'materials', 'actual', 90, 'high', date '2026-08-20', 'manual_queue', timestamptz '2026-11-10T02:00:00Z');
+INSERT INTO public.job_variations (job_id, variation_number, description, amount, cost_estimate, status, accepted_at, approved_at) VALUES
+  ('cc000000-0000-4000-8000-000000000087', 1, 'Extra gate', 1000, 600, 'approved', timestamptz '2026-11-10T05:00:00Z', timestamptz '2026-11-10T06:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000088', 1, 'Extra gate', 1000, 600, 'approved', timestamptz '2026-11-11T05:00:00Z', timestamptz '2026-11-11T06:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000090', 1, 'Extra gate', 1000, 600, 'approved', timestamptz '2026-11-10T05:00:00Z', timestamptz '2026-11-10T06:00:00Z');
+INSERT INTO public.job_variations (job_id, variation_number, description, amount, cost_estimate, status, created_at) VALUES
+  ('cc000000-0000-4000-8000-000000000091', 1, 'Extra post', 180, 120, 'auto_approved', timestamptz '2026-11-14T02:00:00Z');
+-- CC-90: a small negative materials adjustment (a refund) placed on 12 Nov, after the variation; no variation cost.
+INSERT INTO public.job_materials_facts (job_id, xero_invoice_id, invoice_number, contact_name, lane, kind, amount_ex_gst, confidence, fact_date, automation_source, created_at) VALUES
+  ('cc000000-0000-4000-8000-000000000090', 'CC9-REF-06', 'BR-CC-90', 'CC Steel', 'materials', 'actual', 5, 'high', date '2026-08-20', 'manual_queue', timestamptz '2026-11-12T02:00:00Z');
+
+-- CC-89: a crew attended on 10 Nov (clocked on and off, visit complete), then the job was cancelled. No bill yet.
+INSERT INTO public.job_assignments (job_id, status, scheduled_date, role, is_ghost, clocked_on_at, clocked_off_at) VALUES
+  ('cc000000-0000-4000-8000-000000000089', 'complete', date '2026-11-10', 'lead', false,
+   timestamptz '2026-11-10T00:00:00Z', timestamptz '2026-11-10T08:00:00Z');
+
+
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN
+    SELECT e.n, e.st15, e.st16, e.why, c15.cost_state AS got15, c16.cost_state AS got16, c15.waiting_on AS w15
+      FROM (VALUES ('CC-85', 'waiting', 'waiting', 'work_order_not_billed'),
+                   ('CC-86', 'waiting', 'waiting', 'work_order_not_billed'),
+                   ('CC-87', 'waiting', 'waiting', 'variation_cost_not_in'),
+                   ('CC-88', 'waiting', 'waiting', 'variation_cost_not_in'),
+                   ('CC-89', 'open',    'not_applicable', NULL),
+                   ('CC-90', 'waiting', 'waiting', 'variation_cost_not_in'),
+                   ('CC-91', 'waiting', 'waiting', 'variation_cost_not_in')) AS e(n, st15, st16, why)
+      JOIN public.jobs j ON j.job_number = e.n
+      CROSS JOIN LATERAL public.job_cost_close(ARRAY[j.id], date '2026-11-15') c15
+      CROSS JOIN LATERAL public.job_cost_close(ARRAY[j.id], date '2026-12-16') c16
+  LOOP
+    IF r.got15 IS DISTINCT FROM r.st15 OR r.got16 IS DISTINCT FROM r.st16
+       OR (r.why IS NOT NULL AND NOT (r.why = ANY (r.w15))) THEN
+      RAISE EXCEPTION '% state % on 15 Nov and % on 16 Dec, expected % and %, waiting on % (expected %)',
+        r.n, r.got15, r.got16, r.st15, r.st16, r.w15, r.why;
+    END IF;
+  END LOOP;
 END $$;
 
 -- 5. The service role can read it; nothing was stored by reading.
