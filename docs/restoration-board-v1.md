@@ -91,15 +91,16 @@ used, and the photos. It is rendered by `restoration_report_render.ts` on the
 shared report design (`report_design.ts`), which the make-safe report, the roof
 report and the restoration quote use too, so every document reads as one family.
 
-The look is a plain consultant's report (owner, 13 Nov 2026: official, not
-decorated): a text letterhead with the company's ABN, address and contacts and
-one thin orange rule; a ruled document control table; numbered sections and
-paragraphs (Introduction and Scope, Site Attendance, Observations, Works
-Completed, Materials, Photographic Record); ruled tables with hairline borders
-and a light grey key column; the works in order as an "Item / Description of
-work" table; the photos two to a row in a ruled schedule, "Photo N" and the
-caption under each; a running header, a footer with the ABN and "Page x of y",
-and a closing "Report issued by" block with "End of report".
+The look (owner, 14 Nov 2026, approved mockup "SecureWorks report v3"): the
+logo with the report name and reference beside it and one orange rule; a
+"Job details" table of label and value pairs, two to a row, with the work
+order and materials on full-width rows; slate section bars ("What we found",
+"What we did" with the subtitle on the bar, "Outcome", "Photos"); the words in
+a ruled box under each bar, orange square bullets for findings and outcome and
+numbered steps for the works; the first before and after photos as a large
+pair, then the rest four to a row, each "Photo N" with its caption; a running
+header, a closing "Report issued by" table, and a footer with the ABN and
+"Page x of y". The look lives only in `report_design.ts`.
 
 `POST ops-api?action=restoration_render_report` (staff session or the ops key;
 never the routine key, the agent key or a trade):

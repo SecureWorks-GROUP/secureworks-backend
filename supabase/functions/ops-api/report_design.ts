@@ -2,13 +2,19 @@
 // renders shares (restoration report, make-safe report, roof report,
 // restoration quote), so they read as one family.
 //
-// The look is a sober consultant's report (owner, 13 Nov 2026: "official, not
-// slop"): a plain letterhead with the company's details and one thin orange
-// rule, a ruled document control table, numbered sections and paragraphs
-// (1.1, 1.2), ruled tables with hairline borders and a light grey key column,
-// a photographic record as a two-per-row ruled schedule ("Photo N" under each
-// photo), a running header and a footer with "Page x of y". No dark panels, no
-// rounded cards, no pills, no icons, no coloured fills beyond the light grey.
+// The look was approved by the owner on 13 Nov 2026 from a design mockup:
+//   - the SecureWorks Group logo top left, the document's name and reference
+//     top right, one orange rule under them;
+//   - every section opens with a slate title bar (white capitals);
+//   - job information sits in a ruled table, a light grey label cell beside
+//     each value, two pairs to a row;
+//   - descriptions sit in a ruled box under their bar: short paragraphs,
+//     orange square bullets, and numbered steps for work done in order;
+//   - photos sit in ruled cells on a light grey ground, never cropped, with
+//     "Photo N" and the caption in a ruled cell beneath (a large before and
+//     after pair when there is one, then four to a row);
+//   - a footer on every page with the company, ABN, contacts and
+//     "Page x of y", and a closing "Report issued by" table.
 //
 // This module only DRAWS. It decides no content: each renderer keeps its own
 // fields, wording, hashes, limits and file names.
@@ -19,39 +25,43 @@
 //   - text is measured before it is drawn, and breaks to a new page cleanly;
 //   - photos go to jsPDF as raw bytes (never re-encoded to a string here).
 
+import { MAKESAFE_REPORT_LOGO_DATA_URL } from "./makesafe_report_logo.ts";
+
 export type Rgb = [number, number, number];
 
 export const REPORT_COLOURS = {
-  orange: [241, 90, 41] as Rgb, // #F15A29, the one accent: the letterhead rule
-  ink: [20, 20, 20] as Rgb,
-  grey: [84, 84, 84] as Rgb,
-  hair: [140, 140, 140] as Rgb,
-  shade: [241, 241, 241] as Rgb,
+  slate: [41, 60, 70] as Rgb, // #293C46, text and title bars
+  mid: [76, 106, 124] as Rgb, // #4C6A7C, labels and quiet text
+  light: [240, 244, 247] as Rgb, // #F0F4F7, label cells and photo ground
+  line: [195, 206, 214] as Rgb, // #C3CED6, table rules
+  orange: [241, 90, 41] as Rgb, // #F15A29, the brand accent
+  barNote: [201, 214, 222] as Rgb, // quiet text on a title bar
   white: [255, 255, 255] as Rgb,
   // Older names, kept so a caller that names them still draws in this palette.
-  dark: [20, 20, 20] as Rgb,
-  mid: [84, 84, 84] as Rgb,
-  body: [20, 20, 20] as Rgb,
-  light: [241, 241, 241] as Rgb,
-  rule: [140, 140, 140] as Rgb,
+  dark: [41, 60, 70] as Rgb,
+  ink: [41, 60, 70] as Rgb,
+  body: [41, 60, 70] as Rgb,
+  grey: [76, 106, 124] as Rgb,
+  hair: [195, 206, 214] as Rgb,
+  rule: [195, 206, 214] as Rgb,
+  shade: [240, 244, 247] as Rgb,
 } as const;
 
 export const REPORT_PAGE = {
   W: 210,
   H: 297,
-  MARGIN: 20,
-  CONTENT_W: 210 - 2 * 20,
+  MARGIN: 15,
+  CONTENT_W: 210 - 2 * 15,
   /** Where body content starts on a page after the first. */
-  RUNNING_TOP: 24,
+  RUNNING_TOP: 25,
   /** Nothing is drawn below this line except the footer. */
-  BODY_BOTTOM: 278,
+  BODY_BOTTOM: 281,
 } as const;
 
-/** Company details printed on the letterhead and in the closing block. */
+/** Company details printed in the footer and the closing table. */
 export const REPORT_COMPANY = {
   name: "SecureWorks Group",
-  tagline: "Emergency make safe and insurance restoration",
-  abn: "ABN 64 689 223 416",
+  abn: "64 689 223 416",
   address: "15 Utah Gr, Joondalup WA 6027",
   email: "admin@secureworkswa.com.au",
   phone: "+61 489 267 771",
@@ -60,10 +70,12 @@ export const REPORT_COMPANY = {
 const C = REPORT_COLOURS;
 const P = REPORT_PAGE;
 const PT = 0.3528; // one point in mm
-const HAIR_W = 0.18; // hairline, mm
-const BODY = 9.6; // body text size, pt
-const LEAD = 4.7; // body leading, mm
-const NUM_W = 11; // hanging indent for 1.1, 1.2 ..., mm
+const RULE_W = 0.3; // table rule, mm
+const BAR_H = 7.2; // section title bar, mm
+const PAD = 3.2; // inside a description box, mm
+const BODY = 9; // body text size, pt
+const LEAD = BODY * PT * 1.42; // body leading, mm
+const LOGO_RATIO = 1136 / 169; // logo width over height
 
 export interface ReportImage {
   data: Uint8Array | string;
@@ -75,19 +87,18 @@ export interface ReportImage {
 export interface ReportChrome {
   /** The kind of document, e.g. "Restoration Report". */
   kind: string;
-  /** What the document is about, under the kind on page one. */
-  title: string;
-  /** Line(s) under the title, e.g. the property address. */
+  /** What the document is about (kept for callers; not printed in this look). */
+  title?: string;
+  /** Older field, not printed in this look. */
   subtitle?: string;
-  /** Report or quote number: running header and footer. */
+  /** Report or quote number: top right and the running header. */
   reference: string;
-  /** A second line beside the reference, e.g. a date (page one only). */
+  /** Beside the reference on page one, e.g. "Issued 13 November 2026". */
   referenceNote?: string;
-  /** Running header, right: usually the property. */
+  /** Running header, after the reference: usually the property. */
   site?: string;
-  /** Older field; the footer now carries the company and ABN. */
+  /** Older fields, not printed in this look. */
   tagline?: string;
-  /** Older field; this design has no cover photo. */
   cover?: ReportImage | null;
 }
 
@@ -96,17 +107,32 @@ export interface ReportFact {
   value: string;
   /** Take the whole row. */
   wide?: boolean;
+  /** Smaller line(s) after the value, e.g. a quote approval. */
+  note?: string;
 }
 
 export interface GalleryPhoto {
   image: ReportImage | null;
   caption: string;
-  /** The room or area, e.g. "Activity room". */
+  /** The room or area, e.g. "Activity room" (not printed in this look). */
   area?: string;
-  /** "Before" or "After", printed at the start of the caption. */
+  /** "Before", "During" or "After": a small orange word before the caption. */
   tag?: string;
   /** Text shown when the image cannot be drawn. */
   fallback?: string;
+}
+
+/** One cell of a ruled table. */
+export interface TableCell {
+  text: string;
+  /** A label cell: light grey, small bold label text. */
+  shade?: boolean;
+  /** Bold value text. */
+  bold?: boolean;
+  /** Smaller grey line(s) after the text. */
+  note?: string;
+  /** Right-align (money and quantities). */
+  align?: "left" | "right";
 }
 
 /** PNG or JPEG, read from the bytes when we hold them. */
@@ -133,14 +159,15 @@ export function reportText(value: unknown): string {
     .replace(/\r\n/g, "\n");
 }
 
-/** "Photo 3  Before: wall unit ..." without saying Before twice. */
+/** The caption without a leading "Before:" when the tag already says it. */
 export function photoCaptionText(photo: GalleryPhoto): string {
   const caption = reportText(photo.caption).trim();
   const tag = reportText(photo.tag).trim();
-  if (tag && !caption.toLowerCase().startsWith(tag.toLowerCase())) {
-    return caption ? `${tag}: ${caption}` : tag;
-  }
-  return caption;
+  if (!tag) return caption;
+  const re = new RegExp(`^${tag}\\s*[:\\-]\\s*`, "i");
+  const rest = caption.replace(re, "");
+  if (rest === caption || !rest) return caption;
+  return rest.charAt(0).toUpperCase() + rest.slice(1);
 }
 
 export interface GalleryRowItem {
@@ -152,8 +179,8 @@ export interface GalleryRowItem {
 /**
  * Justified rows: every photo in a row has the same height, widths follow each
  * photo's own shape, and a full row spans the whole width. Nothing is cropped.
- * Pure. No longer used for the photographic record (a fixed two-per-row
- * schedule), kept for callers and tests that lay photos out by shape.
+ * Pure. Not used by the ruled photo grid; kept for callers and tests that lay
+ * photos out by shape.
  */
 export function layoutGalleryRows(
   aspects: number[],
@@ -210,26 +237,17 @@ export function layoutGalleryRows(
 // deno-lint-ignore no-explicit-any
 type Doc = any;
 
-/** One cell of a ruled table. */
-export interface TableCell {
-  text: string;
-  /** Bold text (key cells and header rows). */
-  bold?: boolean;
-  /** Light grey fill (key cells and header rows). */
-  shade?: boolean;
-  /** Smaller grey line(s) under the text. */
-  note?: string;
-  /** Right-align (money and quantities). */
-  align?: "left" | "right";
-}
-
 export class ReportCanvas {
   readonly doc: Doc;
   readonly chrome: ReportChrome;
   y = 0;
-  private sectionNo = 0;
-  private paraNo = 0;
   private dims = new Map<string, { w: number; h: number } | null>();
+  /** Top of the open description box, or null when none is open. */
+  private boxTop: number | null = null;
+  /** The open box carried over from a page break: it needs a top rule. */
+  private boxContinued = false;
+  /** The last section title, repeated when photos run onto a new page. */
+  private lastTitle = "";
 
   constructor(doc: Doc, chrome: ReportChrome) {
     this.doc = doc;
@@ -262,13 +280,13 @@ export class ReportCanvas {
     return out;
   }
 
-  /** A small bold field label (plain case, no letter spacing). */
+  /** A small bold label in plain case. */
   eyebrow(
     text: string,
     x: number,
     y: number,
-    rgb: Rgb = C.grey,
-    size = 7.6,
+    rgb: Rgb = C.mid,
+    size = 7.8,
     align: "left" | "right" = "left",
   ): void {
     this.font(size, "bold");
@@ -276,14 +294,14 @@ export class ReportCanvas {
     this.doc.text(reportText(text), x, y, align === "right" ? { align: "right" } : undefined);
   }
 
-  eyebrowWidth(text: string, size = 7.6): number {
+  eyebrowWidth(text: string, size = 7.8): number {
     this.font(size, "bold");
     return this.doc.getTextWidth(reportText(text));
   }
 
-  private hairline(x1: number, y1: number, x2: number, y2: number): void {
-    this.doc.setDrawColor(...C.hair);
-    this.doc.setLineWidth(HAIR_W);
+  private rule(x1: number, y1: number, x2: number, y2: number): void {
+    this.doc.setDrawColor(...C.line);
+    this.doc.setLineWidth(RULE_W);
     this.doc.line(x1, y1, x2, y2);
   }
 
@@ -315,7 +333,7 @@ export class ReportCanvas {
     return size ? size.w / size.h : 4 / 3;
   }
 
-  /** Draw the whole image in the box, square corners. False if it failed. */
+  /** Draw the whole image in the box. False if it failed. */
   drawImage(
     image: ReportImage | null,
     x: number,
@@ -347,69 +365,70 @@ export class ReportCanvas {
     return this.drawImage(image, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
   }
 
+  private logo(x: number, y: number, h: number): void {
+    try {
+      this.doc.addImage(
+        MAKESAFE_REPORT_LOGO_DATA_URL,
+        "PNG",
+        x,
+        y,
+        h * LOGO_RATIO,
+        h,
+        "sw-logo",
+        "FAST",
+      );
+    } catch {
+      this.font(h * 1.6, "bold");
+      this.colour(C.slate);
+      this.doc.text(REPORT_COMPANY.name, x, y + h * 0.8);
+    }
+  }
+
+  private orangeRule(y: number): void {
+    this.doc.setDrawColor(...C.orange);
+    this.doc.setLineWidth(0.8);
+    this.doc.line(P.MARGIN, y, P.W - P.MARGIN, y);
+  }
+
   // ── Page chrome ──
 
-  /** Page one: letterhead, one orange rule, then the document's title block. */
+  /** Page one: logo, the document's name and reference, one orange rule. */
   hero(_options: { overlap?: boolean } = {}): void {
     const doc = this.doc;
-    const chrome = this.chrome;
     const right = P.W - P.MARGIN;
-    this.font(19, "bold");
-    this.colour(C.ink);
-    doc.text(REPORT_COMPANY.name, P.MARGIN, 22);
-    this.font(8.5);
-    this.colour(C.grey);
-    doc.text(REPORT_COMPANY.tagline, P.MARGIN, 27);
-    this.font(8.5);
-    this.colour(C.ink);
-    let ry = 17.5;
-    for (
-      const line of [
-        REPORT_COMPANY.abn,
-        REPORT_COMPANY.address,
-        REPORT_COMPANY.email,
-        REPORT_COMPANY.phone,
-      ]
-    ) {
-      doc.text(line, right, ry, { align: "right" });
-      ry += 3.9;
-    }
-    doc.setDrawColor(...C.orange);
-    doc.setLineWidth(0.39);
-    doc.line(P.MARGIN, 32, right, 32);
-
-    let ty = 43;
-    this.font(17, "bold");
-    this.colour(C.ink);
-    doc.text(reportText(chrome.kind), P.MARGIN, ty);
-    ty += 6.4;
-    const sub = [chrome.title, chrome.subtitle]
+    this.logo(P.MARGIN, 11.5, 9.5);
+    this.font(15, "bold");
+    this.colour(C.slate);
+    doc.text(reportText(this.chrome.kind), right, 16.2, { align: "right" });
+    const sub = [this.chrome.reference, this.chrome.referenceNote]
       .map((t) => reportText(t).trim())
       .filter(Boolean)
-      .join("\n");
+      .join("  |  ");
     if (sub) {
-      const lines = this.wrap(sub, P.CONTENT_W, 10.5).slice(0, 5);
-      this.font(10.5);
-      this.colour(C.grey);
-      doc.text(lines, P.MARGIN, ty, { lineHeightFactor: 4.9 / (10.5 * PT) });
-      ty += lines.length * 4.9;
+      this.font(8.4);
+      this.colour(C.mid);
+      doc.text(sub, right, 21, { align: "right" });
     }
-    this.y = ty + 3;
+    this.orangeRule(25.4);
+    this.y = 27;
   }
 
   private runningHeader(): void {
     const doc = this.doc;
+    const right = P.W - P.MARGIN;
+    this.logo(P.MARGIN, 10.5, 6);
+    const rest = [this.chrome.reference, this.chrome.site]
+      .map((t) => reportText(t).trim())
+      .filter(Boolean)
+      .join("  |  ");
     this.font(8);
-    this.colour(C.grey);
-    doc.text(
-      `${reportText(this.chrome.kind)}  ${reportText(this.chrome.reference)}`,
-      P.MARGIN,
-      14,
-    );
-    if (this.chrome.site) {
-      doc.text(reportText(this.chrome.site), P.W - P.MARGIN, 14, { align: "right" });
-    }
-    this.hairline(P.MARGIN, 16, P.W - P.MARGIN, 16);
+    this.colour(C.mid);
+    const restW = doc.getTextWidth(rest);
+    doc.text(rest, right, 15, { align: "right" });
+    this.font(8, "bold");
+    this.colour(C.slate);
+    doc.text(reportText(this.chrome.kind), right - restW - 3, 15, { align: "right" });
+    this.orangeRule(19.6);
     this.y = P.RUNNING_TOP;
   }
 
@@ -422,59 +441,99 @@ export class ReportCanvas {
     return P.BODY_BOTTOM - this.y;
   }
 
+  /** Make room for `height`, carrying an open description box over the break. */
   ensure(height: number): void {
-    if (this.y + height > P.BODY_BOTTOM) this.newPage();
+    if (this.y + height <= P.BODY_BOTTOM) return;
+    const carry = this.boxTop !== null;
+    if (carry) this.closeBox(true);
+    this.newPage();
+    if (carry) {
+      this.boxTop = this.y;
+      this.boxContinued = true;
+      this.y += PAD - 0.6;
+    }
   }
 
   gap(mm: number): void {
     this.y += mm;
   }
 
-  /**
-   * Close the document: an "issued by" block and "End of report" (unless
-   * asked not to), then every page's footer once the page count is known.
-   */
-  finish(options: { endOfReport?: boolean; issuedOn?: string } = {}): void {
+  // ── Description box ──
+
+  private openBox(): void {
+    if (this.boxTop !== null) return;
+    this.boxTop = this.y;
+    this.boxContinued = false;
+    this.y += PAD - 0.6;
+  }
+
+  /** Draw the open box's rules. `cut` leaves the bottom open at a page break. */
+  private closeBox(cut = false): void {
+    if (this.boxTop === null) return;
+    const top = this.boxTop;
+    const bottom = cut ? Math.min(this.y + 1, P.BODY_BOTTOM) : this.y + PAD - 1;
+    const x1 = P.MARGIN;
+    const x2 = P.W - P.MARGIN;
+    this.rule(x1, top, x1, bottom);
+    this.rule(x2, top, x2, bottom);
+    if (!cut) this.rule(x1, bottom, x2, bottom);
+    if (this.boxContinued) this.rule(x1, top, x2, top);
+    this.boxTop = null;
+    this.boxContinued = false;
+    this.y = bottom;
+  }
+
+  private get innerX(): number {
+    return P.MARGIN + PAD;
+  }
+
+  private get innerW(): number {
+    return P.CONTENT_W - 2 * PAD;
+  }
+
+  // ── Sections ──
+
+  /** A slate title bar, kept with the first `keepWith` mm of what follows. */
+  section(title: string, keepWith = 14, note?: string): void {
     const doc = this.doc;
-    if (options.endOfReport !== false) {
-      const rows: Array<[string, string]> = [
-        ["Report issued by", `${REPORT_COMPANY.name}, ${REPORT_COMPANY.abn}`],
-      ];
-      if (options.issuedOn) rows.push(["Date of issue", options.issuedOn]);
-      rows.push(["Enquiries", `${REPORT_COMPANY.email}, ${REPORT_COMPANY.phone}`]);
-      const h = this.tableHeight([40, P.CONTENT_W - 40], rows.map(keyRow)) + 12;
-      this.y += 4;
-      this.ensure(h);
-      this.table([40, P.CONTENT_W - 40], rows.map(keyRow));
-      this.font(8.8);
-      this.colour(C.grey);
-      doc.text("End of report", P.W / 2, this.y + 4, { align: "center" });
-      this.y += 8;
+    this.closeBox();
+    if (this.y > P.RUNNING_TOP + 1) this.y += 4.6;
+    this.ensure(BAR_H + keepWith);
+    const top = this.y;
+    doc.setFillColor(...C.slate);
+    doc.rect(P.MARGIN, top, P.CONTENT_W, BAR_H, "F");
+    const label = reportText(title).toUpperCase();
+    this.font(8.4, "bold");
+    this.colour(C.white);
+    doc.text(label, P.MARGIN + 2.6, top + 4.8, { charSpace: 0.35 });
+    const labelW = doc.getTextWidth(label) + label.length * 0.35;
+    if (note) {
+      this.font(8.2);
+      this.colour(C.barNote);
+      // A long note is cut to the room left beside the title, never wrapped.
+      const room = P.CONTENT_W - 12 - labelW;
+      let shown = reportText(note);
+      if (doc.getTextWidth(shown) > room) {
+        while (shown.length > 1 && doc.getTextWidth(`${shown}...`) > room) shown = shown.slice(0, -1);
+        shown = `${shown.trimEnd()}...`;
+      }
+      doc.text(shown, P.W - P.MARGIN - 2.6, top + 4.8, { align: "right" });
     }
-    const total = doc.getNumberOfPages();
-    for (let page = 1; page <= total; page++) {
-      doc.setPage(page);
-      this.hairline(P.MARGIN, P.H - 15, P.W - P.MARGIN, P.H - 15);
-      this.font(8);
-      this.colour(C.grey);
-      doc.text(`${REPORT_COMPANY.name}  ${REPORT_COMPANY.abn}`, P.MARGIN, P.H - 10.8);
-      doc.text(reportText(this.chrome.reference), P.W / 2, P.H - 10.8, {
-        align: "center",
-      });
-      doc.text(`Page ${page} of ${total}`, P.W - P.MARGIN, P.H - 10.8, {
-        align: "right",
-      });
-    }
+    this.lastTitle = title;
+    this.y = top + BAR_H;
   }
 
   // ── Ruled tables ──
 
   private cellLines(cell: TableCell, width: number): { text: string[]; note: string[] } {
-    const inner = width - 2 * 1.8;
-    // A key like "Gutters/valleys/downpipes" may break after a slash, never mid-word.
-    const raw = cell.shade ? String(cell.text || "-").replace(/\/(?=\S)/g, "/ ") : cell.text || "-";
+    const inner = width - 2 * 2.6;
+    // A label like "Gutters/valleys/downpipes" may break after a slash, never mid-word.
+    const raw = cell.shade
+      ? String(cell.text || "-").replace(/\/(?=\S)/g, "/ ")
+      : cell.text || "-";
+    const size = cell.shade ? 7.8 : BODY;
     return {
-      text: this.wrap(raw, inner, 9, cell.bold ? "bold" : "normal"),
+      text: this.wrap(raw, inner, size, cell.shade || cell.bold ? "bold" : "normal"),
       note: cell.note ? this.wrap(cell.note, inner, 8) : [],
     };
   }
@@ -483,9 +542,10 @@ export class ReportCanvas {
     let h = 0;
     row.forEach((cell, i) => {
       const { text, note } = this.cellLines(cell, widths[i]);
-      h = Math.max(h, 2.2 + text.length * 4.1 + (note.length ? 1 + note.length * 3.7 : 0) + 1.5);
+      const lead = cell.shade ? 3.5 : 4.1;
+      h = Math.max(h, 2.2 + text.length * lead + (note.length ? 0.6 + note.length * 3.6 : 0) + 1.6);
     });
-    return h;
+    return Math.max(h, 7.6);
   }
 
   tableHeight(widths: number[], rows: TableCell[][]): number {
@@ -493,9 +553,9 @@ export class ReportCanvas {
   }
 
   /**
-   * A ruled table: hairline grid, light grey on shaded cells, 9pt text. A row
-   * never splits; a table that runs over a page carries on, repeating its
-   * header row when it has one.
+   * A ruled table: light rules, light grey label cells. A row never splits; a
+   * table that runs over a page carries on, repeating its header row when it
+   * has one.
    */
   table(
     widths: number[],
@@ -503,6 +563,7 @@ export class ReportCanvas {
     options: { header?: boolean; x?: number } = {},
   ): void {
     const doc = this.doc;
+    this.closeBox();
     const header = options.header ? rows[0] : null;
     const drawRow = (row: TableCell[]) => {
       const h = this.rowHeight(widths, row);
@@ -511,29 +572,32 @@ export class ReportCanvas {
       row.forEach((cell, i) => {
         const w = widths[i];
         if (cell.shade) {
-          doc.setFillColor(...C.shade);
+          doc.setFillColor(...C.light);
           doc.rect(x, top, w, h, "F");
         }
         const { text, note } = this.cellLines(cell, w);
-        this.font(9, cell.bold ? "bold" : "normal");
-        this.colour(C.ink);
+        const size = cell.shade ? 7.8 : BODY;
+        const lead = cell.shade ? 3.5 : 4.1;
+        this.font(size, cell.shade || cell.bold ? "bold" : "normal");
+        this.colour(cell.shade ? C.mid : C.slate);
+        const baseline = top + 2.2 + (cell.shade ? 2.6 : 3);
         if (cell.align === "right") {
-          doc.text(text, x + w - 1.8, top + 2.2 + 3, {
-            lineHeightFactor: 4.1 / (9 * PT),
+          doc.text(text, x + w - 2.6, baseline, {
+            lineHeightFactor: lead / (size * PT),
             align: "right",
           });
         } else {
-          doc.text(text, x + 1.8, top + 2.2 + 3, { lineHeightFactor: 4.1 / (9 * PT) });
+          doc.text(text, x + 2.6, baseline, { lineHeightFactor: lead / (size * PT) });
         }
         if (note.length) {
           this.font(8);
-          this.colour(C.grey);
-          doc.text(note, x + 1.8, top + 2.2 + text.length * 4.1 + 1 + 2.7, {
-            lineHeightFactor: 3.7 / (8 * PT),
+          this.colour(C.mid);
+          doc.text(note, x + 2.6, top + 2.2 + text.length * lead + 0.6 + 2.6, {
+            lineHeightFactor: 3.6 / (8 * PT),
           });
         }
-        doc.setDrawColor(...C.hair);
-        doc.setLineWidth(HAIR_W);
+        doc.setDrawColor(...C.line);
+        doc.setLineWidth(RULE_W);
         doc.rect(x, top, w, h, "S");
         x += w;
       });
@@ -549,118 +613,94 @@ export class ReportCanvas {
     });
   }
 
-  // ── Blocks ──
-
-  /** Document control: label and value pairs, two pairs a row. */
+  /** Label and value pairs, two to a row; a wide fact takes the whole row. */
   facts(items: ReportFact[], columns = 4): void {
-    const pairs = Math.max(1, Math.min(2, Math.floor(columns / 2) || 1));
+    const pairs = columns >= 3 ? 2 : 1;
     const keyW = 31;
-    const valW = P.CONTENT_W / pairs - keyW;
+    const half = P.CONTENT_W / 2;
     const rows: TableCell[][] = [];
     let row: TableCell[] = [];
-    const flush = () => {
-      if (!row.length) return;
-      if (row.length < pairs * 2) {
-        // A short last row: the last value takes the rest of the row.
-        rows.push(row);
-      } else rows.push(row);
-      row = [];
-    };
+    const cellsOf = (item: ReportFact): TableCell[] => [
+      { text: item.label, shade: true },
+      { text: reportText(item.value).trim() || "-", note: item.note },
+    ];
     for (const item of items) {
-      if (item.wide) {
-        flush();
-        rows.push([
-          { text: item.label, bold: true, shade: true },
-          { text: item.value },
-        ]);
+      if (item.wide || pairs === 1) {
+        if (row.length) rows.push(row);
+        row = [];
+        rows.push(cellsOf(item));
         continue;
       }
-      row.push({ text: item.label, bold: true, shade: true }, { text: item.value });
-      if (row.length === pairs * 2) flush();
+      row.push(...cellsOf(item));
+      if (row.length === 4) {
+        rows.push(row);
+        row = [];
+      }
     }
-    flush();
-    // Draw each row with widths that fit its own cell count.
+    if (row.length) rows.push(row);
     for (const cells of rows) {
-      const widths = cells.length === 2
-        ? [keyW, P.CONTENT_W - keyW]
-        : pairs === 2
-        ? [keyW, valW, keyW, valW]
+      const widths = cells.length === 4
+        ? [keyW, half - keyW, keyW, half - keyW]
         : [keyW, P.CONTENT_W - keyW];
-      const h = this.rowHeight(widths, cells);
-      this.ensure(h);
       this.table(widths, [cells]);
     }
-    this.y += 4;
   }
 
-  /** Site attendance: one ruled row a figure, the outcome last. */
+  /** Attendance figures as label and value pairs, the outcome on its own row. */
   glance(
     items: Array<{ label: string; value: string }>,
     outcome?: { label: string; text: string } | null,
   ): void {
-    const rows: TableCell[][] = items
+    const facts: ReportFact[] = items
       .filter((item) => reportText(item.value).trim())
-      .map((item) => keyRow([item.label, item.value]));
-    if (outcome?.text) rows.push(keyRow([outcome.label, outcome.text]));
-    if (!rows.length) return;
-    this.table([40, P.CONTENT_W - 40], rows);
-    this.y += 4;
+      .map((item) => ({ label: item.label, value: item.value }));
+    if (outcome?.text) facts.push({ label: outcome.label, value: outcome.text, wide: true });
+    if (facts.length) this.facts(facts, 4);
   }
 
-  /** "3.   Observations": numbered section heading, kept with what follows. */
-  section(title: string, keepWith = 14, note?: string): void {
-    const doc = this.doc;
-    if (this.y > P.RUNNING_TOP + 1) this.y += 4;
-    this.ensure(9 + keepWith);
-    this.sectionNo++;
-    this.paraNo = 0;
-    const base = this.y + 4.4;
-    this.font(11.5, "bold");
-    this.colour(C.ink);
-    const label = `${this.sectionNo}.`;
-    doc.text(label, P.MARGIN, base);
-    doc.text(reportText(title), P.MARGIN + NUM_W, base);
-    if (note) {
-      const end = P.MARGIN + NUM_W + doc.getTextWidth(reportText(title));
-      this.font(8.6);
-      this.colour(C.grey);
-      doc.text(reportText(note), end + 3, base);
-    }
-    this.y += 8.4;
+  /** The instruction we were given: one wide row, label on the left. */
+  callout(
+    label: string,
+    text: string,
+    note?: string | null,
+    _options: { plainLabel?: boolean } = {},
+  ): void {
+    this.facts([{ label, value: text, note: note || undefined, wide: true }], 4);
   }
 
-  /** The next paragraph number in this section, e.g. "4.3". */
-  private nextNumber(): string {
-    this.paraNo++;
-    return `${this.sectionNo}.${this.paraNo}`;
+  /** Label and value pairs in a ruled table, `columns` pairs a row. */
+  kvGrid(rows: Array<[string, string]>, columns = 2): void {
+    this.facts(
+      rows.map(([label, value]) => ({ label, value, wide: columns < 2 })),
+      columns >= 2 ? 4 : 2,
+    );
   }
+
+  // ── Descriptions (inside a ruled box under the section bar) ──
 
   /** Small bold lead-in over a paragraph. */
   lead(text: string): void {
-    this.ensure(14);
+    this.openBox();
+    this.ensure(LEAD * 3);
     this.font(BODY, "bold");
-    this.colour(C.ink);
-    this.doc.text(reportText(text), P.MARGIN + (this.sectionNo ? NUM_W : 0), this.y + 3.4);
-    this.y += 5.6;
+    this.colour(C.slate);
+    this.doc.text(reportText(text), this.innerX, this.y + 3.2);
+    this.y += LEAD + 0.6;
   }
 
-  /**
-   * Body paragraphs. Blank lines separate paragraphs. Inside a section each
-   * paragraph is numbered (4.1, 4.2) with a hanging indent, unless `plain`.
-   */
+  /** Body paragraphs. Blank lines separate paragraphs. */
   paragraph(
     text: unknown,
     options: { x?: number; width?: number; rgb?: Rgb; size?: number; plain?: boolean } = {},
   ): void {
-    const numbered = !options.plain && options.x === undefined && this.sectionNo > 0;
-    const x = options.x ?? P.MARGIN + (numbered ? NUM_W : 0);
-    const width = options.width ?? P.W - P.MARGIN - x;
+    this.openBox();
+    const x = options.x ?? this.innerX;
+    const width = options.width ?? this.innerX + this.innerW - x;
     const size = options.size ?? BODY;
-    const leading = size * PT * 1.45;
+    const leading = size * PT * 1.42;
     const blocks = (reportText(text) || "-").split(/\n\s*\n/);
     for (const block of blocks) {
       const lines = this.wrap(block.trim() || "-", width, size);
-      const label = numbered ? this.nextNumber() : "";
       for (let i = 0; i < lines.length; i++) {
         // Keep a paragraph's first two and last two lines together.
         const need = i === 0 || i === lines.length - 2
@@ -668,173 +708,187 @@ export class ReportCanvas {
           : leading;
         this.ensure(need);
         this.font(size);
-        this.colour(options.rgb ?? C.ink);
-        if (i === 0 && label) this.doc.text(label, P.MARGIN, this.y + 3.4);
-        this.doc.text(lines[i], x, this.y + 3.4);
+        this.colour(options.rgb ?? C.slate);
+        this.doc.text(lines[i], x, this.y + 3.2);
         this.y += leading;
       }
-      this.y += 1.8;
+      this.y += 1.6;
     }
   }
 
-  /** A lettered list (a), (b) under the paragraph before it. */
+  /** Orange square bullets. */
   bullets(items: string[]): void {
-    const size = BODY;
-    const leading = size * PT * 1.45;
-    const lx = P.MARGIN + (this.sectionNo ? NUM_W : 0);
-    const tx = lx + 7;
-    items.forEach((item, i) => {
-      const lines = this.wrap(item, P.W - P.MARGIN - tx, size);
-      this.ensure(lines.length * leading + 1.4);
-      this.font(size);
-      this.colour(C.ink);
-      this.doc.text(`(${letter(i)})`, lx, this.y + 3.4);
-      this.doc.text(lines, tx, this.y + 3.4, {
-        lineHeightFactor: leading / (size * PT),
+    this.openBox();
+    const tx = this.innerX + 5;
+    const width = this.innerX + this.innerW - tx;
+    for (const item of items) {
+      const lines = this.wrap(item, width, BODY);
+      this.ensure(lines.length * LEAD + 1);
+      this.doc.setFillColor(...C.orange);
+      this.doc.rect(this.innerX + 0.6, this.y + 1.55, 1.6, 1.6, "F");
+      this.font(BODY);
+      this.colour(C.slate);
+      this.doc.text(lines, tx, this.y + 3.2, {
+        lineHeightFactor: LEAD / (BODY * PT),
       });
-      this.y += lines.length * leading + 1.4;
-    });
-    this.y += 1.6;
-  }
-
-  /** The work done, in order: a ruled "Item / Description of work" table. */
-  steps(items: string[]): void {
-    const rows: TableCell[][] = [
-      [{ text: "Item", bold: true, shade: true }, {
-        text: "Description of work",
-        bold: true,
-        shade: true,
-      }],
-      ...items.map((item) => [{ text: this.nextNumber() }, { text: item }]),
-    ];
-    const widths = [16, P.CONTENT_W - 16];
-    // Keep the header with at least its first two rows.
-    this.ensure(this.tableHeight(widths, rows.slice(0, 3)));
-    this.table(widths, rows, { header: true });
-    this.y += 4;
-  }
-
-  /** The instruction we were given: a ruled row, label on the left. */
-  callout(
-    label: string,
-    text: string,
-    note?: string | null,
-    _options: { plainLabel?: boolean } = {},
-  ): void {
-    const row: TableCell[] = [
-      { text: label, bold: true, shade: true },
-      { text, note: note || undefined },
-    ];
-    const widths = [40, P.CONTENT_W - 40];
-    this.ensure(this.rowHeight(widths, row));
-    this.table(widths, [row]);
-    this.y += 4;
-  }
-
-  /** Label and value pairs in a ruled table, `columns` pairs a row. */
-  kvGrid(rows: Array<[string, string]>, columns = 2): void {
-    const pairs = Math.max(1, Math.min(2, columns));
-    const keyW = pairs === 2 ? 38 : 50;
-    const valW = P.CONTENT_W / pairs - keyW;
-    for (let i = 0; i < rows.length; i += pairs) {
-      const cells = rows.slice(i, i + pairs).flatMap(([k, v]) => [
-        { text: k, bold: true, shade: true } as TableCell,
-        { text: reportText(v).trim() || "-" } as TableCell,
-      ]);
-      const widths = cells.length === 2 && pairs === 2
-        ? [keyW, P.CONTENT_W - keyW]
-        : pairs === 2
-        ? [keyW, valW, keyW, valW]
-        : [keyW, P.CONTENT_W - keyW];
-      this.ensure(this.rowHeight(widths, cells));
-      this.table(widths, [cells]);
+      this.y += lines.length * LEAD + 1;
     }
-    this.y += 4;
+    this.y += 0.8;
+  }
+
+  /** Work done in order: "1." in orange, then the step. */
+  steps(items: string[]): void {
+    this.openBox();
+    const tx = this.innerX + 7;
+    const width = this.innerX + this.innerW - tx;
+    items.forEach((item, i) => {
+      const lines = this.wrap(item, width, BODY);
+      this.ensure(lines.length * LEAD + 1);
+      this.font(BODY, "bold");
+      this.colour(C.orange);
+      this.doc.text(`${i + 1}.`, this.innerX, this.y + 3.2);
+      this.font(BODY);
+      this.colour(C.slate);
+      this.doc.text(lines, tx, this.y + 3.2, {
+        lineHeightFactor: LEAD / (BODY * PT),
+      });
+      this.y += lines.length * LEAD + 1;
+    });
+    this.y += 0.8;
   }
 
   /** A quiet line of small grey text. */
   note(text: string): void {
-    const x = P.MARGIN + (this.sectionNo ? NUM_W : 0);
-    const lines = this.wrap(text, P.W - P.MARGIN - x, 8.8);
-    this.ensure(lines.length * 4.1 + 2);
-    this.font(8.8);
-    this.colour(C.grey);
-    this.doc.text(lines, x, this.y + 3.2, {
-      lineHeightFactor: 4.1 / (8.8 * PT),
-    });
-    this.y += lines.length * 4.1 + 2.6;
-  }
-
-  // ── Photographic record ──
-
-  private photoMissing(x: number, y: number, w: number, h: number, text: string): void {
+    this.openBox();
+    const lines = this.wrap(text, this.innerW, 8.4);
+    this.ensure(lines.length * 3.9 + 1.4);
     this.font(8.4);
-    this.colour(C.grey);
-    this.doc.text(reportText(text), x + w / 2, y + h / 2, { align: "center" });
+    this.colour(C.mid);
+    this.doc.text(lines, this.innerX, this.y + 3, {
+      lineHeightFactor: 3.9 / (8.4 * PT),
+    });
+    this.y += lines.length * 3.9 + 1.4;
   }
 
+  // ── Photos ──
+
+  /** Caption lines: tag and "Photo N" lead the first line, then the caption. */
+  private captionLayout(
+    photo: GalleryPhoto,
+    number: number | null,
+    width: number,
+    size: number,
+  ): { prefix: Array<{ text: string; w: number; tag: boolean }>; lines: string[] } {
+    const doc = this.doc;
+    const prefix: Array<{ text: string; w: number; tag: boolean }> = [];
+    const tag = reportText(photo.tag).trim().toUpperCase();
+    if (tag) {
+      this.font(size - 1.4, "bold");
+      prefix.push({ text: tag, w: doc.getTextWidth(tag) + 0.35 * tag.length + 1.6, tag: true });
+    }
+    if (number != null) {
+      const label = `Photo ${number}`;
+      this.font(size, "bold");
+      prefix.push({ text: label, w: doc.getTextWidth(label) + 1.6, tag: false });
+    }
+    const lead = prefix.reduce((sum, p) => sum + p.w, 0);
+    // Words fill the first line after the prefix, then wrap at the full width.
+    this.font(size);
+    const words = photoCaptionText(photo).split(/\s+/).filter(Boolean);
+    const lines: string[] = [];
+    let line = "";
+    let room = width - lead;
+    for (const word of words) {
+      const next = line ? `${line} ${word}` : word;
+      if (doc.getTextWidth(next) <= room || !line) {
+        line = next;
+      } else {
+        lines.push(line);
+        line = word;
+        room = width;
+      }
+    }
+    if (line || !lines.length) lines.push(line);
+    return { prefix, lines };
+  }
 
   /**
-   * One ruled schedule row: up to two photo cells, each with "Photo N" and the
-   * caption in a ruled cell beneath. The row is kept whole on one page.
+   * One row of photo cells: each photo on a light grey ground, never cropped,
+   * with its caption in a ruled cell beneath. The row is kept whole on a page.
    */
-  private scheduleRow(
+  private photoRow(
     cells: Array<{ photo: GalleryPhoto; number: number | null }>,
-    perRow = 2,
+    perRow: number,
+    photoH: number,
   ): void {
     const doc = this.doc;
     const colW = P.CONTENT_W / perRow;
-    // Two rows of two fill a page; the compact schedule fits three rows of three.
-    const boxH = perRow >= 3 ? 52 : 84;
-    const imgH = boxH + (perRow >= 3 ? 6 : 8);
-    const capFor = (c: { photo: GalleryPhoto; number: number | null }) => {
-      const label = c.number != null ? `Photo ${c.number}` : "";
-      const body = photoCaptionText(c.photo);
-      this.font(8.8, "bold");
-      const labelW = label ? doc.getTextWidth(label) + 2.4 : 0;
-      const lines = this.wrap(body || " ", colW - 2 * 1.8 - labelW, 8.8);
-      return { label, labelW, lines };
-    };
-    const caps = cells.map(capFor);
-    const capH = 2.6 + Math.max(...caps.map((c) => c.lines.length)) * 4 + 2;
-    const total = imgH + capH;
-    this.ensure(total);
+    const size = perRow <= 2 ? 8.8 : 8;
+    const capLead = size * PT * 1.32;
+    const layouts = cells.map((c) => this.captionLayout(c.photo, c.number, colW - 4.4, size));
+    const capH = Math.max(
+      perRow <= 2 ? 7.4 : 11,
+      ...layouts.map((l) => 3 + l.lines.length * capLead + 1.6),
+    );
+    const total = photoH + capH;
+    if (this.y + total > P.BODY_BOTTOM) {
+      this.newPage();
+      this.section(this.lastTitle || "Photos", total, "Continued");
+    }
     const top = this.y;
     cells.forEach((c, i) => {
       const x = P.MARGIN + i * colW;
+      doc.setFillColor(...C.light);
+      doc.rect(x, top, colW, photoH, "F");
       const a = this.aspect(c.photo.image);
-      const maxW = colW - (perRow >= 3 ? 8 : 16);
-      const w = Math.min(maxW, boxH * a);
+      const pad = perRow <= 2 ? 2.4 : 2;
+      const maxW = colW - 2 * pad;
+      const maxH = photoH - 2 * pad;
+      const w = Math.min(maxW, maxH * a);
       const h = w / a;
-      const ok = this.drawImage(c.photo.image, x + (colW - w) / 2, top + (imgH - h) / 2, w, h);
+      const ok = this.drawImage(c.photo.image, x + (colW - w) / 2, top + (photoH - h) / 2, w, h);
       if (!ok) {
-        this.photoMissing(x, top, colW, imgH, c.photo.fallback || "Photo could not be shown");
+        this.font(8);
+        this.colour(C.mid);
+        doc.text(
+          reportText(c.photo.fallback || "Photo could not be shown"),
+          x + colW / 2,
+          top + photoH / 2,
+          { align: "center" },
+        );
       }
-      doc.setDrawColor(...C.hair);
-      doc.setLineWidth(HAIR_W);
-      doc.rect(x, top, colW, imgH, "S");
-      doc.rect(x, top + imgH, colW, capH, "S");
-      const cap = caps[i];
-      const cy = top + imgH + 2.6 + 3;
-      if (cap.label) {
-        this.font(8.8, "bold");
-        this.colour(C.ink);
-        doc.text(cap.label, x + 1.8, cy);
+      doc.setDrawColor(...C.line);
+      doc.setLineWidth(RULE_W);
+      doc.rect(x, top, colW, photoH + capH, "S");
+      this.rule(x, top + photoH, x + colW, top + photoH);
+      const layout = layouts[i];
+      const by = top + photoH + 3 + size * PT * 0.72;
+      let cx = x + 2.2;
+      for (const p of layout.prefix) {
+        if (p.tag) {
+          this.font(size - 1.4, "bold");
+          this.colour(C.orange);
+          doc.text(p.text, cx, by, { charSpace: 0.35 });
+        } else {
+          this.font(size, "bold");
+          this.colour(C.slate);
+          doc.text(p.text, cx, by);
+        }
+        cx += p.w;
       }
-      this.font(8.8);
-      this.colour(C.ink);
-      doc.text(cap.lines, x + 1.8 + cap.labelW, cy, {
-        lineHeightFactor: 4 / (8.8 * PT),
+      this.font(size);
+      this.colour(C.slate);
+      layout.lines.forEach((line, li) => {
+        doc.text(line, li === 0 ? cx : x + 2.2, by + li * capLead);
       });
     });
-    this.y = top + total + 5;
+    this.y = top + total;
   }
 
   /**
-   * The photographic record: a ruled schedule, two photos to a row (three when
-   * `targetH` asks for small photos, for long roof visits), numbered "Photo 1",
-   * "Photo 2" in order. Nothing is cropped, a photo never leaves its caption,
-   * and a row never splits across pages.
+   * The photos: four to a row (two when there are only two), numbered
+   * "Photo 1", "Photo 2" in order. Nothing is cropped, a photo never leaves its
+   * caption, and a row that runs over a page carries the section bar with it.
    */
   gallery(
     photos: GalleryPhoto[],
@@ -845,38 +899,85 @@ export class ReportCanvas {
       onContinue?: () => void;
     } = {},
   ): void {
+    this.closeBox();
     const start = options.startNumber ?? 1;
-    const perRow = (options.targetH ?? 84) <= 66 ? 3 : 2;
+    const perRow = photos.length <= 2 ? 2 : 4;
+    const photoH = perRow === 2 ? 96 : 54;
     for (let i = 0; i < photos.length; i += perRow) {
       const row = photos.slice(i, i + perRow).map((photo, j) => ({
         photo,
         number: start + i + j,
       }));
       const before = this.doc.getNumberOfPages();
-      this.scheduleRow(row, perRow);
+      this.photoRow(row, perRow, photoH);
       if (this.doc.getNumberOfPages() !== before) options.onContinue?.();
     }
   }
 
-  /** Two photos side by side: the state we found and the state we left. */
-  beforeAfter(before: GalleryPhoto, after: GalleryPhoto): void {
-    this.scheduleRow([
-      { photo: { ...before, tag: before.tag || "Before" }, number: null },
-      { photo: { ...after, tag: after.tag || "After" }, number: null },
-    ]);
+  /** The state we found beside the state we left, two large cells. */
+  beforeAfter(
+    before: GalleryPhoto,
+    after: GalleryPhoto,
+    numbers: [number | null, number | null] = [null, null],
+  ): void {
+    this.closeBox();
+    this.photoRow([
+      { photo: { ...before, tag: before.tag || "Before" }, number: numbers[0] },
+      { photo: { ...after, tag: after.tag || "After" }, number: numbers[1] },
+    ], 2, 96);
   }
 
-  /** One photo in its own ruled cell, caption beneath. */
+  /** One photo in its own large cell, caption beneath. */
   plate(photo: GalleryPhoto, counter?: string): void {
+    this.closeBox();
     const n = counter ? Number(String(counter).split(/\D+/)[0]) : NaN;
-    this.scheduleRow([{ photo, number: Number.isFinite(n) && n > 0 ? n : null }]);
+    this.photoRow([{ photo, number: Number.isFinite(n) && n > 0 ? n : null }], 2, 96);
   }
-}
 
-function letter(i: number): string {
-  return i < 26 ? String.fromCharCode(97 + i) : String(i + 1);
-}
+  // ── Close ──
 
-function keyRow([label, value]: [string, string]): TableCell[] {
-  return [{ text: label, bold: true, shade: true }, { text: value || "-" }];
+  /**
+   * Close the document: a "Report issued by" table (unless asked not to),
+   * then every page's footer once the page count is known.
+   */
+  finish(options: { endOfReport?: boolean; issuedOn?: string } = {}): void {
+    const doc = this.doc;
+    this.closeBox();
+    if (options.endOfReport !== false) {
+      const facts: ReportFact[] = [
+        { label: "Company", value: REPORT_COMPANY.name },
+        options.issuedOn
+          ? { label: "Date of issue", value: options.issuedOn }
+          : { label: "ABN", value: REPORT_COMPANY.abn },
+      ];
+      if (options.issuedOn) {
+        facts.push({ label: "ABN", value: REPORT_COMPANY.abn });
+        facts.push({ label: "Address", value: REPORT_COMPANY.address });
+      } else {
+        facts.push({ label: "Address", value: REPORT_COMPANY.address, wide: true });
+      }
+      facts.push({ label: "Email", value: REPORT_COMPANY.email });
+      facts.push({ label: "Phone", value: REPORT_COMPANY.phone });
+      this.section("Report issued by", 7.6 * 3);
+      this.facts(facts, 4);
+    }
+    const total = doc.getNumberOfPages();
+    for (let page = 1; page <= total; page++) {
+      doc.setPage(page);
+      const fy = P.H - 13;
+      this.rule(P.MARGIN, fy, P.W - P.MARGIN, fy);
+      this.font(7.4, "bold");
+      this.colour(C.slate);
+      doc.text(REPORT_COMPANY.name, P.MARGIN, fy + 4.2);
+      const nameW = doc.getTextWidth(REPORT_COMPANY.name);
+      this.font(7.4);
+      this.colour(C.mid);
+      doc.text(
+        `ABN ${REPORT_COMPANY.abn}   |   ${REPORT_COMPANY.email}   |   ${REPORT_COMPANY.phone}`,
+        P.MARGIN + nameW + 2.4,
+        fy + 4.2,
+      );
+      doc.text(`Page ${page} of ${total}`, P.W - P.MARGIN, fy + 4.2, { align: "right" });
+    }
+  }
 }

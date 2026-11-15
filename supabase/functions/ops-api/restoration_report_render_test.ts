@@ -100,30 +100,35 @@ Deno.test("file name: stable per job and builder reference, and its own name", (
   );
 });
 
-Deno.test("facts: the document control table, work order and purchase order apart", () => {
+Deno.test("facts: the job details table, work order and purchase order apart", () => {
   const facts = restorationReportFacts(BASE);
-  assertEquals(facts.map((f) => f.label), [
-    "Report number",
-    "Date of attendance",
-    "Prepared by",
-    "Prepared for",
-    "Builder reference",
-    "Purchase order",
-    "Property",
-    "Policyholder",
-  ]);
-  assertEquals(facts[4].value, "MLR-40001");
-  assertEquals(facts[5].value, "PO-60001");
+  const labels = facts.map((f) => f.label);
+  for (
+    const label of [
+      "Our reference",
+      "Date attended",
+      "Builder",
+      "Arrived",
+      "Builder reference",
+      "Attended by",
+      "Purchase order",
+      "Policyholder",
+      "Property",
+    ]
+  ) assert(labels.includes(label), label);
+  assertEquals(facts.find((f) => f.label === "Builder reference")?.value, "MLR-40001");
+  assertEquals(facts.find((f) => f.label === "Purchase order")?.value, "PO-60001");
   // A fused reference with no separate purchase order is split.
   const fused = restorationReportFacts({
     ...BASE,
     builder_reference: "MLB-40707PO-64727",
     builder_purchase_order: null,
   });
-  assertEquals([fused[4].value, fused[5].value], ["MLB-40707", "PO-64727"]);
+  assertEquals(fused.find((f) => f.label === "Builder reference")?.value, "MLB-40707");
+  assertEquals(fused.find((f) => f.label === "Purchase order")?.value, "PO-64727");
   // Nothing is invented for a missing fact.
   const bare = restorationReportFacts({ ...BASE, builder_name: null, policyholder: null });
-  assertEquals(bare.find((f) => f.label === "Prepared for")?.value, "-");
+  assertEquals(bare.find((f) => f.label === "Builder")?.value, "-");
   assertEquals(bare.find((f) => f.label === "Policyholder")?.value, "-");
 });
 
@@ -180,12 +185,11 @@ Deno.test("render: no photos gives a short report that says so", async () => {
   const text = pdfText(rendered.bytes);
   for (
     const expected of [
-      "Introduction and Scope",
-      "Observations",
-      "Works Completed",
-      "Materials",
-      "Photographic Record",
-      "End of report",
+      "JOB DETAILS",
+      "WHAT WE FOUND",
+      "WHAT WE DID",
+      "PHOTOS",
+      "REPORT ISSUED BY",
       "No photos were supplied with this report.",
       "Cabinetry removal from the wet wall",
       "SWRESTO-269999",
@@ -200,20 +204,21 @@ Deno.test("render: no photos gives a short report that says so", async () => {
   }
 });
 
-Deno.test("render: ten photos, each numbered once in the photographic record", async () => {
+Deno.test("render: ten photos, each numbered once, before and after first", async () => {
   const rendered = await renderRestorationReportPdf({ ...BASE, photos: photos(10) });
   assertEquals(rendered.photos_embedded, 10);
-  assert(rendered.pages >= 2 && rendered.pages <= 7, `pages ${rendered.pages}`);
+  assert(rendered.pages >= 2 && rendered.pages <= 6, `pages ${rendered.pages}`);
   const text = pdfText(rendered.bytes);
-  assertStringIncludes(text, "Photographic Record");
+  assertStringIncludes(text, "Before and after");
   for (let n = 1; n <= 10; n++) assertStringIncludes(text, `Photo ${n}`);
   assert(!text.includes("Photo 11"));
-  // The stage reads once at the start of the caption, never twice.
-  assertStringIncludes(text, "Before: Unit fixed to the wall");
-  assert(!/Before: Before/i.test(text));
-  // Each photo is stored once: a PNG is an image plus its mask, so ten x 2.
+  // The stage is a small word before the caption, so the caption does not repeat it.
+  assertStringIncludes(text, "BEFORE");
+  assertStringIncludes(text, "Unit fixed to the wall");
+  assert(!/Before: Unit fixed/i.test(text));
+  // Each photo is stored once: a PNG is an image plus its mask, so (ten + logo) x 2.
   const images = (text.match(/\/Subtype \/Image/g) || []).length;
-  assert(images <= 10 * 2, `image objects ${images}`);
+  assert(images <= (10 + 1) * 2, `image objects ${images}`);
 });
 
 Deno.test("render: thirty photos and very long text page cleanly", async () => {

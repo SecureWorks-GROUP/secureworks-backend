@@ -308,6 +308,7 @@ export async function renderRoofReportPdf(
     site: sanitiseText(job.address).slice(0, 90),
   });
   canvas.hero();
+  canvas.section("Job details", 30);
   canvas.facts(
     roofReportHeaderRows(job).map(([label, value]) => ({
       label,
@@ -346,7 +347,6 @@ export async function renderRoofReportPdf(
     ["Storm-created openings in roof", yesNo(job.storm_openings)],
     ["Water leak through roof", yesNo(job.water_leak)],
   ]);
-  canvas.gap(-4);
   kv([["Cause of water leak", String(job.leak_cause || "")]], 1);
   labelledPara("Storm-created openings", job.storm_openings_notes);
   labelledPara("Roof condition and findings", job.overall_findings || "");
@@ -406,8 +406,8 @@ export async function renderRoofReportPdf(
         fallback: `Photo evidence ${i + 1} (could not embed)`,
       };
     });
-    canvas.section(`Photo Evidence (${resolved.length})`, 72);
-    canvas.gallery(photos, { targetH: 64 });
+    canvas.section("Photo Evidence", 70, `${resolved.length} photos`);
+    canvas.gallery(photos);
   }
 
   canvas.finish();

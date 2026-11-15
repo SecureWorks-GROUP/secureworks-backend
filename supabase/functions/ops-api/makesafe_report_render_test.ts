@@ -125,9 +125,9 @@ Deno.test("render PDF: top-down layout keeps normal no-photo reports to sane pag
   for (
     const heading of [
       "Work Order Scope",
-      "Site Findings",
-      "Works Completed",
-      "Materials and Equipment",
+      "SITE FINDINGS",
+      "WORKS COMPLETED",
+      "MATERIALS AND EQUIPMENT",
     ]
   ) {
     assertStringIncludes(pdf, heading);

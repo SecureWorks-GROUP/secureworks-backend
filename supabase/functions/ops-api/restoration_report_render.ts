@@ -182,7 +182,15 @@ export function splitBuilderReference(
   return { work_order: ref, purchase_order: "" };
 }
 
-/** The document control table: what this report is and who it is for. */
+/** Materials short enough to sit in the job details table. */
+function materialsFitsTable(
+  materials: RestorationReportSection | string | null | undefined,
+): boolean {
+  const texts = sectionTexts(materials).map((t) => reportText(t).trim()).filter(Boolean);
+  return texts.length <= 1 && (texts[0] || "").length <= 90;
+}
+
+/** The job details table: every fact about the job, two to a row. */
 export function restorationReportFacts(
   input: RestorationReportInput,
 ): ReportFact[] {
@@ -190,27 +198,31 @@ export function restorationReportFacts(
     input.builder_reference,
     input.builder_purchase_order,
   );
+  const v = (value: unknown) => reportText(value).trim() || "-";
   const facts: ReportFact[] = [
-    { label: "Report number", value: reportText(input.job_number) },
-    {
-      label: "Date of attendance",
-      value: reportText(input.attended_on).trim() || "-",
-    },
-    { label: "Prepared by", value: "SecureWorks Group" },
-    {
-      label: "Prepared for",
-      value: reportText(input.builder_name).trim() || "-",
-    },
+    { label: "Our reference", value: v(input.job_number) },
+    { label: "Date attended", value: v(input.attended_on) },
+    { label: "Builder", value: v(input.builder_name) },
+    { label: "Arrived", value: v(input.arrived_at) },
+    { label: "Builder reference", value: v(work_order) },
+    { label: "Attended by", value: v(input.crew_line) },
+    { label: "Purchase order", value: v(purchase_order) },
+    { label: "Policyholder", value: v(input.policyholder) },
+    { label: "Property", value: v(input.site_address), wide: true },
   ];
-  if (work_order || purchase_order) {
-    facts.push({ label: "Builder reference", value: work_order || "-" });
-    facts.push({ label: "Purchase order", value: purchase_order || "-" });
+  const instruction = reportText(input.work_order_instruction).trim();
+  if (instruction) {
+    facts.push({
+      label: "Work order",
+      value: instruction,
+      note: reportText(input.approved_quote_note).trim() || undefined,
+      wide: true,
+    });
   }
-  facts.push({ label: "Property", value: reportText(input.site_address) });
-  facts.push({
-    label: "Policyholder",
-    value: reportText(input.policyholder).trim() || "-",
-  });
+  if (materialsFitsTable(input.materials)) {
+    const text = sectionTexts(input.materials).map((t) => reportText(t).trim()).filter(Boolean)[0];
+    if (text) facts.push({ label: "Materials used", value: text, wide: true });
+  }
   return facts;
 }
 
@@ -255,106 +267,90 @@ export async function renderRestorationReportPdf(
   }));
 
   const site = reportText(input.site_address).trim();
+  const issuedOn = reportText(input.issued_on).trim();
   const canvas = new ReportCanvas(doc, {
     kind: RESTORATION_REPORT_TITLE,
-    title: reportText(input.subtitle).trim(),
-    subtitle: site,
     reference: reportText(input.job_number),
+    referenceNote: issuedOn ? `Issued ${issuedOn}` : undefined,
     site,
   });
 
   canvas.hero();
+
+  // Job details: every fact about the job in one ruled table.
+  canvas.section("Job details", 40);
   canvas.facts(restorationReportFacts(input), 4);
-
-  // 1. Introduction and scope: who it is for and what we were asked to do.
-  const { work_order, purchase_order } = splitBuilderReference(
-    input.builder_reference,
-    input.builder_purchase_order,
-  );
-  const builder = reportText(input.builder_name).trim();
-  const refs = [
-    work_order ? `builder reference ${work_order}` : "",
-    purchase_order ? `purchase order ${purchase_order}` : "",
-  ].filter(Boolean).join(" and ");
-  canvas.section("Introduction and Scope", 16);
-  canvas.paragraph(
-    `This report records the works carried out by SecureWorks Group at ${site}` +
-      (builder ? ` for ${builder}` : "") + (refs ? ` under ${refs}` : "") + ".",
-  );
-  const instruction = reportText(input.work_order_instruction).trim();
-  if (instruction) canvas.paragraph(`The work order was: ${instruction}`);
-  const quoteNote = reportText(input.approved_quote_note).trim();
-  if (quoteNote) canvas.paragraph(quoteNote);
-
-  // 2. Site attendance.
-  const attendance = [
-    { label: "Date", value: reportText(input.attended_on) },
-    { label: "Time of arrival", value: reportText(input.arrived_at) },
-    { label: "Attended by", value: reportText(input.crew_line) },
-  ];
-  if (attendance.some((row) => row.value.trim()) || input.outcome) {
-    canvas.section("Site Attendance", 14);
-    canvas.glance(
-      attendance,
-      input.outcome ? { label: "Outcome", text: reportText(input.outcome) } : null,
-    );
-  }
 
   const prose = (section: RestorationReportSection | null | undefined): void => {
     for (const text of cleanList(section?.paragraphs)) canvas.paragraph(text);
   };
-  const closing = (section: RestorationReportSection | null | undefined): void => {
-    for (const text of cleanList(section?.closing)) canvas.paragraph(text);
-  };
 
   if (sectionTexts(input.findings).some((t) => t.trim())) {
-    canvas.section("Observations", 16);
+    canvas.section("What we found", 16);
     prose(input.findings);
     const items = cleanList(input.findings?.bullets);
     if (items.length) canvas.bullets(items);
-    closing(input.findings);
+    for (const text of cleanList(input.findings?.closing)) canvas.paragraph(text);
   }
 
   if (sectionTexts(input.works_completed).some((t) => t.trim())) {
-    canvas.section("Works Completed", 18);
+    canvas.section("What we did", 16, reportText(input.subtitle) || undefined);
     prose(input.works_completed);
     const steps = cleanList(input.works_completed?.bullets);
     if (steps.length) canvas.steps(steps);
-    closing(input.works_completed);
   }
 
+  // Outcome: the closing lines of the works, or the one-line outcome.
+  const outcome = cleanList(input.works_completed?.closing);
+  if (!outcome.length && reportText(input.outcome).trim()) {
+    outcome.push(reportText(input.outcome).trim());
+  }
+  if (outcome.length) {
+    canvas.section("Outcome", 12);
+    canvas.bullets(outcome);
+  }
+
+  // Materials that need more than a line get their own section.
   const materials = typeof input.materials === "string"
     ? { paragraphs: [input.materials] }
     : input.materials;
-  if (sectionTexts(materials).some((t) => t.trim())) {
+  if (!materialsFitsTable(input.materials) && sectionTexts(materials).some((t) => t.trim())) {
     canvas.section("Materials", 10);
     prose(materials);
     const items = cleanList(materials?.bullets);
     if (items.length) canvas.bullets(items);
-    closing(materials);
+    for (const text of cleanList(materials?.closing)) canvas.paragraph(text);
   }
 
-  // Photographic record: every photo, numbered in the order given.
+  // Photos: the first before and the first after side by side, then the rest
+  // four to a row, numbered in that order.
   const gallery: GalleryPhoto[] = supplied.map((photo, i) => {
     const stage = restorationPhotoStage(photo);
     return {
       image: images[i],
-      caption: stage ? captionWithoutStage(photo.caption) : reportText(photo.caption).trim(),
+      caption: reportText(photo.caption).trim(),
       area: photo.area ? reportText(photo.area).trim() : undefined,
       tag: stage ? stage.charAt(0).toUpperCase() + stage.slice(1) : undefined,
       fallback: `Photo ${i + 1} could not be shown`,
     };
   });
-  // The heading travels with the first row of photos.
-  canvas.section("Photographic Record", gallery.length ? 116 : 8);
-  if (gallery.length) {
-    canvas.note(
-      input.attended_on
-        ? `The photographs below were taken on site by SecureWorks technicians on ${reportText(input.attended_on)}.`
-        : "The photographs below were taken on site by SecureWorks technicians.",
-    );
-    canvas.gallery(gallery);
-  } else {
+  const stages = supplied.map((photo) => restorationPhotoStage(photo));
+  const beforeIndex = stages.indexOf("before");
+  const afterIndex = stages.indexOf("after");
+  let number = 1;
+  if (beforeIndex >= 0 && afterIndex >= 0 && beforeIndex !== afterIndex) {
+    canvas.section("Photos", 112, "Before and after");
+    canvas.beforeAfter(gallery[beforeIndex], gallery[afterIndex], [1, 2]);
+    number = 3;
+  }
+  const rest = gallery.filter((_, i) =>
+    !(number === 3 && (i === beforeIndex || i === afterIndex))
+  );
+  if (rest.length) {
+    canvas.section("Photos", 70, number === 3 ? "The works" : undefined);
+    canvas.gallery(rest, { startNumber: number });
+  } else if (!gallery.length) {
+    canvas.section("Photos", 10);
     canvas.note("No photos were supplied with this report.");
   }
 

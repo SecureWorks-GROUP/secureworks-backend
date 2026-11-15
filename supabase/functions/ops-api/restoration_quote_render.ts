@@ -161,9 +161,11 @@ export async function renderRestorationQuotePdf(
         .join("  |  "),
     ).slice(0, 128),
     reference: sanitiseText(quote.quote_number),
+    referenceNote: formatQuoteDate(input.quote_date),
     site: sanitiseText(input.site_address).slice(0, 90),
   });
   canvas.hero();
+  canvas.section("Quote details", 30);
   canvas.facts(
     restorationQuoteHeaderRows(input).map(([label, value]) => ({
       label,

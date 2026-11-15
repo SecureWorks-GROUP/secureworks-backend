@@ -390,31 +390,21 @@ export async function renderMakesafeReportPdf(
 
   const canvas = new ReportCanvas(doc, {
     kind: REPORT_TITLE,
-    title: sanitiseText(job.address),
-    subtitle: sanitiseText(`Job reference ${job.ref}`).slice(0, 128),
     reference: sanitiseText(job.ref).slice(0, 60),
     site: sanitiseText(job.address).slice(0, 90),
   });
   canvas.hero();
 
+  canvas.section("Job details", 30);
   canvas.facts([
     { label: "Job reference", value: sanitiseText(job.ref) },
+    { label: "Date attended", value: sanitiseText(job.date) || "-" },
     { label: "Site contact", value: sanitiseText(job.contact) || "-" },
-    { label: "Property", value: sanitiseText(job.address), wide: true },
+    { label: "Arrived", value: sanitiseText(job.arrival || "to confirm") },
+    { label: "Property", value: sanitiseText(job.address) },
+    { label: "Crew", value: sanitiseText(job.crew) || "-" },
+    { label: "Work Order Scope", value: sanitiseText(job.scope) || "-", wide: true },
   ], 4);
-
-  canvas.section("Work Order Scope", 12);
-  canvas.paragraph(sanitiseText(job.scope) || "-");
-
-  canvas.section("Site Attendance", 14);
-  canvas.glance([
-    { label: "Date of attendance", value: sanitiseText(job.date) },
-    {
-      label: "Time of arrival",
-      value: sanitiseText(job.arrival || "to confirm"),
-    },
-    { label: "Crew", value: sanitiseText(job.crew) },
-  ]);
 
   const proseSections: Array<[string, string]> = [
     ["Site Findings", job.findings || ""],
@@ -427,11 +417,11 @@ export async function renderMakesafeReportPdf(
   }
 
   if (resolved.length === 0) {
-    canvas.section("Photo Evidence", 8);
+    canvas.section("Photo Evidence", 10);
     canvas.note("No usable photo evidence was available for this report.");
   } else {
     // Every embedded photo, in the caller's curated order, each numbered and
-    // captioned, two to a row in a ruled schedule. Nothing is cropped.
+    // captioned, four to a row in ruled cells. Nothing is cropped.
     const count = resolved.length === 1
       ? "1 photo"
       : `${resolved.length} photos`;
@@ -441,7 +431,7 @@ export async function renderMakesafeReportPdf(
         `Photo evidence ${zeroIndex + 1}`,
       fallback: `Photo evidence ${zeroIndex + 1} (could not embed)`,
     }));
-    canvas.section("Photo Evidence", 108, count);
+    canvas.section("Photo Evidence", 70, count);
     canvas.gallery(photos);
   }
 
