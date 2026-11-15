@@ -4,8 +4,11 @@ import {
   // deno-lint-ignore no-import-prefix
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { XeroCooldownError } from "../_shared/xero_cooldown.ts";
+import { syncXeroAccounts, xeroAccountRow } from "./accounts.ts";
 import {
+  BANK_TXN_HEAL_LIMIT,
   BANK_TXN_PAGE_SIZE,
+  bankTransactionLinesRow,
   bankTransactionRow,
   bankTransactionsWhere,
   bankTransactionType,
@@ -13,12 +16,17 @@ import {
   daysAgo,
   syncBankTransactionLines,
 } from "./bank_transactions.ts";
+import { XeroSyncProviderError } from "./xero_transport.ts";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
 const TENANT = "22222222-2222-4222-8222-222222222222";
 const KEY = `bank_transactions:${ORG}:${TENANT}`;
 const FULL = `bank_transactions_full:${ORG}:${TENANT}`;
 const NOW = new Date("2026-11-15T02:00:00.000Z");
+const WHERE_90 = "Date>DateTime(2026,08,17)&&IsReconciled==true";
+const WHERE_WIDE = "Date>DateTime(2026,06,30)&&IsReconciled==true";
+const HEAD = "xero_bank_transactions";
+const LINES = "xero_bank_transaction_lines";
 
 const id = (n: number) => `aaaaaaaa-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
@@ -38,28 +46,25 @@ function txn(n: number, over: Record<string, unknown> = {}) {
     SubTotal: 100,
     TotalTax: 10,
     Total: 110,
+    UpdatedDateUTC: "/Date(1791072000000+0000)/",
     LineItems: [
       { LineItemID: "l1", Description: "Screws", AccountCode: "310", TaxAmount: 6, LineAmount: 66, Tracking: [] },
-      {
-        LineItemID: "l2",
-        Description: "Fuel",
-        AccountCode: "449",
-        TaxAmount: 4,
-        LineAmount: 44,
-        Tracking: [{ Name: "Division", Option: "SW - FENCING" }],
-      },
+      { LineItemID: "l2", Description: "Fuel", AccountCode: "449", TaxAmount: 4, LineAmount: 44 },
     ],
     ...over,
   };
 }
+/** The same transaction as the unpaged list sends it: no lines. */
+const bare = (n: number, over: Record<string, unknown> = {}) => txn(n, { LineItems: undefined, ...over });
 
 type Upsert = { table: string; rows: Record<string, unknown>[] };
 
 function fakeDb(opts: {
   cursors?: { key: string; cursor_at: string | null }[];
   cursorError?: string;
-  failBulk?: boolean;
-  failIds?: string[];
+  failBulk?: string;
+  failRow?: { table: string; id: string };
+  cursorWriteError?: string;
 } = {}) {
   const upserts: Upsert[] = [];
   const sb = {
@@ -75,13 +80,14 @@ function fakeDb(opts: {
         }),
         upsert(payload: Record<string, unknown> | Record<string, unknown>[]) {
           const rows = Array.isArray(payload) ? payload : [payload];
-          if (table === "xero_bank_transactions") {
-            if (Array.isArray(payload) && opts.failBulk) {
-              return Promise.resolve({ error: { message: "bulk refused" } });
-            }
-            if (!Array.isArray(payload) && opts.failIds?.includes(String(payload.xero_txn_id))) {
-              return Promise.resolve({ error: { message: "row refused" } });
-            }
+          if (table === "xero_sync_state" && opts.cursorWriteError) {
+            return Promise.resolve({ error: { message: opts.cursorWriteError } });
+          }
+          if (Array.isArray(payload) && opts.failBulk === table) {
+            return Promise.resolve({ error: { message: "bulk refused" } });
+          }
+          if (!Array.isArray(payload) && opts.failRow?.table === table && payload.xero_txn_id === opts.failRow.id) {
+            return Promise.resolve({ error: { message: "row refused" } });
           }
           upserts.push({ table, rows });
           return Promise.resolve({ error: null });
@@ -89,59 +95,76 @@ function fakeDb(opts: {
       };
     },
   };
-  const written = () => upserts.filter((u) => u.table === "xero_bank_transactions").flatMap((u) => u.rows);
-  const cursorsWritten = () => upserts.filter((u) => u.table === "xero_sync_state").flatMap((u) => u.rows);
-  return { sb, upserts, written, cursorsWritten };
+  const rowsOf = (table: string) => upserts.filter((u) => u.table === table).flatMap((u) => u.rows);
+  return { sb, upserts, rowsOf, cursorKeys: () => rowsOf("xero_sync_state").map((c) => c.key) };
 }
 
 type Call = { path: string; params: Record<string, string>; headers: Record<string, string> };
+type Answer = unknown[] | Error;
 
-function fakeXero(pages: (unknown[] | Error)[], unpaged?: unknown[] | Error) {
+/** Answers by request shape: unpaged list (by where), paged list (by where and page), one by id. */
+function fakeXero(a: { unpaged?: Record<string, Answer>; paged?: Record<string, Answer[]>; byId?: Record<string, Answer> }) {
   const calls: Call[] = [];
   const get = (path: string, params: Record<string, string>, headers: Record<string, string>) => {
     calls.push({ path, params, headers });
-    const answer = params.page ? pages[Number(params.page) - 1] ?? [] : unpaged ?? [];
+    let answer: Answer | undefined;
+    if (path !== "/BankTransactions") answer = a.byId?.[path.split("/").pop()!] ?? [];
+    else if (params.page) answer = a.paged?.[params.where]?.[Number(params.page) - 1] ?? [];
+    else answer = a.unpaged?.[params.where] ?? [];
     if (answer instanceof Error) return Promise.reject(answer);
     return Promise.resolve({ BankTransactions: answer });
   };
-  return { get, calls };
+  return { get, calls, paged: () => calls.filter((c) => c.params.page), byId: () => calls.filter((c) => c.path !== "/BankTransactions") };
 }
 
-Deno.test("a row keeps every earlier field's meaning and gains the lines", () => {
+Deno.test("the transaction row keeps every earlier field's meaning and carries no line text", () => {
   const row = bankTransactionRow(txn(1), ORG, NOW)!;
-  assertEquals(row.xero_txn_id, id(1));
-  assertEquals(row.txn_type, "SPEND");
-  assertEquals(row.amount, -110);
-  assertEquals(row.sub_total, 100);
-  assertEquals(row.total_tax, 10);
-  assertEquals(row.txn_date, "2026-10-03");
-  assertEquals(row.account_name, "Synthetic Card");
-  assertEquals(row.contact_name, "Synthetic Hardware");
-  assertEquals(row.contact_id, "cccccccc-0000-4000-8000-000000000001");
-  assertEquals(row.is_reconciled, true);
-  assertEquals(row.description, "Screws; Fuel");
-  assertEquals(row.line_items?.length, 2);
-  // Each line says whether its amount includes GST, in Xero's own word.
-  assertEquals(row.line_items?.[0].LineAmountTypes, "Inclusive");
-  assertEquals(row.line_items?.[1].AccountCode, "449");
+  assertEquals(row, {
+    org_id: ORG,
+    xero_txn_id: id(1),
+    account_id: "bbbbbbbb-0000-4000-8000-000000000001",
+    account_name: "Synthetic Card",
+    txn_date: "2026-10-03",
+    txn_type: "SPEND",
+    contact_name: "Synthetic Hardware",
+    contact_id: "cccccccc-0000-4000-8000-000000000001",
+    reference: "Screws",
+    amount: -110,
+    sub_total: 100,
+    total_tax: 10,
+    status: "AUTHORISED",
+    is_reconciled: true,
+    synced_at: NOW.toISOString(),
+  });
 });
 
-Deno.test("an answer without lines carries no line_items or description key", () => {
-  for (const over of [{ LineItems: undefined }, { LineItems: [] }, { LineItems: "x" }]) {
-    const row = bankTransactionRow(txn(1, over), ORG, NOW)!;
-    assertEquals("line_items" in row, false);
-    assertEquals("description" in row, false);
+Deno.test("the lines row is Xero's lines as sent, and absent when there are none", () => {
+  const row = bankTransactionLinesRow(txn(1), ORG, NOW)!;
+  assertEquals(row.xero_txn_id, id(1));
+  assertEquals(row.line_amount_types, "Inclusive");
+  assertEquals(row.line_items.length, 2);
+  assertEquals(row.line_items[1].AccountCode, "449");
+  assertEquals(row.xero_updated_at, "2026-10-04T00:00:00.000Z");
+  for (const over of [{ LineItems: undefined }, { LineItems: [] }, { LineItems: "x" }, { BankTransactionID: undefined }]) {
+    assertEquals(bankTransactionLinesRow(txn(1, over), ORG, NOW), null);
   }
 });
 
-Deno.test("types, signs, missing identity and the date fallbacks", () => {
+Deno.test("types, signs, missing identity and the fallbacks the earlier code had", () => {
   assertEquals(bankTransactionType("RECEIVE-PREPAYMENT"), "RECEIVE");
   assertEquals(bankTransactionType("SPEND-TRANSFER"), "TRANSFER");
   assertEquals(bankTransactionType("SPEND-OVERPAYMENT"), "SPEND");
   assertEquals(bankTransactionRow(txn(1, { Type: "RECEIVE" }), ORG, NOW)!.amount, 110);
   assertEquals(bankTransactionRow(txn(1, { Total: 0, SubTotal: 40 }), ORG, NOW)!.amount, -40);
+  assertEquals(bankTransactionRow(txn(1, { Total: "110" }), ORG, NOW)!.amount, -110);
+  assertEquals(bankTransactionRow(txn(1, { TotalTax: 0 }), ORG, NOW)!.total_tax, null);
+  assertEquals(bankTransactionRow(txn(1, { IsReconciled: undefined }), ORG, NOW)!.is_reconciled, true);
   assertEquals(bankTransactionRow(txn(1, { BankTransactionID: undefined }), ORG, NOW), null);
   assertEquals(bankTransactionRow(txn(1, { DateString: undefined }), ORG, NOW)!.txn_date, "2026-10-03");
+  assertEquals(
+    bankTransactionRow(txn(1, { DateString: undefined, Date: "2026-10-01T00:00:00+08:00" }), ORG, NOW)!.txn_date,
+    "2026-10-01",
+  );
   assertEquals(
     bankTransactionRow(txn(1, { DateString: undefined, Date: undefined }), ORG, NOW)!.txn_date,
     "2026-11-15",
@@ -155,154 +178,239 @@ Deno.test("window helpers", () => {
   // 16:00 UTC on 30 June is already 1 July in Perth.
   assertEquals(dayBeforeFinancialYear(new Date("2026-06-30T16:00:00Z")), "2026-06-30");
   assertEquals(daysAgo(NOW, 90), "2026-08-17");
-  assertEquals(bankTransactionsWhere("2026-08-17"), "Date>DateTime(2026,08,17)&&IsReconciled==true");
+  assertEquals(bankTransactionsWhere("2026-08-17"), WHERE_90);
 });
 
-Deno.test("first run reads back to 1 July, page by page, and sets both cursors", async () => {
-  const page1 = Array.from({ length: BANK_TXN_PAGE_SIZE }, (_, i) => txn(i + 1));
-  const page2 = [txn(BANK_TXN_PAGE_SIZE), txn(BANK_TXN_PAGE_SIZE + 1), txn(BANK_TXN_PAGE_SIZE + 2, {
-    LineItems: [],
-  })];
+Deno.test("an ordinary run before the first whole read: the old read, and nothing else", async () => {
   const db = fakeDb();
-  const xero = fakeXero([page1, page2]);
-  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, () => NOW);
-  assertEquals(result.mode, "backfill");
-  assertEquals(result.pages, 2);
-  // The repeated id on page 2 is written once.
-  assertEquals(result.transactions_synced, BANK_TXN_PAGE_SIZE + 2);
-  assertEquals(result.with_lines, BANK_TXN_PAGE_SIZE + 1);
-  assertEquals(result.skipped, 0);
-  assertEquals(xero.calls.length, 2);
-  assertEquals(xero.calls[0].params, {
-    where: "Date>DateTime(2026,06,30)&&IsReconciled==true",
-    order: "Date DESC",
-    page: "1",
-    pageSize: "100",
-  });
-  assertEquals(xero.calls[0].headers, {});
-  // A row with no lines is written apart, with no line_items column to blank the stored one.
-  const bare = db.upserts.filter((u) => u.table === "xero_bank_transactions").at(-1)!;
-  assertEquals(bare.rows.length, 1);
-  assertEquals("line_items" in bare.rows[0], false);
-  assertEquals(db.cursorsWritten().map((c) => c.key), [KEY, FULL]);
-  assertEquals(db.cursorsWritten()[0].cursor_at, NOW.toISOString());
-});
-
-Deno.test("a run inside the day asks only for changes, over the wide window", async () => {
-  const db = fakeDb({
-    cursors: [
-      { key: KEY, cursor_at: "2026-11-15T01:45:00.000Z" },
-      { key: FULL, cursor_at: "2026-11-14T22:45:00.000Z" },
-    ],
-  });
-  const xero = fakeXero([[txn(7)]]);
-  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, () => NOW);
-  assertEquals(result.mode, "incremental");
-  assertEquals(result.modified_since, "2026-11-15T01:30:00.000Z");
-  assertEquals(xero.calls[0].headers, { "If-Modified-Since": "2026-11-15T01:30:00.000Z" });
-  assertEquals(xero.calls[0].params.where, "Date>DateTime(2026,06,30)&&IsReconciled==true");
-  assertEquals(result.transactions_synced, 1);
-  // Only the incremental cursor moves.
-  assertEquals(db.cursorsWritten().map((c) => c.key), [KEY]);
-});
-
-Deno.test("once a day the last 90 days are read whole", async () => {
-  const db = fakeDb({
-    cursors: [
-      { key: KEY, cursor_at: "2026-11-15T01:45:00.000Z" },
-      { key: FULL, cursor_at: "2026-11-14T01:59:00.000Z" },
-    ],
-  });
-  const xero = fakeXero([[txn(7)]]);
-  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, () => NOW);
-  assertEquals(result.mode, "full");
-  assertEquals(xero.calls[0].headers, {});
-  assertEquals(xero.calls[0].params.where, "Date>DateTime(2026,08,17)&&IsReconciled==true");
-  assertEquals(db.cursorsWritten().map((c) => c.key), [KEY, FULL]);
-});
-
-Deno.test("an incremental run with no usable cursor reads the 90 days whole", async () => {
-  const db = fakeDb({ cursors: [{ key: FULL, cursor_at: "2026-11-15T00:00:00.000Z" }] });
-  const xero = fakeXero([[]]);
-  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, () => NOW);
-  assertEquals(result.mode, "full");
-  assertEquals(xero.calls[0].headers, {});
-  assertEquals(db.cursorsWritten().map((c) => c.key), [KEY, FULL]);
-});
-
-Deno.test("304 to an incremental read means nothing changed, and the cursor moves", async () => {
-  const db = fakeDb({
-    cursors: [
-      { key: KEY, cursor_at: "2026-11-15T01:45:00.000Z" },
-      { key: FULL, cursor_at: "2026-11-14T22:45:00.000Z" },
-    ],
-  });
-  const notModified = Object.assign(new Error("Xero /BankTransactions returned HTTP 304"), { status: 304 });
-  const xero = fakeXero([notModified]);
-  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, () => NOW);
-  assertEquals(result.transactions_synced, 0);
-  assertEquals(db.written().length, 0);
-  assertEquals(db.cursorsWritten().map((c) => c.key), [KEY]);
-});
-
-Deno.test("a refused paged read falls back to the old unpaged read and moves no cursor", async () => {
-  const db = fakeDb();
-  const xero = fakeXero([new Error("Xero /BankTransactions returned HTTP 400")], [
-    txn(1, { LineItems: undefined }),
-    txn(2, { LineItems: undefined }),
-  ]);
-  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, () => NOW);
-  assertEquals(result.mode, "unpaged_fallback");
-  assertEquals(result.fallback_reason, "Xero /BankTransactions returned HTTP 400");
-  assertEquals(result.transactions_synced, 2);
-  assertEquals(result.with_lines, 0);
-  assertEquals(xero.calls[1].params, {
-    where: "Date>DateTime(2026,08,17)&&IsReconciled==true",
-    order: "Date DESC",
-  });
-  assertEquals(db.written().every((r) => !("line_items" in r)), true);
-  assertEquals(db.cursorsWritten().length, 0);
-});
-
-Deno.test("a rate limit stops the run and is not swallowed by the fallback", async () => {
-  const db = fakeDb();
-  const cooldown = Object.create(XeroCooldownError.prototype) as Error;
-  const xero = fakeXero([cooldown]);
-  await assertRejects(() => syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, () => NOW));
+  const xero = fakeXero({ unpaged: { [WHERE_90]: [bare(1), bare(2), bare(2)] } });
+  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: false }, () => NOW);
   assertEquals(xero.calls.length, 1);
-  assertEquals(db.cursorsWritten().length, 0);
+  assertEquals(xero.calls[0], { path: "/BankTransactions", params: { where: WHERE_90, order: "Date DESC" }, headers: {} });
+  assertEquals(result.transactions_synced, 2);
+  assertEquals(result.lines, { ok: null, mode: "waiting", reason: "awaiting_first_whole_read" });
+  assertEquals(db.rowsOf(HEAD).map((r) => r.xero_txn_id), [id(1), id(2)]);
+  // The widely readable table never receives line text.
+  assertEquals(db.rowsOf(HEAD).every((r) => !("line_items" in r) && !("description" in r)), true);
+  assertEquals(db.rowsOf(LINES).length, 0);
+  assertEquals(db.cursorKeys().length, 0);
 });
 
-Deno.test("a failure on a later page keeps what was written and moves no cursor", async () => {
+Deno.test("an ordinary run after it: the old read plus only what changed, over the wide window", async () => {
+  const db = fakeDb({
+    cursors: [
+      { key: KEY, cursor_at: "2026-11-15T01:45:00.000Z" },
+      { key: FULL, cursor_at: "2026-11-14T22:45:00.000Z" },
+    ],
+  });
+  const xero = fakeXero({ unpaged: { [WHERE_90]: [bare(1)] }, paged: { [WHERE_WIDE]: [[txn(7)]] } });
+  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: false }, () => NOW);
+  assertEquals(xero.calls.length, 2);
+  assertEquals(xero.calls[1].headers, { "If-Modified-Since": "2026-11-15T01:30:00.000Z" });
+  assertEquals(xero.calls[1].params, { where: WHERE_WIDE, order: "Date DESC", page: "1", pageSize: "100" });
+  assertEquals(result.lines, {
+    ok: true,
+    mode: "incremental",
+    pages: 1,
+    written: 1,
+    modified_since: "2026-11-15T01:30:00.000Z",
+    healed: 0,
+  });
+  assertEquals(db.rowsOf(LINES).map((r) => r.xero_txn_id), [id(7)]);
+  // Only the incremental cursor moves.
+  assertEquals(db.cursorKeys(), [KEY]);
+});
+
+Deno.test("304 to the incremental read means nothing changed, and the cursor moves", async () => {
+  const db = fakeDb({ cursors: [{ key: KEY, cursor_at: "2026-11-15T01:45:00.000Z" }, { key: FULL, cursor_at: "2026-11-14T22:45:00.000Z" }] });
+  const xero = fakeXero({ paged: { [WHERE_WIDE]: [new XeroSyncProviderError(304, "/BankTransactions")] } });
+  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: false }, () => NOW);
+  assertEquals(result.lines.ok, true);
+  assertEquals(db.rowsOf(LINES).length, 0);
+  assertEquals(db.cursorKeys(), [KEY]);
+});
+
+Deno.test("a failed lines read never fails the transaction copy, and moves no cursor", async () => {
+  const db = fakeDb({ cursors: [{ key: KEY, cursor_at: "2026-11-15T01:45:00.000Z" }, { key: FULL, cursor_at: "2026-11-14T22:45:00.000Z" }] });
+  const xero = fakeXero({
+    unpaged: { [WHERE_90]: [bare(1)] },
+    paged: { [WHERE_WIDE]: [new XeroSyncProviderError(500, "/BankTransactions")] },
+  });
+  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: false }, () => NOW);
+  assertEquals(result.success, true);
+  assertEquals(result.transactions_synced, 1);
+  assertEquals(result.lines.ok, false);
+  assertEquals(result.lines.mode, "incremental");
+  assertEquals(db.cursorKeys().length, 0);
+});
+
+Deno.test("an unreadable cursor is a failed lines read, not a failed copy", async () => {
+  const db = fakeDb({ cursorError: "permission denied" });
+  const xero = fakeXero({ unpaged: { [WHERE_90]: [bare(1)] } });
+  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: true }, () => NOW);
+  assertEquals(result.transactions_synced, 1);
+  assertEquals(result.lines.ok, false);
+  assertEquals(xero.calls.length, 1);
+});
+
+Deno.test("a rate limit always stops the run", async () => {
+  const cooldown = Object.create(XeroCooldownError.prototype) as Error;
+  const db = fakeDb({ cursors: [{ key: KEY, cursor_at: "2026-11-15T01:45:00.000Z" }, { key: FULL, cursor_at: "2026-11-14T22:45:00.000Z" }] });
+  const xero = fakeXero({ paged: { [WHERE_WIDE]: [cooldown] } });
+  await assertRejects(() => syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: false }, () => NOW));
+  assertEquals(db.cursorKeys().length, 0);
+});
+
+Deno.test("a failed transaction copy still throws, as it always did", async () => {
+  const db = fakeDb();
+  const xero = fakeXero({ unpaged: { [WHERE_90]: new XeroSyncProviderError(500, "/BankTransactions") } });
+  await assertRejects(() => syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: true }, () => NOW));
+  assertEquals(db.upserts.length, 0);
+});
+
+Deno.test("the first whole read goes back to 1 July, page by page, and starts both cursors", async () => {
+  const page1 = Array.from({ length: BANK_TXN_PAGE_SIZE }, (_, i) => txn(i + 1));
+  // Page 2 repeats one of page 1's rows (the list moved); it is written once.
+  const page2 = [txn(BANK_TXN_PAGE_SIZE), txn(BANK_TXN_PAGE_SIZE + 1)];
+  const all = [...page1, txn(BANK_TXN_PAGE_SIZE + 1)].map((t) => bare(Number(String(t.BankTransactionID).slice(-12))));
+  const db = fakeDb();
+  const xero = fakeXero({
+    unpaged: { [WHERE_90]: all.slice(0, 40), [WHERE_WIDE]: all },
+    paged: { [WHERE_WIDE]: [page1, page2] },
+  });
+  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: true }, () => NOW);
+  assertEquals(result.lines, {
+    ok: true,
+    mode: "first_whole",
+    pages: 2,
+    written: BANK_TXN_PAGE_SIZE + 1,
+    modified_since: null,
+    healed: 0,
+  });
+  assertEquals(xero.paged().map((c) => c.params.page), ["1", "2"]);
+  assertEquals(xero.paged()[0].headers, {});
+  assertEquals(db.rowsOf(LINES).length, BANK_TXN_PAGE_SIZE + 1);
+  assertEquals(db.cursorKeys(), [KEY, FULL]);
+});
+
+Deno.test("a later whole read covers 90 days and leaves the incremental cursor to the incremental read", async () => {
+  const db = fakeDb({ cursors: [{ key: KEY, cursor_at: "2026-11-15T01:45:00.000Z" }, { key: FULL, cursor_at: "2026-11-14T01:00:00.000Z" }] });
+  const xero = fakeXero({
+    unpaged: { [WHERE_90]: [bare(1), bare(2)] },
+    paged: { [WHERE_WIDE]: [[]], [WHERE_90]: [[txn(1), txn(2)]] },
+  });
+  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: true }, () => NOW);
+  assertEquals(result.lines.ok, true);
+  assertEquals(result.lines.mode, "whole");
+  // No second unpaged call: the 90-day list from step 1 is the check.
+  assertEquals(xero.calls.filter((c) => !c.params.page).length, 1);
+  assertEquals(xero.paged().map((c) => [c.params.where, c.headers["If-Modified-Since"] ?? null]), [
+    [WHERE_WIDE, "2026-11-15T01:30:00.000Z"],
+    [WHERE_90, null],
+  ]);
+  // The incremental read stamps its own cursor; the whole read stamps only its own.
+  assertEquals(db.cursorKeys(), [KEY, FULL]);
+  assertEquals(db.upserts.filter((u) => u.table === "xero_sync_state").map((u) => u.rows.length), [1, 1]);
+});
+
+Deno.test("a transaction the pages skipped is fetched by its id before the whole read counts", async () => {
+  const db = fakeDb({ cursors: [{ key: KEY, cursor_at: "2026-11-15T01:45:00.000Z" }, { key: FULL, cursor_at: "2026-11-14T01:00:00.000Z" }] });
+  const xero = fakeXero({
+    unpaged: { [WHERE_90]: [bare(1), bare(2), bare(3)] },
+    paged: { [WHERE_90]: [[txn(1), txn(3)]] },
+    byId: { [id(2)]: [txn(2)] },
+  });
+  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: true }, () => NOW);
+  assertEquals(xero.byId().map((c) => c.path), [`/BankTransactions/${id(2)}`]);
+  assertEquals(result.lines.ok, true);
+  assertEquals(result.lines.ok && result.lines.healed, 1);
+  assertEquals(db.rowsOf(LINES).map((r) => r.xero_txn_id).sort(), [id(1), id(2), id(3)]);
+  assertEquals(db.cursorKeys().includes(FULL), true);
+});
+
+Deno.test("more skipped than one run may fetch: the whole-read cursor stays and the result says how many", async () => {
+  const n = BANK_TXN_HEAL_LIMIT + 3;
+  const listed = Array.from({ length: n }, (_, i) => bare(i + 1));
+  const db = fakeDb({ cursors: [{ key: KEY, cursor_at: "2026-11-15T01:45:00.000Z" }, { key: FULL, cursor_at: "2026-11-14T01:00:00.000Z" }] });
+  const xero = fakeXero({
+    unpaged: { [WHERE_90]: listed },
+    paged: { [WHERE_90]: [[]] },
+    byId: Object.fromEntries(listed.map((t, i) => [t.BankTransactionID, [txn(i + 1)]])),
+  });
+  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: true }, () => NOW);
+  assertEquals(xero.byId().length, BANK_TXN_HEAL_LIMIT);
+  assertEquals(result.lines.ok, false);
+  assertEquals(result.lines.ok === false && result.lines.missed, 3);
+  assertEquals(db.cursorKeys().includes(FULL), false);
+});
+
+Deno.test("a transaction that arrives without lines is not counted as read", async () => {
+  const db = fakeDb({ cursors: [{ key: KEY, cursor_at: "2026-11-15T01:45:00.000Z" }, { key: FULL, cursor_at: "2026-11-14T01:00:00.000Z" }] });
+  const xero = fakeXero({
+    unpaged: { [WHERE_90]: [bare(1), bare(2)] },
+    paged: { [WHERE_90]: [[txn(1)]] },
+    byId: { [id(2)]: [] },
+  });
+  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: true }, () => NOW);
+  assertEquals(result.lines.ok, false);
+  assertEquals(db.cursorKeys().includes(FULL), false);
+});
+
+Deno.test("a failure on a later page keeps what was written and moves no whole-read cursor", async () => {
   const page1 = Array.from({ length: BANK_TXN_PAGE_SIZE }, (_, i) => txn(i + 1));
   const db = fakeDb();
-  const xero = fakeXero([page1, new Error("Xero /BankTransactions returned HTTP 500")]);
-  await assertRejects(
-    () => syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, () => NOW),
-    Error,
-    "HTTP 500",
-  );
-  assertEquals(db.written().length, BANK_TXN_PAGE_SIZE);
-  assertEquals(db.cursorsWritten().length, 0);
+  const xero = fakeXero({ paged: { [WHERE_WIDE]: [page1, new XeroSyncProviderError(500, "/BankTransactions")] } });
+  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: true }, () => NOW);
+  assertEquals(result.lines.ok, false);
+  assertEquals(db.rowsOf(LINES).length, BANK_TXN_PAGE_SIZE);
+  assertEquals(db.cursorKeys().length, 0);
 });
 
-Deno.test("one row the database refuses is counted and the rest are written", async () => {
-  const db = fakeDb({ failBulk: true, failIds: [id(2)] });
-  const xero = fakeXero([[txn(1), txn(2), txn(3)]]);
-  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, () => NOW);
+Deno.test("one transaction row the database refuses is counted and the rest are written", async () => {
+  const db = fakeDb({ failBulk: HEAD, failRow: { table: HEAD, id: id(2) } });
+  const xero = fakeXero({ unpaged: { [WHERE_90]: [bare(1), bare(2), bare(3)] } });
+  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: false }, () => NOW);
   assertEquals(result.transactions_synced, 2);
   assertEquals(result.skipped, 1);
   assertEquals(result.first_error, "row refused");
-  assertEquals(db.written().map((r) => r.xero_txn_id), [id(1), id(3)]);
+  assertEquals(db.rowsOf(HEAD).map((r) => r.xero_txn_id), [id(1), id(3)]);
 });
 
-Deno.test("an unreadable cursor refuses the run before any Xero call", async () => {
-  const db = fakeDb({ cursorError: "permission denied" });
-  const xero = fakeXero([[txn(1)]]);
+Deno.test("a lines row the database refuses holds the whole-read cursor", async () => {
+  const db = fakeDb({
+    cursors: [{ key: KEY, cursor_at: "2026-11-15T01:45:00.000Z" }, { key: FULL, cursor_at: "2026-11-14T01:00:00.000Z" }],
+    failBulk: LINES,
+    failRow: { table: LINES, id: id(2) },
+  });
+  const xero = fakeXero({ unpaged: { [WHERE_90]: [bare(1), bare(2)] }, paged: { [WHERE_90]: [[txn(1), txn(2)]] } });
+  const result = await syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, { whole: true }, () => NOW);
+  assertEquals(result.lines.ok, false);
+  assertEquals(db.cursorKeys().includes(FULL), false);
+});
+
+Deno.test("the chart of accounts is copied as Xero sent it; an empty answer is refused", async () => {
+  const account = { AccountID: "dddddddd-0000-4000-8000-000000000001", Code: "305", Name: "Direct Material Cost", Type: "DIRECTCOSTS", Class: "EXPENSE", Status: "ACTIVE", TaxType: "INPUT" };
+  assertEquals(xeroAccountRow(account, ORG, NOW), {
+    org_id: ORG,
+    xero_account_id: account.AccountID,
+    code: "305",
+    name: "Direct Material Cost",
+    type: "DIRECTCOSTS",
+    class: "EXPENSE",
+    status: "ACTIVE",
+    tax_type: "INPUT",
+    synced_at: NOW.toISOString(),
+  });
+  assertEquals(xeroAccountRow({ Code: "305" }, ORG, NOW), null);
+  const written: unknown[] = [];
+  const sb = { from: () => ({ upsert: (rows: unknown[]) => (written.push(...rows), Promise.resolve({ error: null })) }) };
+  const bank = { AccountID: "dddddddd-0000-4000-8000-000000000002", Name: "Operations", Type: "BANK", Class: "ASSET", Status: "ACTIVE" };
+  const got = await syncXeroAccounts(sb, ORG, () => Promise.resolve({ Accounts: [account, bank, account] }), () => NOW);
+  assertEquals(got, { ok: true, accounts: 2 });
+  assertEquals(written.length, 2);
   await assertRejects(
-    () => syncBankTransactionLines(db.sb, ORG, TENANT, xero.get, () => NOW),
+    () => syncXeroAccounts(sb, ORG, () => Promise.resolve({ Accounts: [] }), () => NOW),
     Error,
-    "cursor read failed",
+    "no accounts",
   );
-  assertEquals(xero.calls.length, 0);
 });

@@ -28,6 +28,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldownError, xeroAppKey } from '../_shared/xero_cooldown.ts'
 import { createXeroSyncTransport } from './xero_transport.ts'
 import { syncBankTransactionLines } from './bank_transactions.ts'
+import { syncXeroAccounts } from './accounts.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
 import { runInvoiceMirrorCheck } from './xero_mirror_check.ts'
 import { autoReleaseVoidedTradeInvoices } from '../ops-api/trade_invoice_voided_release.ts'
@@ -288,7 +289,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(result)
       }
       case 'sync_bank_transactions':
-        return json(await syncBankTransactions(sb))
+        return json(await syncBankTransactions(sb, { whole: true }))
       case 'ingest_materials_recent':
         // Scheduled every 15 minutes (xero-materials-ingest): the bills of the last 90 days, the
         // window every new bill falls in. The pre-match runs on its own schedule.
@@ -3805,12 +3806,23 @@ async function syncAgedPayables(sb: any) {
 // BANK TRANSACTIONS — reconciled transactions, with their lines
 // ════════════════════════════════════════════════════════════
 
-async function syncBankTransactions(sb: any) {
-  // Paged, so each transaction arrives with its lines; rules in bank_transactions.ts.
+async function syncBankTransactions(sb: any, opts: { whole: boolean } = { whole: false }) {
+  // The transaction copy as before, then the lines; rules in bank_transactions.ts.
+  // whole (the daily job) also reads every line of the window and the chart of accounts.
   const { accessToken, tenantId } = await getToken(sb)
-  const result = await syncBankTransactionLines(sb, DEFAULT_ORG_ID, tenantId,
-    (path, params, headers) => xeroGet(path, accessToken, tenantId, params, headers))
+  const get = (path: string, params: Record<string, string>, headers: Record<string, string>) =>
+    xeroGet(path, accessToken, tenantId, params, headers)
+  const result: any = await syncBankTransactionLines(sb, DEFAULT_ORG_ID, tenantId, get, opts)
   if (result.skipped > 0) console.log('[xero-sync] Bank txn upsert error sample:', result.first_error)
-  console.log(`[xero-sync] Synced ${result.transactions_synced} bank transactions (${result.skipped} skipped, ${result.with_lines} with lines, ${result.mode}, ${result.pages} pages)`)
+  console.log(`[xero-sync] Synced ${result.transactions_synced} bank transactions (${result.skipped} skipped); lines ${JSON.stringify(result.lines)}`)
+  if (opts.whole) {
+    try {
+      result.accounts = await syncXeroAccounts(sb, DEFAULT_ORG_ID, get)
+    } catch (e: any) {
+      if (e instanceof XeroCooldownError) throw e
+      result.accounts = { ok: false, reason: (e as Error).message }
+      console.error('[xero-sync] Chart of accounts sync error:', (e as Error).message)
+    }
+  }
   return result
 }

@@ -1,27 +1,37 @@
-// Bank transactions (spend money, receive money, transfers) copied from Xero
-// WITH their lines. Read only against Xero: one GET lane, no write to Xero.
+// Bank transactions (spend money, receive money, transfers) copied from Xero,
+// and now their LINES. Read only against Xero: GET only, no write to Xero.
 //
-// Why this file exists (15 Nov 2026): the earlier sync asked Xero for the list
-// with no page number. Xero answers an unpaged list without LineItems, so every
-// row in xero_bank_transactions had an empty line_items and no description, and
-// card and bank spend could not be sorted by account, tracking or job. A paged
-// read (page=N) carries the lines. Nothing else about a row changed meaning.
+// Why (15 Nov 2026): the sync asks Xero for the list with no page number. Xero
+// answers an unpaged list without LineItems, so card and bank spend could not
+// be sorted by account, tracking or job. A paged read (page=N) carries them.
 //
-// Rules:
-// - A row says only what Xero sent. line_items and description are written only
-//   when Xero sent lines, so an answer without them never blanks what we hold.
-// - Each stored line is Xero's own line plus the transaction's LineAmountTypes,
-//   so a reader can tell an amount that includes GST from one that does not
-//   (Inclusive: LineAmount less TaxAmount is the ex GST figure).
-// - Runs every sync. Most runs ask only for what Xero changed since the last
-//   complete read (If-Modified-Since); once a day the last 90 days are read
-//   whole; the first run reads back to 1 July of the financial year so those
-//   months get their lines. Cursors move only after a complete read.
-// - If the paged read itself is refused, the old unpaged read runs instead, so
-//   the copy is never staler than it was before this file. It says so.
+// Two stores, on purpose:
+//   xero_bank_transactions       one row per transaction, exactly the fields it
+//                                always had. Written by the same unpaged read
+//                                on every run, so it is as fresh as it ever was.
+//                                That table is readable well beyond the service
+//                                role, so no line text is ever written to it.
+//   xero_bank_transaction_lines  the lines as Xero sent them, service role only
+//                                (20261115110000). Written only from an answer
+//                                that carried lines.
+//
+// Two kinds of run:
+//   every sync      the unpaged read as before, then one paged read of what
+//                   Xero changed since the last complete read (If-Modified-Since).
+//   the daily job   the same, then a WHOLE paged read: the last 90 days, or on
+//   (whole: true)   the first run back to 1 July of the financial year. A whole
+//                   read is checked: every transaction the unpaged list named
+//                   must have arrived with lines. One the pages missed (Xero's
+//                   order is by date, and many share a date) is fetched by its
+//                   id. The whole-read cursor moves only when none is left.
+//
+// A failure of the lines read never fails the transaction copy: it is reported
+// in the result (lines.ok false) and tried again next run. A rate limit always
+// stops the run.
 import { XeroCooldownError } from "../_shared/xero_cooldown.ts";
 import {
   xeroCollection,
+  xeroInstant,
   xeroObject,
   type XeroRecord,
   xeroText,
@@ -32,7 +42,8 @@ import { incrementalModifiedSince } from "./sync_window.ts";
 export const BANK_TXN_PAGE_SIZE = 100;
 export const BANK_TXN_PAGE_LIMIT = 80;
 export const BANK_TXN_WINDOW_DAYS = 90;
-export const BANK_TXN_FULL_REREAD_MS = 24 * 60 * 60 * 1000;
+export const BANK_TXN_HEAL_LIMIT = 25;
+const WRITE_CHUNK = 100;
 const PERTH_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 export type BankTransactionRow = {
@@ -51,8 +62,15 @@ export type BankTransactionRow = {
   status: string | null;
   is_reconciled: boolean;
   synced_at: string;
-  line_items?: XeroRecord[];
-  description?: string | null;
+};
+
+export type BankTransactionLinesRow = {
+  org_id: string;
+  xero_txn_id: string;
+  line_amount_types: string | null;
+  line_items: XeroRecord[];
+  xero_updated_at: string | null;
+  synced_at: string;
 };
 
 /** SPEND, RECEIVE or TRANSFER, exactly as the copy has always grouped Xero's types. */
@@ -64,12 +82,16 @@ export function bankTransactionType(xeroType: unknown): BankTransactionRow["txn_
   return "SPEND";
 }
 
-const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+// Xero sends numbers; a numeric string is read as the earlier code read it.
+const num = (v: unknown): number | null => {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
+  return null;
+};
 
 /**
- * One row for our copy, or null when Xero sent no BankTransactionID. Every field
- * the copy already had keeps its meaning. line_items and description are present
- * only when Xero sent at least one line.
+ * The transaction row, or null when Xero sent no BankTransactionID. Every field
+ * keeps the meaning it had; contact_id is Xero's own id. No line text.
  */
 export function bankTransactionRow(txn: XeroRecord, orgId: string, now: Date): BankTransactionRow | null {
   const id = xeroText(txn.BankTransactionID);
@@ -78,12 +100,13 @@ export function bankTransactionRow(txn: XeroRecord, orgId: string, now: Date): B
   const account = xeroObject(txn.BankAccount);
   const contact = xeroObject(txn.Contact);
   const amount = num(txn.Total) || num(txn.SubTotal) || 0;
-  const row: BankTransactionRow = {
+  const rawDate = typeof txn.Date === "string" && /^\d{4}-\d{2}-\d{2}T/.test(txn.Date) ? txn.Date.slice(0, 10) : null;
+  return {
     org_id: orgId,
     xero_txn_id: id,
     account_id: xeroText(account?.AccountID) ?? "",
     account_name: xeroText(account?.Name),
-    txn_date: xeroDay(txn.DateString) ?? xeroDay(txn.Date) ?? now.toISOString().slice(0, 10),
+    txn_date: xeroDay(txn.DateString) ?? xeroDay(txn.Date) ?? rawDate ?? now.toISOString().slice(0, 10),
     txn_type: type,
     contact_name: xeroText(contact?.Name),
     contact_id: xeroText(contact?.ContactID),
@@ -95,15 +118,22 @@ export function bankTransactionRow(txn: XeroRecord, orgId: string, now: Date): B
     is_reconciled: typeof txn.IsReconciled === "boolean" ? txn.IsReconciled : true,
     synced_at: now.toISOString(),
   };
-  const lines = Array.isArray(txn.LineItems)
-    ? txn.LineItems.map(xeroObject).filter((l): l is XeroRecord => l !== null)
-    : [];
-  if (lines.length > 0) {
-    const amountTypes = xeroText(txn.LineAmountTypes);
-    row.line_items = lines.map((l) => ({ ...l, LineAmountTypes: amountTypes }));
-    row.description = lines.map((l) => xeroText(l.Description)).filter(Boolean).join("; ") || null;
-  }
-  return row;
+}
+
+/** The lines row, or null when Xero sent no id or no line. Lines are stored as sent. */
+export function bankTransactionLinesRow(txn: XeroRecord, orgId: string, now: Date): BankTransactionLinesRow | null {
+  const id = xeroText(txn.BankTransactionID);
+  if (!id || !Array.isArray(txn.LineItems)) return null;
+  const lines = txn.LineItems.map(xeroObject).filter((l): l is XeroRecord => l !== null);
+  if (lines.length === 0) return null;
+  return {
+    org_id: orgId,
+    xero_txn_id: id,
+    line_amount_types: xeroText(txn.LineAmountTypes),
+    line_items: lines,
+    xero_updated_at: xeroInstant(txn.UpdatedDateUTC),
+    synced_at: now.toISOString(),
+  };
 }
 
 /** The day before 1 July of the financial year `now` falls in, in Perth. */
@@ -132,35 +162,37 @@ type Get = (
 // deno-lint-ignore no-explicit-any
 type Client = { from: (t: string) => any };
 
+export type BankLinesOutcome =
+  | { ok: true; mode: "incremental" | "whole" | "first_whole"; pages: number; written: number; modified_since: string | null; healed: number }
+  | { ok: false; mode: "incremental" | "whole" | "first_whole"; reason: string; pages: number; written: number; missed?: number }
+  | { ok: null; mode: "waiting"; reason: "awaiting_first_whole_read" };
+
 export type BankTransactionSyncResult = {
   success: true;
   transactions_synced: number;
   skipped: number;
   first_error: string | null;
-  /** backfill: back to 1 July. full: the last 90 days. incremental: changes only. unpaged_fallback: no lines. */
-  mode: "backfill" | "full" | "incremental" | "unpaged_fallback";
-  pages: number;
-  with_lines: number;
-  modified_since: string | null;
-  fallback_reason?: string;
+  lines: BankLinesOutcome;
 };
 
-type Tally = { synced: number; skipped: number; withLines: number; firstError: string | null };
+type Tally = { synced: number; skipped: number; firstError: string | null };
 
-async function writeRows(sb: Client, rows: BankTransactionRow[], tally: Tally): Promise<void> {
-  // Two shapes, written apart: one upsert sends one column list, and a row with
-  // no lines must not carry a line_items column that would blank the stored one.
-  const groups = [rows.filter((r) => r.line_items !== undefined), rows.filter((r) => r.line_items === undefined)];
-  for (const group of groups) {
-    if (group.length === 0) continue;
-    const { error } = await sb.from("xero_bank_transactions").upsert(group, { onConflict: "org_id,xero_txn_id" });
+async function upsertAll(
+  sb: Client,
+  table: string,
+  rows: Record<string, unknown>[],
+  tally: Tally,
+): Promise<void> {
+  for (let i = 0; i < rows.length; i += WRITE_CHUNK) {
+    const chunk = rows.slice(i, i + WRITE_CHUNK);
+    const { error } = await sb.from(table).upsert(chunk, { onConflict: "org_id,xero_txn_id" });
     if (!error) {
-      tally.synced += group.length;
+      tally.synced += chunk.length;
       continue;
     }
     // One bad row must not lose the rest: write them one at a time and count it.
-    for (const row of group) {
-      const one = await sb.from("xero_bank_transactions").upsert(row, { onConflict: "org_id,xero_txn_id" });
+    for (const row of chunk) {
+      const one = await sb.from(table).upsert(row, { onConflict: "org_id,xero_txn_id" });
       if (one.error) {
         tally.skipped++;
         tally.firstError ??= String(one.error.message ?? one.error);
@@ -169,7 +201,18 @@ async function writeRows(sb: Client, rows: BankTransactionRow[], tally: Tally): 
       }
     }
   }
-  tally.withLines += groups[0].length;
+}
+
+/** Unique by transaction id, first one kept. */
+function unique<T extends { xero_txn_id: string }>(rows: (T | null)[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const r of rows) {
+    if (!r || seen.has(r.xero_txn_id)) continue;
+    seen.add(r.xero_txn_id);
+    out.push(r);
+  }
+  return out;
 }
 
 /** Xero may answer "nothing changed" to If-Modified-Since with 304; the transport throws it. */
@@ -177,132 +220,184 @@ function notModified(e: unknown): boolean {
   return (e as { status?: unknown } | null)?.status === 304;
 }
 
+type PagedRead = { ids: Set<string>; pages: number; written: number; skipped: number; firstError: string | null };
+
+/** One paged traversal, written page by page. Throws on anything but a clean end. */
+async function readPages(
+  sb: Client,
+  orgId: string,
+  get: Get,
+  where: string,
+  headers: Record<string, string>,
+  at: Date,
+): Promise<PagedRead> {
+  const ids = new Set<string>();
+  const head: Tally = { synced: 0, skipped: 0, firstError: null };
+  const lines: Tally = { synced: 0, skipped: 0, firstError: null };
+  let pages = 0;
+  for (let page = 1;; page++) {
+    if (page > BANK_TXN_PAGE_LIMIT) throw new Error("Bank transaction traversal limit reached; cursor retained");
+    let rows: XeroRecord[];
+    try {
+      rows = xeroCollection(
+        await get("/BankTransactions", {
+          where,
+          order: "Date DESC",
+          page: String(page),
+          pageSize: String(BANK_TXN_PAGE_SIZE),
+        }, headers),
+        "BankTransactions",
+      );
+    } catch (e) {
+      if (!notModified(e)) throw e;
+      rows = [];
+    }
+    if (rows.length > BANK_TXN_PAGE_SIZE) throw new Error("Xero BankTransactions exceeded page size");
+    pages++;
+    const fresh = rows.filter((r) => {
+      const id = xeroText(r.BankTransactionID);
+      if (!id || ids.has(id)) return false;
+      ids.add(id);
+      return true;
+    });
+    await upsertAll(sb, "xero_bank_transactions", unique(fresh.map((r) => bankTransactionRow(r, orgId, at))), head);
+    await upsertAll(
+      sb,
+      "xero_bank_transaction_lines",
+      unique(fresh.map((r) => bankTransactionLinesRow(r, orgId, at))),
+      lines,
+    );
+    if (rows.length < BANK_TXN_PAGE_SIZE) break;
+  }
+  return {
+    ids,
+    pages,
+    written: lines.synced,
+    skipped: head.skipped + lines.skipped,
+    firstError: head.firstError ?? lines.firstError,
+  };
+}
+
 export async function syncBankTransactionLines(
   sb: Client,
   orgId: string,
   tenantId: string,
   get: Get,
+  opts: { whole: boolean },
   now = () => new Date(),
 ): Promise<BankTransactionSyncResult> {
-  const key = `bank_transactions:${orgId}:${tenantId}`;
-  const fullKey = `bank_transactions_full:${orgId}:${tenantId}`;
-  const { data: cursors, error: cursorError } = await sb.from("xero_sync_state")
-    .select("key,cursor_at").in("key", [key, fullKey]);
-  if (cursorError || !Array.isArray(cursors)) {
-    throw new Error(`Bank transaction cursor read failed: ${cursorError?.message ?? "no rows"}`);
-  }
-  const cursorAt = (k: string) =>
-    (cursors as { key: string; cursor_at: string | null }[]).find((c) => c.key === k)?.cursor_at;
   const startedAt = now();
   const started = startedAt.toISOString();
   const ninety = daysAgo(startedAt, BANK_TXN_WINDOW_DAYS);
   const fyEve = dayBeforeFinancialYear(startedAt);
   const wide = fyEve < ninety ? fyEve : ninety;
 
-  const lastFull = Date.parse(cursorAt(fullKey) ?? "");
-  const mode: "backfill" | "full" | "incremental" = !Number.isFinite(lastFull)
-    ? "backfill"
-    : startedAt.getTime() - lastFull >= BANK_TXN_FULL_REREAD_MS
-    ? "full"
-    : "incremental";
-  const since = mode === "incremental" ? incrementalModifiedSince(cursorAt(key), startedAt.getTime()) : undefined;
-  // An incremental run with no usable cursor has nothing to bound it: read the 90 days whole.
-  const effective = mode === "incremental" && !since ? "full" : mode;
-  const headers: Record<string, string> = since ? { "If-Modified-Since": since } : {};
-  const where = bankTransactionsWhere(effective === "full" ? ninety : wide);
+  // 1. The transaction copy, by the read it has always used.
+  const listed = xeroCollection(
+    await get("/BankTransactions", { where: bankTransactionsWhere(ninety), order: "Date DESC" }, {}),
+    "BankTransactions",
+  );
+  const head: Tally = { synced: 0, skipped: 0, firstError: null };
+  const headRows = unique(listed.map((r) => bankTransactionRow(r, orgId, startedAt)));
+  await upsertAll(sb, "xero_bank_transactions", headRows, head);
+  const result = (lines: BankLinesOutcome): BankTransactionSyncResult => ({
+    success: true,
+    transactions_synced: head.synced,
+    skipped: head.skipped,
+    first_error: head.firstError,
+    lines,
+  });
 
-  const tally: Tally = { synced: 0, skipped: 0, withLines: 0, firstError: null };
-  const seen = new Set<string>();
+  // 2. The lines.
+  const key = `bank_transactions:${orgId}:${tenantId}`;
+  const fullKey = `bank_transactions_full:${orgId}:${tenantId}`;
+  let mode: "incremental" | "whole" | "first_whole" = "incremental";
   let pages = 0;
-  for (let page = 1;; page++) {
-    if (page > BANK_TXN_PAGE_LIMIT) {
-      throw new Error("Bank transaction traversal limit reached; cursor retained");
+  let written = 0;
+  try {
+    const { data: cursors, error: cursorError } = await sb.from("xero_sync_state")
+      .select("key,cursor_at").in("key", [key, fullKey]);
+    if (cursorError || !Array.isArray(cursors)) {
+      throw new Error(`cursor read failed: ${cursorError?.message ?? "no rows"}`);
     }
-    let rows: XeroRecord[];
-    try {
-      const data = await get("/BankTransactions", {
-        where,
-        order: "Date DESC",
-        page: String(page),
-        pageSize: String(BANK_TXN_PAGE_SIZE),
-      }, headers);
-      rows = xeroCollection(data, "BankTransactions");
-    } catch (e) {
-      if (e instanceof XeroCooldownError) throw e;
-      if (notModified(e)) {
-        rows = [];
-      } else if (page === 1) {
-        return await unpagedFallback(sb, orgId, get, startedAt, ninety, (e as Error).message);
-      } else {
-        throw e;
+    const cursorAt = (k: string) =>
+      (cursors as { key: string; cursor_at: string | null }[]).find((c) => c.key === k)?.cursor_at;
+    const hasFull = Number.isFinite(Date.parse(cursorAt(fullKey) ?? ""));
+    const since = incrementalModifiedSince(cursorAt(key), startedAt.getTime());
+    const stamp = (keys: string[], note: string) =>
+      sb.from("xero_sync_state").upsert(
+        keys.map((k) => ({ key: k, cursor_at: started, updated_at: now().toISOString(), note })),
+        { onConflict: "key" },
+      );
+
+    // What changed since the last complete read, over the wide window.
+    let healed = 0;
+    if (since) {
+      const read = await readPages(sb, orgId, get, bankTransactionsWhere(wide), { "If-Modified-Since": since }, startedAt);
+      pages += read.pages;
+      written += read.written;
+      const { error } = await stamp([key], `Bank transaction lines ${read.written}; incremental`);
+      if (error) throw new Error(`cursor write failed: ${error.message}`);
+    }
+    if (!opts.whole) {
+      if (!since) return result({ ok: null, mode: "waiting", reason: "awaiting_first_whole_read" });
+      return result({ ok: true, mode, pages, written, modified_since: since, healed });
+    }
+
+    // The whole read, checked against the unpaged list of the same window.
+    mode = hasFull ? "whole" : "first_whole";
+    const from = hasFull ? ninety : wide;
+    const expected = new Set<string>(headRows.map((r) => r.xero_txn_id));
+    if (from !== ninety) {
+      const wideList = xeroCollection(
+        await get("/BankTransactions", { where: bankTransactionsWhere(from), order: "Date DESC" }, {}),
+        "BankTransactions",
+      );
+      for (const r of wideList) {
+        const id = xeroText(r.BankTransactionID);
+        if (id) expected.add(id);
       }
     }
-    pages++;
-    const built: BankTransactionRow[] = [];
-    for (const raw of rows) {
-      const row = bankTransactionRow(raw, orgId, startedAt);
-      // Newest first, so a transaction entered mid-read pushes one onto the next
-      // page: the same id twice is expected and written once.
-      if (!row || seen.has(row.xero_txn_id)) continue;
-      seen.add(row.xero_txn_id);
-      built.push(row);
+    const read = await readPages(sb, orgId, get, bankTransactionsWhere(from), {}, startedAt);
+    pages += read.pages;
+    written += read.written;
+    const missed = [...expected].filter((id) => !read.ids.has(id));
+    // A transaction the pages skipped is fetched by its own id, a bounded number a run.
+    let left = missed.length;
+    for (const id of missed.slice(0, BANK_TXN_HEAL_LIMIT)) {
+      const one = xeroCollection(await get(`/BankTransactions/${id}`, {}, {}), "BankTransactions");
+      const tally: Tally = { synced: 0, skipped: 0, firstError: null };
+      await upsertAll(sb, "xero_bank_transactions", unique(one.map((r) => bankTransactionRow(r, orgId, startedAt))), tally);
+      await upsertAll(
+        sb,
+        "xero_bank_transaction_lines",
+        unique(one.map((r) => bankTransactionLinesRow(r, orgId, startedAt))),
+        tally,
+      );
+      if (tally.skipped === 0 && one.some((r) => xeroText(r.BankTransactionID) === id)) {
+        healed++;
+        left--;
+        written++;
+      }
     }
-    await writeRows(sb, built, tally);
-    if (rows.length < BANK_TXN_PAGE_SIZE) break;
+    if (left > 0 || read.skipped > 0) {
+      return result({
+        ok: false,
+        mode,
+        reason: left > 0
+          ? `${left} transactions in the list did not arrive with lines; whole-read cursor retained`
+          : `${read.skipped} rows would not write (${read.firstError}); whole-read cursor retained`,
+        pages,
+        written,
+        missed: left,
+      });
+    }
+    // The first whole read also starts the incremental chain; later ones leave it alone.
+    const { error } = await stamp(since ? [fullKey] : [key, fullKey], `Bank transaction lines ${read.written}; ${mode}; healed ${healed}`);
+    if (error) throw new Error(`cursor write failed: ${error.message}`);
+    return result({ ok: true, mode, pages, written, modified_since: since ?? null, healed });
+  } catch (e) {
+    if (e instanceof XeroCooldownError) throw e;
+    return result({ ok: false, mode, reason: (e as Error).message, pages, written });
   }
-
-  // A complete read. Rows that would not write are counted and reported; the
-  // daily whole read tries them again, so they do not hold the cursor.
-  const updatedAt = now().toISOString();
-  const note = `Bank transactions ${tally.synced}; with lines ${tally.withLines}; skipped ${tally.skipped}; ${effective}`;
-  const { error } = await sb.from("xero_sync_state").upsert([
-    { key, cursor_at: started, updated_at: updatedAt, note },
-    ...(effective === "incremental" ? [] : [{ key: fullKey, cursor_at: started, updated_at: updatedAt, note }]),
-  ], { onConflict: "key" });
-  if (error) throw new Error(`Bank transaction cursor write failed: ${error.message}`);
-  return {
-    success: true,
-    transactions_synced: tally.synced,
-    skipped: tally.skipped,
-    first_error: tally.firstError,
-    mode: effective,
-    pages,
-    with_lines: tally.withLines,
-    modified_since: since ?? null,
-  };
-}
-
-/** The read this file replaced: the last 90 days in one unpaged call, which carries no lines. */
-async function unpagedFallback(
-  sb: Client,
-  orgId: string,
-  get: Get,
-  startedAt: Date,
-  ninety: string,
-  reason: string,
-): Promise<BankTransactionSyncResult> {
-  const data = await get("/BankTransactions", { where: bankTransactionsWhere(ninety), order: "Date DESC" }, {});
-  const tally: Tally = { synced: 0, skipped: 0, withLines: 0, firstError: null };
-  const seen = new Set<string>();
-  const built: BankTransactionRow[] = [];
-  for (const raw of xeroCollection(data, "BankTransactions")) {
-    const row = bankTransactionRow(raw, orgId, startedAt);
-    if (!row || seen.has(row.xero_txn_id)) continue;
-    seen.add(row.xero_txn_id);
-    built.push(row);
-  }
-  for (let i = 0; i < built.length; i += BANK_TXN_PAGE_SIZE) {
-    await writeRows(sb, built.slice(i, i + BANK_TXN_PAGE_SIZE), tally);
-  }
-  return {
-    success: true,
-    transactions_synced: tally.synced,
-    skipped: tally.skipped,
-    first_error: tally.firstError,
-    mode: "unpaged_fallback",
-    pages: 1,
-    with_lines: tally.withLines,
-    modified_since: null,
-    fallback_reason: reason,
-  };
 }
