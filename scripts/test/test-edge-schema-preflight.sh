@@ -1081,7 +1081,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261113120000", "job_schedule_reminders"),
                       # TP-08 Xero tie-out: xero_tieout also calls
                       # xero_spend_revenue_monthly (xero_tieout.ts).
-                      ("20261115110000", "xero_spend_revenue_tieout")]:
+                      ("20261115110000", "xero_spend_revenue_tieout"),
+                      # Weekly pay-run check for trade invoices
+                      # (trade_pay_run_check.ts).
+                      ("20261115140000", "trade_pay_run_check")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
