@@ -134,6 +134,12 @@ What the numbers say:
 
 ## Not in v1
 
+- Checking net pay exactly against the super rules. `pay_above_lines` stops a
+  net pay above the lines, but a net pay equal to the lines when super should
+  have come off passes. Three super schemes are live (on 15 Nov 2026, of 106
+  invoices: half the super withheld 83, all of it 20, none 3 under
+  `employer_12_v2`), so an exact check needs the scheme per invoice.
+
 - Approving clean bills in Xero automatically. Revisit only after eight weeks in
   which every bill this check marked clean was right, and with the owner's word.
 - Comparing hours with clock times: clocking is almost unused (7 clock-ons ever
