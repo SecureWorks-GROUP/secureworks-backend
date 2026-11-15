@@ -115,7 +115,7 @@ export function workOrderTotalCapRefusal(input: {
     j.most_this_invoice_ex > 0
       ? `Job ${j.job}: this invoice can bill at most ${
         dollars(j.most_this_invoice_ex)
-      } of labour on its work order. If someone else on the job billed their part, list them as crew on the work order. Ask the office if the work order needs changing.`
+      } on its work order. If someone else on the job billed their part, list them as crew on the work order. Ask the office if the work order needs changing.`
       : `Job ${j.job}: its work order has been billed in full. Ask the office if it needs changing.`
   ).join(" ");
   return { code: "work_order_total_over_agreed", message, jobs: over };
