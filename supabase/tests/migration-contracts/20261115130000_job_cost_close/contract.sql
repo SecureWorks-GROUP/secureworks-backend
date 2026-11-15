@@ -42,7 +42,9 @@
 --                                                                    settling, no finish day, final on 1 Dec
 --   CC-35  fencing, archived on 25 Oct by a status move, no completed_at   settling, finished on 25 Oct by status, final on 24 Nov
 --   CC-36  repair, processing, stage moved to complete 28 Oct        settling, finished on 28 Oct by repair_stage, final on 27 Nov
---   CC-37  make-safe, archived 1 Nov, invoiced 25 Aug, moved to processing 26 Aug   final on 24 Sep by first_invoice
+--   CC-37  make-safe, archived 1 Nov, invoiced 25 Aug, moved to processing 26 Aug naming no old status
+--                                                                    settling, finished on 1 Nov by status, final on 1 Dec
+--          (the invoice no longer stands: a move nobody logged may lie before the 26 Aug one; CC-67 names it)
 --                                                                    (putting an invoiced make-safe away does not restart its count)
 --  Fourth review, 15 Nov 2026: a job is never dated before it came to stand where it stands.
 --   CC-38  make-safe, complete, completed_at 10 Aug, no status move on record, invoiced 25 Aug
@@ -96,6 +98,19 @@
 --          (the history floor: a move nobody logged could be as late as 1 Nov)
 --   CC-63  make-safe, invoiced 25 Aug, complete 5 Aug then scheduled 1 Sep, the move to scheduled naming no old
 --          status                                                    open (it left a finished status after the invoice)
+--   CC-64  make-safe, complete 25 Aug 09:00 Perth, back to scheduled 14:00 the same day (the move names no old
+--          status), invoiced 25 Aug                                  open (taken out of a finished status)
+--   CC-65  make-safe, complete 5 Aug, in_progress 10 Aug, scheduled 12 Aug, invoiced 25 Aug, cycle 1
+--                                                                    open (an invoice after a send-back finishes nothing)
+--   CC-66  make-safe, scheduled 1 Aug, invoiced 25 Aug, moved to processing 1 Sep naming no old status
+--                                                                    open (a complete nobody logged may lie between)
+--   CC-67  make-safe, invoiced 25 Aug, moved scheduled to processing 1 Sep with the old status named
+--                                                                    final on 24 Sep by first_invoice
+--   CC-68  repair, processing, stage complete 1 Aug, stage moved to on_site 1 Oct, stage now complete with no
+--          later stage move on record                                open
+--   CC-69  fencing, invoiced, done 10 Aug, flagged as a callback with no callback event      open
+--   CC-70  fencing, complete, done 10 Aug, a crew visit booked for 20 Nov                    open
+--          (CC-01 carries a ghost visit that day and stays final)
 -- And the record itself (section 4): a status change by anyone writes a job_status_moves row naming both
 -- statuses, and a make-safe taken from complete back to accepted is open again.
 
@@ -253,8 +268,19 @@ FROM (VALUES
   (60, 'invoiced',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
   (61, 'invoiced',      'makesafe', '{"ses_family": "restoration", "restoration_stage": {"stage": "invoiced"}}', NULL),
   (62, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
-  (63, 'scheduled',     'makesafe', '{}', NULL)
+  (63, 'scheduled',     'makesafe', '{}', NULL),
+  (64, 'scheduled',     'makesafe', '{}', NULL),
+  (65, 'scheduled',     'makesafe', '{}', NULL),
+  (66, 'processing',    'makesafe', '{}', NULL),
+  (67, 'processing',    'makesafe', '{}', NULL),
+  (68, 'processing',    'repair',   '{"repair_stage": "complete"}', NULL),
+  (69, 'invoiced',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (70, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z')
 ) AS v(n, status, type, meta, completed);
+UPDATE public.jobs SET is_callback = true WHERE job_number = 'CC-69';
+INSERT INTO public.job_assignments (job_id, status, scheduled_date, role, is_ghost) VALUES
+  ('cc000000-0000-4000-8000-000000000070', 'scheduled', date '2026-11-20', 'lead', false),
+  ('cc000000-0000-4000-8000-000000000001', 'scheduled', date '2026-11-20', 'observer', true);
 
 -- The trigger wrote a 'created' row for each job just now. A real job's row is written when it is created, so
 -- date each one to its job's creation. CC-62 stands for a job that existed before the record began: its row is
@@ -329,6 +355,17 @@ INSERT INTO public.job_events (job_id, event_type, detail_json, created_at) VALU
   ('cc000000-0000-4000-8000-000000000061', 'restoration_stage_changed', '{"from_stage": "works", "to_stage": "invoiced", "job_status": "invoiced"}', timestamptz '2026-11-10T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000063', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-05T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000063', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-09-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000064', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-25T01:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000064', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-08-25T06:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000065', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-05T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000065', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-08-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000065', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-08-12T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000066', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-08-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000066', 'status_changed', '{"new_status": "processing"}',    timestamptz '2026-09-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000067', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-08-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000067', 'status_changed', '{"new_status": "processing", "old_status": "scheduled"}', timestamptz '2026-09-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000068', 'repair_stage_changed', '{"from_stage": "on_site", "to_stage": "complete"}', timestamptz '2026-08-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000068', 'repair_stage_changed', '{"from_stage": "complete", "to_stage": "on_site"}', timestamptz '2026-10-01T02:00:00Z'),
   -- A normal run through the finished statuses does not move the finish day: CC-01 was invoiced, then archived.
   ('cc000000-0000-4000-8000-000000000001', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-08-01T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000001', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:01Z'),
@@ -418,7 +455,7 @@ INSERT INTO cc_key VALUES
   ('CC-34', 'settling',       '2026-12-01', true,  NULL,         'status',           NULL),
   ('CC-35', 'settling',       '2026-11-24', true,  '2026-10-25', 'status',           NULL),
   ('CC-36', 'settling',       '2026-11-27', true,  '2026-10-28', 'repair_stage',     NULL),
-  ('CC-37', 'final',          '2026-09-24', true,  '2026-08-25', 'first_invoice',    NULL),
+  ('CC-37', 'settling',       '2026-12-01', true,  '2026-11-01', 'status',           NULL),
   ('CC-38', 'final',          '2026-09-24', true,  '2026-08-25', 'first_invoice',    NULL),
   ('CC-39', 'settling',       '2026-12-01', true,  '2026-11-01', 'status',           NULL),
   ('CC-40', 'settling',       '2026-12-05', true,  '2026-11-05', 'status',           NULL),
@@ -444,7 +481,14 @@ INSERT INTO cc_key VALUES
   ('CC-60', 'settling',       '2026-12-10', true,  '2026-11-10', 'status',           NULL),
   ('CC-61', 'settling',       '2026-12-10', true,  '2026-11-10', 'status',           NULL),
   ('CC-62', 'settling',       '2026-12-01', true,  '2026-08-10', 'work_done',        NULL),
-  ('CC-63', 'open',           NULL,         false, NULL,         NULL,               NULL);
+  ('CC-63', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-64', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-65', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-66', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-67', 'final',          '2026-09-24', true,  '2026-08-25', 'first_invoice',    NULL),
+  ('CC-68', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-69', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-70', 'open',           NULL,         false, NULL,         NULL,               NULL);
 
 DO $$
 DECLARE r record; out text := ''; ids uuid[];
@@ -511,7 +555,7 @@ BEGIN
   IF (SELECT count(*) FROM public.job_cost_close(one, date '2026-09-19')) <> 1 THEN
     RAISE EXCEPTION 'job cost close contract: asked for one job, got another count';
   END IF;
-  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 63 THEN
+  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 70 THEN
     RAISE EXCEPTION 'job cost close contract: null ids did not return every job';
   END IF;
   IF (SELECT count(*) FROM public.job_cost_close()) <> (SELECT count(*) FROM public.v_job_profit) THEN

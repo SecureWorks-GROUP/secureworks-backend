@@ -52,9 +52,12 @@
 --     and an invoice does not finish it. The stage stands while no working status move is on record after it
 --     reached complete; one sent back to work with its stage left at complete is finished again only by a
 --     finished status. Archived (closed_statuses) also finishes it: the card was put away;
---   never while a callback is open on it (a callback_opened event with no callback_resolved after it): the
---     work is being redone, whatever the status says;
---   an approved customer invoice, for a make-safe that has no repair stage, is not restoration work, is still on
+--   never while a callback is open on it (jobs.is_callback, or a callback_opened event with no
+--     callback_resolved after it): the work is being redone, whatever the status says;
+--   never while a crew visit is booked on or after as_of (a live job_assignments row: scheduled or confirmed,
+--     not a ghost or an observer): labour is still to come;
+--   an approved customer invoice, for a make-safe that has no repair stage, has never been taken out of a
+--     finished status (once one has, only a finished status finishes it again), is not restoration work, is still on
 --     its first attendance (makesafe_job_details.cycle_number 1 and no reopen_reason) and sits at one of the
 --     statuses an invoiced make-safe rests at (invoice_finish_statuses; measured: accepted, scheduled,
 --     processing). A make-safe is invoiced after the attendance and its status is not its stage. One reopened,
@@ -73,7 +76,11 @@
 -- A day stands only while the status has not moved to a working one after it. A working move is a move to any
 -- status that is not finished; for a make-safe or a job with a repair stage, whose status is not its stage,
 -- a move to a resting status (invoice_finish_statuses) is not one, unless it is a move out of a finished status
--- (the record names the status it left): that is a return to work wherever it lands. Reopening or re-attending
+-- (the record names the status it left): that is a return to work wherever it lands. An invoice is stricter:
+-- it stands only while no move to a status that is not finished comes on a later Perth day, except a move from
+-- one resting status to another whose old status is named (the record, or the event, names it; an old status
+-- inferred from the previous logged move does not count, because a move nobody logged may lie between).
+-- A repair's stage stands only while no stage move to another stage is on record after it last reached complete. Reopening or re-attending
 -- a make-safe, a quote accepted or a quote run declined, and a callback opened each put a job back to work and
 -- may log no status move; each leaves its own job_events row (reopen_event_types, reopen_note_prefix) and each
 -- counts as a working move. A stage day or an invoice day that does not stand gives way to the first move into
@@ -105,8 +112,16 @@ SET LOCAL lock_timeout = '5s';
 DO $guard$
 BEGIN
   IF to_regclass('public.v_job_profit') IS NULL OR to_regclass('public.job_client_signoffs') IS NULL
-     OR to_regclass('public.makesafe_job_details') IS NULL OR to_regclass('public.job_events') IS NULL THEN
-    RAISE EXCEPTION 'job cost close: v_job_profit, job_client_signoffs, makesafe_job_details or job_events is missing';
+     OR to_regclass('public.makesafe_job_details') IS NULL OR to_regclass('public.job_events') IS NULL
+     OR to_regclass('public.job_assignments') IS NULL THEN
+    RAISE EXCEPTION 'job cost close: v_job_profit, job_client_signoffs, makesafe_job_details, job_events or job_assignments is missing';
+  END IF;
+  IF (SELECT count(*) FROM pg_attribute a
+       WHERE a.attrelid = 'public.jobs'::regclass AND NOT a.attisdropped AND a.attname = 'is_callback') <> 1
+     OR (SELECT count(*) FROM pg_attribute a
+          WHERE a.attrelid = 'public.job_assignments'::regclass AND NOT a.attisdropped
+            AND a.attname IN ('job_id', 'status', 'scheduled_date', 'is_ghost', 'role')) <> 5 THEN
+    RAISE EXCEPTION 'job cost close: jobs.is_callback or a job_assignments column the read needs is missing';
   END IF;
   IF (SELECT count(*) FROM pg_attribute a
        WHERE a.attrelid = 'public.makesafe_job_details'::regclass AND NOT a.attisdropped
@@ -118,6 +133,7 @@ BEGIN
      OR NOT has_table_privilege('service_role', 'public.job_client_signoffs', 'SELECT')
      OR NOT has_table_privilege('service_role', 'public.job_events', 'SELECT')
      OR NOT has_table_privilege('service_role', 'public.jobs', 'SELECT')
+     OR NOT has_table_privilege('service_role', 'public.job_assignments', 'SELECT')
      OR NOT has_table_privilege('service_role', 'public.v_job_profit', 'SELECT') THEN
     RAISE EXCEPTION 'job cost close: the service role cannot read a table this reads';
   END IF;
@@ -287,7 +303,8 @@ AS $fn$
            NOT k.reopen AND COALESCE(st.to_status = ANY (pr.finished_statuses), false) AS to_finished,
            NOT k.reopen AND COALESCE(st.to_status = ANY (pr.invoice_finish_statuses), false) AS to_resting,
            k.reopen,
-           COALESCE(st.from_status = ANY (pr.finished_statuses), false) AS from_finished
+           COALESCE(st.from_status = ANY (pr.finished_statuses), false) AS from_finished,
+           st.from_named AND COALESCE(st.from_status = ANY (pr.invoice_finish_statuses), false) AS from_resting_named
       FROM public.job_events e CROSS JOIN params pr
      CROSS JOIN LATERAL (
        SELECT COALESCE(e.event_type = ANY (pr.reopen_event_types), false)
@@ -305,7 +322,9 @@ AS $fn$
                           FROM public.job_events p
                          WHERE p.job_id = e.job_id AND p.created_at < e.created_at
                            AND p.event_type IN ('status_changed', 'status_change', 'restoration_stage_changed')
-                         ORDER BY p.created_at DESC LIMIT 1)) AS from_status) st
+                         ORDER BY p.created_at DESC LIMIT 1)) AS from_status,
+              COALESCE(e.detail_json ->> 'old_status', e.detail_json ->> 'from',
+                       e.detail_json ->> 'prior_job_status') IS NOT NULL AS from_named) st
      WHERE (k.reopen OR (pr.status_events ? e.event_type AND st.to_status IS NOT NULL))
        AND (p_job_ids IS NULL OR e.job_id = ANY (p_job_ids))
     UNION ALL
@@ -315,7 +334,8 @@ AS $fn$
            COALESCE(m.to_status = ANY (pr.finished_statuses), false),
            COALESCE(m.to_status = ANY (pr.invoice_finish_statuses), false),
            false,
-           COALESCE(m.from_status = ANY (pr.finished_statuses), false)
+           COALESCE(m.from_status = ANY (pr.finished_statuses), false),
+           COALESCE(m.from_status = ANY (pr.invoice_finish_statuses), false)
       FROM public.job_status_moves m CROSS JOIN params pr
      WHERE m.source = 'changed' AND m.to_status IS NOT NULL
        AND (p_job_ids IS NULL OR m.job_id = ANY (p_job_ids))
@@ -325,7 +345,9 @@ AS $fn$
     -- finished status wherever it lands, a reopen or a re-attend); and the last reopen or re-attend.
     SELECT m.job_id, max(m.created_at) AS back_to_work_at,
            max(m.created_at) FILTER (WHERE NOT m.to_resting OR m.from_finished) AS active_at,
-           max(m.created_at) FILTER (WHERE m.reopen) AS reopened_at
+           max(m.created_at) FILTER (WHERE m.reopen) AS reopened_at,
+           max(m.created_at) FILTER (WHERE m.from_finished) AS left_finished_at,
+           max(m.created_at) FILTER (WHERE NOT (m.to_resting AND m.from_resting_named)) AS unsettled_at
       FROM moves m WHERE NOT m.to_finished GROUP BY m.job_id
   ), refinished AS (
     -- The first move into a finished status at or after the last move to any status that is not finished.
@@ -350,10 +372,12 @@ AS $fn$
      WHERE p_job_ids IS NULL OR m.job_id = ANY (p_job_ids)
      GROUP BY m.job_id
   ), staged AS (
-    SELECT e.job_id, max(e.created_at) AS stage_done_at
+    -- The last stage move to complete, and the last stage move to any other stage.
+    SELECT e.job_id,
+           max(e.created_at) FILTER (WHERE e.detail_json ->> 'to_stage' = ANY (pr.repair_finished_stages)) AS stage_done_at,
+           max(e.created_at) FILTER (WHERE NOT COALESCE(e.detail_json ->> 'to_stage' = ANY (pr.repair_finished_stages), false)) AS stage_left_at
       FROM public.job_events e CROSS JOIN params pr
      WHERE e.event_type = 'repair_stage_changed'
-       AND e.detail_json ->> 'to_stage' = ANY (pr.repair_finished_stages)
        AND (p_job_ids IS NULL OR e.job_id = ANY (p_job_ids))
      GROUP BY e.job_id
   ), src AS (
@@ -369,7 +393,8 @@ AS $fn$
            -- all is held to the day its row last changed.
            LEAST((j.updated_at AT TIME ZONE 'Australia/Perth')::date,
                  (rc.recorded_from AT TIME ZONE 'Australia/Perth')::date) AS history_floor_on,
-           COALESCE(cb.opened_at IS NOT NULL AND (cb.resolved_at IS NULL OR cb.resolved_at < cb.opened_at), false) AS callback_open,
+           COALESCE(j.is_callback, false)
+             OR COALESCE(cb.opened_at IS NOT NULL AND (cb.resolved_at IS NULL OR cb.resolved_at < cb.opened_at), false) AS callback_open,
            -- The latest day the records give: completed_at, or the newest sign-off not revoked since.
            -- GREATEST skips a null.
            GREATEST(j.completed_at,
@@ -379,7 +404,8 @@ AS $fn$
                         AND NOT EXISTS (SELECT 1 FROM public.job_client_signoffs r
                                          WHERE r.job_id = jp.job_id AND r.method = 'revoked'
                                            AND r.created_at >= s.created_at))) AS done_at,
-           w.back_to_work_at, w.active_at, w.reopened_at, rf.refinished_at, sg.stage_done_at
+           w.back_to_work_at, w.active_at, w.reopened_at, w.left_finished_at, w.unsettled_at,
+           rf.refinished_at, sg.stage_done_at, sg.stage_left_at
       FROM public.v_job_profit jp
       JOIN public.jobs j ON j.id = jp.job_id
       LEFT JOIN public.makesafe_job_details d ON d.job_id = jp.job_id
@@ -407,8 +433,16 @@ AS $fn$
            -- the last one. A complete stage with no stage move on record and a working move on record does
            -- not stand: their order is not known.
            COALESCE(s.repair_stage = ANY (pr.repair_finished_stages), false)
-             AND (wk.work_at IS NULL OR (s.stage_done_at IS NOT NULL AND wk.work_at <= s.stage_done_at)) AS stage_stands,
+             AND (wk.work_at IS NULL OR (s.stage_done_at IS NOT NULL AND wk.work_at <= s.stage_done_at))
+             AND (s.stage_left_at IS NULL OR (s.stage_done_at IS NOT NULL AND s.stage_left_at < s.stage_done_at)) AS stage_stands,
+           -- A crew visit still to come: labour not yet worked.
+           EXISTS (SELECT 1 FROM public.job_assignments a
+                    WHERE a.job_id = s.job_id AND a.status IN ('scheduled', 'confirmed')
+                      AND NOT COALESCE(a.is_ghost, false) AND COALESCE(a.role, '') <> 'observer'
+                      AND a.scheduled_date >= pr.as_of) AS crew_due,
            iv.invoice_finish_on IS NOT NULL
+             AND s.left_finished_at IS NULL
+             AND (s.unsettled_at IS NULL OR (s.unsettled_at AT TIME ZONE 'Australia/Perth')::date <= iv.invoice_finish_on)
              AND (wk.work_at IS NULL OR (wk.work_at AT TIME ZONE 'Australia/Perth')::date <= iv.invoice_finish_on)
              AND (s.reopened_at IS NULL OR (s.reopened_at AT TIME ZONE 'Australia/Perth')::date < iv.invoice_finish_on) AS inv_ok,
            pr.pending_cost_reasons,
@@ -437,10 +471,10 @@ AS $fn$
   ), judged AS (
     -- Where the job stands now decides. A finish day alone finishes nothing. A repair is finished by its
     -- stage while the stage stands; one sent back to work after its stage reached complete is finished again
-    -- only by a finished status. A job with a callback open is not finished. An answer that cannot be worked
+    -- only by a finished status. A job with a callback open, or a crew visit still to come, is not finished. An answer that cannot be worked
     -- out is not finished.
     SELECT m.*,
-           COALESCE(CASE WHEN m.reopened OR m.callback_open THEN false
+           COALESCE(CASE WHEN m.reopened OR m.callback_open OR m.crew_due THEN false
                          WHEN m.did_not_go_ahead THEN m.actual_cost_events > 0 OR m.cost_pending
                          WHEN m.has_stage THEN m.closed_status OR m.stage_stands
                                                OR (m.stage_finished AND m.finished_status)
@@ -522,7 +556,7 @@ AS $fn$
 $fn$;
 
 COMMENT ON FUNCTION public.job_cost_close(uuid[], date) IS
-  'Job cost close (20261115130000): per job in v_job_profit, whether its cost is final. cost_state: not_applicable (holding job, or cancelled or lost with no cost and none still to come), open (work not finished, or in rectification), waiting (finished; waiting_on names what stands in the way), settling (finished, nothing outstanding, quiet for fewer than quiet_days; final_on is the day it turns final), final (final_on is the day it became final, closed_by the rule). Finished is where the job stands now (a finished status; for a job with a repair stage, stage complete or archived; or an approved invoice on a make-safe that is at a resting status, on its first attendance and not restoration work), never a day on the job alone. finished_on is the later of the work day (completed_at or a standing sign-off) and the day the job came to stand where it stands (the stage moving to complete, the make-safe''s first invoice, or the first move into a finished status after the last move out of one); a day stands only while the status has not moved to a working one after it, and an invoice that does not stand finishes nothing; with no day, the quiet count runs from the newer of the last cost and the day the job record last changed. A job with a callback open is not finished. Status moves are read from job_status_moves (the database''s own record, complete from the day it began) and from the application''s events before that; for the time before the record began, final_on is never earlier than quiet_days after the earlier of the day the job row last changed and the day its record began. Derived on every read from Job Profit''s row: a later cost or reason reopens it. waiting_on is Job Profit''s completeness and cost flag less the reasons that are not about cost; any cost flag other than ok holds a close. Says the cost is complete, not that every line is evidenced (job_profit_line_evidence). Null ids: every job. Null as_of: today in Perth; as_of moves only the day the quiet count is measured to, the costs, status and reasons are always today''s. Read only. Service role only.';
+  'Job cost close (20261115130000): per job in v_job_profit, whether its cost is final. cost_state: not_applicable (holding job, or cancelled or lost with no cost and none still to come), open (work not finished, or in rectification), waiting (finished; waiting_on names what stands in the way), settling (finished, nothing outstanding, quiet for fewer than quiet_days; final_on is the day it turns final), final (final_on is the day it became final, closed_by the rule). Finished is where the job stands now (a finished status; for a job with a repair stage, stage complete or archived; or an approved invoice on a make-safe that is at a resting status, on its first attendance and not restoration work), never a day on the job alone. finished_on is the later of the work day (completed_at or a standing sign-off) and the day the job came to stand where it stands (the stage moving to complete, the make-safe''s first invoice, or the first move into a finished status after the last move out of one); a day stands only while the status has not moved to a working one after it, and an invoice that does not stand finishes nothing; with no day, the quiet count runs from the newer of the last cost and the day the job record last changed. A job with a callback open (jobs.is_callback or an unresolved callback_opened) or a crew visit booked on or after as_of is not finished. A make-safe once taken out of a finished status is finished again only by a finished status. Status moves are read from job_status_moves (the database''s own record, complete from the day it began) and from the application''s events before that; for the time before the record began, final_on is never earlier than quiet_days after the earlier of the day the job row last changed and the day its record began. Derived on every read from Job Profit''s row: a later cost or reason reopens it. waiting_on is Job Profit''s completeness and cost flag less the reasons that are not about cost; any cost flag other than ok holds a close. Says the cost is complete, not that every line is evidenced (job_profit_line_evidence). Null ids: every job. Null as_of: today in Perth; as_of moves only the day the quiet count is measured to, the costs, status and reasons are always today''s. Read only. Service role only.';
 
 REVOKE ALL ON FUNCTION public.job_cost_close_policy() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_cost_close(uuid[], date) FROM PUBLIC, anon, authenticated;

@@ -28,3 +28,7 @@ GRANT SELECT ON public.job_events TO service_role;
 -- 2026). The contract changes a status as that role to prove the status record is written for a caller that
 -- cannot write the record itself.
 GRANT SELECT, UPDATE ON public.jobs TO service_role;
+-- Production's jobs carries is_callback (boolean, default false, read 15 Nov 2026), added by no migration this
+-- stack applies; its service role reads job_assignments. Both stood up here as production has them.
+ALTER TABLE public.jobs ADD COLUMN IF NOT EXISTS is_callback boolean DEFAULT false;
+GRANT SELECT ON public.job_assignments TO service_role;
