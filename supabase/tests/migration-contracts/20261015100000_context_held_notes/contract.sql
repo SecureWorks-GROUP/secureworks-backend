@@ -98,6 +98,13 @@ END $c$;
 -- 2. Off: every replaced function answers byte for byte as the bodies before this migration do.
 BEGIN;
 \ir fixtures.sql
+-- (rested notes, 20261115130000) sets aside notes by their age, so the off answers are
+-- recorded without it: the earlier bodies below never rest a note, and this case is about
+-- the held-notes switch, not the clock.
+SELECT to_regprocedure('public.context_job_story_rest(jsonb,jsonb,timestamptz)') IS NOT NULL AS rested_notes_live \gset
+\if :rested_notes_live
+\ir ../../../rollbacks/20261115130000_context_story_rested_notes_down.sql
+\endif
 DO $c$
 DECLARE a uuid := '7f000000-0000-4000-8000-0000000000a1'; cl jsonb; res jsonb;
 BEGIN
