@@ -42,7 +42,7 @@ CREATE FUNCTION pg_temp.story(p_status text, p_owing numeric, p_left numeric DEF
    pg_temp.lp('k-neighbour', 'commitment', 'us', 'third_party', 'invoice:inv-2001', 'Send the neighbour his $1,450 invoice.', '2026-11-03T02:00:00Z'),
    pg_temp.lp('k-custinv', 'request', 'customer', 'us', 'invoice:az-77', 'We asked the customer to pay AZ-77.', '2026-11-03T02:00:00Z'),
    pg_temp.lp('k-overcharge', 'commitment', 'customer', 'us', 'invoice:inv-1', 'Send bank details so we can reimburse the $150 he was overcharged.', '2026-11-03T02:00:00Z'),
-   pg_temp.lp('k-return', 'commitment', 'us', 'customer', 'visit:return', 'The crew will return to finish the side panels.', '2026-10-14T02:00:00Z'),
+   pg_temp.lp('k-return', 'commitment', 'us', 'customer', 'visit:return', 'The crew will return to finish the side panels.', '2026-10-20T02:00:00Z'),
    pg_temp.lp('k-deposit', 'request', 'customer', 'us', 'payment:deposit', 'Please pay the deposit.', '2026-10-14T02:00:00Z'),
    pg_temp.lp('k-person', 'commitment', 'us', 'customer', 'booking:2026-10-12', 'Call the customer before the install.', '2026-10-01T02:00:00Z')))
 $f$;
