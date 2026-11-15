@@ -779,17 +779,24 @@ Deno.test("job_profit: line evidence comes with the figures; a failed read is un
   const r1 = await jobProfitAction(ok, new URLSearchParams(`job_id=${JOB}`));
   assertEquals(r1.status, 200);
   assertEquals((r1.body as any).line_evidence, { status: "provisional", items: 3, evidenced: 1 });
-  assertEquals(seen, [["job_profit_line_evidence", { p_job_id: JOB }]]);
+  assertEquals(seen, [
+    ["job_profit_line_evidence", { p_job_id: JOB }],
+    ["job_cost_close", { p_job_ids: [JOB] }],
+  ]);
+  // The cost close read rides beside the figures: an answer that is not its rows is unknown.
+  assertEquals((r1.body as any).cost_close, { ok: false, reason: "cost close read returned nothing" });
 
   const bad: any = fakeClient(tables);
   bad.rpc = () => Promise.resolve({ data: null, error: { message: "timeout" } });
   const r2 = await jobProfitAction(bad, new URLSearchParams(`job_id=${JOB}`));
   assertEquals(r2.status, 200, "figures still return when the evidence read fails");
   assertEquals((r2.body as any).line_evidence.status, "unknown");
+  assertEquals((r2.body as any).cost_close, { ok: false, reason: "cost close read failed: timeout" });
 
   const none: any = fakeClient(tables);
   const r3 = await jobProfitAction(none, new URLSearchParams(`job_id=${JOB}`));
   assertEquals((r3.body as any).line_evidence.status, "unknown");
+  assertEquals((r3.body as any).cost_close, { ok: false, reason: "cost close is not readable here" });
 });
 
 // When each trade charged (finish line A5, owner ask 1, coordinator spot-check
