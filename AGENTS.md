@@ -1153,12 +1153,15 @@ earlier contract runs `20261030161813`'s down, as those 21 sites now do.
 
 Since `20261116060000` `context_job_story_rest` also sets aside, before the money guard, the
 standalone AI notes the records already answer: `paid` (about one of the job's own invoices that
-Xero shows `PAID` with nothing owing, when someone other than us owes it, it is a claim, or it is
-the reader's "Invoice record:" copy; or about a payment someone other than us owes, or a claim
-about money (never a refund), on a job whose status is in the policy's `closed_statuses` with
-every invoice paid and no draft), `supplier` (about an invoice that is not the job's own, owed by
-us to a third party or supplier), `office` (`other:other-job`), `courtesy` (we asked for a
-review), and a deposit note once the work is done with nothing owing. A note with no `blocks`
+Xero shows `PAID` with nothing owing, when someone other than us owes it, it is a claim needing no
+reply, or it is the reader's "Invoice record:" copy; or about a payment someone other than us
+owes, or a claim about money needing no reply, on a job whose status is in the policy's
+`closed_statuses` with every invoice paid, no draft, and `context_job_story_money_settled`:
+nothing known left to invoice and nothing placed on no job), `supplier` (about a bill in the
+card's `money.supplier_bills`, by number or reference), `office` (`other:other-job`), `courtesy`
+(we asked for a review), and a deposit note someone else owes once the work is done with nothing
+owing. Refund, overpayment, credit or double-payment words or about-keys are never set aside by
+these. A completion matter we owe rests only once the office has closed the job. A note with no `blocks`
 holds up the step its about-key's first word names in the policy's `about_step` (a visit's
 arrangements: the install), and a job at invoice, payment or complete has passed completion (6).
 `context_job_story_closed_paid` then reads a job the office closed with every invoice paid as

@@ -213,6 +213,11 @@ BEGIN
   RAISE EXCEPTION 'rested notes contract: the identity case must carry a live AI note';
  END IF;
 END $c$;
+-- (finished notes, 20261116060000) replaced the story since: its down goes first
+SELECT to_regprocedure('public.context_job_story_closed_paid(jsonb)') IS NOT NULL AS finished_notes_live \gset
+\if :finished_notes_live
+\ir ../../../rollbacks/20261116060000_context_story_finished_notes_down.sql
+\endif
 \ir ../../../rollbacks/20261115130000_context_story_rested_notes_down.sql
 DO $c$
 BEGIN
