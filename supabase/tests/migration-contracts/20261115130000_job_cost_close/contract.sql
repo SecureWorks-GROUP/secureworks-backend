@@ -28,7 +28,8 @@
 --   CC-24  fencing, complete 10 Aug, signed 15 Aug, revoked 18 Aug   finished on 10 Aug (a revoked sign-off is no sign-off)
 --   CC-25  fencing, complete 10 Aug, signed, revoked, signed 12 Aug  finished on 12 Aug (the sign-off that stands)
 --   CC-26  fencing, cancelled, no cost, a priced open order          waiting on open_purchase_orders (a cost is still to come)
---   CC-27  make-safe, complete 10 Aug, first attendance, invoiced    finished on 10 Aug by work_done (the status finishes it)
+--   CC-27  make-safe, complete 10 Aug (a status move that day), first attendance, invoiced 25 Aug
+--                                                                    finished on 10 Aug by work_done (the status finishes it)
 --   CC-28  repair, archived, repair stage on_site                    final, finished by status (archived puts the card away)
 --  Third review, 15 Nov 2026:
 --   CC-29  repair, invoiced, repair stage on_site                    open (the stage, not the status, is where a repair stands)
@@ -43,6 +44,23 @@
 --   CC-36  repair, processing, stage moved to complete 28 Oct        settling, finished on 28 Oct by repair_stage, final on 27 Nov
 --   CC-37  make-safe, archived 1 Nov, invoiced 25 Aug, moved to processing 26 Aug   final on 24 Sep by first_invoice
 --                                                                    (putting an invoiced make-safe away does not restart its count)
+--  Fourth review, 15 Nov 2026: a job is never dated before it came to stand where it stands.
+--   CC-38  make-safe, complete, completed_at 10 Aug, no status move on record, invoiced 25 Aug
+--                                                                    final on 24 Sep, finished on 25 Aug by first_invoice
+--   CC-39  make-safe, invoiced 25 Aug, sent back to in_progress 20 Oct, complete 1 Nov
+--                                                                    settling, finished on 1 Nov by status, final on 1 Dec
+--   CC-40  repair, stage complete 1 Aug, rectification 20 Oct, complete 5 Nov, stage left at complete
+--                                                                    settling, finished on 5 Nov by status, final on 5 Dec
+--   CC-41  make-safe, invoiced 25 Aug, in_progress 20 Oct, back to scheduled 1 Nov, still cycle 1
+--                                                                    open (the invoice is from before it went back to work)
+--   CC-42  fencing, in_progress 1 Aug, completed_at 10 Aug while still in_progress, complete 10 Nov
+--                                                                    settling, finished on 10 Nov by status, final on 10 Dec
+--   CC-43  repair, stage complete 1 Aug, status moved to processing 5 Aug   final on 19 Sep, finished on 1 Aug by repair_stage
+--                                                                    (a move to a resting status is not a return to work)
+--   CC-44  make-safe, processing, invoiced 25 Aug, in_progress earlier that same day
+--                                                                    final on 24 Sep by first_invoice (the invoice has a day, no time)
+--   CC-45  fencing, done 10 Aug, moved to in_progress and to complete at the same instant on 1 Nov
+--                                                                    settling, finished on 1 Nov by status, final on 1 Dec
 
 \set ON_ERROR_STOP on
 
@@ -144,7 +162,15 @@ FROM (VALUES
   (34, 'archived',      'fencing',  '{}', NULL),
   (35, 'archived',      'fencing',  '{}', NULL),
   (36, 'processing',    'repair',   '{"repair_stage": "complete"}', NULL),
-  (37, 'archived',      'makesafe', '{}', NULL)
+  (37, 'archived',      'makesafe', '{}', NULL),
+  (38, 'complete',      'makesafe', '{}', '2026-08-10T02:00:00Z'),
+  (39, 'complete',      'makesafe', '{}', NULL),
+  (40, 'complete',      'repair',   '{"repair_stage": "complete"}', NULL),
+  (41, 'scheduled',     'makesafe', '{}', NULL),
+  (42, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (43, 'processing',    'repair',   '{"repair_stage": "complete"}', NULL),
+  (44, 'processing',    'makesafe', '{}', NULL),
+  (45, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z')
 ) AS v(n, status, type, meta, completed);
 
 -- Status and stage moves on record. Most jobs have none, as most of production's older jobs have none.
@@ -159,6 +185,22 @@ INSERT INTO public.job_events (job_id, event_type, detail_json, created_at) VALU
   ('cc000000-0000-4000-8000-000000000036', 'repair_stage_changed', '{"from_stage": "on_site", "to_stage": "complete"}', timestamptz '2026-10-28T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000037', 'status_changed', '{"new_status": "processing"}',    timestamptz '2026-08-26T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000037', 'status_changed', '{"new_status": "archived"}',      timestamptz '2026-11-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000027', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000039', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-10-20T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000039', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-11-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000040', 'repair_stage_changed', '{"from_stage": "on_site", "to_stage": "complete"}', timestamptz '2026-08-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000040', 'status_changed', '{"new_status": "rectification"}', timestamptz '2026-10-20T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000040', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-11-05T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000041', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-10-20T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000041', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-11-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000042', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-08-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000042', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-11-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000043', 'repair_stage_changed', '{"from_stage": "on_site", "to_stage": "complete"}', timestamptz '2026-08-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000043', 'status_changed', '{"new_status": "processing"}',    timestamptz '2026-08-05T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000044', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-08-25T00:30:00Z'),
+  ('cc000000-0000-4000-8000-000000000044', 'status_changed', '{"new_status": "processing"}',    timestamptz '2026-08-25T06:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000045', 'status_changed', '{"new_status": "in_progress"}',   timestamptz '2026-11-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000045', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-11-01T02:00:00Z'),
   -- A normal run through the finished statuses does not move the finish day: CC-01 was invoiced, then archived.
   ('cc000000-0000-4000-8000-000000000001', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-08-01T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000001', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:01Z'),
@@ -246,7 +288,15 @@ INSERT INTO cc_key VALUES
   ('CC-34', 'settling',       '2026-12-01', true,  NULL,         'status',           NULL),
   ('CC-35', 'settling',       '2026-11-24', true,  '2026-10-25', 'status',           NULL),
   ('CC-36', 'settling',       '2026-11-27', true,  '2026-10-28', 'repair_stage',     NULL),
-  ('CC-37', 'final',          '2026-09-24', true,  '2026-08-25', 'first_invoice',    NULL);
+  ('CC-37', 'final',          '2026-09-24', true,  '2026-08-25', 'first_invoice',    NULL),
+  ('CC-38', 'final',          '2026-09-24', true,  '2026-08-25', 'first_invoice',    NULL),
+  ('CC-39', 'settling',       '2026-12-01', true,  '2026-11-01', 'status',           NULL),
+  ('CC-40', 'settling',       '2026-12-05', true,  '2026-11-05', 'status',           NULL),
+  ('CC-41', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-42', 'settling',       '2026-12-10', true,  '2026-11-10', 'status',           NULL),
+  ('CC-43', 'final',          '2026-09-19', true,  '2026-08-01', 'repair_stage',     NULL),
+  ('CC-44', 'final',          '2026-09-24', true,  '2026-08-25', 'first_invoice',    NULL),
+  ('CC-45', 'settling',       '2026-12-01', true,  '2026-11-01', 'status',           NULL);
 
 DO $$
 DECLARE r record; out text := ''; ids uuid[];
@@ -313,11 +363,16 @@ BEGIN
   IF (SELECT count(*) FROM public.job_cost_close(one, date '2026-09-19')) <> 1 THEN
     RAISE EXCEPTION 'job cost close contract: asked for one job, got another count';
   END IF;
-  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 37 THEN
+  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 45 THEN
     RAISE EXCEPTION 'job cost close contract: null ids did not return every job';
   END IF;
   IF (SELECT count(*) FROM public.job_cost_close()) <> (SELECT count(*) FROM public.v_job_profit) THEN
     RAISE EXCEPTION 'job cost close contract: the default read is not one row per Job Profit job';
+  END IF;
+  -- No job goes from open to final in a day: CC-42 only reached a finished status on 10 Nov.
+  IF (SELECT cost_state FROM public.job_cost_close(ARRAY['cc000000-0000-4000-8000-000000000042'::uuid], date '2026-12-09')) IS DISTINCT FROM 'settling'
+     OR (SELECT cost_state FROM public.job_cost_close(ARRAY['cc000000-0000-4000-8000-000000000042'::uuid], date '2026-12-10')) IS DISTINCT FROM 'final' THEN
+    RAISE EXCEPTION 'job cost close contract: CC-42 does not settle for 30 days from the day it reached a finished status';
   END IF;
   IF (SELECT as_of FROM public.job_cost_close(one)) IS DISTINCT FROM (now() AT TIME ZONE 'Australia/Perth')::date THEN
     RAISE EXCEPTION 'job cost close contract: the default as_of is not today in Perth';

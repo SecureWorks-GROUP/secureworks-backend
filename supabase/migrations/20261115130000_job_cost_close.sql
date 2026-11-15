@@ -40,18 +40,24 @@
 --   cancelled or lost, with a cost on it or one still to come.
 -- A job in rectification is never finished, whatever else it carries.
 --
--- finished_on is the day the quiet count starts from, and it is the latest day the records give, never the
--- earliest, so a job finished a second time is not dated by its first finish:
---   the later of jobs.completed_at and the newest client sign-off that stands (a sign-off revoked later is no
---     sign-off). If the job's status went back to a working one after that day (job_events status_changed), the
---     day is stale and the finish is the first move into a finished status after it;
---   with no such day, the first move into a finished status after its last working status;
---   for a repair finished by its stage, also the day its stage last moved to complete (repair_stage_changed);
---   for a make-safe finished by its invoice, the first approved customer invoice.
+-- finished_on is the day the quiet count starts from. It is the later of two days, so a job finished a second
+-- time is never dated by its first finish, and a job is never dated before it came to stand where it stands:
+--   the work day: the later of jobs.completed_at and the newest client sign-off that stands (a sign-off revoked
+--     later is no sign-off);
+--   the day the job came to stand where it stands: for a repair finished by its stage, the day its stage last
+--     moved to complete (repair_stage_changed); for a make-safe, its first approved customer invoice; otherwise
+--     the first move into a finished status after the last move out of one (job_events status_changed).
+-- A day stands only while the status has not moved to a working one after it. A working move is a move to any
+-- status that is not finished; for a make-safe or a job with a repair stage, whose status is not its stage,
+-- a move to a resting status (invoice_finish_statuses) is not one. A stage day or an invoice day that does not
+-- stand gives way to the first move into a finished status after the last move out of one, and an invoice
+-- that does not stand finishes nothing.
 -- With no finish day on record at all, the quiet count runs from the newer of the last cost and the day the job
 -- record last changed (jobs.updated_at), so a job put away today is not final today.
 -- finished_basis names what dated it: work_done (completed_at or a sign-off), first_invoice, repair_stage,
 -- status (a status move, or no day), did_not_go_ahead.
+-- Known limit: an invoiced make-safe at a resting status is taken as attended. Nothing here reads an attendance
+-- record. An invoiced make-safe nobody attended holds no labour, so Job Profit's own reasons keep it waiting.
 --
 -- waiting_on is Job Profit's completeness list and cost flag, less the reasons that are not about cost
 -- (not_cost_reasons). Any cost flag other than ok holds a close, text_matched_lines included, and a reason Job
@@ -159,22 +165,28 @@ AS $fn$
            COALESCE(p_as_of, (now() AT TIME ZONE 'Australia/Perth')::date) AS as_of
       FROM (SELECT public.job_cost_close_policy() AS pol) p
   ), moves AS (
-    -- Status moves on record, each marked finished or not. Read once, by event type, never per job.
+    -- Status moves on record, each marked finished or not, and resting or not. Read once, by event type,
+    -- never per job.
     SELECT e.job_id, e.created_at,
-           COALESCE(e.detail_json ->> 'new_status', e.detail_json ->> 'to') = ANY (pr.finished_statuses) AS to_finished
+           COALESCE(e.detail_json ->> 'new_status', e.detail_json ->> 'to') = ANY (pr.finished_statuses) AS to_finished,
+           COALESCE(e.detail_json ->> 'new_status', e.detail_json ->> 'to') = ANY (pr.invoice_finish_statuses) AS to_resting
       FROM public.job_events e CROSS JOIN params pr
      WHERE e.event_type IN ('status_changed', 'status_change')
        AND COALESCE(e.detail_json ->> 'new_status', e.detail_json ->> 'to') IS NOT NULL
        AND (p_job_ids IS NULL OR e.job_id = ANY (p_job_ids))
   ), worked AS (
-    -- The last time the job's status moved to one that is not finished.
-    SELECT m.job_id, max(m.created_at) AS back_to_work_at
+    -- The last time the job's status moved to one that is not finished, and the last time it moved to one
+    -- that is neither finished nor a resting status.
+    SELECT m.job_id, max(m.created_at) AS back_to_work_at,
+           max(m.created_at) FILTER (WHERE NOT m.to_resting) AS active_at
       FROM moves m WHERE NOT m.to_finished GROUP BY m.job_id
   ), refinished AS (
-    -- The first move into a finished status after that.
+    -- The first move into a finished status at or after the last move to any status that is not finished.
+    -- Two moves stamped the same instant have no order on record, so the finished one counts: where the
+    -- job stands now decides whether it is finished at all, and this only dates it.
     SELECT m.job_id, min(m.created_at) AS refinished_at
       FROM moves m LEFT JOIN worked w ON w.job_id = m.job_id
-     WHERE m.to_finished AND (w.back_to_work_at IS NULL OR m.created_at > w.back_to_work_at)
+     WHERE m.to_finished AND (w.back_to_work_at IS NULL OR m.created_at >= w.back_to_work_at)
      GROUP BY m.job_id
   ), staged AS (
     SELECT e.job_id, max(e.created_at) AS stage_done_at
@@ -200,7 +212,7 @@ AS $fn$
                         AND NOT EXISTS (SELECT 1 FROM public.job_client_signoffs r
                                          WHERE r.job_id = jp.job_id AND r.method = 'revoked'
                                            AND r.created_at >= s.created_at))) AS done_at,
-           w.back_to_work_at, rf.refinished_at, sg.stage_done_at
+           w.back_to_work_at, w.active_at, rf.refinished_at, sg.stage_done_at
       FROM public.v_job_profit jp
       JOIN public.jobs j ON j.id = jp.job_id
       LEFT JOIN public.makesafe_job_details d ON d.job_id = jp.job_id
@@ -217,12 +229,13 @@ AS $fn$
            s.status = ANY (pr.invoice_finish_statuses) AS invoice_status,
            s.repair_stage IS NOT NULL AS has_stage,
            COALESCE(s.repair_stage = ANY (pr.repair_finished_stages), false) AS stage_finished,
-           CASE WHEN s.work_type = ANY (pr.invoice_types) AND s.repair_stage IS NULL AND s.invoiced_ex > 0
-                     AND s.first_attendance AND NOT s.has_restoration_stage
-                     AND COALESCE(s.work_subtype, '') <> ALL (pr.invoice_never_subtypes)
-                THEN s.first_invoice_date END AS invoice_finish_on,
-           -- The recorded day stands unless the status went back to a working one after it.
-           s.done_at IS NOT NULL AND (s.back_to_work_at IS NULL OR s.back_to_work_at <= s.done_at) AS done_stands,
+           iv.invoice_finish_on,
+           -- A recorded day stands only while the status has not moved to a working one after it. The invoice
+           -- carries a day and no time, so a working move on the invoice day itself leaves it standing.
+           s.done_at IS NOT NULL AND (wk.work_at IS NULL OR wk.work_at <= s.done_at) AS done_ok,
+           s.stage_done_at IS NOT NULL AND (wk.work_at IS NULL OR wk.work_at <= s.stage_done_at) AS stage_ok,
+           iv.invoice_finish_on IS NOT NULL
+             AND (wk.work_at IS NULL OR (wk.work_at AT TIME ZONE 'Australia/Perth')::date <= iv.invoice_finish_on) AS inv_ok,
            pr.pending_cost_reasons,
            ARRAY(SELECT u.r
                    FROM unnest(s.completeness || CASE WHEN s.cost_flag <> 'ok' THEN ARRAY[s.cost_flag] ELSE ARRAY[]::text[] END)
@@ -231,6 +244,17 @@ AS $fn$
                   GROUP BY u.r
                   ORDER BY min(u.o)) AS cost_reasons
       FROM src s CROSS JOIN params pr
+     -- The last working move. A make-safe or a job with a repair stage rests at accepted, scheduled or
+     -- processing while it is finished (its status is not its stage), so a move there is not a return to work.
+     -- For every other job any status that is not finished is.
+     CROSS JOIN LATERAL (
+       SELECT CASE WHEN s.work_type = ANY (pr.invoice_types) OR s.repair_stage IS NOT NULL
+                   THEN s.active_at ELSE s.back_to_work_at END AS work_at) wk
+     CROSS JOIN LATERAL (
+       SELECT CASE WHEN s.work_type = ANY (pr.invoice_types) AND s.repair_stage IS NULL AND s.invoiced_ex > 0
+                        AND s.first_attendance AND NOT s.has_restoration_stage
+                        AND COALESCE(s.work_subtype, '') <> ALL (pr.invoice_never_subtypes)
+                   THEN s.first_invoice_date END AS invoice_finish_on) iv
   ), marked AS (
     SELECT r.*, r.cost_reasons && r.pending_cost_reasons AS cost_pending
       FROM reasoned r
@@ -240,36 +264,50 @@ AS $fn$
            CASE WHEN m.reopened THEN false
                 WHEN m.did_not_go_ahead THEN m.actual_cost_events > 0 OR m.cost_pending
                 WHEN m.has_stage THEN m.stage_finished OR m.closed_status
-                ELSE m.finished_status OR (m.invoice_finish_on IS NOT NULL AND m.invoice_status)
+                ELSE m.finished_status OR (m.inv_ok AND m.invoice_status)
            END AS finished
       FROM marked m
+  ), evidenced AS (
+    -- Two days per finished job, each null when the records do not give it.
+    --   done_on: the work day (completed_at or a sign-off), when it stands.
+    --   base_on: the day the job came to stand where it stands.
+    --     A repair finished by its stage: the day the stage moved to complete, when it stands; else the first
+    --     move into a finished status after the last move out of one.
+    --     A job at a finished status: that first move into a finished status, or for a make-safe whose invoice
+    --     stands the invoice day when it is earlier (it has stood finished since the invoice, and putting the
+    --     card away later does not restart the count).
+    --     A make-safe finished by its invoice alone: the invoice day.
+    SELECT j.*,
+           CASE WHEN j.done_ok THEN (j.done_at AT TIME ZONE 'Australia/Perth')::date END AS done_on,
+           CASE WHEN j.has_stage AND j.stage_finished AND j.stage_ok
+                  THEN (j.stage_done_at AT TIME ZONE 'Australia/Perth')::date
+                WHEN j.has_stage OR NOT j.inv_ok THEN j.refinished_on
+                WHEN j.finished_status THEN LEAST(j.invoice_finish_on, j.refinished_on)
+                ELSE j.invoice_finish_on END AS base_on,
+           CASE WHEN j.has_stage AND j.stage_finished AND (j.stage_ok OR j.refinished_on IS NULL) THEN 'repair_stage'
+                WHEN j.has_stage OR NOT j.inv_ok THEN 'status'
+                WHEN j.finished_status AND j.refinished_on < j.invoice_finish_on THEN 'status'
+                ELSE 'first_invoice' END AS base_basis
+      FROM (SELECT g.*, (g.refinished_at AT TIME ZONE 'Australia/Perth')::date AS refinished_on FROM judged g) j
   ), dated AS (
+    -- The finish day is the later of the two, so a job is never dated before it came to stand where it stands.
+    -- GREATEST skips a null; with neither day the job has no finish day.
     SELECT g.*,
            CASE WHEN NOT g.finished OR g.did_not_go_ahead THEN NULL::date
-                WHEN g.has_stage AND g.stage_finished
-                  THEN (GREATEST(g.done_at, g.stage_done_at) AT TIME ZONE 'Australia/Perth')::date
-                WHEN g.finished_status OR g.has_stage
-                  THEN CASE WHEN g.done_stands THEN (g.done_at AT TIME ZONE 'Australia/Perth')::date
-                            WHEN g.done_at IS NULL AND g.invoice_finish_on IS NOT NULL THEN g.invoice_finish_on
-                            ELSE (g.refinished_at AT TIME ZONE 'Australia/Perth')::date END
-                ELSE g.invoice_finish_on
-           END AS finished_on
-      FROM judged g
+                ELSE GREATEST(g.done_on, g.base_on) END AS finished_on
+      FROM evidenced g
   ), based AS (
     SELECT d.*,
            CASE WHEN NOT d.finished THEN NULL
                 WHEN d.did_not_go_ahead THEN 'did_not_go_ahead'
-                WHEN d.has_stage AND d.stage_finished
-                  THEN CASE WHEN d.done_at IS NOT NULL THEN 'work_done' ELSE 'repair_stage' END
-                WHEN d.finished_status OR d.has_stage
-                  THEN CASE WHEN d.done_stands THEN 'work_done'
-                            WHEN d.done_at IS NULL AND d.invoice_finish_on IS NOT NULL THEN 'first_invoice'
-                            ELSE 'status' END
-                ELSE 'first_invoice'
+                WHEN d.done_on IS NOT NULL AND (d.base_on IS NULL OR d.done_on >= d.base_on) THEN 'work_done'
+                ELSE d.base_basis
            END AS finished_basis,
            -- No finish day on record: count from the newer of the last cost and the day the record last changed.
+           -- Without that day either, there is nothing to count from and the job waits.
            CASE WHEN d.finished_on IS NOT NULL THEN GREATEST(d.finished_on, d.last_cost_date)
-                WHEN d.last_cost_date IS NOT NULL THEN GREATEST(d.last_cost_date, d.record_changed_on)
+                WHEN d.last_cost_date IS NOT NULL AND d.record_changed_on IS NOT NULL
+                  THEN GREATEST(d.last_cost_date, d.record_changed_on)
            END AS quiet_from
       FROM dated d
   ), stated AS (
@@ -291,7 +329,8 @@ AS $fn$
          CASE WHEN t.finished AND t.cost_state <> 'not_applicable' THEN t.finished_on END AS finished_on,
          CASE WHEN t.finished AND t.cost_state <> 'not_applicable' THEN t.finished_basis END AS finished_basis,
          t.last_cost_date AS last_cost_on,
-         CASE WHEN t.cost_state = 'waiting' AND cardinality(t.cost_reasons) = 0 THEN ARRAY['no_cost_date']
+         CASE WHEN t.cost_state = 'waiting' AND cardinality(t.cost_reasons) = 0
+                THEN ARRAY[CASE WHEN t.last_cost_date IS NULL THEN 'no_cost_date' ELSE 'no_finish_day' END]
               WHEN t.cost_state IN ('open', 'waiting') THEN t.cost_reasons
               ELSE ARRAY[]::text[] END AS waiting_on,
          t.actual_cost_ex,
@@ -301,7 +340,7 @@ AS $fn$
 $fn$;
 
 COMMENT ON FUNCTION public.job_cost_close(uuid[], date) IS
-  'Job cost close (20261115130000): per job in v_job_profit, whether its cost is final. cost_state: not_applicable (holding job, or cancelled or lost with no cost and none still to come), open (work not finished, or in rectification), waiting (finished; waiting_on names what stands in the way), settling (finished, nothing outstanding, quiet for fewer than quiet_days; final_on is the day it turns final), final (final_on is the day it became final, closed_by the rule). Finished is where the job stands now (a finished status; for a job with a repair stage, stage complete or archived; or an approved invoice on a make-safe that is at a resting status, on its first attendance and not restoration work), never a day on the job alone. finished_on is the latest finish day the records give (completed_at, a standing sign-off, or the move into a finished status after the last working one); with none, the quiet count runs from the newer of the last cost and the day the job record last changed. Derived on every read from Job Profit''s row: a later cost or reason reopens it. waiting_on is Job Profit''s completeness and cost flag less the reasons that are not about cost; any cost flag other than ok holds a close. Says the cost is complete, not that every line is evidenced (job_profit_line_evidence). Null ids: every job. Null as_of: today in Perth; as_of moves only the day the quiet count is measured to, the costs, status and reasons are always today''s. Read only. Service role only.';
+  'Job cost close (20261115130000): per job in v_job_profit, whether its cost is final. cost_state: not_applicable (holding job, or cancelled or lost with no cost and none still to come), open (work not finished, or in rectification), waiting (finished; waiting_on names what stands in the way), settling (finished, nothing outstanding, quiet for fewer than quiet_days; final_on is the day it turns final), final (final_on is the day it became final, closed_by the rule). Finished is where the job stands now (a finished status; for a job with a repair stage, stage complete or archived; or an approved invoice on a make-safe that is at a resting status, on its first attendance and not restoration work), never a day on the job alone. finished_on is the later of the work day (completed_at or a standing sign-off) and the day the job came to stand where it stands (the stage moving to complete, the make-safe''s first invoice, or the first move into a finished status after the last move out of one); a day stands only while the status has not moved to a working one after it, and an invoice that does not stand finishes nothing; with no day, the quiet count runs from the newer of the last cost and the day the job record last changed. Derived on every read from Job Profit''s row: a later cost or reason reopens it. waiting_on is Job Profit''s completeness and cost flag less the reasons that are not about cost; any cost flag other than ok holds a close. Says the cost is complete, not that every line is evidenced (job_profit_line_evidence). Null ids: every job. Null as_of: today in Perth; as_of moves only the day the quiet count is measured to, the costs, status and reasons are always today''s. Read only. Service role only.';
 
 REVOKE ALL ON FUNCTION public.job_cost_close_policy() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_cost_close(uuid[], date) FROM PUBLIC, anon, authenticated;
