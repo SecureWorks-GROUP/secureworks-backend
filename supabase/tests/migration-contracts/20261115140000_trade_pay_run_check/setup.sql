@@ -32,7 +32,8 @@ ALTER TABLE public.trade_invoices
   ADD COLUMN IF NOT EXISTS xero_bill_total numeric,
   ADD COLUMN IF NOT EXISTS xero_adjustment_lines jsonb,
   ADD COLUMN IF NOT EXISTS submitted_at timestamptz,
-  ADD COLUMN IF NOT EXISTS created_at timestamptz;
+  ADD COLUMN IF NOT EXISTS created_at timestamptz,
+  ADD COLUMN IF NOT EXISTS subtotal_ex numeric;
 
 CREATE TABLE IF NOT EXISTS public.trade_invoice_lines (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
 ALTER TABLE public.trade_invoice_lines
@@ -47,7 +48,9 @@ ALTER TABLE public.trade_invoice_lines
   ADD COLUMN IF NOT EXISTS flag_type text,
   ADD COLUMN IF NOT EXISTS work_date date,
   ADD COLUMN IF NOT EXISTS line_date date,
-  ADD COLUMN IF NOT EXISTS job_work_order_id uuid;
+  ADD COLUMN IF NOT EXISTS job_work_order_id uuid,
+  ADD COLUMN IF NOT EXISTS unit_rate numeric,
+  ADD COLUMN IF NOT EXISTS group_share_id uuid;
 
 CREATE TABLE IF NOT EXISTS public.work_orders (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
 ALTER TABLE public.work_orders ADD COLUMN IF NOT EXISTS agreed_labour_ex numeric;

@@ -59,7 +59,9 @@ export function payRunCheckParams(
     const w = String(weeks).trim();
     const n = /^\d{1,2}$/.test(w) ? Number(w) : NaN;
     if (!Number.isInteger(n) || n < 1 || n > 26) {
-      throw new TradePayRunCheckError("weeks must be a whole number from 1 to 26");
+      throw new TradePayRunCheckError(
+        "weeks must be a whole number from 1 to 26",
+      );
     }
     pWeeks = n;
   }
@@ -78,7 +80,14 @@ export async function readTradePayRunCheck(
     (data as any).rule !== "trade-pay-check-v1" ||
     !Array.isArray((data as any).invoices) ||
     !(data as any).counts || typeof (data as any).counts !== "object" ||
-    (data as any).counts.invoices !== (data as any).invoices.length
+    (data as any).counts.invoices !== (data as any).invoices.length ||
+    (data as any).counts.clean + (data as any).counts.stopped !==
+      (data as any).invoices.length ||
+    // A bill reads clean only when it carries no stop.
+    !(data as any).invoices.every((inv: any) =>
+      Array.isArray(inv?.stops) &&
+      inv.verdict === (inv.stops.length > 0 ? "stopped" : "clean")
+    )
   ) {
     throw new TradePayRunCheckError(
       `The pay-run check could not be read: ${error?.message ?? "no answer"}`,

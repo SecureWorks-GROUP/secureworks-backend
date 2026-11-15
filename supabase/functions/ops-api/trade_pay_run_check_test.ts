@@ -119,6 +119,25 @@ Deno.test("pay-run check: an unreadable answer is a 503, never 'every bill clean
       { data: "trade-pay-check-v1", error: null },
       // A list that does not match its own count is not shown.
       { data: { ...ANSWER, invoices: [] }, error: null },
+      // Counts that do not add up, or a bill marked clean that carries a stop.
+      {
+        data: { ...ANSWER, counts: { ...ANSWER.counts, stopped: 0 } },
+        error: null,
+      },
+      {
+        data: {
+          ...ANSWER,
+          invoices: [{ ...ANSWER.invoices[0], verdict: "clean" }],
+        },
+        error: null,
+      },
+      {
+        data: {
+          ...ANSWER,
+          invoices: [{ ...ANSWER.invoices[0], stops: undefined }],
+        },
+        error: null,
+      },
     ]
   ) {
     const err = await assertRejects(
@@ -174,7 +193,9 @@ Deno.test("pay-run check: staff only at the ops-api front door", () => {
   for (const role of ["admin", "owner", "ops_manager"]) {
     assertEquals(status("jwt", role), 200, role);
   }
-  for (const role of ["trade", "crew", "lead_installer", "installer", "estimator"]) {
+  for (
+    const role of ["trade", "crew", "lead_installer", "installer", "estimator"]
+  ) {
     assertEquals(status("jwt", role), 403, role);
   }
 });
