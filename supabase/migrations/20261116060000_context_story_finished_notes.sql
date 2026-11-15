@@ -196,7 +196,7 @@ AS $fn$
               -- (its own step, not completion) or a dated visit that was on or before the work was done
               OR (lq.blocks IS NOT NULL AND lq.step IS DISTINCT FROM 'completion')
               OR (lq.blocks IS NULL AND lq.about ~ '^booking:[0-9]{4}-[0-9]{2}-[0-9]{2}'
-                  AND substr(lq.about, 9, 10)::date <= ph.phase_since))
+                  AND substr(lq.about, 9, 10) <= to_char(ph.phase_since, 'YYYY-MM-DD')))
      THEN 'stage_passed'
     WHEN lq.status = 'open' AND lq.since IS NOT NULL
          AND greatest((lq.since AT TIME ZONE 'Australia/Perth')::date, coalesce(lq.due, (lq.since AT TIME ZONE 'Australia/Perth')::date))
@@ -220,7 +220,7 @@ AS $fn$
       'why', CASE rs.reason
         WHEN 'said' THEN 'Something a person said, kept as background. Nobody owes anything on it, so it is never the next move.'
         WHEN 'paid' THEN CASE WHEN rs.paid_number IS NOT NULL
-              THEN 'Xero shows ' || rs.paid_number || ' paid in full' || coalesce(' on ' || to_char(rs.paid_on::date, 'FMDy FMDD Mon'), '') || '. Not owed now.'
+              THEN 'Xero shows ' || rs.paid_number || ' paid in full' || CASE WHEN pg_input_is_valid(left(rs.paid_on, 10), 'date') THEN ' on ' || to_char(left(rs.paid_on, 10)::date, 'FMDy FMDD Mon') ELSE '' END || '. Not owed now.'
               ELSE 'The office has closed this job and Xero shows every invoice on it paid in full. Not owed now.' END
         WHEN 'supplier' THEN 'A bill to us from a supplier or contractor, not one of this job''s customer invoices: Finance places and pays it, and Job Profit counts it. Not owed on the customer''s job.'
         WHEN 'office' THEN 'A note about a supplier''s paper that names another job: for the office to sort out, not owed on this job.'

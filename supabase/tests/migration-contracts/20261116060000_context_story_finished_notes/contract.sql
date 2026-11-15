@@ -24,6 +24,7 @@ CREATE FUNCTION pg_temp.story(p_status text, p_owing numeric, p_left numeric DEF
    'parties', jsonb_build_array(jsonb_build_object('party', 'Customer A', 'owing', p_owing, 'drafts', 0,
      'invoices', jsonb_build_array(
        jsonb_build_object('number', 'INV-1', 'status', 'PAID', 'owing', 0, 'fully_paid_on', '2026-09-17'),
+       jsonb_build_object('number', 'INV-3', 'status', 'PAID', 'owing', 0, 'fully_paid_on', '2026-02-31'),
        jsonb_build_object('number', 'INV-2', 'status', CASE WHEN p_owing = 0 THEN 'PAID' ELSE 'AUTHORISED' END, 'owing', p_owing))))),
   'loops', jsonb_build_array(
    pg_temp.lp('k-invrec', 'claim', 'us', 'us', 'invoice:inv-1', 'Invoice record: INV-1 PAID; owing $0.00. Matter remains unresolved.', '2026-09-20T02:00:00Z'),
@@ -44,6 +45,7 @@ CREATE FUNCTION pg_temp.story(p_status text, p_owing numeric, p_left numeric DEF
    pg_temp.lp('k-overcharge', 'commitment', 'customer', 'us', 'invoice:inv-1', 'Send bank details so we can reimburse the $150 he was overcharged.', '2026-11-03T02:00:00Z'),
    pg_temp.lp('k-return', 'commitment', 'us', 'customer', 'visit:return', 'The crew will return to finish the side panels.', '2026-10-20T02:00:00Z'),
    pg_temp.lp('k-deposit', 'request', 'customer', 'us', 'payment:deposit', 'Please pay the deposit.', '2026-10-14T02:00:00Z'),
+   pg_temp.lp('k-baddate', 'commitment', 'us', 'customer', 'booking:2026-11-31', 'The crew will call before the visit.', '2026-10-20T02:00:00Z'),
    pg_temp.lp('k-person', 'commitment', 'us', 'customer', 'booking:2026-10-12', 'Call the customer before the install.', '2026-10-01T02:00:00Z')))
 $f$;
 CREATE FUNCTION pg_temp.ledger() RETURNS jsonb LANGUAGE sql IMMUTABLE AS $f$
@@ -51,7 +53,7 @@ CREATE FUNCTION pg_temp.ledger() RETURNS jsonb LANGUAGE sql IMMUTABLE AS $f$
   pg_temp.li('k-invrec'), pg_temp.li('k-receipt'), pg_temp.li('k-paybal'), pg_temp.li('k-supplier'), pg_temp.li('k-office'),
   pg_temp.li('k-review'), pg_temp.li('k-visit'), pg_temp.li('k-visitnew'), pg_temp.li('k-moneyclaim', 'luna-ledger:v2', false), pg_temp.li('k-refund'),
   pg_temp.li('k-refundclaim'), pg_temp.li('k-depositrefund'), pg_temp.li('k-neighbour'),
-  pg_temp.li('k-custinv'), pg_temp.li('k-overcharge'), pg_temp.li('k-return'), pg_temp.li('k-deposit'),
+  pg_temp.li('k-baddate'), pg_temp.li('k-custinv'), pg_temp.li('k-overcharge'), pg_temp.li('k-return'), pg_temp.li('k-deposit'),
   pg_temp.li('k-completion'), pg_temp.li('k-person', 'person:00000000-0000-4000-8000-000000000001')))
 $f$;
 CREATE FUNCTION pg_temp.reasons(p_status text, p_owing numeric, p_left numeric DEFAULT NULL) RETURNS jsonb LANGUAGE sql STABLE AS $f$
@@ -89,7 +91,7 @@ BEGIN
  r := pg_temp.reasons('invoiced', 100);
  IF r ->> 'k-invrec' IS DISTINCT FROM 'paid' THEN RAISE EXCEPTION 'finished notes contract: a paid invoice is paid on an open job too, got %', r; END IF;
  IF r ? 'k-paybal' OR r ? 'k-moneyclaim' THEN RAISE EXCEPTION 'finished notes contract: on a job still owing, paying and money said must stay open, got %', r; END IF;
- IF r ? 'k-completion' OR r ? 'k-return' THEN RAISE EXCEPTION 'finished notes contract: a fix or a visit we owe stays open until the office closes the job, got %', r; END IF;
+ IF r ? 'k-completion' OR r ? 'k-return' OR r ? 'k-baddate' THEN RAISE EXCEPTION 'finished notes contract: a fix or a visit we owe stays open until the office closes the job, got %', r; END IF;
  IF r ->> 'k-visit' IS DISTINCT FROM 'stage_passed' THEN RAISE EXCEPTION 'finished notes contract: a dated visit before the work was done is answered, got %', r; END IF;
 
  -- 3. Closed by the office but something still owing: the customer still owes.
