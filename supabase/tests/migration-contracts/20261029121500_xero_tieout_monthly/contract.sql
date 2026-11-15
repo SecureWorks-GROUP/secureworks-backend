@@ -48,6 +48,14 @@
 
 BEGIN;
 
+-- 20261115100000 gave the tie-out Job Profit's own rule, and the earlier tie-out migrations and their downs refuse
+-- that body. This contract is about its own slice's function, so it rolls 20261115100000 back first, inside this
+-- transaction: the ROLLBACK at the end puts it back.
+SELECT COALESCE(obj_description(to_regprocedure('public.xero_tieout_monthly(date,integer,uuid)'), 'pg_proc'), '') LIKE 'TP-01 Xero tie-out, Job Profit rule (20261115100000%' AS tieout_has_job_profit_rule \gset
+\if :tieout_has_job_profit_rule
+\ir ../../../rollbacks/20261115100000_xero_tieout_job_profit_rule_down.sql
+\endif
+
 INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at) VALUES
   ('b7000000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'complete', 'patio', 'TO-J1', false, '{}', '{}', NULL, '2031-01-01T00:00:00Z'),
   ('b7000000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'TO-HOLD', false, '{"do_not_schedule": "TRUE"}', '{}', NULL, '2031-01-01T00:00:00Z'),

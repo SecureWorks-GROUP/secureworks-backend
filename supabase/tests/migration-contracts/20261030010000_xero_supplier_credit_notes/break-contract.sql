@@ -44,6 +44,12 @@ SELECT md5(pg_get_viewdef('public.v_job_cost_events'::regclass))='92d9a2923438e6
 -- The contract must catch it.
 -- TP-07 slice 2 (20261030060000) replaces this view: roll it back first (this
 -- is a disposable copy), so the break is made in slice 1's own body.
+-- 20261115100000 gave the tie-out Job Profit's own rule, and the earlier tie-out migrations and their downs refuse
+-- that body. This is a disposable copy, so 20261115100000 is rolled back first and 20261030060000's down can run.
+SELECT COALESCE(obj_description(to_regprocedure('public.xero_tieout_monthly(date,integer,uuid)'), 'pg_proc'), '') LIKE 'TP-01 Xero tie-out, Job Profit rule (20261115100000%' AS tieout_has_job_profit_rule \gset
+\if :tieout_has_job_profit_rule
+\ir ../../../rollbacks/20261115100000_xero_tieout_job_profit_rule_down.sql
+\endif
 SELECT to_regclass('public.v_supplier_credit_allocations') IS NOT NULL AS cn_netting_live \gset
 \if :cn_netting_live
 \ir ../../../rollbacks/20261030060000_supplier_credit_netting_down.sql
