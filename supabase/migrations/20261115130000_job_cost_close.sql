@@ -8,7 +8,8 @@
 --   job_cost_close(job ids, as of)     one row per job in v_job_profit (every job when the ids are null).
 --
 -- cost_state is one of:
---   not_applicable  the holding job, or a job that did not go ahead (cancelled, lost) with no cost on it.
+--   not_applicable  the holding job, or a job that did not go ahead (cancelled, lost) with no cost on it and
+--                   no cost still to come (pending_cost_reasons: an order or a bill still out).
 --   open            the work is not finished, or the job is back in rectification.
 --   waiting         the work is finished and something named in waiting_on stands between the job and a final
 --                   cost (a bill not in, an order not billed, a bill a person has not confirmed, no cost at all).
@@ -23,20 +24,35 @@
 -- quiet, 17 after 45 days, 16 after 60. Waiting longer barely helps, so quiet_days is 30, the same limit
 -- Job Profit already uses for an order with no bill.
 --
--- When is the work finished (finished_basis):
---   work_done        Job Profit's own day: the earlier of jobs.completed_at and the first client sign-off.
---   first_invoice    a make-safe is invoiced after the attendance and its job status is not its stage (measured:
---                    invoiced make-safes sit at accepted, scheduled and processing), so its first approved
---                    customer invoice marks the finish. Not used for a job that carries a repair stage.
---   repair_stage     a repair's stage is jobs.metadata.repair_stage, not its status: complete is finished. An
---                    invoice does not finish a repair (invoiced repairs were found still on site).
---   status           a finished status with no day on record.
---                    For repair_stage and status the quiet count runs from the last cost.
---   did_not_go_ahead cancelled or lost, with a cost on it. The quiet count runs from the last cost.
--- A job in rectification is never finished, whatever days it carries.
+-- When is the work finished. A day on the job never finishes it by itself: a job sent back to work keeps its old
+-- completed_at and its old sign-off (measured: jobs at in_progress, awaiting_supplier and partially_accepted
+-- carry one). What finishes a job is where it stands now:
+--   a finished status (finished_statuses), for every kind of job;
+--   a repair stage of complete (jobs.metadata.repair_stage), for a job that carries a repair stage. Its stage,
+--     not its status, is where a repair stands, and an invoice does not finish it (invoiced repairs were found
+--     still on site);
+--   an approved customer invoice, for a make-safe with no repair stage that is still on its first attendance
+--     (makesafe_job_details.cycle_number 1 and no reopen_reason). A make-safe is invoiced after the attendance
+--     and its status is not its stage (measured: invoiced make-safes sit at accepted, scheduled and
+--     processing). A make-safe reopened or sent back for another attendance is finished only by its status:
+--     its first invoice belongs to the attendance before;
+--   cancelled or lost, with a cost on it or one still to come.
+-- A job in rectification is never finished, whatever else it carries.
+--
+-- finished_basis says which of those it was, and finished_on is the day when one is on record:
+--   work_done        the earlier of jobs.completed_at and the client sign-off that stands (the first sign-off
+--                    after the newest revoke; a revoked sign-off is no sign-off).
+--   first_invoice    the make-safe's first approved customer invoice.
+--   repair_stage     the repair stage is complete and no day is on record.
+--   status           a finished status and no day on record.
+--   did_not_go_ahead cancelled or lost. No finish day.
+-- With no finish day the quiet count runs from the last cost.
 --
 -- waiting_on is Job Profit's completeness list and cost flag, less the reasons that are not about cost
--- (not_cost_reasons). A reason Job Profit adds later holds a close until someone decides otherwise.
+-- (not_cost_reasons). Any cost flag other than ok holds a close, text_matched_lines included, and a reason Job
+-- Profit adds later holds a close until someone decides otherwise.
+-- as_of moves only the day the quiet count is measured to. The costs, the status and Job Profit's reasons are
+-- always today's: this is not a read of how the job stood on an earlier day.
 -- This read says the cost is complete. It does not say every line is evidenced in bookkeeping: that is
 -- job_profit_line_evidence, unchanged.
 --
@@ -46,8 +62,21 @@ SET LOCAL lock_timeout = '5s';
 
 DO $guard$
 BEGIN
-  IF to_regclass('public.v_job_profit') IS NULL OR to_regclass('public.job_client_signoffs') IS NULL THEN
-    RAISE EXCEPTION 'job cost close: v_job_profit or job_client_signoffs is missing';
+  IF to_regclass('public.v_job_profit') IS NULL OR to_regclass('public.job_client_signoffs') IS NULL
+     OR to_regclass('public.makesafe_job_details') IS NULL THEN
+    RAISE EXCEPTION 'job cost close: v_job_profit, job_client_signoffs or makesafe_job_details is missing';
+  END IF;
+  IF (SELECT count(*) FROM pg_attribute a
+       WHERE a.attrelid = 'public.makesafe_job_details'::regclass AND NOT a.attisdropped
+         AND a.attname IN ('cycle_number', 'reopen_reason')) <> 2 THEN
+    RAISE EXCEPTION 'job cost close: makesafe_job_details.cycle_number or reopen_reason is missing';
+  END IF;
+  -- The read runs with the caller's rights, and its only caller is the service role.
+  IF NOT has_table_privilege('service_role', 'public.makesafe_job_details', 'SELECT')
+     OR NOT has_table_privilege('service_role', 'public.job_client_signoffs', 'SELECT')
+     OR NOT has_table_privilege('service_role', 'public.jobs', 'SELECT')
+     OR NOT has_table_privilege('service_role', 'public.v_job_profit', 'SELECT') THEN
+    RAISE EXCEPTION 'job cost close: the service role cannot read a table this reads';
   END IF;
 END
 $guard$;
@@ -67,12 +96,16 @@ AS $policy$
     'repair_finished_stages', jsonb_build_array('complete'),
     'not_cost_reasons', jsonb_build_array('missing_client_invoice', 'draft_revenue', 'holding_job',
                                           'variation_not_invoiced', 'variation_invoice_unchecked',
-                                          'expected_cost_lane_missing', 'xero_project_linked_by_contact_only')
+                                          'expected_cost_lane_missing', 'xero_project_linked_by_contact_only'),
+    'pending_cost_reasons', jsonb_build_array('open_purchase_orders', 'ordered_not_billed',
+                                              'ordered_not_billed_over_30_days', 'po_no_bill_overdue',
+                                              'invoice_emailed_bill_not_placed', 'installer_bill_unconfirmed',
+                                              'unapproved_trade_charges')
   );
 $policy$;
 
 COMMENT ON FUNCTION public.job_cost_close_policy() IS
-  'Job cost close (20261115130000): the numbers and lists job_cost_close reads. quiet_days: Perth days with no new cost, after the newer of the finish day and the last cost, before a finished job''s cost is final. finished_statuses: finished without a day on record. did_not_go_ahead_statuses: cancelled or lost. reopened_statuses: never finished while here. invoice_marks_finished_types: work types whose first approved customer invoice marks the finish (never a job with a repair stage). repair_finished_stages: values of jobs.metadata.repair_stage that mean the repair is finished. not_cost_reasons: Job Profit reasons that are not about cost and never hold a close. Change only by migration. Service role only.';
+  'Job cost close (20261115130000): the numbers and lists job_cost_close reads. quiet_days: Perth days with no new cost, after the newer of the finish day and the last cost, before a finished job''s cost is final. finished_statuses: the statuses that finish a job; a day on the job never does by itself. did_not_go_ahead_statuses: cancelled or lost. reopened_statuses: never finished while here. invoice_marks_finished_types: work types whose first approved customer invoice marks the finish (never a job with a repair stage, never one reopened or past its first attendance). repair_finished_stages: values of jobs.metadata.repair_stage that mean the repair is finished. not_cost_reasons: Job Profit reasons that are not about cost and never hold a close. pending_cost_reasons: reasons that say a cost is still to come, so a cancelled or lost job carrying one is waiting, not out of scope. Change only by migration. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.job_cost_close(p_job_ids uuid[] DEFAULT NULL, p_as_of date DEFAULT NULL)
 RETURNS TABLE (
@@ -107,6 +140,7 @@ AS $fn$
            ARRAY(SELECT jsonb_array_elements_text(p.pol -> 'invoice_marks_finished_types')) AS invoice_types,
            ARRAY(SELECT jsonb_array_elements_text(p.pol -> 'repair_finished_stages')) AS repair_finished_stages,
            ARRAY(SELECT jsonb_array_elements_text(p.pol -> 'not_cost_reasons')) AS not_cost_reasons,
+           ARRAY(SELECT jsonb_array_elements_text(p.pol -> 'pending_cost_reasons')) AS pending_cost_reasons,
            COALESCE(p_as_of, (now() AT TIME ZONE 'Australia/Perth')::date) AS as_of
       FROM (SELECT public.job_cost_close_policy() AS pol) p
   ), src AS (
@@ -114,20 +148,30 @@ AS $fn$
            jp.actual_cost_events, jp.actual_cost_ex, jp.last_cost_date, jp.first_invoice_date, jp.invoiced_ex,
            jp.cost_flag, jp.completeness, jp.costs_verified_paid,
            j.metadata ->> 'repair_stage' AS repair_stage,
+           COALESCE(d.cycle_number, 1) <= 1 AND d.reopen_reason IS NULL AS first_attendance,
+           -- The sign-off that stands: the first one after the newest revoke. LEAST skips a null.
            LEAST((j.completed_at AT TIME ZONE 'Australia/Perth')::date,
                  (SELECT (min(s.created_at) AT TIME ZONE 'Australia/Perth')::date
-                    FROM public.job_client_signoffs s WHERE s.job_id = jp.job_id)) AS work_done_on
+                    FROM public.job_client_signoffs s
+                   WHERE s.job_id = jp.job_id AND s.method <> 'revoked'
+                     AND NOT EXISTS (SELECT 1 FROM public.job_client_signoffs r
+                                      WHERE r.job_id = jp.job_id AND r.method = 'revoked'
+                                        AND r.created_at >= s.created_at))) AS work_done_on
       FROM public.v_job_profit jp
       JOIN public.jobs j ON j.id = jp.job_id
+      LEFT JOIN public.makesafe_job_details d ON d.job_id = jp.job_id
      WHERE p_job_ids IS NULL OR jp.job_id = ANY (p_job_ids)
-  ), marked AS (
+  ), reasoned AS (
     SELECT s.*, pr.quiet_days, pr.rule, pr.as_of,
            s.status = ANY (pr.dnga_statuses) AS did_not_go_ahead,
            s.status = ANY (pr.reopened_statuses) AS reopened,
            s.status = ANY (pr.finished_statuses) AS finished_status,
+           s.repair_stage IS NOT NULL AS has_stage,
            COALESCE(s.repair_stage = ANY (pr.repair_finished_stages), false) AS stage_finished,
            CASE WHEN s.work_type = ANY (pr.invoice_types) AND s.repair_stage IS NULL AND s.invoiced_ex > 0
+                     AND s.first_attendance
                 THEN s.first_invoice_date END AS invoice_finish_on,
+           pr.pending_cost_reasons,
            ARRAY(SELECT u.r
                    FROM unnest(s.completeness || CASE WHEN s.cost_flag <> 'ok' THEN ARRAY[s.cost_flag] ELSE ARRAY[]::text[] END)
                         WITH ORDINALITY AS u(r, o)
@@ -135,36 +179,49 @@ AS $fn$
                   GROUP BY u.r
                   ORDER BY min(u.o)) AS cost_reasons
       FROM src s CROSS JOIN params pr
-  ), dated AS (
-    SELECT m.*,
-           CASE WHEN m.did_not_go_ahead OR m.reopened THEN NULL::date
-                ELSE COALESCE(m.work_done_on, m.invoice_finish_on) END AS finished_on
-      FROM marked m
+  ), marked AS (
+    SELECT r.*, r.cost_reasons && r.pending_cost_reasons AS cost_pending
+      FROM reasoned r
   ), judged AS (
+    -- Where the job stands now decides. A finish day alone finishes nothing.
+    SELECT m.*,
+           CASE WHEN m.reopened THEN false
+                WHEN m.did_not_go_ahead THEN m.actual_cost_events > 0 OR m.cost_pending
+                WHEN m.has_stage THEN m.stage_finished OR m.finished_status
+                ELSE m.finished_status OR m.invoice_finish_on IS NOT NULL
+           END AS finished
+      FROM marked m
+  ), dated AS (
+    SELECT g.*,
+           CASE WHEN NOT g.finished OR g.did_not_go_ahead THEN NULL::date
+                WHEN g.has_stage THEN g.work_done_on
+                WHEN g.finished_status THEN COALESCE(g.work_done_on, g.invoice_finish_on)
+                ELSE g.invoice_finish_on
+           END AS finished_on
+      FROM judged g
+  ), based AS (
     SELECT d.*,
-           NOT d.reopened AND (
-             (d.did_not_go_ahead AND d.actual_cost_events > 0)
-             OR (NOT d.did_not_go_ahead AND (d.finished_on IS NOT NULL OR d.stage_finished OR d.finished_status))
-           ) AS finished,
-           CASE WHEN d.reopened THEN NULL
-                WHEN d.did_not_go_ahead THEN CASE WHEN d.actual_cost_events > 0 THEN 'did_not_go_ahead' END
-                WHEN d.work_done_on IS NOT NULL THEN 'work_done'
+           CASE WHEN NOT d.finished THEN NULL
+                WHEN d.did_not_go_ahead THEN 'did_not_go_ahead'
+                WHEN d.has_stage THEN CASE WHEN d.finished_on IS NOT NULL THEN 'work_done'
+                                           WHEN d.stage_finished THEN 'repair_stage'
+                                           ELSE 'status' END
+                WHEN d.finished_status AND d.work_done_on IS NOT NULL THEN 'work_done'
                 WHEN d.invoice_finish_on IS NOT NULL THEN 'first_invoice'
-                WHEN d.stage_finished THEN 'repair_stage'
-                WHEN d.finished_status THEN 'status'
+                ELSE 'status'
            END AS finished_basis,
            GREATEST(d.finished_on, d.last_cost_date) AS quiet_from
       FROM dated d
   ), stated AS (
-    SELECT g.*,
-           CASE WHEN g.holding_job THEN 'not_applicable'
-                WHEN g.did_not_go_ahead AND g.actual_cost_events = 0 THEN 'not_applicable'
-                WHEN NOT g.finished THEN 'open'
-                WHEN cardinality(g.cost_reasons) > 0 OR g.quiet_from IS NULL THEN 'waiting'
-                WHEN g.as_of < g.quiet_from + g.quiet_days THEN 'settling'
+    SELECT b.*,
+           CASE WHEN b.holding_job THEN 'not_applicable'
+                WHEN b.did_not_go_ahead AND NOT b.finished THEN 'not_applicable'
+                WHEN NOT b.finished THEN 'open'
+                WHEN cardinality(b.cost_reasons) > 0 OR b.quiet_from IS NULL THEN 'waiting'
+                WHEN b.as_of < b.quiet_from + b.quiet_days THEN 'settling'
                 ELSE 'final'
            END AS cost_state
-      FROM judged g
+      FROM based b
   )
   SELECT t.job_id, t.org_id, t.job_number, t.cost_state,
          t.cost_state = 'final' AS cost_final,
@@ -184,7 +241,7 @@ AS $fn$
 $fn$;
 
 COMMENT ON FUNCTION public.job_cost_close(uuid[], date) IS
-  'Job cost close (20261115130000): per job in v_job_profit, whether its cost is final. cost_state: not_applicable (holding job, or cancelled or lost with no cost), open (work not finished, or in rectification), waiting (finished; waiting_on names what stands in the way), settling (finished, nothing outstanding, quiet for fewer than quiet_days; final_on is the day it turns final), final (final_on is the day it became final, closed_by the rule). Derived on every read from Job Profit''s row: a later cost or reason reopens it. waiting_on is Job Profit''s completeness and cost flag less the reasons that are not about cost. Says the cost is complete, not that every line is evidenced (job_profit_line_evidence). Null ids: every job. Null as_of: today in Perth. Read only. Service role only.';
+  'Job cost close (20261115130000): per job in v_job_profit, whether its cost is final. cost_state: not_applicable (holding job, or cancelled or lost with no cost and none still to come), open (work not finished, or in rectification), waiting (finished; waiting_on names what stands in the way), settling (finished, nothing outstanding, quiet for fewer than quiet_days; final_on is the day it turns final), final (final_on is the day it became final, closed_by the rule). Finished is where the job stands now (a finished status, a complete repair stage, or an approved invoice on a make-safe still on its first attendance), never a day on the job alone. Derived on every read from Job Profit''s row: a later cost or reason reopens it. waiting_on is Job Profit''s completeness and cost flag less the reasons that are not about cost; any cost flag other than ok holds a close. Says the cost is complete, not that every line is evidenced (job_profit_line_evidence). Null ids: every job. Null as_of: today in Perth; as_of moves only the day the quiet count is measured to, the costs, status and reasons are always today''s. Read only. Service role only.';
 
 REVOKE ALL ON FUNCTION public.job_cost_close_policy() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_cost_close(uuid[], date) FROM PUBLIC, anon, authenticated;

@@ -162,23 +162,35 @@ and list is in `job_cost_close_policy()` (`cost-close-v1`) and changes only by m
 
 | `cost_state` | Means |
 |---|---|
-| `not_applicable` | A holding job, or a job that did not go ahead (cancelled, lost) and holds no cost |
+| `not_applicable` | A holding job, or a job that did not go ahead (cancelled, lost), holds no cost and has none still to come |
 | `open` | The work is not finished, or the job is back in rectification |
 | `waiting` | Finished, but Job Profit names a cost reason: `waiting_on` lists them, in Job Profit's words |
 | `settling` | Finished with no cost reason, inside the quiet days (30) since the later of the finish day and the newest cost |
 | `final` | Finished, no cost reason, quiet for 30 days. `final_on` is the day it became final, `closed_by` the rule |
 
-- **Finished** is Job Profit's work-done day (the earlier of `completed_at` and the first client
-  sign-off, Perth days); else, for a make-safe that carries no repair stage, its first counted
-  invoice; else a repair at stage `complete`; else a finished status (`complete`, `invoiced`,
-  `final_payment`, `get_review`, `archived`). `finished_basis` says which. A cancelled or lost job
-  that holds cost is finished as `did_not_go_ahead`.
+- **Finished** is where the job stands now, never a day on the job alone: a job sent back to work
+  keeps its old `completed_at` and its old sign-off. A job is finished by a finished status
+  (`complete`, `invoiced`, `final_payment`, `get_review`, `archived`); a job that carries a repair
+  stage also by stage `complete` (an invoice does not finish a repair); a make-safe with no repair
+  stage also by its first counted invoice, but only on its first attendance
+  (`makesafe_job_details.cycle_number` 1 and no `reopen_reason`): reopened or sent back, it is
+  finished only by its status. A job in `rectification` is never finished. A cancelled or lost job
+  is finished as `did_not_go_ahead` when it holds cost or a cost is still to come
+  (`pending_cost_reasons` in the policy: an open or unbilled order, a bill not placed or not
+  confirmed, unapproved trade charges), so it reads `waiting`, not `not_applicable`.
+- **`finished_on` and `finished_basis`.** `work_done`: the earlier of `completed_at` and the client
+  sign-off that stands (the first after the newest revoke; a revoked sign-off is none), Perth days.
+  `first_invoice`: the make-safe's first counted invoice. `repair_stage` and `status`: finished with
+  no day on record. `did_not_go_ahead`: no day. With no day the quiet count runs from the newest cost.
 - **A cost reason** is any `completeness` code or non-ok `cost_flag`, except the ones that are about
   revenue or structure and not cost (`not_cost_reasons` in the policy: a missing or draft customer
   invoice, an unbilled variation, a holding job, a missing expected-cost lane, a Xero Project linked
-  by contact only). So `final` says the cost is complete; it does not say the job was invoiced.
+  by contact only). Every other code holds a close, `text_matched_lines` included, and so does a code
+  Job Profit adds later. So `final` says the cost is complete; it does not say the job was invoiced.
 - **Nothing is frozen.** A cost that lands on a final job moves it back to `settling` with a later
-  `final_on`; a job put back into rectification reads `open`. Measured on production on 15 Nov 2026:
+  `final_on`; a job put back into rectification or any working status reads `open`. `as_of` moves
+  only the day the quiet count is measured to: the costs, the status and the reasons are always
+  today's, so it is not a read of how the job stood on an earlier day. Measured on production on 15 Nov 2026:
   of 261 jobs finished by 15 Aug, 22 took a cost more than 30 days after going quiet and 11 more than 90.
 - `job_profit` returns `cost_close` for its job; `job_profit_list` returns `cost_close.by_job` for
   the page. Each is `{ ok: true, cost_state, cost_final, final_on, closed_by, finished, finished_on,
