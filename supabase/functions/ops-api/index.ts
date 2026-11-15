@@ -15,11 +15,9 @@ import {
   workOrderAmountRefusal,
 } from './trade_invoice_mode.ts'
 import {
-  incomingLabourByJob,
-  isWorkOrderLabourLineType,
-  readWorkOrderCapFacts,
+  checkWorkOrderTotalCap,
   WorkOrderTotalCapReadError,
-  workOrderTotalCapRefusal,
+  type WorkOrderTotalCapRefusal,
 } from './work_order_total_cap.ts'
 import {
   assertTradeMayBillExtraJobs,
@@ -13238,6 +13236,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             if (reviewAction === 'approve') {
               updates.acknowledgment_status = 'acknowledged'
             } else if (reviewAction === 'adjust') {
+              // The new amount replaces the line's old one on the job's work
+              // order total, and may not take it over (work_order_total_cap.ts).
+              await _assertWithinWorkOrderTotal(client, tradeUser, [{
+                job_id: lineData.job_id,
+                line_type: lineData.line_type,
+                line_total_ex: Number(overrideAmt) || 0,
+              }], [String(line_id)])
               updates.acknowledgment_status = 'acknowledged'
               updates.override_amount = Number(overrideAmt) || 0
               updates.override_by = tradeUser.id
@@ -13495,6 +13500,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 source_trade_invoice_line_id: charge.line_id,
               })
             }
+
+            // The job's work order caps this door too: a crew work order on a
+            // job with an approved job work order may not take the job's total
+            // over it (work_order_total_cap.ts).
+            await _assertWithinWorkOrderTotal(client, tradeUser, workOrderLines)
 
             // Persist the complete local invoice and its source claims inside
             // the same organization-scoped transaction as weekly invoices.
@@ -15157,82 +15167,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // (work_order_total_cap.ts).
             {
               const capLines = [...lineItems, ...extraLineItems]
-                .map((line: any) => ({ ...line, line_type: line.line_type || 'labour' }))
-                .filter((line: any) => isWorkOrderLabourLineType(line.line_type))
               const capNumbers = [...new Set(capLines
                 .filter((line: any) => !line.job_id && line.job_number)
                 .map((line: any) => String(line.job_number).trim()).filter(Boolean))]
-              const capFailed = (where: string) => {
-                console.error('[ops-api] generate_trade_invoice: work order cap unreadable:', where)
-                const message = 'This invoice was not saved. What is already billed on its work orders could not be checked. Try again in a minute.'
-                return new ApiError(message, 503, {
-                  ok: false, success: false, saved: false,
-                  code: 'work_order_cap_unavailable', error: message, userMessage: message,
-                })
-              }
               const idByNumber = new Map<string, string>()
               if (capNumbers.length > 0) {
                 const { data: numbered, error: numberedError } = await client.from('jobs')
                   .select('id, job_number').eq('org_id', tradeUser.orgId).in('job_number', capNumbers)
-                if (numberedError) throw capFailed('jobs by number')
+                if (numberedError) {
+                  console.error('[ops-api] generate_trade_invoice: work order cap unreadable: jobs by number')
+                  const message = 'This invoice was not saved. What is already billed on its work orders could not be checked. Try again in a minute.'
+                  throw new ApiError(message, 503, {
+                    ok: false, success: false, saved: false,
+                    code: 'work_order_cap_unavailable', error: message, userMessage: message,
+                  })
+                }
                 for (const row of numbered || []) idByNumber.set(String(row.job_number), String(row.id))
               }
-              const capLinesWithJob = capLines.map((line: any) => ({
+              await _assertWithinWorkOrderTotal(client, tradeUser, capLines.map((line: any) => ({
                 ...line,
                 job_id: line.job_id || idByNumber.get(String(line.job_number || '').trim()) || null,
-              }))
-              const incoming = incomingLabourByJob(capLinesWithJob)
-              if (incoming.size > 0) {
-                let capModes: TradeInvoiceJobMode[]
-                try {
-                  capModes = (await loadTradeInvoiceJobModes(client, {
-                    tradeId: tradeUser.id,
-                    orgId: tradeUser.orgId,
-                    jobIds: [...incoming.keys()],
-                    jobVertical: _jobVertical,
-                    normaliseManagedVerticals: _normalizeManagedVerticals,
-                  })).jobs
-                } catch (error) {
-                  if (error instanceof TradeInvoiceModeReadError) throw capFailed('job modes')
-                  throw error
-                }
-                const capped = capModes.filter((m) =>
-                  m.invoice_mode === 'work_order' && m.work_order_agreed_ex != null && m.job_work_order_id
-                )
-                if (capped.length > 0) {
-                  const { data: cappedJobs, error: cappedJobsError } = await client.from('jobs')
-                    .select('id, job_number').eq('org_id', tradeUser.orgId).in('id', capped.map((m) => m.job_id))
-                  if (cappedJobsError) throw capFailed('job numbers')
-                  const numberById = new Map<string, string>((cappedJobs || []).map((j: any) => [String(j.id), String(j.job_number || '')]))
-                  const refOf = (jobId: string) => numberById.get(jobId) || jobId
-                  let facts: Awaited<ReturnType<typeof readWorkOrderCapFacts>>
-                  try {
-                    facts = await readWorkOrderCapFacts(client, capped.map((m) => ({
-                      jobId: m.job_id,
-                      ref: refOf(m.job_id),
-                      agreedEx: Number(m.work_order_agreed_ex),
-                      workOrderId: String(m.job_work_order_id),
-                    })))
-                  } catch (error) {
-                    if (error instanceof WorkOrderTotalCapReadError) throw capFailed('billed labour')
-                    throw error
-                  }
-                  const capRefusal = workOrderTotalCapRefusal({
-                    jobs: facts.jobs,
-                    billedEx: facts.billedEx,
-                    incomingEx: incoming,
-                  })
-                  if (capRefusal) {
-                    throw new ApiError(capRefusal.message, 409, {
-                      ok: false, success: false, saved: false,
-                      code: capRefusal.code,
-                      jobs: capRefusal.jobs,
-                      error: capRefusal.message,
-                      userMessage: capRefusal.message,
-                    })
-                  }
-                }
-              }
+              })))
             }
 
             let duplicateExtraMatches: any[] = []
@@ -17910,6 +17865,73 @@ export async function _persistWorkOrderInvoice(
     throw new TradeInvoiceStoreError('Failed to persist work-order invoice: ' + (error?.message || 'no invoice id returned'), error?.code)
   }
   return invoiceId
+}
+
+// No trade bills more than a work order allows, in total (owner, 15 Nov
+// 2026): every door that saves or changes a trade line on a job calls this
+// before it writes (work_order_total_cap.ts). Over: 409 and nothing saved.
+// Unreadable: 503, never read as "nothing billed".
+export async function _assertWithinWorkOrderTotal(
+  client: any,
+  tradeUser: { id: string; orgId: string },
+  lines: ReadonlyArray<{ job_id?: unknown; line_type?: unknown; line_total_ex?: unknown }>,
+  excludeLineIds: readonly string[] = [],
+): Promise<void> {
+  const capFailed = (where: string) => {
+    console.error('[ops-api] work order cap unreadable:', where)
+    const message = 'This was not saved. What is already billed on its work order could not be checked. Try again in a minute.'
+    return new ApiError(message, 503, {
+      ok: false, success: false, saved: false,
+      code: 'work_order_cap_unavailable', error: message, userMessage: message,
+    })
+  }
+  let refusal: WorkOrderTotalCapRefusal | null
+  try {
+    refusal = await checkWorkOrderTotalCap(client, {
+      lines,
+      excludeLineIds,
+      loadModes: async (jobIds) => {
+        // Only a job with an approved job work order carrying its agreed
+        // labour can be capped, so a week of hourly jobs reads nothing more.
+        const { data: approved, error } = await client.from('work_orders')
+          .select('job_id').eq('kind', 'job').eq('status', 'approved')
+          .not('agreed_labour_ex', 'is', null).in('job_id', jobIds)
+        if (error) throw new WorkOrderTotalCapReadError()
+        const withWorkOrder: string[] = [...new Set<string>((approved || []).map((r: any) => String(r.job_id)))]
+        if (withWorkOrder.length === 0) return []
+        try {
+          return (await loadTradeInvoiceJobModes(client, {
+            tradeId: tradeUser.id,
+            orgId: tradeUser.orgId,
+            jobIds: withWorkOrder,
+            jobVertical: _jobVertical,
+            normaliseManagedVerticals: _normalizeManagedVerticals,
+          })).jobs
+        } catch (e) {
+          if (e instanceof TradeInvoiceModeReadError) throw new WorkOrderTotalCapReadError()
+          throw e
+        }
+      },
+      jobRefs: async (jobIds) => {
+        const { data, error } = await client.from('jobs')
+          .select('id, job_number').eq('org_id', tradeUser.orgId).in('id', jobIds)
+        if (error) throw new WorkOrderTotalCapReadError()
+        return new Map<string, string>((data || []).map((j: any) => [String(j.id), String(j.job_number || '')]))
+      },
+    })
+  } catch (e) {
+    if (e instanceof WorkOrderTotalCapReadError) throw capFailed('work order cap')
+    throw e
+  }
+  if (refusal) {
+    throw new ApiError(refusal.message, 409, {
+      ok: false, success: false, saved: false,
+      code: refusal.code,
+      jobs: refusal.jobs,
+      error: refusal.message,
+      userMessage: refusal.message,
+    })
+  }
 }
 
 export async function _claimWorkOrderInvoiceBeforeXero(

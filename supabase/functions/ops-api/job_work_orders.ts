@@ -1152,20 +1152,17 @@ async function readWorkOrderLines(
 }
 
 /**
- * Every labour line on these jobs, on any trade's invoice, each marked
- * counted when its invoice is billed (JOB_WORK_ORDER_BILLED_INVOICE_STATUSES).
- * The same read the work order figures use; work_order_total_cap.ts adds the
- * counted lines up per job.
+ * Every line on these jobs, on any trade's invoice, with its invoice status
+ * and cost lane. work_order_total_cap.ts decides which count against the
+ * work order and adds them up per job.
  */
-export async function readJobLabourLines(
+export async function readJobTradeLines(
   client: any,
   jobIds: string[],
 ): Promise<WorkOrderLine[]> {
   const ids = [...new Set(jobIds.filter(Boolean))];
   if (ids.length === 0) return [];
-  return (await readWorkOrderLines(client, ids)).filter((l) =>
-    workOrderLineIsLabour(l)
-  );
+  return await readWorkOrderLines(client, ids);
 }
 
 const VARIATION_COLUMNS =

@@ -6,8 +6,9 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  checkWorkOrderTotalCap,
+  countsAgainstWorkOrder,
   incomingLabourByJob,
-  isWorkOrderLabourLineType,
   readWorkOrderCapFacts,
   WorkOrderTotalCapReadError,
   workOrderTotalCapRefusal,
@@ -93,7 +94,7 @@ Deno.test("cap: a job with no labour on this invoice, or not capped, is never re
   );
 });
 
-Deno.test("incoming: labour lane lines add up per job, crew deductions come off", () => {
+Deno.test("incoming: every line but commission, materials and travel counts per job; deductions come off", () => {
   const out = incomingLabourByJob([
     { job_id: JOB, line_type: "work order", line_total_ex: 2160 },
     {
@@ -105,11 +106,21 @@ Deno.test("incoming: labour lane lines add up per job, crew deductions come off"
     { job_id: JOB, line_type: "commission", line_total_ex: 500 },
     { job_id: JOB, line_type: "Travel", line_total_ex: 50 },
     { job_id: "", line_type: "labour", line_total_ex: 80 },
+    { job_id: JOB, line_type: "decking", line_total_ex: 40 },
+    {
+      job_id: JOB,
+      line_type: "travel_logistics_deduction",
+      line_total_ex: -10,
+    },
+    { job_id: JOB, line_total_ex: 5 },
   ]);
-  assertEquals(out.get(JOB), 1760);
+  assertEquals(out.get(JOB), 1795);
   assertEquals(out.size, 1);
-  assert(isWorkOrderLabourLineType("Labour"));
-  assert(!isWorkOrderLabourLineType("group share"));
+  assert(countsAgainstWorkOrder("Labour"));
+  assert(countsAgainstWorkOrder("other"));
+  assert(countsAgainstWorkOrder(null));
+  assert(!countsAgainstWorkOrder(" Materials "));
+  assert(!countsAgainstWorkOrder("commission"));
 });
 
 function fakeClient(
@@ -168,10 +179,18 @@ Deno.test("facts: billed labour counts live invoices only; approved customer var
     line("3", "draft", "work order", 5000),
     line("4", "ops-reject", "work order", 5000),
     line("5", "approved", "materials", 300),
+    line("6", "approved", "decking", 50),
+    line("7", "approved", "commission", 400),
   ];
   const lanes = lines.map((l) => ({
     line_id: l.id,
-    cost_lane: l.line_type === "materials" ? "materials" : "labour",
+    cost_lane: l.line_type === "materials"
+      ? "materials"
+      : l.line_type === "decking"
+      ? "unclassified"
+      : l.line_type === "commission"
+      ? "commission"
+      : "labour",
   }));
   const variations = [
     {
@@ -199,21 +218,58 @@ Deno.test("facts: billed labour counts live invoices only; approved customer var
       { jobId: JOB, ref: "SWF-1", agreedEx: 2000, workOrderId: WO },
     ],
   );
-  assertEquals(facts.billedEx.get(JOB), 1200);
+  assertEquals(facts.billedEx.get(JOB), 1250, "an odd line type still counts");
   assertEquals(facts.jobs, [{ jobId: JOB, ref: "SWF-1", allowedEx: 2150 }]);
 });
 
-Deno.test("wiring: generate_trade_invoice checks the cap after the M0 guard and before anything is saved", async () => {
+Deno.test("wiring: every door that saves or changes a trade line checks the cap before it writes", async () => {
   const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const CALL = "await _assertWithinWorkOrderTotal(client, tradeUser, ";
+
+  // generate_trade_invoice: after the M0 guard, before the invoice row.
   const m0 = src.indexOf("// ── END M0 GUARD");
-  const cap = src.indexOf("const capRefusal = workOrderTotalCapRefusal(", m0);
+  const genCap = src.indexOf(CALL, m0);
   const insert = src.indexOf("const invoicePayload = {", m0);
-  assert(m0 > 0 && cap > m0, "the cap must sit after the M0 guard");
-  assert(insert > cap, "the cap must refuse before the invoice is written");
-  const block = src.slice(m0, insert);
-  assertStringIncludes(block, "throw new ApiError(capRefusal.message, 409, {");
-  assertStringIncludes(block, "saved: false");
-  assertStringIncludes(block, "'work_order_cap_unavailable'");
+  assert(
+    m0 > 0 && genCap > m0 && genCap < insert,
+    "generate_trade_invoice checks before it writes",
+  );
+
+  // submit_work_order_invoice: before the claim that saves the invoice.
+  const door = src.indexOf("case 'submit_work_order_invoice': {");
+  const doorCap = src.indexOf(CALL + "workOrderLines)", door);
+  const claim = src.indexOf("await _claimWorkOrderInvoiceBeforeXero(", door);
+  assert(
+    door > 0 && doorCap > door && doorCap < claim,
+    "the crew work order door checks before it saves",
+  );
+
+  // review_crew_charge adjust: the new amount replaces the old, before the update.
+  const review = src.indexOf("case 'review_crew_charge': {");
+  const adjust = src.indexOf("reviewAction === 'adjust'", review);
+  const adjustCap = src.indexOf(CALL, adjust);
+  const update = src.indexOf(
+    ".from('trade_invoice_lines').update(updates)",
+    review,
+  );
+  assert(
+    adjust > 0 && adjustCap > adjust && adjustCap < update,
+    "a lead's adjust checks before it writes",
+  );
+  assertStringIncludes(src.slice(adjustCap, update), "[String(line_id)]");
+
+  // The guard: 409 over, 503 unreadable, nothing saved either way.
+  const guardAt = src.indexOf(
+    "export async function _assertWithinWorkOrderTotal(",
+  );
+  assert(guardAt > 0);
+  const guard = src.slice(
+    guardAt,
+    src.indexOf("\nexport async function ", guardAt + 10),
+  );
+  assertStringIncludes(guard, "throw new ApiError(refusal.message, 409, {");
+  assertStringIncludes(guard, "saved: false");
+  assertStringIncludes(guard, "'work_order_cap_unavailable'");
 });
 
 Deno.test("facts: an unreadable read refuses, never reads as nothing billed", async () => {
@@ -238,4 +294,67 @@ Deno.test("facts: an unreadable read refuses, never reads as nothing billed", as
       WorkOrderTotalCapReadError,
     );
   }
+});
+
+const MODE = {
+  job_id: JOB,
+  invoice_mode: "work_order",
+  work_order_agreed_ex: 2000,
+  job_work_order_id: WO,
+};
+const refs = () => Promise.resolve(new Map([[JOB, "SWF-1"]]));
+
+Deno.test("check: a new line over what is left is refused; a hourly job is never read", async () => {
+  const client = fakeClient({
+    lines: [line("1", "approved", "work order", 1500)],
+  });
+  const over = await checkWorkOrderTotalCap(client, {
+    lines: [{ job_id: JOB, line_type: "decking", line_total_ex: 600 }],
+    loadModes: () => Promise.resolve([MODE]),
+    jobRefs: refs,
+  });
+  assertEquals(over?.jobs, [{
+    job: "SWF-1",
+    job_id: JOB,
+    most_this_invoice_ex: 500,
+  }]);
+  const hourly = await checkWorkOrderTotalCap(client, {
+    lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 9999 }],
+    loadModes: () => Promise.resolve([{ ...MODE, invoice_mode: "hourly" }]),
+    jobRefs: refs,
+  });
+  assertEquals(hourly, null);
+  let read = false;
+  await checkWorkOrderTotalCap(client, {
+    lines: [{ job_id: JOB, line_type: "materials", line_total_ex: 9999 }],
+    loadModes: () => {
+      read = true;
+      return Promise.resolve([MODE]);
+    },
+    jobRefs: refs,
+  });
+  assertEquals(read, false, "materials alone never reads the work order");
+});
+
+Deno.test("check: a lead's adjust replaces the line's old amount, never adds to it", async () => {
+  const client = fakeClient({
+    lines: [
+      line("lead", "approved", "work order", 1600),
+      line("crew", "pending_acknowledgment", "labour", 400),
+    ],
+  });
+  const same = await checkWorkOrderTotalCap(client, {
+    lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 400 }],
+    loadModes: () => Promise.resolve([MODE]),
+    jobRefs: refs,
+    excludeLineIds: ["crew"],
+  });
+  assertEquals(same, null);
+  const raised = await checkWorkOrderTotalCap(client, {
+    lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 5000 }],
+    loadModes: () => Promise.resolve([MODE]),
+    jobRefs: refs,
+    excludeLineIds: ["crew"],
+  });
+  assertEquals(raised?.jobs[0].most_this_invoice_ex, 400);
 });

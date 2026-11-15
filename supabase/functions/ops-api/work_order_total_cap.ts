@@ -14,39 +14,48 @@
 //   its agreed labour (work_order_agreed_ex on the job's mode) are capped.
 //   Hourly jobs, group work orders and jobs with no agreed amount keep their
 //   own rules; the pay-run check stops a work order with no agreed amount.
-// - Labour is the labour cost lane (v_trade_charge_resolved): hours, work
-//   order lines and crew deductions on the job. Materials, travel and
-//   commission are not labour. Commission has its own cap (job_commission.ts).
+// - Every line on the job counts (hours, the work order line, deductions,
+//   any type a client sends) except commission, materials and travel
+//   (NOT_AGAINST_WORK_ORDER_LINE_TYPES). Commission has its own cap
+//   (job_commission.ts).
 // - Billed is JOB_WORK_ORDER_BILLED_INVOICE_STATUSES: a draft, a rejected or a
 //   voided invoice holds nothing.
 // - Only the office can raise the figure, through an approved customer
 //   variation or a new work order.
 //
 // Refusals carry the job and the most this invoice may still bill on it. They
-// never say what anyone else billed.
+// never name another trade or their figure (a trade who knows the agreed
+// amount can still work out the total others billed from the remainder).
+//
+// Known limits: the read and the save are not one transaction, so two
+// invoices sent at the same moment can both pass (the commission cap has a
+// database guard; this one does not yet). A job billed hourly is not capped
+// even when it has a job work order.
 // deno-lint-ignore-file no-explicit-any
 
 import {
   JOB_WORK_ORDER_BILLED_INVOICE_STATUSES,
   readCustomerVariations,
-  readJobLabourLines,
+  readJobTradeLines,
 } from "./job_work_orders.ts";
 
-/** Line types in the labour lane of v_trade_charge_resolved (20261015093000). */
-export const WORK_ORDER_LABOUR_LINE_TYPES: ReadonlySet<string> = new Set([
-  "labour",
-  "fencing",
-  "patio",
-  "make safe",
-  "general labour",
-  "crew_work_order_deduction",
-  "labour_deduction",
-  "work order",
-  "work_order",
+/**
+ * Line types that never count against a work order: commission (its own cap,
+ * job_commission.ts), materials and travel. Every other line on a capped job
+ * counts, whatever its type: labour, the work order line, any deduction
+ * (negative), and any type the client sends that is not on this list
+ * ("decking", "other", "install" ...), so a new or odd type cannot bill
+ * around the work order.
+ */
+export const NOT_AGAINST_WORK_ORDER_LINE_TYPES: ReadonlySet<string> = new Set([
+  "commission",
+  "materials",
+  "material",
+  "travel",
 ]);
 
-export function isWorkOrderLabourLineType(lineType: unknown): boolean {
-  return WORK_ORDER_LABOUR_LINE_TYPES.has(
+export function countsAgainstWorkOrder(lineType: unknown): boolean {
+  return !NOT_AGAINST_WORK_ORDER_LINE_TYPES.has(
     String(lineType ?? "").trim().toLowerCase(),
   );
 }
@@ -117,7 +126,7 @@ export function incomingLabourByJob(
   const out = new Map<string, number>();
   for (const line of lines) {
     const jobId = String(line?.job_id ?? "").trim();
-    if (!jobId || !isWorkOrderLabourLineType(line?.line_type)) continue;
+    if (!jobId || !countsAgainstWorkOrder(line?.line_type)) continue;
     const amount = Number(line?.line_total_ex);
     if (!Number.isFinite(amount)) continue;
     out.set(jobId, money((out.get(jobId) ?? 0) + amount));
@@ -142,24 +151,28 @@ export async function readWorkOrderCapFacts(
   jobs: ReadonlyArray<
     { jobId: string; ref: string; agreedEx: number; workOrderId: string }
   >,
+  opts: { excludeLineIds?: readonly string[] } = {},
 ): Promise<{ jobs: WorkOrderCapJob[]; billedEx: Map<string, number> }> {
   if (jobs.length === 0) return { jobs: [], billedEx: new Map() };
   const ids = jobs.map((j) => j.jobId);
-  let lines: Awaited<ReturnType<typeof readJobLabourLines>>;
+  let lines: Awaited<ReturnType<typeof readJobTradeLines>>;
   let variations: any[];
   try {
     [lines, variations] = await Promise.all([
-      readJobLabourLines(client, ids),
+      readJobTradeLines(client, ids),
       readCustomerVariations(client, ids),
     ]);
   } catch {
     throw new WorkOrderTotalCapReadError();
   }
+  const excluded = new Set((opts.excludeLineIds || []).map(String));
   const billedEx = new Map<string, number>();
   for (const line of lines) {
     if (!JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(line.invoice_status)) {
       continue;
     }
+    if (!countsAgainstWorkOrder(line.line_type)) continue;
+    if (excluded.has(String(line.trade_invoice_line_id))) continue;
     billedEx.set(
       line.job_id,
       money((billedEx.get(line.job_id) ?? 0) + line.amount_ex),
@@ -176,4 +189,56 @@ export async function readWorkOrderCapFacts(
     return { jobId: j.jobId, ref: j.ref, allowedEx: money(j.agreedEx + added) };
   });
   return { jobs: capJobs, billedEx };
+}
+
+/** How a job is billed, as loadTradeInvoiceJobModes answers it. */
+export type WorkOrderCapMode = {
+  job_id: string;
+  invoice_mode: string;
+  work_order_agreed_ex: number | null;
+  job_work_order_id: string | null;
+};
+
+/**
+ * The whole check, shared by every door that saves or changes a trade line
+ * (generate_trade_invoice, submit_work_order_invoice, a lead's adjust in
+ * review_crew_charge). `lines` are the lines about to be saved or the new
+ * amount of a changed line; `excludeLineIds` are saved lines whose old amount
+ * the change replaces. loadModes and jobRefs throw WorkOrderTotalCapReadError
+ * on a failed read. null: nothing goes over.
+ */
+export async function checkWorkOrderTotalCap(client: any, input: {
+  lines: ReadonlyArray<
+    { job_id?: unknown; line_type?: unknown; line_total_ex?: unknown }
+  >;
+  loadModes: (jobIds: string[]) => Promise<readonly WorkOrderCapMode[]>;
+  jobRefs: (jobIds: string[]) => Promise<ReadonlyMap<string, string>>;
+  excludeLineIds?: readonly string[];
+}): Promise<WorkOrderTotalCapRefusal | null> {
+  const incoming = incomingLabourByJob(input.lines);
+  const jobIds = [...incoming].filter(([, ex]) => cents(ex) > 0).map(([id]) =>
+    id
+  );
+  if (jobIds.length === 0) return null;
+  const capped = (await input.loadModes(jobIds)).filter((m) =>
+    m.invoice_mode === "work_order" && m.work_order_agreed_ex != null &&
+    !!m.job_work_order_id
+  );
+  if (capped.length === 0) return null;
+  const refs = await input.jobRefs(capped.map((m) => m.job_id));
+  const facts = await readWorkOrderCapFacts(
+    client,
+    capped.map((m) => ({
+      jobId: m.job_id,
+      ref: refs.get(m.job_id) || m.job_id,
+      agreedEx: Number(m.work_order_agreed_ex),
+      workOrderId: String(m.job_work_order_id),
+    })),
+    { excludeLineIds: input.excludeLineIds },
+  );
+  return workOrderTotalCapRefusal({
+    jobs: facts.jobs,
+    billedEx: facts.billedEx,
+    incomingEx: incoming,
+  });
 }
