@@ -1113,6 +1113,24 @@ work reopened after it was recorded finished is not finished again) and
 `unconfirmed` (R8 whose amount a C2 check leaves unknown) are never a move, the
 first line's item or a reason for whose move.
 
+## The Card Sets Aside AI Notes Nobody Owes Now
+
+Since `20261115130000` `context_job_story` assembles the card, asks the pure
+`context_job_story_rest` which standalone AI notes are not owed now (`said`: a claim the
+reader marked `needs_reply` false that blocks no step; `stage_passed`: blocks a step the phase
+has passed and was raised before it; `old`: plainly open (never `closing_evidence`), opened,
+and due if dated, more than `context_job_story_rest_policy().max_age_days` Perth days ago),
+and only when there are any assembles again with those items' status `rested` and adds
+`rested` (held-marked like the other sections) to the card. Money (payment or deposit blocks,
+an invoice, payment or refund about-key, a dollar amount in the words), a person's or locked
+note and a note attached to a record loop are never set aside, and nothing is written. This
+is the one rule in the story that moves with the clock: a note crossing the age line leaves
+`loops`, so `context_job_story_card_hash` moves once and the saved story reads stale once
+(the rewrite queue does not read the hash). A rested requested or offered agreement still
+shows in `agreements`, with status `rested`. Do not move this into the assembler (its body is
+md5-pinned). A later story read replaces this body and must run this down first wherever an
+earlier contract runs `20261030161813`'s down, as those 21 sites now do.
+
 ## A Lead Not Followed Up Has One Rule
 
 `context_lead_monitored_jobs(job_ids, as_of)` (`20261007010000`, drafts and
