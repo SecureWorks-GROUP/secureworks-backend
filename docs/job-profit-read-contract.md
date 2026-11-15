@@ -180,8 +180,10 @@ caught and logged as a warning). Service role reads the table; nothing else read
 
 - **Finished** is where the job stands now, never a day on the job alone: a job sent back to work
   keeps its old `completed_at` and its old sign-off. Read in this order:
-  - A job in `rectification` is never finished, and neither is a job with a callback open (a
-    `callback_opened` event with no `callback_resolved` after it).
+  - A job in `rectification` is never finished, and neither is a job with a callback open
+    (`jobs.is_callback`, or a `callback_opened` event with no `callback_resolved` after it), nor a
+    job with a crew visit still to come (a `job_assignments` row at `scheduled` or `confirmed`, not
+    a ghost or observer, dated on or after `as_of`): labour not yet worked.
   - A cancelled or lost job is finished as `did_not_go_ahead` when it holds cost or a cost is still
     to come (`pending_cost_reasons` in the policy: an open or unbilled order, a bill not placed or
     not confirmed, unapproved trade charges), so it reads `waiting`, not `not_applicable`.
@@ -198,7 +200,12 @@ caught and logged as a warning). Service role reads the table; nothing else read
     `reopen_reason`), never for restoration work (a restoration stage on the job, or a work
     subtype that contains `restoration`: restoration is invoiced before the works), and only while
     the invoice stands (below): one raised before the job went back to `in_progress`, was reopened
-    or was re-attended finishes nothing.
+    or was re-attended finishes nothing. Once a make-safe has been taken out of a finished status,
+    its invoice never finishes it again; only a finished status does. And the invoice stands only
+    while no move to a status that is not finished comes on a later day, except a move from one
+    resting status to another whose old status is named (by the record, or by the event; an old
+    status inferred from the previous logged move does not count, because a move nobody logged may
+    lie between).
 - **`finished_on` and `finished_basis`.** The finish day is the later of two days, so a job
   finished a second time is never dated by its first finish and a job is never dated before it
   came to stand where it stands. A job cannot go from `open` to `final` in a day.
@@ -217,7 +224,9 @@ caught and logged as a warning). Service role reads the table; nothing else read
     make-safe, a quote accepted, a quote run declined and a callback opened each put a job back to
     work and may log no status move; each leaves its own event (`reopen_event_types`, and a note
     starting `Job reopened`) and each counts as a working move. A complete
-    stage with no stage move on record stands only when no working move is on record either. A
+    stage with no stage move on record stands only when no working move is on record either, and a
+    stage stands only while no stage move to another stage is on record after it last reached
+    `complete`. A
     stage day that does not stand gives way to the status move. The invoice carries a day and no
     time, so a working status move on the invoice day itself leaves it standing (a make-safe is
     attended and invoiced on one day); a reopen or a re-attend on that day does not.
