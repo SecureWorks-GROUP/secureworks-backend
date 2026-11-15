@@ -21,7 +21,7 @@
 --         + account unknown 50.00 + no line detail 95.25 + lines differ 0.01. Status partial.
 -- July: SP-NULL, no subtotal in the copy, one 10.00 line: partial, amount unknown 1, does not add up.
 -- August: SP-A1 40.00 on the equipment account: read, adds up, not a cost 40.00.
--- September (every transaction has lines and a known account, so the status is read):
+-- September (every transaction has lines and a known account; the two that differ make the month partial):
 --   SP-J1 100.00 with one 60.00 line and SP-J2 60.00 with one 100.00 line, both fuel: the two differences cancel
 --         to 0.00, and the month still does not add up, because differences are counted per transaction (2).
 --   SP-P1 300.00 a supplier prepayment coded to the direct cost account, SP-P2 45.00 an overpayment on the loan
@@ -233,7 +233,7 @@ BEGIN
 
   -- September: two differences that cancel still stop the month adding up; money paid ahead is its own part.
   s := sep -> 'spend';
-  PERFORM pg_temp.srt_is('September spend status', s ->> 'status', 'read');
+  PERFORM pg_temp.srt_is('September spend status', s ->> 'status', 'partial');
   PERFORM pg_temp.srt_is('September transactions', (s ->> 'transactions')::int, 4);
   PERFORM pg_temp.srt_is('September spend total', (s ->> 'total_ex')::numeric, 505.00);
   PERFORM pg_temp.srt_is('September overhead', (s ->> 'overhead_ex')::numeric, 160.00);

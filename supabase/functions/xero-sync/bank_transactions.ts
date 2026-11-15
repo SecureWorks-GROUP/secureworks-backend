@@ -20,10 +20,14 @@
 //                   Xero changed since the last complete read (If-Modified-Since).
 //   the daily job   the same, then a WHOLE paged read: the last 90 days, or on
 //   (whole: true)   the first run back to 1 July of the financial year. A whole
-//                   read is checked: every transaction the unpaged list named
-//                   must have arrived with lines. One the pages missed (Xero's
-//                   order is by date, and many share a date) is fetched by its
-//                   id. The whole-read cursor moves only when none is left.
+//                   read is checked: every SPEND transaction the unpaged list
+//                   named must have arrived with lines (spend is what the lines
+//                   are read for; money received and transfers are stored when
+//                   they come with lines and are not checked). One the pages
+//                   missed (Xero's order is by date, and many share a date) is
+//                   fetched by its id; Xero's own answer for that id with an
+//                   empty line list means it has none, and is counted apart.
+//                   The whole-read cursor moves only when none is left.
 //
 // A failure of the lines read never fails the transaction copy: it is reported
 // in the result (lines.ok false) and tried again next run. A rate limit always
@@ -166,7 +170,16 @@ type Get = (
 type Client = { from: (t: string) => any };
 
 export type BankLinesOutcome =
-  | { ok: true; mode: "incremental" | "whole" | "first_whole"; pages: number; written: number; modified_since: string | null; healed: number }
+  | {
+    ok: true;
+    mode: "incremental" | "whole" | "first_whole";
+    pages: number;
+    written: number;
+    modified_since: string | null;
+    healed: number;
+    /** Only on a whole read, and only when above 0: spend Xero itself says has no lines. */
+    without_lines?: number;
+  }
   | { ok: false; mode: "incremental" | "whole" | "first_whole"; reason: string; pages: number; written: number; missed?: number }
   | { ok: null; mode: "waiting"; reason: "awaiting_first_whole_read" };
 
@@ -365,7 +378,7 @@ export async function syncBankTransactionLines(
     // The whole read, checked against the unpaged list of the same window.
     mode = hasFull ? "whole" : "first_whole";
     const from = hasFull ? ninety : wide;
-    const expected = new Set<string>(headRows.map((r) => r.xero_txn_id));
+    const expected = new Set<string>(headRows.filter((r) => r.txn_type === "SPEND").map((r) => r.xero_txn_id));
     if (from !== ninety) {
       const wideList = xeroCollection(
         await get("/BankTransactions", { where: bankTransactionsWhere(from), order: "Date DESC" }, {}),
@@ -373,16 +386,18 @@ export async function syncBankTransactionLines(
       );
       for (const r of wideList) {
         const id = xeroText(r.BankTransactionID);
-        if (id) expected.add(id);
+        if (id && bankTransactionType(r.Type) === "SPEND") expected.add(id);
       }
     }
     const read = await readPages(sb, orgId, get, bankTransactionsWhere(from), {}, startedAt);
     pages += read.pages;
     written += read.written;
     // Read means it came with its lines. A transaction the pages skipped, or returned without lines, is
-    // fetched by its own id, a bounded number a run, and counts only when its lines row was built and written.
+    // fetched by its own id, a bounded number a run, and counts only when its lines row was built and written,
+    // or when Xero's answer for that id carries a line list that is empty (it has no lines to read).
     const missed = [...expected].filter((id) => !read.withLines.has(id));
     let left = missed.length;
+    let withoutLines = 0;
     for (const id of missed.slice(0, BANK_TXN_HEAL_LIMIT)) {
       const one = xeroCollection(await get(`/BankTransactions/${id}`, {}, {}), "BankTransactions")
         .filter((r) => xeroText(r.BankTransactionID) === id);
@@ -390,10 +405,14 @@ export async function syncBankTransactionLines(
       await upsertAll(sb, "xero_bank_transactions", unique(one.map((r) => bankTransactionRow(r, orgId, startedAt))), tally);
       const lineRows = unique(one.map((r) => bankTransactionLinesRow(r, orgId, startedAt)));
       await upsertAll(sb, "xero_bank_transaction_lines", lineRows, tally);
-      if (tally.skipped === 0 && lineRows.length > 0) {
+      if (tally.skipped > 0) continue;
+      if (lineRows.length > 0) {
         healed++;
         left--;
         written++;
+      } else if (one.length > 0 && one.every((r) => Array.isArray(r.LineItems) && r.LineItems.length === 0)) {
+        withoutLines++;
+        left--;
       }
     }
     if (left > 0 || read.skipped > 0) {
@@ -409,9 +428,22 @@ export async function syncBankTransactionLines(
       });
     }
     // The first whole read also starts the incremental chain; later ones leave it alone.
-    const { error } = await stamp(since ? [fullKey] : [key, fullKey], `Bank transaction lines ${read.written}; ${mode}; healed ${healed}`);
+    const { error } = await stamp(
+      since ? [fullKey] : [key, fullKey],
+      `Bank transaction lines ${read.written}; ${mode}; healed ${healed}; without lines ${withoutLines}`,
+    );
     if (error) throw new Error(`cursor write failed: ${error.message}`);
-    return result({ ok: true, mode, pages, written, modified_since: since ?? null, healed });
+    // The whole read stands, but a row the incremental read could not write is still said.
+    if (incrementalRefused) return result({ ok: false, mode, reason: incrementalRefused, pages, written });
+    return result({
+      ok: true,
+      mode,
+      pages,
+      written,
+      modified_since: since ?? null,
+      healed,
+      ...(withoutLines > 0 ? { without_lines: withoutLines } : {}),
+    });
   } catch (e) {
     if (e instanceof XeroCooldownError) throw e;
     return result({ ok: false, mode, reason: (e as Error).message, pages, written });
