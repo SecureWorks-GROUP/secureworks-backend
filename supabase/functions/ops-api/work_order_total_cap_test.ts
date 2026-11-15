@@ -94,7 +94,7 @@ Deno.test("cap: a job with no labour on this invoice, or not capped, is never re
   );
 });
 
-Deno.test("incoming: every line but commission, materials and travel counts per job; deductions come off", () => {
+Deno.test("incoming: every line but commission and materials counts per job; deductions come off", () => {
   const out = incomingLabourByJob([
     { job_id: JOB, line_type: "work order", line_total_ex: 2160 },
     {
@@ -114,13 +114,14 @@ Deno.test("incoming: every line but commission, materials and travel counts per 
     },
     { job_id: JOB, line_total_ex: 5 },
   ]);
-  assertEquals(out.get(JOB), 1795);
+  assertEquals(out.get(JOB), 1845, "travel counts against the work order");
   assertEquals(out.size, 1);
   assert(countsAgainstWorkOrder("Labour"));
   assert(countsAgainstWorkOrder("other"));
   assert(countsAgainstWorkOrder(null));
   assert(!countsAgainstWorkOrder(" Materials "));
   assert(!countsAgainstWorkOrder("commission"));
+  assert(countsAgainstWorkOrder("Travel"));
 });
 
 function fakeClient(

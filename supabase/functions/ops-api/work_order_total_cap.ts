@@ -15,7 +15,7 @@
 //   Hourly jobs, group work orders and jobs with no agreed amount keep their
 //   own rules; the pay-run check stops a work order with no agreed amount.
 // - Every line on the job counts (hours, the work order line, deductions,
-//   any type a client sends) except commission, materials and travel
+//   any type a client sends, travel) except commission and materials
 //   (NOT_AGAINST_WORK_ORDER_LINE_TYPES). Commission has its own cap
 //   (job_commission.ts).
 // - Billed is JOB_WORK_ORDER_BILLED_INVOICE_STATUSES: a draft, a rejected or a
@@ -41,17 +41,18 @@ import {
 
 /**
  * Line types that never count against a work order: commission (its own cap,
- * job_commission.ts), materials and travel. Every other line on a capped job
+ * job_commission.ts) and materials. Every other line on a capped job
  * counts, whatever its type: labour, the work order line, any deduction
  * (negative), and any type the client sends that is not on this list
  * ("decking", "other", "install" ...), so a new or odd type cannot bill
- * around the work order.
+ * around the work order. Travel counts too: on 13 Nov 2026 a work order
+ * invoice carried a travel line equal to the work order amount on two jobs
+ * (SW-INV-SL-261113-016); travel past the work order is an office variation.
  */
 export const NOT_AGAINST_WORK_ORDER_LINE_TYPES: ReadonlySet<string> = new Set([
   "commission",
   "materials",
   "material",
-  "travel",
 ]);
 
 export function countsAgainstWorkOrder(lineType: unknown): boolean {
