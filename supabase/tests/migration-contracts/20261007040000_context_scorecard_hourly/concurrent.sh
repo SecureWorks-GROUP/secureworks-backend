@@ -70,13 +70,16 @@ fi
 
 # 2. The job's command, as one simple query, with the scorecard held behind a lock.
 command=$(q -c "SELECT public.context_scorecard_run_policy()->>'command'")
+# 60 s as this migration set it; 110 s once 20261115090000_context_scorecard_hourly_timeout is applied.
 expected="SET statement_timeout = '60s'; SET lock_timeout = '10s'; SELECT public.context_scorecard_record_run('cron')"
-if [ "$command" != "$expected" ]; then
+expected_later="SET statement_timeout = '110s'; SET lock_timeout = '10s'; SELECT public.context_scorecard_record_run('cron')"
+if [ "$command" != "$expected" ] && [ "$command" != "$expected_later" ]; then
   echo "error: the policy's command is not the one this script tests: ${command}" >&2
   exit 1
 fi
 lock_command=${command/"lock_timeout = '10s'"/"lock_timeout = '300ms'"}
 statement_command=${command/"statement_timeout = '60s'"/"statement_timeout = '1s'"}
+statement_command=${statement_command/"statement_timeout = '110s'"/"statement_timeout = '1s'"}
 
 psql "$database_url" -X -q -v ON_ERROR_STOP=1 -At \
   -c "BEGIN" \
