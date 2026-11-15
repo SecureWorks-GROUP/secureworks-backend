@@ -15,7 +15,12 @@
 -- mirror, it is not approved or paid in Xero, or the job is missing, cancelled, lost or a holding
 -- job. Each skip is raised as a NOTICE with its reason, and nothing else is changed for it.
 -- Installer bills (accounts 306 and 301) land in the labour lane, as assignReconRow does.
--- Rollback: 20261116003000_sep_reconcile_placements.rollback.sql removes exactly the rows this
+-- A bill whose own writes raise any error (a fact landing from another route between the check and
+-- the insert, a trigger refusing it) is rolled back on its own and named in a NOTICE with the error,
+-- so one bad bill never stops the others or fails the deploy. The split is the same. Each bill takes
+-- the same advisory lock as allocate_bill_split and the no-mix trigger before its queue row lock, so
+-- a person pressing Split at deploy time cannot deadlock with it.
+-- Rollback: supabase/rollbacks/20261116003000_sep_reconcile_placements_down.sql removes exactly the rows this
 -- writes (facts and events stamped with this migration's actor) and reopens their queue rows.
 
 DO $placements$
@@ -33,6 +38,7 @@ DECLARE
   v_skipped int := 0;
   v_j1 uuid;
   v_j2 uuid;
+  v_errors int := 0;
 BEGIN
   FOR r IN
     SELECT * FROM (VALUES
@@ -81,6 +87,8 @@ BEGIN
     ) AS a(xero_invoice_id, job_number, amount_ex, invoice_number)
   LOOP
     v_skip := NULL;
+    BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('job_materials_facts:' || r.xero_invoice_id, 0));
     SELECT * INTO q FROM public.materials_reconciliation_queue
      WHERE xero_invoice_id = r.xero_invoice_id
      ORDER BY created_at
@@ -101,7 +109,7 @@ BEGIN
     IF v_skip IS NULL THEN
       SELECT xi.status, xi.line_items INTO x
         FROM public.xero_invoices xi
-       WHERE xi.xero_invoice_id = r.xero_invoice_id
+       WHERE xi.xero_invoice_id = r.xero_invoice_id AND xi.invoice_type = 'ACCPAY'
        ORDER BY (xi.status IN ('AUTHORISED', 'PAID')) DESC
        LIMIT 1;
       IF NOT FOUND THEN
@@ -126,16 +134,10 @@ BEGIN
     IF v_skip IS NOT NULL THEN
       v_skipped := v_skipped + 1;
       RAISE NOTICE 'sep placements: skipped bill % (%) for %: %', r.invoice_number, r.xero_invoice_id, r.job_number, v_skip;
-      CONTINUE;
-    END IF;
+    ELSE
 
-    -- assignReconRow's lane rule: an installer account on any line with an amount makes it labour.
-    v_lane := CASE WHEN EXISTS (
-                SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(x.line_items) = 'array'
-                                                        THEN x.line_items ELSE '[]'::jsonb END) li
-                 WHERE COALESCE(NULLIF(li ->> 'LineAmount', '')::numeric, 0) <> 0
-                   AND li ->> 'AccountCode' IN ('306', '301'))
-              THEN 'labour' ELSE 'materials' END;
+    -- An installer bill (accounts 306 and 301) is labour, read by the same rule Job Profit uses.
+    v_lane := CASE WHEN public.job_cost_installer_bill(x.line_items) THEN 'labour' ELSE 'materials' END;
 
     INSERT INTO public.job_materials_facts (
       org_id, xero_invoice_id, invoice_number, xero_contact_id, contact_name, job_id, job_number,
@@ -166,6 +168,13 @@ BEGIN
       'assigned_by', c_actor,
       'assigned_at', c_now));
     v_placed := v_placed + 1;
+    END IF;
+    EXCEPTION WHEN OTHERS THEN
+      v_skipped := v_skipped + 1;
+      v_errors := v_errors + 1;
+      RAISE NOTICE 'sep placements: ERROR, bill % (%) for % not placed and left as it was: % %',
+        r.invoice_number, r.xero_invoice_id, r.job_number, SQLSTATE, SQLERRM;
+    END;
   END LOOP;
 
   -- The one split: Nithin's commission bill 202608 names two jobs, one line each
@@ -197,11 +206,16 @@ BEGIN
       'assigned_by', c_actor)
       FROM (VALUES (v_j1, 409.00), (v_j2, 167.00)) AS p(job_id, amount_ex);
     v_placed := v_placed + 1;
-  EXCEPTION WHEN raise_exception THEN
+  EXCEPTION WHEN OTHERS THEN
     v_skipped := v_skipped + 1;
-    RAISE NOTICE 'sep placements: skipped bill 202608 split: %', SQLERRM;
+    IF SQLSTATE = 'P0001' AND SQLERRM LIKE 'split_refused:%' THEN
+      RAISE NOTICE 'sep placements: skipped bill 202608 split: %', SQLERRM;
+    ELSE
+      v_errors := v_errors + 1;
+      RAISE NOTICE 'sep placements: ERROR, bill 202608 split not placed and left as it was: % %', SQLSTATE, SQLERRM;
+    END IF;
   END;
 
-  RAISE NOTICE 'sep placements: % bills placed, % skipped', v_placed, v_skipped;
+  RAISE NOTICE 'sep placements: % bills placed, % skipped (% of them on an error)', v_placed, v_skipped, v_errors;
 END
 $placements$;
