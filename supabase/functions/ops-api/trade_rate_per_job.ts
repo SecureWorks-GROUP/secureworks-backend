@@ -40,7 +40,7 @@ export function tradeTypedJobRate(
   ) {
     n = Number(raw.trim());
   }
-  if (!Number.isFinite(n) || n < 0) {
+  if (!Number.isFinite(n) || n < 0 || n > 99999.99) {
     throw new TradeJobRateError(
       `Check the hourly rate on ${label}: it must be an amount in dollars and cents.`,
     );

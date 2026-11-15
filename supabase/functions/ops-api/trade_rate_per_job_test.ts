@@ -12,7 +12,18 @@ import {
 
 Deno.test("job rate: nothing typed, or the office rate, bills the office rate", () => {
   for (
-    const raw of [null, undefined, "", "  ", 0, "0", 50, "50", "50.00", 50.000000001]
+    const raw of [
+      null,
+      undefined,
+      "",
+      "  ",
+      0,
+      "0",
+      50,
+      "50",
+      "50.00",
+      50.000000001,
+    ]
   ) {
     assertEquals(tradeTypedJobRate(raw, 50, "SWF-1"), null, String(raw));
   }
@@ -40,6 +51,8 @@ Deno.test("job rate: a rate that cannot be read is refused, never guessed", () =
       [],
       true,
       "123456",
+      123456,
+      1e15,
     ]
   ) {
     assertThrows(
