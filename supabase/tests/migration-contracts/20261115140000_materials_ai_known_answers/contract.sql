@@ -1,4 +1,4 @@
--- Contract for 20261115140000_materials_ai_known_answers. Fixture bills KA-01 to KA-22, each decided one with the
+-- Contract for 20261115140000_materials_ai_known_answers. Fixture bills KA-01 to KA-26, each decided one with the
 -- AI's decision and the bookkeeper's answer, and the verdict each must read. Its writes are rolled back.
 
 BEGIN;
@@ -41,7 +41,14 @@ BEGIN
     (org, 'KA-21', 'C-STEEL', 'S-7021', 'ACCPAY', 'KA Steel', 'AUTHORISED',
      '[{"LineItemID":"l1","LineAmount":80.57},{"LineItemID":"l2","Description":"Delivery notes"}]'::jsonb),
     -- KA-22: a live bill of KA-13's supplier whose number matches a phone photo's name on KA-13's email.
-    (org, 'KA-22', 'C-POSTS', '6022', 'ACCPAY', 'KA Posts', 'AUTHORISED', NULL);
+    (org, 'KA-22', 'C-POSTS', '6022', 'ACCPAY', 'KA Posts', 'AUTHORISED', NULL),
+    -- KA-23: placed right, then a refusal written before the job was looked up. KA-24: only such a refusal.
+    (org, 'KA-23', 'C-STEEL', 'S-7023', 'ACCPAY', 'KA Steel', 'AUTHORISED', NULL),
+    (org, 'KA-24', 'C-STEEL', 'S-7024', 'ACCPAY', 'KA Steel', 'AUTHORISED', NULL),
+    -- KA-25: the bookkeeper's answer rests only on our own register. KA-26: its line is split across two jobs in
+    -- the parts read, under an older whole-line row naming one job.
+    (org, 'KA-25', 'C-STEEL', 'S-7025', 'ACCPAY', 'KA Steel', 'AUTHORISED', NULL),
+    (org, 'KA-26', 'C-STEEL', 'S-7026', 'ACCPAY', 'KA Steel', 'AUTHORISED', NULL);
 
   -- One email carrying two live bills of the same supplier (KA-01, KA-02). Another carrying KA-13 with a bill of a
   -- different supplier (KA-16), a voided bill of its own supplier (KA-19) and a date in a file name that reads
@@ -74,7 +81,16 @@ BEGIN
     ('KA-15', 'l1', 'job', j2, 'KA-J2', true),
     ('KA-17', 'l1', 'job', j1, 'KA-J1', true),
     ('KA-18', 'l1', 'job', j1, 'KA-J1', true),
-    ('KA-21', 'l1', 'job', j1, 'KA-J1', true), ('KA-21', 'l2', 'not_job_cost', NULL, NULL, true);
+    ('KA-21', 'l1', 'job', j1, 'KA-J1', true), ('KA-21', 'l2', 'not_job_cost', NULL, NULL, true),
+    ('KA-23', 'l1', 'job', j1, 'KA-J1', true),
+    ('KA-24', 'l1', 'job', j1, 'KA-J1', true),
+    ('KA-26', 'l1', 'job', j1, 'KA-J1', true);
+  INSERT INTO public.v_bookkeeping_line_evidence_current (xero_invoice_id, xero_line_item_id, allocation, job_id, job_number, evidenced, basis, emitted_at) VALUES
+    ('KA-25', 'l1', 'job', j1, 'KA-J1', true, 'register_addr', now() - interval '1 day');
+  INSERT INTO public.bookkeeping_evidence_revisions (revision, stream, emitted_at, status) VALUES ('ka-parts', 'cost', now(), 'current');
+  INSERT INTO public.bookkeeping_line_evidence_parts (revision, xero_invoice_id, xero_line_item_id, part, parts, line_ex, amount_ex_gst, allocation, job_id, job_number, evidenced) VALUES
+    ('ka-parts', 'KA-26', 'l1', 1, 2, 50, 30, 'job', j1, 'KA-J1', true),
+    ('ka-parts', 'KA-26', 'l1', 2, 2, 50, 20, 'job', j2, 'KA-J2', true);
 
   INSERT INTO public.materials_ai_placements
     (xero_invoice_id, invoice_number, contact_name, amount_ex, decision, job_id, job_number, confidence, reason, model,
@@ -101,10 +117,15 @@ BEGIN
     -- KA-15: placed and then undone by a person. Still what the AI said.
     ('KA-15', 'S-7015', 'KA Steel', 50, 'job', j1, 'KA-J1', 0.990, 'r', 'm', 'placed', NULL, NULL, NULL, now() - interval '10 days', now(), 'person'),
     -- KA-17: a sure job pick of a job that does not exist. Refused, and wrong against the bookkeeper's job.
-    ('KA-17', 'S-7017', 'KA Steel', 50, 'job', NULL, 'KA-J7', 0.970, 'r', 'm', 'refused', 'job not found', NULL, NULL, now() - interval '2 days', NULL, NULL),
+    ('KA-17', 'S-7017', 'KA Steel', 50, 'job', NULL, NULL, 0.970, 'r', 'm', 'refused', 'job not found', NULL, NULL, now() - interval '2 days', NULL, NULL),
     ('KA-18', 'S-7018', 'KA Steel', 100, 'job', j1, 'KA-J1', 0.990, 'r', 'm', 'placed', NULL, NULL, NULL, now() - interval '10 days', NULL, NULL),
     -- KA-21: filed as not job related on its own at 0.98, and the bookkeeper put its money on a job.
-    ('KA-21', 'S-7021', 'KA Steel', 80.57, 'not_job_related', NULL, NULL, 0.980, 'r', 'm', 'filed_not_job_related', NULL, ARRAY['ai_confidence'], NULL, now() - interval '2 days', NULL, NULL);
+    ('KA-21', 'S-7021', 'KA Steel', 80.57, 'not_job_related', NULL, NULL, 0.980, 'r', 'm', 'filed_not_job_related', NULL, ARRAY['ai_confidence'], NULL, now() - interval '2 days', NULL, NULL),
+    ('KA-23', 'S-7023', 'KA Steel', 50, 'job', j1, 'KA-J1', 0.990, 'r', 'm', 'placed', NULL, ARRAY['ai_confidence','job_number'], NULL, now() - interval '3 days', NULL, NULL),
+    ('KA-23', 'S-7023', 'KA Steel', 50, 'job', NULL, NULL, 0.990, 'r', 'm', 'refused', 'already decided by the AI', NULL, NULL, now() - interval '1 day', NULL, NULL),
+    ('KA-24', 'S-7024', 'KA Steel', 50, 'job', NULL, NULL, 0.990, 'r', 'm', 'refused', 'already assigned', NULL, NULL, now() - interval '2 days', NULL, NULL),
+    ('KA-25', 'S-7025', 'KA Steel', 50, 'job', j1, 'KA-J1', 0.990, 'r', 'm', 'placed', NULL, ARRAY['ai_confidence','job_number'], NULL, now() - interval '3 days', NULL, NULL),
+    ('KA-26', 'S-7026', 'KA Steel', 50, 'job', j1, 'KA-J1', 0.990, 'r', 'm', 'placed', NULL, ARRAY['ai_confidence','job_number'], NULL, now() - interval '3 days', NULL, NULL);
 END $$;
 
 -- 1. Grants and comments.
@@ -139,8 +160,8 @@ END $$;
 DO $$
 DECLARE r record; n int := 0;
 BEGIN
-  IF (SELECT count(*) FROM public.materials_ai_known_answers() WHERE xero_invoice_id LIKE 'KA-%') <> 18 THEN
-    RAISE EXCEPTION 'materials ai known answers contract: expected one row per decided bill (18), got %',
+  IF (SELECT count(*) FROM public.materials_ai_known_answers() WHERE xero_invoice_id LIKE 'KA-%') <> 21 THEN
+    RAISE EXCEPTION 'materials ai known answers contract: expected one row per decided bill (21; KA-24 has only a refusal with no job), got %',
       (SELECT count(*) FROM public.materials_ai_known_answers() WHERE xero_invoice_id LIKE 'KA-%');
   END IF;
   FOR r IN
@@ -164,7 +185,10 @@ BEGIN
         ('KA-15', 'job',           'wrong_job',            'before_two_keys', false, true),
         ('KA-17', 'job',           'wrong_job',            'two_keys',        false, false),
         ('KA-18', 'not_evidenced', 'no_answer',            'before_two_keys', false, false),
-        ('KA-21', 'job',           'missed_job_cost',      'two_keys',        false, false)
+        ('KA-21', 'job',           'missed_job_cost',      'two_keys',        false, false),
+        ('KA-23', 'job',           'agree',                'two_keys',        false, false),
+        ('KA-25', 'job',           'no_answer',            'two_keys',        false, false),
+        ('KA-26', 'split',         'no_answer',            'two_keys',        false, false)
       ) AS e(id, answer, verdict, rule, multi, undone)
       LEFT JOIN public.materials_ai_known_answers() k ON k.xero_invoice_id = e.id
   LOOP
@@ -184,6 +208,15 @@ BEGIN
      OR (SELECT bookkeeper_job_id FROM public.materials_ai_known_answers() WHERE xero_invoice_id = 'KA-07') IS NOT NULL THEN
     RAISE EXCEPTION 'the bookkeeper''s job is named only when the answer is one job';
   END IF;
+  IF (SELECT answer_independent FROM public.materials_ai_known_answers() WHERE xero_invoice_id = 'KA-25') IS DISTINCT FROM false
+     OR (SELECT bookkeeper_basis FROM public.materials_ai_known_answers() WHERE xero_invoice_id = 'KA-25') IS DISTINCT FROM 'register_addr'
+     OR (SELECT bookkeeper_emitted_at FROM public.materials_ai_known_answers() WHERE xero_invoice_id = 'KA-25') IS NULL
+     OR (SELECT answer_independent FROM public.materials_ai_known_answers() WHERE xero_invoice_id = 'KA-23') IS DISTINCT FROM true THEN
+    RAISE EXCEPTION 'KA-25: an answer resting only on our own register must say so and is no check';
+  END IF;
+  IF (SELECT ai_outcome FROM public.materials_ai_known_answers() WHERE xero_invoice_id = 'KA-23') <> 'placed' THEN
+    RAISE EXCEPTION 'KA-23: a refusal with no job must not stand in for the placement before it';
+  END IF;
   IF (SELECT xero_contact_id FROM public.materials_ai_known_answers() WHERE xero_invoice_id = 'KA-01') <> 'C-PLANS' THEN
     RAISE EXCEPTION 'KA-01: the supplier must be the bill''s Xero contact';
   END IF;
@@ -199,9 +232,9 @@ BEGIN
     RAISE EXCEPTION 'steel before two keys counted wrong: %', row_to_json(s);
   END IF;
   SELECT * INTO s FROM public.materials_ai_accuracy_by_supplier() x WHERE xero_contact_id = 'C-STEEL' AND rule = 'two_keys';
-  IF s.decided <> 7 OR s.checkable <> 7 OR s.agree <> 1 OR s.wrong_job <> 2 OR s.job_but_not_job_cost <> 1
+  IF s.decided <> 10 OR s.checkable <> 8 OR s.agree <> 2 OR s.wrong_job <> 2 OR s.job_but_not_job_cost <> 1
      OR s.missed_job_cost <> 2 OR s.declined <> 1 OR s.sure_and_wrong <> 1 OR s.sure_and_missed <> 1
-     OR s.placed_agree <> 1 OR s.placed_wrong <> 0 OR s.filed_agree <> 0 OR s.filed_wrong <> 2 THEN
+     OR s.placed_agree <> 2 OR s.placed_wrong <> 0 OR s.filed_agree <> 0 OR s.filed_wrong <> 2 THEN
     RAISE EXCEPTION 'steel two keys counted wrong: %', row_to_json(s);
   END IF;
   SELECT * INTO s FROM public.materials_ai_accuracy_by_supplier() x WHERE xero_contact_id = 'C-PLANS' AND rule = 'before_two_keys';

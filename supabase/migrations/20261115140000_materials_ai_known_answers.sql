@@ -14,12 +14,18 @@
 -- The bookkeeper's answer for a bill (bookkeeper_answer):
 --   job            every line of the bill is evidenced and allocated to the same one job;
 --   not_job_cost   every line is evidenced and allocated as overhead or not a job cost;
---   split          every line is evidenced, but the lines name more than one job or mix job and overhead;
+--   split          every line is evidenced, but the lines name more than one job or mix job and overhead, or
+--                  a line is split across jobs in v_bookkeeping_line_parts_current (an older whole-line row
+--                  for that line does not count);
 --   not_evidenced  some line is not evidenced, a job line names no job, or a bill line with an amount is not in
 --                  the load at all (the load may send only the lines it resolved);
 --   (null)         the bookkeeper's load has no line for the bill.
 -- Only job and not_job_cost are answers the AI can be checked against. A split bill is not one job, and the AI
 -- answers one job per bill, so it is left out rather than counted against either side.
+-- bookkeeper_basis lists the load's bases for the bill and bookkeeper_emitted_at when the load was made. A basis
+-- named register_* reads SecureSuite's own placement register (measured 15 Nov 2026: 35 of 49 such lines name a
+-- job the AI had already placed the bill on before the load was emitted), so it can repeat the AI's own pick. A
+-- bill whose every line rests on such a basis has answer_independent false and reads no_answer: it is no check.
 --
 -- verdict:
 --   agree                 the AI's job is the bookkeeper's job, or both say not a job cost;
@@ -28,9 +34,11 @@
 --   job_but_not_job_cost  the AI named a job and the bookkeeper allocated the bill as overhead;
 --   missed_job_cost       the AI said not job related and the bookkeeper named a job;
 --   declined              the AI said unsure. Not wrong, and not help either;
---   no_answer             the bookkeeper has no checkable answer for this bill (null, split or not_evidenced).
+--   no_answer             the bookkeeper has no checkable answer for this bill (null, split, not_evidenced, or
+--                         an answer that rests only on our own register).
 -- The AI's latest decision is the latest row for the bill in materials_ai_placements, undone or not: an undone
--- placement is still what the AI said (undone says a person took it back).
+-- placement is still what the AI said (undone says a person took it back). A refusal written before the job was
+-- looked up (no job recorded, any reason but job not found) is not an answer and is skipped.
 --
 -- rule says which gate the decision went through: two_keys (made at or after the first recorded keys, 30 Oct
 -- 2026 UTC: the AI's confidence alone never places a bill, a hard clue such as the job number on the bill must agree;
@@ -58,26 +66,30 @@ SET LOCAL lock_timeout = '5s';
 DO $guard$
 BEGIN
   IF to_regclass('public.materials_ai_placements') IS NULL OR to_regclass('public.v_bookkeeping_line_evidence_current') IS NULL
-     OR to_regclass('public.context_email_attachments') IS NULL OR to_regclass('public.xero_invoices') IS NULL THEN
-    RAISE EXCEPTION 'materials ai known answers: materials_ai_placements, v_bookkeeping_line_evidence_current, context_email_attachments or xero_invoices is missing';
+     OR to_regclass('public.context_email_attachments') IS NULL OR to_regclass('public.xero_invoices') IS NULL
+     OR to_regclass('public.v_bookkeeping_line_parts_current') IS NULL THEN
+    RAISE EXCEPTION 'materials ai known answers: materials_ai_placements, v_bookkeeping_line_evidence_current, v_bookkeeping_line_parts_current, context_email_attachments or xero_invoices is missing';
   END IF;
   IF (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = 'public.materials_ai_placements'::regclass AND NOT a.attisdropped
         AND a.attname IN ('xero_invoice_id', 'invoice_number', 'contact_name', 'amount_ex', 'decision', 'job_id', 'job_number',
-                          'confidence', 'outcome', 'agreed_keys', 'created_at', 'undone_at', 'model')) <> 13
+                          'confidence', 'outcome', 'refusal', 'agreed_keys', 'created_at', 'undone_at', 'model')) <> 14
      OR (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = 'public.v_bookkeeping_line_evidence_current'::regclass
            AND NOT a.attisdropped AND a.attname IN ('xero_invoice_id', 'xero_line_item_id', 'allocation', 'job_id', 'job_number',
-                                                     'evidenced')) <> 6
+                                                     'evidenced', 'basis', 'emitted_at')) <> 8
+     OR (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = 'public.v_bookkeeping_line_parts_current'::regclass
+           AND NOT a.attisdropped AND a.attname IN ('xero_invoice_id', 'xero_line_item_id')) <> 2
      OR (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = 'public.context_email_attachments'::regclass
            AND NOT a.attisdropped AND a.attname IN ('business_event_id', 'file_name')) <> 2
      OR (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = 'public.xero_invoices'::regclass
            AND NOT a.attisdropped AND a.attname IN ('xero_invoice_id', 'xero_contact_id', 'invoice_number', 'invoice_type', 'status',
-                                                     'line_items')) <> 6 THEN
+                                                     'line_items', 'updated_at')) <> 7 THEN
     RAISE EXCEPTION 'materials ai known answers: a column the read needs is missing';
   END IF;
   IF NOT has_table_privilege('service_role', 'public.materials_ai_placements', 'SELECT')
      OR NOT has_table_privilege('service_role', 'public.v_bookkeeping_line_evidence_current', 'SELECT')
      OR NOT has_table_privilege('service_role', 'public.context_email_attachments', 'SELECT')
-     OR NOT has_table_privilege('service_role', 'public.xero_invoices', 'SELECT') THEN
+     OR NOT has_table_privilege('service_role', 'public.xero_invoices', 'SELECT')
+     OR NOT has_table_privilege('service_role', 'public.v_bookkeeping_line_parts_current', 'SELECT') THEN
     RAISE EXCEPTION 'materials ai known answers: the service role cannot read a table the functions read';
   END IF;
 END
@@ -88,12 +100,16 @@ RETURNS TABLE (
   xero_invoice_id text, invoice_number text, contact_name text, xero_contact_id text, amount_ex numeric,
   decided_at timestamptz, model text, ai_decision text, ai_outcome text, ai_job_id uuid, ai_job_number text,
   ai_confidence numeric, agreed_keys text[], rule text, undone boolean, bookkeeper_answer text,
-  bookkeeper_job_id uuid, bookkeeper_job_number text, verdict text, multi_bill_email boolean)
+  bookkeeper_job_id uuid, bookkeeper_job_number text, bookkeeper_basis text, bookkeeper_emitted_at timestamptz,
+  answer_independent boolean, verdict text, multi_bill_email boolean)
 LANGUAGE sql STABLE SECURITY INVOKER SET search_path = public, pg_temp
 AS $ka$
 WITH latest AS (
+  -- A refusal written before the job was looked up (already assigned, already decided, not live in Xero, a
+  -- person placed it, the second check) carries no job and is not the AI's answer: it never stands in for one.
   SELECT DISTINCT ON (p.xero_invoice_id) p.*
     FROM public.materials_ai_placements p
+   WHERE NOT (p.outcome = 'refused' AND p.job_id IS NULL AND p.refusal IS DISTINCT FROM 'job not found')
    ORDER BY p.xero_invoice_id, p.created_at DESC, p.id DESC
 ), cutover AS (
   -- The moment the two-key rule began: its first recorded keys. Every decision from then on went through it,
@@ -105,10 +121,14 @@ WITH latest AS (
          COALESCE(x.status, '') NOT IN ('VOIDED', 'DELETED') AS live
     FROM public.xero_invoices x
    WHERE x.invoice_type = 'ACCPAY'
-   ORDER BY x.xero_invoice_id
+   ORDER BY x.xero_invoice_id, (COALESCE(x.status, '') NOT IN ('VOIDED', 'DELETED')) DESC, x.updated_at DESC NULLS LAST
 ), bk AS (
   SELECT e.xero_invoice_id,
          bool_and(COALESCE(e.evidenced, false)) AS all_evidenced,
+         -- A basis named register_* reads SecureSuite's own placement register, so it can repeat the AI's pick.
+         bool_and(COALESCE(e.basis, '') ~ '^register_') AS all_register,
+         string_agg(DISTINCT e.basis, ', ' ORDER BY e.basis) AS bases,
+         max(e.emitted_at) AS emitted_at,
          bool_and(e.allocation = 'job') AS all_job,
          bool_and(e.allocation IN ('overhead', 'not_job_cost')) AS all_not_job,
          count(DISTINCT e.job_id) AS jobs,
@@ -128,8 +148,13 @@ WITH latest AS (
 ), bk_answer AS (
   -- A bill line with an amount the load does not carry is a line not evidenced: the load may send only the lines
   -- it resolved.
+  -- A line the ledger splits across jobs lives in the parts read: the bill is split, whatever an older whole-line
+  -- row says.
   SELECT b.xero_invoice_id,
-         CASE WHEN NOT b.all_evidenced OR b.job_lines_without_job > 0
+         CASE WHEN EXISTS (SELECT 1 FROM public.v_bookkeeping_line_parts_current p WHERE p.xero_invoice_id = b.xero_invoice_id
+                            AND p.xero_line_item_id = ANY (COALESCE(b.line_ids, ARRAY[]::text[])))
+                THEN 'split'
+              WHEN NOT b.all_evidenced OR b.job_lines_without_job > 0
                    OR EXISTS (SELECT 1 FROM bill x CROSS JOIN LATERAL jsonb_array_elements(
                                          CASE WHEN jsonb_typeof(x.line_items) = 'array' THEN x.line_items ELSE '[]'::jsonb END) li
                                WHERE x.xero_invoice_id = b.xero_invoice_id
@@ -140,7 +165,7 @@ WITH latest AS (
               WHEN b.all_job AND b.jobs = 1 THEN 'job'
               WHEN b.all_not_job THEN 'not_job_cost'
               ELSE 'split' END AS answer,
-         b.job_id, b.job_number
+         b.job_id, b.job_number, b.bases, b.emitted_at, NOT b.all_register AS independent
     FROM bk b
 ), att AS (
   -- Digit runs of four or more in attachment file names, leaving out runs that read as a date (2026, 202610,
@@ -181,10 +206,14 @@ SELECT l.xero_invoice_id,
        ba.answer AS bookkeeper_answer,
        CASE WHEN ba.answer = 'job' THEN ba.job_id END AS bookkeeper_job_id,
        CASE WHEN ba.answer = 'job' THEN ba.job_number END AS bookkeeper_job_number,
+       ba.bases AS bookkeeper_basis,
+       ba.emitted_at AS bookkeeper_emitted_at,
+       ba.independent AS answer_independent,
        -- A job pick the reader could not resolve to a job (refused, job not found) is still a job pick: it is
-       -- wrong against a bookkeeper's job as it is against a bookkeeper's overhead.
+       -- wrong against a bookkeeper's job as it is against a bookkeeper's overhead. An answer that rests only on
+       -- our own register is no check of the AI.
        CASE
-         WHEN ba.answer IS NULL OR ba.answer NOT IN ('job', 'not_job_cost') THEN 'no_answer'
+         WHEN ba.answer IS NULL OR ba.answer NOT IN ('job', 'not_job_cost') OR NOT ba.independent THEN 'no_answer'
          WHEN l.decision = 'unsure' THEN 'declined'
          WHEN l.decision = 'job' AND ba.answer = 'job' AND l.job_id = ba.job_id THEN 'agree'
          WHEN l.decision = 'job' AND ba.answer = 'job' THEN 'wrong_job'
@@ -201,7 +230,7 @@ SELECT l.xero_invoice_id,
 $ka$;
 
 COMMENT ON FUNCTION public.materials_ai_known_answers() IS
-  'Materials AI known answers (20261115140000): one row per bill the AI bill reader has decided. Its latest decision beside the bookkeeper''s answer for the same bill from v_bookkeeping_line_evidence_current (job: every line evidenced on one job; not_job_cost: every line evidenced as overhead or not a job cost; split; not_evidenced, including a bill line with an amount the load does not carry; null: no line loaded). verdict: agree, wrong_job (including a job pick refused as job not found), job_but_not_job_cost, missed_job_cost, declined (AI unsure), no_answer (no checkable bookkeeper answer). rule: two_keys (decided at or after the first recorded keys) or before_two_keys. multi_bill_email: the bill''s invoice number is on an email that carries another live bill of the same supplier, so the email is no evidence of the job. Neither side is taken as right; a disagreement is for a person. Read only. Service role only.';
+  'Materials AI known answers (20261115140000): one row per bill the AI bill reader has decided. Its latest decision beside the bookkeeper''s answer for the same bill from v_bookkeeping_line_evidence_current (job: every line evidenced on one job; not_job_cost: every line evidenced as overhead or not a job cost; split; not_evidenced, including a bill line with an amount the load does not carry; null: no line loaded), the bases of that answer, when the load was made, and answer_independent (false when every line rests on a register_* basis, which reads our own placements). verdict: agree, wrong_job (including a job pick refused as job not found), job_but_not_job_cost, missed_job_cost, declined (AI unsure), no_answer (no checkable or independent bookkeeper answer). A refusal with no job, for any reason but job not found, is skipped as not an answer. rule: two_keys (decided at or after the first recorded keys) or before_two_keys. multi_bill_email: the bill''s invoice number is on an email that carries another live bill of the same supplier, so the email is no evidence of the job. Neither side is taken as right; a disagreement is for a person. Read only. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.materials_ai_accuracy_by_supplier()
 RETURNS TABLE (
