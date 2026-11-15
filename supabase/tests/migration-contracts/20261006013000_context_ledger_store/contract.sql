@@ -172,7 +172,11 @@ BEGIN
     'context_ledger_person_placement_enabled', 'context_ledger_event_on_job', 'context_ledger_reader_events', 'context_ledger_mail_copy_blocks') THEN
    PERFORM pg_temp.lg_assert(NOT p.prosecdef AND p.proconfig IS NULL, p.proname || ' must be an inlinable helper (no SET, no definer)');
   ELSE
-   PERFORM pg_temp.lg_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'], p.proname || ' must be definer with search_path public, pg_temp');
+   -- (widened by the due list's time, 20261115092000: the due list alone may also carry
+   -- statement_timeout=45s, which PostgREST hoists onto the worker's request)
+   PERFORM pg_temp.lg_assert(p.prosecdef AND (p.proconfig = ARRAY['search_path=public, pg_temp']
+     OR (p.proname = 'context_ledger_due' AND p.proconfig = ARRAY['search_path=public, pg_temp', 'statement_timeout=45s'])),
+    p.proname || ' must be definer with search_path public, pg_temp');
   END IF;
  END LOOP;
  PERFORM pg_temp.lg_assert(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_extraction_runs'::regclass AND contype = 'c'

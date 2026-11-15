@@ -526,7 +526,12 @@ BEGIN
   SELECT pr.prosecdef, pr.provolatile, pr.proconfig, pr.prolang INTO p FROM pg_proc pr WHERE pr.oid = to_regprocedure(x.sig);
   IF p IS NULL THEN RAISE EXCEPTION 'scoping pipeline contract: % missing', x.sig; END IF;
   IF p.prosecdef IS DISTINCT FROM x.definer OR p.provolatile <> 's' OR p.prolang <> (SELECT l.oid FROM pg_language l WHERE l.lanname = 'sql')
-     OR (x.definer AND p.proconfig IS DISTINCT FROM ARRAY['search_path=public, pg_temp']) OR (NOT x.definer AND p.proconfig IS NOT NULL) THEN
+     -- (widened by the due list's time, 20261115092000: the due list alone may also carry
+     -- statement_timeout=45s, which PostgREST hoists onto the worker's request)
+     OR (x.definer AND p.proconfig IS DISTINCT FROM ARRAY['search_path=public, pg_temp']
+         AND NOT (x.sig = 'public.context_ledger_due(integer)'
+                  AND p.proconfig IS NOT DISTINCT FROM ARRAY['search_path=public, pg_temp', 'statement_timeout=45s']))
+     OR (NOT x.definer AND p.proconfig IS NOT NULL) THEN
    RAISE EXCEPTION 'scoping pipeline contract: % flags (definer %, volatility %, config %)', x.sig, p.prosecdef, p.provolatile, p.proconfig;
   END IF;
   IF has_function_privilege('anon', x.sig, 'EXECUTE') OR has_function_privilege('authenticated', x.sig, 'EXECUTE')

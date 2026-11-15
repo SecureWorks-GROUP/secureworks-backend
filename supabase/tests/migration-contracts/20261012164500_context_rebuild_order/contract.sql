@@ -203,7 +203,10 @@ BEGIN
  SELECT pr.prosecdef, pr.provolatile, pr.proconfig, md5(pr.prosrc) AS m, pg_get_function_result(pr.oid) AS res,
   (SELECT l.lanname FROM pg_language l WHERE l.oid = pr.prolang) AS lang
  INTO p FROM pg_proc pr WHERE pr.oid = to_regprocedure(sig);
- PERFORM pg_temp.ro_assert(p.prosecdef AND p.provolatile = 's' AND p.lang = 'sql' AND p.proconfig = ARRAY['search_path=public, pg_temp'],
+ -- (widened by the due list's time, 20261115092000: the list may also carry statement_timeout=45s,
+ -- which PostgREST hoists onto the worker's request)
+ PERFORM pg_temp.ro_assert(p.prosecdef AND p.provolatile = 's' AND p.lang = 'sql'
+   AND p.proconfig IN (ARRAY['search_path=public, pg_temp'], ARRAY['search_path=public, pg_temp', 'statement_timeout=45s']),
   'the due list must stay stable SQL, security definer, search_path pinned: ' || to_jsonb(p)::text);
  PERFORM pg_temp.ro_assert(p.res = 'TABLE(job_id uuid, kind text, reason text, priority integer, newest_evidence_at timestamp with time zone)',
   'the due list''s columns changed: ' || p.res);
