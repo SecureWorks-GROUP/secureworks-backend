@@ -1195,6 +1195,13 @@ days always carry their year, so the clock never changes its words. Ship the
 writer first: the v3 writer never saves `money_sig`, so the sweep would keep
 rewriting its stories.
 
+A job with no current story is queued only by `context_job_story_enqueue_first`
+(`20261115091000`): the changed-jobs sweep sees only jobs that already hold a
+story, and production held none on 15 Nov 2026. Its reserve (60 of the day's
+story calls kept for real changes) and open limit (5) are in
+`context_job_story_first_policy()`; never queue first stories by hand or by
+loosening the sweep. Contract: `docs/context/job-story-text.md`, "The queue".
+
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
 Since P4 (`20261002110000_context_unlinked_rules.sql`) every caller uses
