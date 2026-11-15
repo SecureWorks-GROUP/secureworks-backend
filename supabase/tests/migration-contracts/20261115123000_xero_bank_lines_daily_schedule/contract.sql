@@ -127,3 +127,36 @@ BEGIN
   END IF;
 END $$;
 ROLLBACK;
+
+-- 4. A job of that name running some other command is refused, and left as it was.
+BEGIN;
+\ir cron_stand_in.sql
+INSERT INTO cron.job (jobname, schedule, command) VALUES ('xero-bank-lines-daily', '5 5 * * *', 'SELECT 1');
+DO $$
+DECLARE refused boolean := false;
+BEGIN
+  BEGIN
+    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'xero-bank-lines-daily'
+                AND command IS DISTINCT FROM 'SELECT public.trigger_xero_sync_action(''sync_bank_transactions'') WHERE public.automation_lane_enabled(''capture'')') THEN
+      NULL;
+    ELSE
+      RAISE EXCEPTION 'contract: the stand-in job was not set up';
+    END IF;
+  END;
+END $$;
+SAVEPOINT before_refusal;
+\set ON_ERROR_STOP off
+\echo 'the next errors are expected: the migration must refuse a job of this name with another command'
+\ir ../../../migrations/20261115123000_xero_bank_lines_daily_schedule.sql
+\set ON_ERROR_STOP on
+ROLLBACK TO SAVEPOINT before_refusal;
+DO $$
+BEGIN
+  IF (SELECT schedule || ' | ' || command FROM cron.job WHERE jobname = 'xero-bank-lines-daily')
+       IS DISTINCT FROM '5 5 * * * | SELECT 1'
+     OR (SELECT count(*) FROM cron.job WHERE jobname = 'xero-bank-lines-daily') <> 1 THEN
+    RAISE EXCEPTION 'contract: a foreign job of the same name was changed or doubled: %',
+      (SELECT jsonb_agg(row_to_json(j)) FROM cron.job j);
+  END IF;
+END $$;
+ROLLBACK;

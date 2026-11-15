@@ -21,10 +21,9 @@ BEGIN
   END IF;
   SELECT md5(prosrc) INTO v FROM pg_proc WHERE oid = 'public.trigger_xero_sync_action(text)'::regprocedure;
   -- eeb40769...: the body of the 20261103170000 definition (five actions), as read on production on
-  -- 15 Nov 2026. Already replaced by this migration: run again safely.
-  IF v NOT IN ('eeb40769f7c49507f7180e5a453fadcd') AND NOT EXISTS (
-       SELECT 1 FROM pg_proc WHERE oid = 'public.trigger_xero_sync_action(text)'::regprocedure
-          AND prosrc LIKE '%sync_bank_transactions%') THEN
+  -- 15 Nov 2026. 5e775910...: this migration's own body, so it runs again safely. Any other body is
+  -- another lane's and is refused, never written over.
+  IF v NOT IN ('eeb40769f7c49507f7180e5a453fadcd', '5e7759107244be12a3e416b43abcf7c7') THEN
     RAISE EXCEPTION 'trigger_xero_sync_action changed since 20261103170000 (body md5 %); refusing', v;
   END IF;
 END $guard$;
@@ -55,6 +54,11 @@ BEGIN
   IF to_regclass('cron.job') IS NULL THEN
     RAISE NOTICE 'xero bank lines schedule: pg_cron absent, not scheduled';
     RETURN;
+  END IF;
+  -- A job of this name that runs something else is not ours: refuse, never leave it standing in for the read.
+  IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'xero-bank-lines-daily'
+              AND command IS DISTINCT FROM $cmd$SELECT public.trigger_xero_sync_action('sync_bank_transactions') WHERE public.automation_lane_enabled('capture')$cmd$) THEN
+    RAISE EXCEPTION 'xero-bank-lines-daily is already scheduled with another command; refusing';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'xero-bank-lines-daily') THEN
     PERFORM cron.schedule('xero-bank-lines-daily', '1 20 * * *',
