@@ -170,6 +170,12 @@ ROLLBACK;
 -- message later on one job drops the item on the other and makes it certain on that one.
 BEGIN;
 \ir fixtures.sql
+-- (rested notes, 20261115130000) would set these October notes aside by age; this case is about
+-- the held marker, so it runs without that step (its own contract checks a rested note keeps the mark).
+SELECT to_regprocedure('public.context_job_story_rest(jsonb,jsonb,timestamptz)') IS NOT NULL AS rested_notes_live \gset
+\if :rested_notes_live
+\ir ../../../rollbacks/20261115130000_context_story_rested_notes_down.sql
+\endif
 DO $c$
 DECLARE a uuid := '7f000000-0000-4000-8000-0000000000a1'; b uuid := '7f000000-0000-4000-8000-0000000000b1';
  h uuid := '7fb00000-0000-4000-8000-000000000002'; h2 uuid := '7fb00000-0000-4000-8000-000000000003';
