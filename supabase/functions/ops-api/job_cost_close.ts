@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 // Job cost close: is a job's cost final, and if not, what it is waiting on.
 //
-// Reads public.job_cost_close (20261115130000_job_cost_close.sql), which works
+// Reads public.job_cost_close (20261115143000_job_cost_close.sql), which works
 // the state out from Job Profit's own row on every read. Nothing is worked out
 // here and nothing is written. The read rides beside the Job Profit figures
 // and never fails them: a read that fails, or a job the engine has no row

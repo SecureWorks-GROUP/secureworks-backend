@@ -18,7 +18,7 @@ BEGIN
   PERFORM count(*) FROM public.v_job_profit;
 END $$;
 
-\ir ../../../rollbacks/20261115130000_job_cost_close_down.sql
+\ir ../../../rollbacks/20261115143000_job_cost_close_down.sql
 
 DO $$
 BEGIN
@@ -27,7 +27,7 @@ BEGIN
   END IF;
 END $$;
 
-\ir ../../../migrations/20261115130000_job_cost_close.sql
+\ir ../../../migrations/20261115143000_job_cost_close.sql
 
 DO $$
 BEGIN
