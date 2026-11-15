@@ -27,8 +27,8 @@ carry no money.
 
 | Action | Returns |
 |---|---|
-| `job_profit&job_id=<uuid>` or `&job_number=<number>` | `job` (one row of the fields below), `trades`, `trade_charge_dates` (below), `cost_events`, `revenue_events`, `timeline`, `dispatch_orders` (below), `labels` |
-| `job_profit_list` (`type`, `status`, `from`, `to`, `date_field=created\|invoiced`, `limit`, `offset`) | `jobs` (rows of the fields below), `has_more`, `labels` |
+| `job_profit&job_id=<uuid>` or `&job_number=<number>` | `job` (one row of the fields below), `trades`, `trade_charge_dates` (below), `cost_events`, `revenue_events`, `timeline`, `dispatch_orders` (below), `cost_close` (below), `labels` |
+| `job_profit_list` (`type`, `status`, `from`, `to`, `date_field=created\|invoiced`, `limit`, `offset`) | `jobs` (rows of the fields below), `has_more`, `cost_close` (below, by job), `labels` |
 | `job_profit_list&view=rollup` (same filters) | `totals`, `by_type`, `by_month`, `labels` |
 
 `job_profit_list` returns no row count. `has_more` is true when another page
@@ -152,6 +152,41 @@ depends on the clock and holds would; for that case
 `context_job_story_money_sig` carries the order checks' state while the policy
 makes one hold, so the sweep rewrites the story on the day an order turns
 overdue. The signature also carries the job's variations.
+
+## Cost close (15 Nov 2026)
+
+Is a job's cost final, and if not, what is it waiting on. `job_cost_close(job_ids, as_of)`
+(migration 20261115130000, service role only) works the answer out from Job Profit's own row on
+every read. Nothing is stored, no person closes a job, and `v_job_profit` is untouched. Every number
+and list is in `job_cost_close_policy()` (`cost-close-v1`) and changes only by migration.
+
+| `cost_state` | Means |
+|---|---|
+| `not_applicable` | A holding job, or a job that did not go ahead (cancelled, lost) and holds no cost |
+| `open` | The work is not finished, or the job is back in rectification |
+| `waiting` | Finished, but Job Profit names a cost reason: `waiting_on` lists them, in Job Profit's words |
+| `settling` | Finished with no cost reason, inside the quiet days (30) since the later of the finish day and the newest cost |
+| `final` | Finished, no cost reason, quiet for 30 days. `final_on` is the day it became final, `closed_by` the rule |
+
+- **Finished** is Job Profit's work-done day (the earlier of `completed_at` and the first client
+  sign-off, Perth days); else, for a make-safe that carries no repair stage, its first counted
+  invoice; else a repair at stage `complete`; else a finished status (`complete`, `invoiced`,
+  `final_payment`, `get_review`, `archived`). `finished_basis` says which. A cancelled or lost job
+  that holds cost is finished as `did_not_go_ahead`.
+- **A cost reason** is any `completeness` code or non-ok `cost_flag`, except the ones that are about
+  revenue or structure and not cost (`not_cost_reasons` in the policy: a missing or draft customer
+  invoice, an unbilled variation, a holding job, a missing expected-cost lane, a Xero Project linked
+  by contact only). So `final` says the cost is complete; it does not say the job was invoiced.
+- **Nothing is frozen.** A cost that lands on a final job moves it back to `settling` with a later
+  `final_on`; a job put back into rectification reads `open`. Measured on production on 15 Nov 2026:
+  of 261 jobs finished by 15 Aug, 22 took a cost more than 30 days after going quiet and 11 more than 90.
+- `job_profit` returns `cost_close` for its job; `job_profit_list` returns `cost_close.by_job` for
+  the page. Each is `{ ok: true, cost_state, cost_final, final_on, closed_by, finished, finished_on,
+  finished_basis, last_cost_on, waiting_on, all_costs_paid, quiet_days, as_of, rule }` and carries no
+  money figure. A read that fails, or a job the rule has no row for, is `{ ok: false, reason }`:
+  never `final`, never `open`. A job missing from `by_job` is not known.
+- It is not line evidence: `final` does not mean every cost line is verified (`line_evidence` says
+  that), and it never changes a margin or whether one is shown.
 
 ## Xero Project rule
 
