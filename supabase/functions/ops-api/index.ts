@@ -15,6 +15,11 @@ import {
   workOrderAmountRefusal,
 } from './trade_invoice_mode.ts'
 import {
+  checkWorkOrderTotalCap,
+  WorkOrderTotalCapReadError,
+  type WorkOrderTotalCapRefusal,
+} from './work_order_total_cap.ts'
+import {
   assertTradeMayBillExtraJobs,
   commissionLinesTotalEx,
   ExtraJobBillingRefusal,
@@ -13216,7 +13221,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
             // Verify user is the DESIGNATED lead on this job (is_lead), never
             // via job_assignments.role — see tradeLeadJobIds.
-            const { data: lineData } = await client.from('trade_invoice_lines').select('job_id, group_share_id, line_type').eq('id', line_id).single()
+            const { data: lineData } = await client.from('trade_invoice_lines').select('job_id, group_share_id, line_type, line_total_ex, override_amount').eq('id', line_id).single()
             if (!lineData) throw new ApiError('Line not found', 404)
             if (lineData.group_share_id || String(lineData.line_type || '').toLowerCase() === 'group share') {
               throw new ApiError('A group share is only visible to its owner.', 403)
@@ -13231,6 +13236,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             if (reviewAction === 'approve') {
               updates.acknowledgment_status = 'acknowledged'
             } else if (reviewAction === 'adjust') {
+              // The new amount replaces the line's old one on the job's work
+              // order total, and may not take it over (work_order_total_cap.ts).
+              // A lowered line is never refused; a raised one is checked even
+              // when the new amount is 0 or less (a deduction raised towards 0).
+              const oldAmount = Number(lineData.override_amount ?? lineData.line_total_ex) || 0
+              if ((Number(overrideAmt) || 0) > oldAmount) {
+                await _assertWithinWorkOrderTotal(client, tradeUser, [{
+                  job_id: lineData.job_id,
+                  line_type: lineData.line_type,
+                  line_total_ex: Number(overrideAmt) || 0,
+                }], [String(line_id)], true)
+              }
               updates.acknowledgment_status = 'acknowledged'
               updates.override_amount = Number(overrideAmt) || 0
               updates.override_by = tradeUser.id
@@ -13488,6 +13505,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 source_trade_invoice_line_id: charge.line_id,
               })
             }
+
+            // The job's work order caps this door too: a crew work order on a
+            // job with an approved job work order may not take the job's total
+            // over it (work_order_total_cap.ts).
+            await _assertWithinWorkOrderTotal(client, tradeUser, workOrderLines)
 
             // Persist the complete local invoice and its source claims inside
             // the same organization-scoped transaction as weekly invoices.
@@ -15142,6 +15164,36 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               }
             }
             // ── END M0 GUARD ─────────────────────────────────────────────────
+
+            // No trade bills more than a work order allows, in total (owner,
+            // 15 Nov 2026): the labour already billed on a work-order job by
+            // every trade, plus this invoice's, stays within the agreed labour
+            // and approved customer variations, or nothing is saved
+            // (work_order_total_cap.ts).
+            {
+              const capLines = [...lineItems, ...extraLineItems]
+              const capNumbers = [...new Set(capLines
+                .filter((line: any) => !line.job_id && line.job_number)
+                .map((line: any) => String(line.job_number).trim()).filter(Boolean))]
+              const idByNumber = new Map<string, string>()
+              if (capNumbers.length > 0) {
+                const { data: numbered, error: numberedError } = await client.from('jobs')
+                  .select('id, job_number').eq('org_id', tradeUser.orgId).in('job_number', capNumbers)
+                if (numberedError) {
+                  console.error('[ops-api] generate_trade_invoice: work order cap unreadable: jobs by number')
+                  const message = 'This invoice was not saved. What is already billed on its work orders could not be checked. Try again in a minute.'
+                  throw new ApiError(message, 503, {
+                    ok: false, success: false, saved: false,
+                    code: 'work_order_cap_unavailable', error: message, userMessage: message,
+                  })
+                }
+                for (const row of numbered || []) idByNumber.set(String(row.job_number), String(row.id))
+              }
+              await _assertWithinWorkOrderTotal(client, tradeUser, capLines.map((line: any) => ({
+                ...line,
+                job_id: line.job_id || idByNumber.get(String(line.job_number || '').trim()) || null,
+              })))
+            }
 
             let duplicateExtraMatches: any[] = []
             if (extraLineItems.length > 0 && !weeklyInvoice) {
@@ -17818,6 +17870,75 @@ export async function _persistWorkOrderInvoice(
     throw new TradeInvoiceStoreError('Failed to persist work-order invoice: ' + (error?.message || 'no invoice id returned'), error?.code)
   }
   return invoiceId
+}
+
+// No trade bills more than a work order allows, in total (owner, 15 Nov
+// 2026): every door that saves or changes a trade line on a job calls this
+// before it writes (work_order_total_cap.ts). Over: 409 and nothing saved.
+// Unreadable: 503, never read as "nothing billed".
+export async function _assertWithinWorkOrderTotal(
+  client: any,
+  tradeUser: { id: string; orgId: string },
+  lines: ReadonlyArray<{ job_id?: unknown; line_type?: unknown; line_total_ex?: unknown }>,
+  excludeLineIds: readonly string[] = [],
+  force = false,
+): Promise<void> {
+  const capFailed = (where: string) => {
+    console.error('[ops-api] work order cap unreadable:', where)
+    const message = 'This was not saved. What is already billed on its work order could not be checked. Try again in a minute.'
+    return new ApiError(message, 503, {
+      ok: false, success: false, saved: false,
+      code: 'work_order_cap_unavailable', error: message, userMessage: message,
+    })
+  }
+  let refusal: WorkOrderTotalCapRefusal | null
+  try {
+    refusal = await checkWorkOrderTotalCap(client, {
+      lines,
+      excludeLineIds,
+      force,
+      loadModes: async (jobIds) => {
+        // Only a job with an approved job work order carrying its agreed
+        // labour can be capped, so a week of hourly jobs reads nothing more.
+        const { data: approved, error } = await client.from('work_orders')
+          .select('job_id').eq('kind', 'job').eq('status', 'approved')
+          .not('agreed_labour_ex', 'is', null).in('job_id', jobIds)
+        if (error) throw new WorkOrderTotalCapReadError()
+        const withWorkOrder: string[] = [...new Set<string>((approved || []).map((r: any) => String(r.job_id)))]
+        if (withWorkOrder.length === 0) return []
+        try {
+          return (await loadTradeInvoiceJobModes(client, {
+            tradeId: tradeUser.id,
+            orgId: tradeUser.orgId,
+            jobIds: withWorkOrder,
+            jobVertical: _jobVertical,
+            normaliseManagedVerticals: _normalizeManagedVerticals,
+          })).jobs
+        } catch (e) {
+          if (e instanceof TradeInvoiceModeReadError) throw new WorkOrderTotalCapReadError()
+          throw e
+        }
+      },
+      jobRefs: async (jobIds) => {
+        const { data, error } = await client.from('jobs')
+          .select('id, job_number').eq('org_id', tradeUser.orgId).in('id', jobIds)
+        if (error) throw new WorkOrderTotalCapReadError()
+        return new Map<string, string>((data || []).map((j: any) => [String(j.id), String(j.job_number || '')]))
+      },
+    })
+  } catch (e) {
+    if (e instanceof WorkOrderTotalCapReadError) throw capFailed('work order cap')
+    throw e
+  }
+  if (refusal) {
+    throw new ApiError(refusal.message, 409, {
+      ok: false, success: false, saved: false,
+      code: refusal.code,
+      jobs: refusal.jobs,
+      error: refusal.message,
+      userMessage: refusal.message,
+    })
+  }
 }
 
 export async function _claimWorkOrderInvoiceBeforeXero(
