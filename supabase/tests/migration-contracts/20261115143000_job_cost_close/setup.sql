@@ -1,4 +1,4 @@
--- Prerequisites for 20261115130000_job_cost_close. Earlier registered cases supply Job Profit's view, the jobs
+-- Prerequisites for 20261115143000_job_cost_close. Earlier registered cases supply Job Profit's view, the jobs
 -- table, client sign-offs and the make-safe details table. Fail closed, by name, if any of it is gone.
 -- The registered stack's make-safe details table has no attendance columns: production's has both (cycle_number
 -- integer NOT NULL DEFAULT 1, reopen_reason text, read 15 Nov 2026), added by no migration this stack applies.

@@ -1084,7 +1084,7 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261115110000", "xero_spend_revenue_tieout"),
                       # Job cost close: job_profit and job_profit_list also call
                       # job_cost_close (job_cost_close.ts).
-                      ("20261115130000", "job_cost_close"),
+                      ("20261115143000", "job_cost_close"),
                       # Weekly pay-run check for trade invoices
                       # (trade_pay_run_check.ts).
                       ("20261115140000", "trade_pay_run_check")]:

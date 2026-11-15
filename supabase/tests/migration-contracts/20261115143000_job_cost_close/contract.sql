@@ -1,4 +1,4 @@
--- Contract for 20261115130000_job_cost_close.sql. Synthetic jobs, no customer data. Every fixture write is inside a
+-- Contract for 20261115143000_job_cost_close.sql. Synthetic jobs, no customer data. Every fixture write is inside a
 -- transaction that rolls back. The answer key is written from how each job was built, never read off the function.
 --
 --   CC-01  fencing, complete 10 Aug, costs 20 Aug, invoiced     final on 19 Sep (last cost + 30); settling the day before
@@ -156,8 +156,8 @@ BEGIN
   IF (SELECT prosrc FROM pg_proc WHERE oid = fn) ~* '\m(insert|update|delete|truncate)\M' THEN
     RAISE EXCEPTION 'job cost close contract: job_cost_close must write nothing';
   END IF;
-  IF obj_description(fn, 'pg_proc') NOT LIKE 'Job cost close (20261115130000): %'
-     OR obj_description(pol, 'pg_proc') NOT LIKE 'Job cost close (20261115130000): %' THEN
+  IF obj_description(fn, 'pg_proc') NOT LIKE 'Job cost close (20261115143000): %'
+     OR obj_description(pol, 'pg_proc') NOT LIKE 'Job cost close (20261115143000): %' THEN
     RAISE EXCEPTION 'job cost close contract: the comments do not name the slice';
   END IF;
   IF p ->> 'version' <> 'cost-close-v1' OR (p ->> 'quiet_days')::int <> 30

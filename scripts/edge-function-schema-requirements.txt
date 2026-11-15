@@ -1242,8 +1242,8 @@ xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|table
 ops-api|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|function|xero_spend_revenue_monthly
 # ops-api job_profit and job_profit_list ask the cost close rule beside the
 # Job Profit figures (job_cost_close.ts).
-ops-api|supabase/migrations/20261115130000_job_cost_close.sql|function|job_cost_close
-ops-api|supabase/migrations/20261115130000_job_cost_close.sql|function|job_cost_close_policy
+ops-api|supabase/migrations/20261115143000_job_cost_close.sql|function|job_cost_close
+ops-api|supabase/migrations/20261115143000_job_cost_close.sql|function|job_cost_close_policy
 # Trade pay-run check (trade-pay-check-v1): ops-api's trade_pay_run_check door
 # calls the SQL read, so ops-api must not deploy ahead of the migration.
 ops-api|supabase/migrations/20261115140000_trade_pay_run_check.sql|function|trade_pay_run_check
