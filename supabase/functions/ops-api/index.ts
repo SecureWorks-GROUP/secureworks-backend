@@ -15,6 +15,13 @@ import {
   workOrderAmountRefusal,
 } from './trade_invoice_mode.ts'
 import {
+  incomingLabourByJob,
+  isWorkOrderLabourLineType,
+  readWorkOrderCapFacts,
+  WorkOrderTotalCapReadError,
+  workOrderTotalCapRefusal,
+} from './work_order_total_cap.ts'
+import {
   assertTradeMayBillExtraJobs,
   commissionLinesTotalEx,
   ExtraJobBillingRefusal,
@@ -15142,6 +15149,91 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               }
             }
             // ── END M0 GUARD ─────────────────────────────────────────────────
+
+            // No trade bills more than a work order allows, in total (owner,
+            // 15 Nov 2026): the labour already billed on a work-order job by
+            // every trade, plus this invoice's, stays within the agreed labour
+            // and approved customer variations, or nothing is saved
+            // (work_order_total_cap.ts).
+            {
+              const capLines = [...lineItems, ...extraLineItems]
+                .map((line: any) => ({ ...line, line_type: line.line_type || 'labour' }))
+                .filter((line: any) => isWorkOrderLabourLineType(line.line_type))
+              const capNumbers = [...new Set(capLines
+                .filter((line: any) => !line.job_id && line.job_number)
+                .map((line: any) => String(line.job_number).trim()).filter(Boolean))]
+              const capFailed = (where: string) => {
+                console.error('[ops-api] generate_trade_invoice: work order cap unreadable:', where)
+                const message = 'This invoice was not saved. What is already billed on its work orders could not be checked. Try again in a minute.'
+                return new ApiError(message, 503, {
+                  ok: false, success: false, saved: false,
+                  code: 'work_order_cap_unavailable', error: message, userMessage: message,
+                })
+              }
+              const idByNumber = new Map<string, string>()
+              if (capNumbers.length > 0) {
+                const { data: numbered, error: numberedError } = await client.from('jobs')
+                  .select('id, job_number').eq('org_id', tradeUser.orgId).in('job_number', capNumbers)
+                if (numberedError) throw capFailed('jobs by number')
+                for (const row of numbered || []) idByNumber.set(String(row.job_number), String(row.id))
+              }
+              const capLinesWithJob = capLines.map((line: any) => ({
+                ...line,
+                job_id: line.job_id || idByNumber.get(String(line.job_number || '').trim()) || null,
+              }))
+              const incoming = incomingLabourByJob(capLinesWithJob)
+              if (incoming.size > 0) {
+                let capModes: TradeInvoiceJobMode[]
+                try {
+                  capModes = (await loadTradeInvoiceJobModes(client, {
+                    tradeId: tradeUser.id,
+                    orgId: tradeUser.orgId,
+                    jobIds: [...incoming.keys()],
+                    jobVertical: _jobVertical,
+                    normaliseManagedVerticals: _normalizeManagedVerticals,
+                  })).jobs
+                } catch (error) {
+                  if (error instanceof TradeInvoiceModeReadError) throw capFailed('job modes')
+                  throw error
+                }
+                const capped = capModes.filter((m) =>
+                  m.invoice_mode === 'work_order' && m.work_order_agreed_ex != null && m.job_work_order_id
+                )
+                if (capped.length > 0) {
+                  const { data: cappedJobs, error: cappedJobsError } = await client.from('jobs')
+                    .select('id, job_number').eq('org_id', tradeUser.orgId).in('id', capped.map((m) => m.job_id))
+                  if (cappedJobsError) throw capFailed('job numbers')
+                  const numberById = new Map<string, string>((cappedJobs || []).map((j: any) => [String(j.id), String(j.job_number || '')]))
+                  const refOf = (jobId: string) => numberById.get(jobId) || jobId
+                  let facts: Awaited<ReturnType<typeof readWorkOrderCapFacts>>
+                  try {
+                    facts = await readWorkOrderCapFacts(client, capped.map((m) => ({
+                      jobId: m.job_id,
+                      ref: refOf(m.job_id),
+                      agreedEx: Number(m.work_order_agreed_ex),
+                      workOrderId: String(m.job_work_order_id),
+                    })))
+                  } catch (error) {
+                    if (error instanceof WorkOrderTotalCapReadError) throw capFailed('billed labour')
+                    throw error
+                  }
+                  const capRefusal = workOrderTotalCapRefusal({
+                    jobs: facts.jobs,
+                    billedEx: facts.billedEx,
+                    incomingEx: incoming,
+                  })
+                  if (capRefusal) {
+                    throw new ApiError(capRefusal.message, 409, {
+                      ok: false, success: false, saved: false,
+                      code: capRefusal.code,
+                      jobs: capRefusal.jobs,
+                      error: capRefusal.message,
+                      userMessage: capRefusal.message,
+                    })
+                  }
+                }
+              }
+            }
 
             let duplicateExtraMatches: any[] = []
             if (extraLineItems.length > 0 && !weeklyInvoice) {
