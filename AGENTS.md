@@ -1158,10 +1158,10 @@ reply, or it is the reader's "Invoice record:" copy; or about a payment someone 
 owes, or a claim about money needing no reply, on a job whose status is in the policy's
 `closed_statuses` with every invoice paid, no draft, and `context_job_story_money_settled`:
 nothing known left to invoice and nothing placed on no job), `supplier` (about a bill in the
-card's `money.supplier_bills`, by number or reference), `office` (`other:other-job`), `courtesy`
+card's `money.supplier_bills`, by number, owed by us to someone other than the customer), `office` (`other:other-job`), `courtesy`
 (we asked for a review), and a deposit note someone else owes once the work is done with nothing
 owing. Refund, overpayment, credit or double-payment words or about-keys are never set aside by
-these. A completion matter we owe rests only once the office has closed the job. A note with no `blocks`
+these. A completion matter or an undated visit we owe rests only once the office has closed the job (a dated `booking:YYYY-MM-DD` on or before the phase began rests on its own). A note with no `blocks`
 holds up the step its about-key's first word names in the policy's `about_step` (a visit's
 arrangements: the install), and a job at invoice, payment or complete has passed completion (6).
 `context_job_story_closed_paid` then reads a job the office closed with every invoice paid as

@@ -40,6 +40,10 @@ CREATE FUNCTION pg_temp.story(p_status text, p_owing numeric, p_left numeric DEF
    pg_temp.lp('k-refundclaim', 'claim', 'us', 'customer', 'invoice:inv-1', 'The customer says he paid INV-1 twice and wants $880 back.', '2026-11-03T02:00:00Z'),
    pg_temp.lp('k-depositrefund', 'commitment', 'us', 'customer', 'refund:deposit', 'We will refund the $500 deposit.', '2026-10-01T02:00:00Z', 'deposit'),
    pg_temp.lp('k-neighbour', 'commitment', 'us', 'third_party', 'invoice:inv-2001', 'Send the neighbour his $1,450 invoice.', '2026-11-03T02:00:00Z'),
+   pg_temp.lp('k-custinv', 'request', 'customer', 'us', 'invoice:az-77', 'We asked the customer to pay AZ-77.', '2026-11-03T02:00:00Z'),
+   pg_temp.lp('k-overcharge', 'commitment', 'customer', 'us', 'invoice:inv-1', 'Send bank details so we can reimburse the $150 he was overcharged.', '2026-11-03T02:00:00Z'),
+   pg_temp.lp('k-return', 'commitment', 'us', 'customer', 'visit:return', 'The crew will return to finish the side panels.', '2026-10-14T02:00:00Z'),
+   pg_temp.lp('k-deposit', 'request', 'customer', 'us', 'payment:deposit', 'Please pay the deposit.', '2026-10-14T02:00:00Z'),
    pg_temp.lp('k-person', 'commitment', 'us', 'customer', 'booking:2026-10-12', 'Call the customer before the install.', '2026-10-01T02:00:00Z')))
 $f$;
 CREATE FUNCTION pg_temp.ledger() RETURNS jsonb LANGUAGE sql IMMUTABLE AS $f$
@@ -47,6 +51,7 @@ CREATE FUNCTION pg_temp.ledger() RETURNS jsonb LANGUAGE sql IMMUTABLE AS $f$
   pg_temp.li('k-invrec'), pg_temp.li('k-receipt'), pg_temp.li('k-paybal'), pg_temp.li('k-supplier'), pg_temp.li('k-office'),
   pg_temp.li('k-review'), pg_temp.li('k-visit'), pg_temp.li('k-visitnew'), pg_temp.li('k-moneyclaim', 'luna-ledger:v2', false), pg_temp.li('k-refund'),
   pg_temp.li('k-refundclaim'), pg_temp.li('k-depositrefund'), pg_temp.li('k-neighbour'),
+  pg_temp.li('k-custinv'), pg_temp.li('k-overcharge'), pg_temp.li('k-return'), pg_temp.li('k-deposit'),
   pg_temp.li('k-completion'), pg_temp.li('k-person', 'person:00000000-0000-4000-8000-000000000001')))
 $f$;
 CREATE FUNCTION pg_temp.reasons(p_status text, p_owing numeric, p_left numeric DEFAULT NULL) RETURNS jsonb LANGUAGE sql STABLE AS $f$
@@ -72,6 +77,8 @@ BEGIN
  IF r ->> 'k-completion' IS DISTINCT FROM 'stage_passed' THEN RAISE EXCEPTION 'finished notes contract: a completion matter raised before the work was done must be set aside, got %', r; END IF;
  IF r ? 'k-person' THEN RAISE EXCEPTION 'finished notes contract: a person''s own note must never be set aside, got %', r; END IF;
  IF r ? 'k-refundclaim' OR r ? 'k-depositrefund' THEN RAISE EXCEPTION 'finished notes contract: a refund or double payment must never be set aside, got %', r; END IF;
+ IF r ? 'k-custinv' OR r ? 'k-overcharge' THEN RAISE EXCEPTION 'finished notes contract: what the customer owes us or we owe back must stay open, got %', r; END IF;
+ IF r ->> 'k-return' IS DISTINCT FROM 'stage_passed' OR NOT r ? 'k-deposit' THEN RAISE EXCEPTION 'finished notes contract: on a closed, paid job a return visit and the deposit are answered, got %', r; END IF;
  IF r ? 'k-neighbour' THEN RAISE EXCEPTION 'finished notes contract: an invoice that is not a supplier bill on the job must stay open, got %', r; END IF;
  IF (SELECT x ->> 'why' FROM jsonb_array_elements(public.context_job_story_rest(pg_temp.ledger(), pg_temp.story('archived', 0), '2026-11-16T00:00:00Z') -> 'rested') x
      WHERE x ->> 'key' = 'k-invrec') IS DISTINCT FROM 'Xero shows INV-1 paid in full on Thu 17 Sep. Not owed now.' THEN
@@ -82,14 +89,15 @@ BEGIN
  r := pg_temp.reasons('invoiced', 100);
  IF r ->> 'k-invrec' IS DISTINCT FROM 'paid' THEN RAISE EXCEPTION 'finished notes contract: a paid invoice is paid on an open job too, got %', r; END IF;
  IF r ? 'k-paybal' OR r ? 'k-moneyclaim' THEN RAISE EXCEPTION 'finished notes contract: on a job still owing, paying and money said must stay open, got %', r; END IF;
- IF r ? 'k-completion' THEN RAISE EXCEPTION 'finished notes contract: a fix we owe stays open until the office closes the job, got %', r; END IF;
+ IF r ? 'k-completion' OR r ? 'k-return' THEN RAISE EXCEPTION 'finished notes contract: a fix or a visit we owe stays open until the office closes the job, got %', r; END IF;
+ IF r ->> 'k-visit' IS DISTINCT FROM 'stage_passed' THEN RAISE EXCEPTION 'finished notes contract: a dated visit before the work was done is answered, got %', r; END IF;
 
  -- 3. Closed by the office but something still owing: the customer still owes.
  r := pg_temp.reasons('archived', 100);
  IF r ? 'k-paybal' THEN RAISE EXCEPTION 'finished notes contract: an archived job still owing keeps the payment note open, got %', r; END IF;
  -- Closed and paid, but a known amount is left to invoice: more is coming.
  r := pg_temp.reasons('archived', 0, 5000);
- IF r ? 'k-paybal' OR r ? 'k-moneyclaim' THEN RAISE EXCEPTION 'finished notes contract: with an amount left to invoice, paying must stay open, got %', r; END IF;
+ IF r ? 'k-paybal' OR r ? 'k-moneyclaim' OR r ? 'k-deposit' THEN RAISE EXCEPTION 'finished notes contract: with an amount left to invoice, paying must stay open, got %', r; END IF;
  IF public.context_job_story_closed_paid(pg_temp.story('archived', 0, 5000)) IS DISTINCT FROM pg_temp.story('archived', 0, 5000) THEN
   RAISE EXCEPTION 'finished notes contract: a job with an amount left to invoice is not paid in full';
  END IF;

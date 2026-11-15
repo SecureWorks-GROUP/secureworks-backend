@@ -113,7 +113,7 @@ AS $fn$
  sb AS (
   SELECT DISTINCT lower(btrim(x)) AS number
   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_story -> 'money' -> 'supplier_bills') = 'array' THEN p_story -> 'money' -> 'supplier_bills' ELSE '[]'::jsonb END) b
-  CROSS JOIN LATERAL (VALUES (b ->> 'number'), (b ->> 'reference')) v(x)
+  CROSS JOIN LATERAL (VALUES (b ->> 'number')) v(x)
   WHERE nullif(btrim(x), '') IS NOT NULL
  ),
  ph AS (
@@ -149,7 +149,7 @@ AS $fn$
           OR coalesce(l.v ->> 'about_key', '') LIKE 'payment:%' OR coalesce(l.v ->> 'about_key', '') LIKE 'refund:%'
           OR coalesce(l.v ->> 'what', '') ~ '\$ ?[0-9]') AS money,
          -- a refund, an overpayment, a credit or a double payment: never set aside by the paid rules
-         (coalesce(l.v ->> 'about_key', '') ~* '^(refund|credit)' OR coalesce(l.v ->> 'what', '') ~* '(refund|overpa|over-pa|paid twice|twice|double|money back|credit)') AS refund_words
+         (coalesce(l.v ->> 'about_key', '') ~* '^(refund|credit)' OR coalesce(l.v ->> 'what', '') ~* '(refund|overpa|over-pa|paid twice|twice|double|money back|credit|reimburs|overcharg|over-charg|pay back|paid back|charge ?back|dispute|rebate|discount|return|owed back|short ?paid|underpa)') AS refund_words
   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p_story -> 'loops') = 'array' THEN p_story -> 'loops' ELSE '[]'::jsonb END) l(v)
   JOIN it ON it.item_key = l.v ->> 'key'
   WHERE l.v ->> 'source' = 'ledger' AND l.v ->> 'status' IN ('open', 'closing_evidence')
@@ -176,13 +176,15 @@ AS $fn$
     -- a bill to us from a supplier or contractor (an invoice that is not one of the job's own),
     -- or a supplier's paper that names another job: Finance's to place and pay, not owed on the job
     WHEN lq.about_invoice IS NOT NULL AND EXISTS (SELECT 1 FROM sb WHERE sb.number = lq.about_invoice)
-         AND NOT EXISTS (SELECT 1 FROM inv WHERE inv.number = lq.about_invoice) AND NOT lq.refund_words THEN 'supplier'
+         AND NOT EXISTS (SELECT 1 FROM inv WHERE inv.number = lq.about_invoice) AND NOT lq.refund_words
+         AND lq.owner = 'us' AND lq.counterparty <> 'customer' THEN 'supplier'
     WHEN lq.about LIKE 'other:other-job%' THEN 'office'
     -- we asked the customer for a review: nobody owes one
     WHEN lq.rule = 'request' AND lq.owner = 'customer' AND (lq.about LIKE 'other:review%' OR lq.about LIKE 'review:%') THEN 'courtesy'
     -- (deposit) the work is done and nothing is owing in Xero: the deposit note is answered
     WHEN lq.step = 'deposit' AND lq.owner <> 'us' AND NOT lq.refund_words
-         AND ph.passed IS NOT NULL AND ph.passed >= 6 AND ph.any_invoice AND NOT ph.any_owing THEN 'stage_passed'
+         AND ph.passed IS NOT NULL AND ph.passed >= 6 AND ph.any_invoice AND NOT ph.any_owing
+         AND public.context_job_story_money_settled(p_story) THEN 'stage_passed'
     -- money is never set aside on the note's own say: what is owed is the records' to say
     WHEN lq.money THEN NULL
     WHEN lq.rule = 'claim' AND lq.needs_reply IS FALSE AND lq.blocks IS NULL THEN 'said'
@@ -190,7 +192,11 @@ AS $fn$
     WHEN ph.passed IS NOT NULL AND ph.phase_since IS NOT NULL AND (lq.since AT TIME ZONE 'Australia/Perth')::date < ph.phase_since
          AND array_position(ARRAY['quote', 'acceptance', 'deposit', 'booking', 'install', 'completion', 'payment'], lq.step) <= ph.passed
          -- a fix we owe is answered by the office closing the job, not by invoicing alone
-         AND (lq.step IS DISTINCT FROM 'completion' OR lq.owner <> 'us' OR ph.office_closed)
+         AND (lq.owner <> 'us' OR ph.office_closed
+              -- (its own step, not completion) or a dated visit that was on or before the work was done
+              OR (lq.blocks IS NOT NULL AND lq.step IS DISTINCT FROM 'completion')
+              OR (lq.blocks IS NULL AND lq.about ~ '^booking:[0-9]{4}-[0-9]{2}-[0-9]{2}'
+                  AND substr(lq.about, 9, 10)::date <= ph.phase_since))
      THEN 'stage_passed'
     WHEN lq.status = 'open' AND lq.since IS NOT NULL
          AND greatest((lq.since AT TIME ZONE 'Australia/Perth')::date, coalesce(lq.due, (lq.since AT TIME ZONE 'Australia/Perth')::date))
@@ -235,7 +241,7 @@ AS $fn$
      FROM rs WHERE rs.reason IS NOT NULL)) END
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_rest(jsonb, jsonb, timestamptz) IS
- 'Rested notes (20261115130000), Finished notes (20261116060000): given the story''s ledger read and the card assembled from it, the open AI notes that are not something anyone owes now, and the ledger with those items'' status set to rested (so the assembler no longer opens them). Only the reader''s own notes (never a person''s or a locked one) that stand on their own on the card (source ledger). In order, the first that holds: paid (the note is about one of the job''s own invoices that Xero shows PAID with nothing owing, and is owed by someone other than us, is something said that needs no reply, or is the reader''s copy of the invoice record; or it is about a payment someone other than us owes, on a job the office closed, a status in the policy''s closed_statuses, with every invoice on the job paid, no draft, nothing known left to invoice and nothing placed on no job (context_job_story_money_settled); or it is something said about money that needs no reply on such a job); supplier (about a bill the card''s money lists as this job''s supplier bill, by number or reference, and not one of its customer invoices); office (about a supplier''s paper that names another job, other:other-job); courtesy (we asked the customer for a review); stage_passed for a deposit note someone other than us owes on a job whose work is done with an invoice and nothing owing in Xero; a refund, overpayment, credit or double payment in the about-key or words is never set aside by these; then, as before, nothing about money (blocks payment or deposit, about an invoice, a payment or a refund, or a dollar amount in its words); said (a claim marked needing no reply, blocking no step); stage_passed (it holds up a step, its own or by its about_key''s first word in the policy''s about_step, that the job''s phase has passed, and was opened before that phase began; a completion matter we owe only once the office has closed the job); old (plainly open, opened and due more than max_age_days ago). Returns NULL when there is none, else ledger and rested (key, type, what, since, age_days, reason, why, owner, owner_name, counterparty, blocks, about_key, cites, customer_reported; newest first). Pure: reads no table. Nothing is written; the notes themselves are unchanged. Service role only.';
+ 'Rested notes (20261115130000), Finished notes (20261116060000): given the story''s ledger read and the card assembled from it, the open AI notes that are not something anyone owes now, and the ledger with those items'' status set to rested (so the assembler no longer opens them). Only the reader''s own notes (never a person''s or a locked one) that stand on their own on the card (source ledger). In order, the first that holds: paid (the note is about one of the job''s own invoices that Xero shows PAID with nothing owing, and is owed by someone other than us, is something said that needs no reply, or is the reader''s copy of the invoice record; or it is about a payment someone other than us owes, on a job the office closed, a status in the policy''s closed_statuses, with every invoice on the job paid, no draft, nothing known left to invoice and nothing placed on no job (context_job_story_money_settled); or it is something said about money that needs no reply on such a job); supplier (about a bill the card''s money lists as this job''s supplier bill, by number, not one of its customer invoices, owed by us to someone other than the customer); office (about a supplier''s paper that names another job, other:other-job); courtesy (we asked the customer for a review); stage_passed for a deposit note someone other than us owes on a job whose work is done with an invoice and nothing owing in Xero; a refund, overpayment, overcharge, reimbursement, credit, chargeback, dispute, discount, rebate, return or double payment in the about-key or words is never set aside by these, nor a deposit note while money is not settled; then, as before, nothing about money (blocks payment or deposit, about an invoice, a payment or a refund, or a dollar amount in its words); said (a claim marked needing no reply, blocking no step); stage_passed (it holds up a step, its own or by its about_key''s first word in the policy''s about_step, that the job''s phase has passed, and was opened before that phase began; something we owe at completion, or a visit we owe with no step of its own, only once the office has closed the job or, for a dated booking:YYYY-MM-DD, once that day is on or before the phase began); old (plainly open, opened and due more than max_age_days ago). Returns NULL when there is none, else ledger and rested (key, type, what, since, age_days, reason, why, owner, owner_name, counterparty, blocks, about_key, cites, customer_reported; newest first). Pure: reads no table. Nothing is written; the notes themselves are unchanged. Service role only.';
 
 -- 3. A job the office closed with every invoice paid reads as complete, not as invoicing or payment.
 CREATE OR REPLACE FUNCTION public.context_job_story_closed_paid(p_story jsonb)
