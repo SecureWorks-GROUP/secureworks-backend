@@ -32,18 +32,19 @@
 -- The AI's latest decision is the latest row for the bill in materials_ai_placements, undone or not: an undone
 -- placement is still what the AI said (undone says a person took it back).
 --
--- rule says which gate the decision went through: two_keys (made at or after the first recorded keys, 29 Oct
--- 2026: the AI's confidence alone never places a bill, a hard clue such as the job number on the bill must agree;
+-- rule says which gate the decision went through: two_keys (made at or after the first recorded keys, 30 Oct
+-- 2026 UTC: the AI's confidence alone never places a bill, a hard clue such as the job number on the bill must agree;
 -- a refused, unsure or below-the-bar row records no keys, so the era is read from the moment, not the keys) or
 -- before_two_keys (confidence alone placed it).
 --
 -- multi_bill_email is true when the bill's invoice number is on an email that also carries another live bill of
 -- the same supplier (the digit run of the invoice number, four digits or more, read from the attachment file
--- names in context_email_attachments, leaving out runs that read as a date). It is a flag, not a measure: a number
--- written with leading zeros or split by a dash is not matched, and only emails that were filed are seen. The
--- email's subject then names at most one of those jobs, so it is no evidence of which job a given bill belongs to. Measured 15 Nov 2026: one drawings supplier emails several invoices
--- for several patio jobs together, and the AI placed 8 of them from such an email onto a job the bookkeeper did
--- not choose.
+-- names in context_email_attachments, leaving out runs that read as a date and photo or video files). It is a
+-- flag, not a measure: a number written differently on the bill and in the file name is not matched, and only
+-- emails that were filed are seen. The email's subject then names at most one of those jobs, so it is no evidence
+-- of which job a given bill belongs to. Measured 15 Nov 2026: one drawings supplier emails several invoices
+-- for several patio jobs together. Measured with this flag on 15 Nov 2026: 3 bills the AI placed on a job the
+-- bookkeeper did not choose came on such an email.
 --
 -- Neither side is taken as right by this read: a disagreement is a bill for a person to look at. Job Profit
 -- already counts the bookkeeper's ledger over an AI placement (20261103050000), so a wrong_job does not change a
@@ -117,15 +118,22 @@ WITH latest AS (
          array_agg(e.xero_line_item_id) FILTER (WHERE e.xero_line_item_id IS NOT NULL) AS line_ids
     FROM public.v_bookkeeping_line_evidence_current e
    WHERE e.xero_invoice_id IS NOT NULL
+     -- A text line the bill carries with no amount says nothing about where the money went: the load files it as
+     -- not a job cost at 0, and it must not make a one-job bill read split.
+     AND NOT EXISTS (SELECT 1 FROM bill x CROSS JOIN LATERAL jsonb_array_elements(
+                                CASE WHEN jsonb_typeof(x.line_items) = 'array' THEN x.line_items ELSE '[]'::jsonb END) li
+                      WHERE x.xero_invoice_id = e.xero_invoice_id AND li ->> 'LineItemID' = e.xero_line_item_id
+                        AND COALESCE(CASE WHEN jsonb_typeof(li -> 'LineAmount') = 'number' THEN (li ->> 'LineAmount')::numeric END, 0) = 0)
    GROUP BY e.xero_invoice_id
 ), bk_answer AS (
-  -- A bill line the load does not carry is a line not evidenced: the load may send only the lines it resolved.
+  -- A bill line with an amount the load does not carry is a line not evidenced: the load may send only the lines
+  -- it resolved.
   SELECT b.xero_invoice_id,
          CASE WHEN NOT b.all_evidenced OR b.job_lines_without_job > 0
                    OR EXISTS (SELECT 1 FROM bill x CROSS JOIN LATERAL jsonb_array_elements(
                                          CASE WHEN jsonb_typeof(x.line_items) = 'array' THEN x.line_items ELSE '[]'::jsonb END) li
                                WHERE x.xero_invoice_id = b.xero_invoice_id
-                                 AND COALESCE((li ->> 'LineAmount')::numeric, 0) <> 0
+                                 AND COALESCE(CASE WHEN jsonb_typeof(li -> 'LineAmount') = 'number' THEN (li ->> 'LineAmount')::numeric END, 0) <> 0
                                  AND li ->> 'LineItemID' IS NOT NULL
                                  AND NOT (li ->> 'LineItemID' = ANY (COALESCE(b.line_ids, ARRAY[]::text[]))))
                 THEN 'not_evidenced'
@@ -136,12 +144,13 @@ WITH latest AS (
     FROM bk b
 ), att AS (
   -- Digit runs of four or more in attachment file names, leaving out runs that read as a date (2026, 202610,
-  -- 20261012).
+  -- 20261012) and photo or video files (a phone names them IMG_0021.jpeg).
   SELECT DISTINCT a.business_event_id, m.digits
     FROM public.context_email_attachments a
    CROSS JOIN LATERAL (SELECT (regexp_matches(COALESCE(a.file_name, ''), '\d+', 'g'))[1] AS digits) m
    WHERE a.business_event_id IS NOT NULL AND length(m.digits) >= 4
      AND m.digits !~ '^20[0-9]{2}((0[1-9]|1[0-2])([0-3][0-9])?)?$'
+     AND COALESCE(a.file_name, '') !~* '\.(jpe?g|png|gif|heic|heif|webp|bmp|tiff?|mp4|mov|m4v|avi)$'
 ), bill_email AS (
   SELECT b.xero_invoice_id, b.xero_contact_id, b.digits, a.business_event_id
     FROM bill b JOIN att a ON a.digits = b.digits
@@ -198,7 +207,8 @@ CREATE OR REPLACE FUNCTION public.materials_ai_accuracy_by_supplier()
 RETURNS TABLE (
   xero_contact_id text, contact_name text, rule text, decided bigint, checkable bigint, agree bigint,
   wrong_job bigint, job_but_not_job_cost bigint, missed_job_cost bigint, declined bigint, sure_and_wrong bigint,
-  placed_agree bigint, placed_wrong bigint, multi_bill_email bigint, last_decided_at timestamptz)
+  sure_and_missed bigint, placed_agree bigint, placed_wrong bigint, filed_agree bigint, filed_wrong bigint,
+  multi_bill_email bigint, last_decided_at timestamptz)
 LANGUAGE sql STABLE SECURITY INVOKER SET search_path = public, pg_temp
 AS $kb$
 SELECT k.xero_contact_id,
@@ -212,8 +222,11 @@ SELECT k.xero_contact_id,
        count(*) FILTER (WHERE k.verdict = 'missed_job_cost') AS missed_job_cost,
        count(*) FILTER (WHERE k.verdict = 'declined') AS declined,
        count(*) FILTER (WHERE k.verdict IN ('wrong_job', 'job_but_not_job_cost') AND k.ai_confidence >= 0.95) AS sure_and_wrong,
+       count(*) FILTER (WHERE k.verdict = 'missed_job_cost' AND k.ai_confidence >= 0.95) AS sure_and_missed,
        count(*) FILTER (WHERE k.ai_outcome = 'placed' AND k.verdict = 'agree') AS placed_agree,
        count(*) FILTER (WHERE k.ai_outcome = 'placed' AND k.verdict IN ('wrong_job', 'job_but_not_job_cost')) AS placed_wrong,
+       count(*) FILTER (WHERE k.ai_outcome = 'filed_not_job_related' AND k.verdict = 'agree') AS filed_agree,
+       count(*) FILTER (WHERE k.ai_outcome = 'filed_not_job_related' AND k.verdict = 'missed_job_cost') AS filed_wrong,
        count(*) FILTER (WHERE k.multi_bill_email) AS multi_bill_email,
        max(k.decided_at) AS last_decided_at
   FROM public.materials_ai_known_answers() k
@@ -221,7 +234,7 @@ SELECT k.xero_contact_id,
 $kb$;
 
 COMMENT ON FUNCTION public.materials_ai_accuracy_by_supplier() IS
-  'Materials AI known answers (20261115140000): the verdicts of materials_ai_known_answers() counted per supplier (Xero contact) and per rule. checkable excludes no_answer. sure_and_wrong: wrong_job or job_but_not_job_cost at AI confidence 0.95 or more. placed_agree and placed_wrong: the bills the AI actually placed. Read only. Service role only.';
+  'Materials AI known answers (20261115140000): the verdicts of materials_ai_known_answers() counted per supplier (Xero contact) and per rule. checkable excludes no_answer. sure_and_wrong: wrong_job or job_but_not_job_cost at AI confidence 0.95 or more; sure_and_missed: missed_job_cost at 0.95 or more (a fixed mark for comparison, not the reader''s live confidence bar). placed_agree and placed_wrong: the bills the AI actually placed on a job. filed_agree and filed_wrong: the bills it filed as not job related on its own (filed_wrong took a job cost off the job with no person involved). Read only. Service role only.';
 
 REVOKE ALL ON FUNCTION public.materials_ai_known_answers() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.materials_ai_accuracy_by_supplier() FROM PUBLIC, anon, authenticated;

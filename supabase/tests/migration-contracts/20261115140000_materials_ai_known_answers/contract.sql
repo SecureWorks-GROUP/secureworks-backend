@@ -1,5 +1,7 @@
--- Contract for 20261115140000_materials_ai_known_answers. Fixture bills KA-01 to KA-20, each decided one with the
--- AI's decision and the bookkeeper's answer, and the verdict each must read.
+-- Contract for 20261115140000_materials_ai_known_answers. Fixture bills KA-01 to KA-22, each decided one with the
+-- AI's decision and the bookkeeper's answer, and the verdict each must read. Its writes are rolled back.
+
+BEGIN;
 
 -- 0. Fixtures. Decisions at 10 days ago went through the old rule; the first keys are recorded 3 days ago, so
 -- every decision from then on reads two_keys, keys recorded or not (KA-06, KA-14 and KA-17 record none).
@@ -34,7 +36,12 @@ BEGIN
      '[{"LineItemID":"l1","LineAmount":80},{"LineItemID":"l2","LineAmount":20}]'::jsonb),
     -- KA-19: a voided bill of KA-13's supplier on KA-13's email. KA-20: a live one numbered like a year.
     (org, 'KA-19', 'C-POSTS', '6019', 'ACCPAY', 'KA Posts', 'VOIDED', NULL),
-    (org, 'KA-20', 'C-POSTS', 'P-2026', 'ACCPAY', 'KA Posts', 'AUTHORISED', NULL);
+    (org, 'KA-20', 'C-POSTS', 'P-2026', 'ACCPAY', 'KA Posts', 'AUTHORISED', NULL),
+    -- KA-21: all its money on one job, and a text line with no amount that the load files as not a job cost at 0.
+    (org, 'KA-21', 'C-STEEL', 'S-7021', 'ACCPAY', 'KA Steel', 'AUTHORISED',
+     '[{"LineItemID":"l1","LineAmount":80.57},{"LineItemID":"l2","Description":"Delivery notes"}]'::jsonb),
+    -- KA-22: a live bill of KA-13's supplier whose number matches a phone photo's name on KA-13's email.
+    (org, 'KA-22', 'C-POSTS', '6022', 'ACCPAY', 'KA Posts', 'AUTHORISED', NULL);
 
   -- One email carrying two live bills of the same supplier (KA-01, KA-02). Another carrying KA-13 with a bill of a
   -- different supplier (KA-16), a voided bill of its own supplier (KA-19) and a date in a file name that reads
@@ -47,7 +54,8 @@ BEGIN
     ('email:ka-2', repeat('3', 64), ev2, 'Invoice 6013.pdf', 'skipped_kind'),
     ('email:ka-2', repeat('4', 64), ev2, 'Invoice 6016.pdf', 'skipped_kind'),
     ('email:ka-2', repeat('5', 64), ev2, 'Invoice 6019 VOID.pdf', 'skipped_kind'),
-    ('email:ka-2', repeat('6', 64), ev2, 'Statement 2026.pdf', 'skipped_kind');
+    ('email:ka-2', repeat('6', 64), ev2, 'Statement 2026.pdf', 'skipped_kind'),
+    ('email:ka-2', repeat('7', 64), ev2, 'IMG_6022.jpeg', 'skipped_kind');
 
   INSERT INTO public.v_bookkeeping_line_evidence_current (xero_invoice_id, xero_line_item_id, allocation, job_id, job_number, evidenced) VALUES
     ('KA-01', 'l1', 'job', j1, 'KA-J1', true), ('KA-01', 'l2', 'job', j1, 'KA-J1', true),
@@ -65,7 +73,8 @@ BEGIN
     ('KA-14', 'l1', 'job', j2, 'KA-J2', true),
     ('KA-15', 'l1', 'job', j2, 'KA-J2', true),
     ('KA-17', 'l1', 'job', j1, 'KA-J1', true),
-    ('KA-18', 'l1', 'job', j1, 'KA-J1', true);
+    ('KA-18', 'l1', 'job', j1, 'KA-J1', true),
+    ('KA-21', 'l1', 'job', j1, 'KA-J1', true), ('KA-21', 'l2', 'not_job_cost', NULL, NULL, true);
 
   INSERT INTO public.materials_ai_placements
     (xero_invoice_id, invoice_number, contact_name, amount_ex, decision, job_id, job_number, confidence, reason, model,
@@ -93,7 +102,9 @@ BEGIN
     ('KA-15', 'S-7015', 'KA Steel', 50, 'job', j1, 'KA-J1', 0.990, 'r', 'm', 'placed', NULL, NULL, NULL, now() - interval '10 days', now(), 'person'),
     -- KA-17: a sure job pick of a job that does not exist. Refused, and wrong against the bookkeeper's job.
     ('KA-17', 'S-7017', 'KA Steel', 50, 'job', NULL, 'KA-J7', 0.970, 'r', 'm', 'refused', 'job not found', NULL, NULL, now() - interval '2 days', NULL, NULL),
-    ('KA-18', 'S-7018', 'KA Steel', 100, 'job', j1, 'KA-J1', 0.990, 'r', 'm', 'placed', NULL, NULL, NULL, now() - interval '10 days', NULL, NULL);
+    ('KA-18', 'S-7018', 'KA Steel', 100, 'job', j1, 'KA-J1', 0.990, 'r', 'm', 'placed', NULL, NULL, NULL, now() - interval '10 days', NULL, NULL),
+    -- KA-21: filed as not job related on its own at 0.98, and the bookkeeper put its money on a job.
+    ('KA-21', 'S-7021', 'KA Steel', 80.57, 'not_job_related', NULL, NULL, 0.980, 'r', 'm', 'filed_not_job_related', NULL, ARRAY['ai_confidence'], NULL, now() - interval '2 days', NULL, NULL);
 END $$;
 
 -- 1. Grants and comments.
@@ -128,8 +139,8 @@ END $$;
 DO $$
 DECLARE r record; n int := 0;
 BEGIN
-  IF (SELECT count(*) FROM public.materials_ai_known_answers() WHERE xero_invoice_id LIKE 'KA-%') <> 17 THEN
-    RAISE EXCEPTION 'materials ai known answers contract: expected one row per decided bill (17), got %',
+  IF (SELECT count(*) FROM public.materials_ai_known_answers() WHERE xero_invoice_id LIKE 'KA-%') <> 18 THEN
+    RAISE EXCEPTION 'materials ai known answers contract: expected one row per decided bill (18), got %',
       (SELECT count(*) FROM public.materials_ai_known_answers() WHERE xero_invoice_id LIKE 'KA-%');
   END IF;
   FOR r IN
@@ -152,7 +163,8 @@ BEGIN
         ('KA-14', 'job',           'wrong_job',            'two_keys',        false, false),
         ('KA-15', 'job',           'wrong_job',            'before_two_keys', false, true),
         ('KA-17', 'job',           'wrong_job',            'two_keys',        false, false),
-        ('KA-18', 'not_evidenced', 'no_answer',            'before_two_keys', false, false)
+        ('KA-18', 'not_evidenced', 'no_answer',            'before_two_keys', false, false),
+        ('KA-21', 'job',           'missed_job_cost',      'two_keys',        false, false)
       ) AS e(id, answer, verdict, rule, multi, undone)
       LEFT JOIN public.materials_ai_known_answers() k ON k.xero_invoice_id = e.id
   LOOP
@@ -187,13 +199,18 @@ BEGIN
     RAISE EXCEPTION 'steel before two keys counted wrong: %', row_to_json(s);
   END IF;
   SELECT * INTO s FROM public.materials_ai_accuracy_by_supplier() x WHERE xero_contact_id = 'C-STEEL' AND rule = 'two_keys';
-  IF s.decided <> 6 OR s.checkable <> 6 OR s.agree <> 1 OR s.wrong_job <> 2 OR s.job_but_not_job_cost <> 1
-     OR s.missed_job_cost <> 1 OR s.declined <> 1 OR s.sure_and_wrong <> 1 OR s.placed_agree <> 1 OR s.placed_wrong <> 0 THEN
+  IF s.decided <> 7 OR s.checkable <> 7 OR s.agree <> 1 OR s.wrong_job <> 2 OR s.job_but_not_job_cost <> 1
+     OR s.missed_job_cost <> 2 OR s.declined <> 1 OR s.sure_and_wrong <> 1 OR s.sure_and_missed <> 1
+     OR s.placed_agree <> 1 OR s.placed_wrong <> 0 OR s.filed_agree <> 0 OR s.filed_wrong <> 2 THEN
     RAISE EXCEPTION 'steel two keys counted wrong: %', row_to_json(s);
   END IF;
   SELECT * INTO s FROM public.materials_ai_accuracy_by_supplier() x WHERE xero_contact_id = 'C-PLANS' AND rule = 'before_two_keys';
   IF s.decided <> 1 OR s.wrong_job <> 1 OR s.sure_and_wrong <> 1 OR s.multi_bill_email <> 1 OR s.placed_wrong <> 1 THEN
     RAISE EXCEPTION 'plans before two keys counted wrong: %', row_to_json(s);
+  END IF;
+  SELECT * INTO s FROM public.materials_ai_accuracy_by_supplier() x WHERE xero_contact_id = 'C-FUEL' AND rule = 'two_keys';
+  IF s.decided <> 1 OR s.filed_agree <> 1 OR s.filed_wrong <> 0 OR s.sure_and_missed <> 0 THEN
+    RAISE EXCEPTION 'fuel two keys counted wrong: %', row_to_json(s);
   END IF;
   IF (SELECT count(*) FROM public.materials_ai_accuracy_by_supplier() WHERE xero_contact_id IN ('C-PLANS', 'C-STEEL', 'C-FUEL', 'C-POSTS')) <> 6 THEN
     RAISE EXCEPTION 'expected six supplier and rule rows for the fixtures';
@@ -209,3 +226,5 @@ BEGIN
     RAISE EXCEPTION 'materials ai known answers contract: a read changed the audit table';
   END IF;
 END $$;
+
+ROLLBACK;
