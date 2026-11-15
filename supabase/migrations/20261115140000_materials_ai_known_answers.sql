@@ -25,7 +25,9 @@
 -- bookkeeper_basis lists the load's bases for the bill and bookkeeper_emitted_at when the load was made. A basis
 -- named register_* reads SecureSuite's own placement register (measured 15 Nov 2026: 35 of 49 such lines name a
 -- job the AI had already placed the bill on before the load was emitted), so it can repeat the AI's own pick. A
--- bill whose every line rests on such a basis has answer_independent false and reads no_answer: it is no check.
+-- bill whose every line rests on such a basis, and that the AI had placed before the load was emitted, has
+-- answer_independent false and reads no_answer: it is no check. With no AI placement before the load, the register
+-- could not have read the AI's answer, so it counts.
 --
 -- verdict:
 --   agree                 the AI's job is the bookkeeper's job, or both say not a job cost;
@@ -151,8 +153,7 @@ WITH latest AS (
   -- A line the ledger splits across jobs lives in the parts read: the bill is split, whatever an older whole-line
   -- row says.
   SELECT b.xero_invoice_id,
-         CASE WHEN EXISTS (SELECT 1 FROM public.v_bookkeeping_line_parts_current p WHERE p.xero_invoice_id = b.xero_invoice_id
-                            AND p.xero_line_item_id = ANY (COALESCE(b.line_ids, ARRAY[]::text[])))
+         CASE WHEN EXISTS (SELECT 1 FROM public.v_bookkeeping_line_parts_current p WHERE p.xero_invoice_id = b.xero_invoice_id)
                 THEN 'split'
               WHEN NOT b.all_evidenced OR b.job_lines_without_job > 0
                    OR EXISTS (SELECT 1 FROM bill x CROSS JOIN LATERAL jsonb_array_elements(
@@ -165,7 +166,10 @@ WITH latest AS (
               WHEN b.all_job AND b.jobs = 1 THEN 'job'
               WHEN b.all_not_job THEN 'not_job_cost'
               ELSE 'split' END AS answer,
-         b.job_id, b.job_number, b.bases, b.emitted_at, NOT b.all_register AS independent
+         b.job_id, b.job_number, b.bases, b.emitted_at,
+         NOT (b.all_register AND EXISTS (SELECT 1 FROM public.materials_ai_placements p
+                                          WHERE p.xero_invoice_id = b.xero_invoice_id AND p.outcome = 'placed'
+                                            AND p.created_at < b.emitted_at)) AS independent
     FROM bk b
 ), att AS (
   -- Digit runs of four or more in attachment file names, leaving out runs that read as a date (2026, 202610,
@@ -230,7 +234,7 @@ SELECT l.xero_invoice_id,
 $ka$;
 
 COMMENT ON FUNCTION public.materials_ai_known_answers() IS
-  'Materials AI known answers (20261115140000): one row per bill the AI bill reader has decided. Its latest decision beside the bookkeeper''s answer for the same bill from v_bookkeeping_line_evidence_current (job: every line evidenced on one job; not_job_cost: every line evidenced as overhead or not a job cost; split; not_evidenced, including a bill line with an amount the load does not carry; null: no line loaded), the bases of that answer, when the load was made, and answer_independent (false when every line rests on a register_* basis, which reads our own placements). verdict: agree, wrong_job (including a job pick refused as job not found), job_but_not_job_cost, missed_job_cost, declined (AI unsure), no_answer (no checkable or independent bookkeeper answer). A refusal with no job, for any reason but job not found, is skipped as not an answer. rule: two_keys (decided at or after the first recorded keys) or before_two_keys. multi_bill_email: the bill''s invoice number is on an email that carries another live bill of the same supplier, so the email is no evidence of the job. Neither side is taken as right; a disagreement is for a person. Read only. Service role only.';
+  'Materials AI known answers (20261115140000): one row per bill the AI bill reader has decided. Its latest decision beside the bookkeeper''s answer for the same bill from v_bookkeeping_line_evidence_current (job: every line evidenced on one job; not_job_cost: every line evidenced as overhead or not a job cost; split; not_evidenced, including a bill line with an amount the load does not carry; null: no line loaded), the bases of that answer, when the load was made, and answer_independent (false when every line rests on a register_* basis, which reads our own placements, and the AI placed the bill before the load was emitted). verdict: agree, wrong_job (including a job pick refused as job not found), job_but_not_job_cost, missed_job_cost, declined (AI unsure), no_answer (no checkable or independent bookkeeper answer). A refusal with no job, for any reason but job not found, is skipped as not an answer. rule: two_keys (decided at or after the first recorded keys) or before_two_keys. multi_bill_email: the bill''s invoice number is on an email that carries another live bill of the same supplier, so the email is no evidence of the job. Neither side is taken as right; a disagreement is for a person. Read only. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.materials_ai_accuracy_by_supplier()
 RETURNS TABLE (
