@@ -156,7 +156,7 @@ overdue. The signature also carries the job's variations.
 ## Cost close (15 Nov 2026)
 
 Is a job's cost final, and if not, what is it waiting on. `job_cost_close(job_ids, as_of)`
-(migration 20261115130000, service role only) works the answer out from Job Profit's own row on
+(migration 20261115143000, service role only) works the answer out from Job Profit's own row on
 every read. The answer is not stored, no person closes a job, and `v_job_profit` is untouched. Every number
 and list is in `job_cost_close_policy()` (`cost-close-v1`) and changes only by migration.
 

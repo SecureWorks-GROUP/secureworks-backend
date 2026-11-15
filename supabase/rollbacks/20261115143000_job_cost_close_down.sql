@@ -1,4 +1,4 @@
--- Rollback for 20261115130000_job_cost_close.sql. The two read functions store nothing. The status record
+-- Rollback for 20261115143000_job_cost_close.sql. The two read functions store nothing. The status record
 -- (job_status_moves) holds every job status move since the migration was applied; dropping it loses that
 -- history, which nothing else reads. Drop ops-api's reader first or its cost_close key answers ok:false.
 SET LOCAL lock_timeout = '5s';
