@@ -268,7 +268,10 @@ reads or writes it.
   - **The day a cost reached the job** is not its document date: a bill dated in August and placed
     on the job in November changed the job in November. It is the latest of the cost event's date
     (`v_job_cost_events`), the day its row was written (`xero_invoices`, `trade_invoices`,
-    `purchase_orders` `created_at`) and the day its own route placed it on this job:
+    `purchase_orders` `created_at`), the bill's last change in Xero (`UpdatedDateUTC` in the stored
+    Xero record: a draft approved or an amount edited restarts the count, and so does a payment,
+    which only waits longer; `xero_invoices.updated_at` is our row's last write and is not used), a
+    crew invoice's `submitted_at`, and the day its own route placed it on this job:
     `xero_invoices.job_linked_at` for a bill placed by its job link, the first `job_materials_facts`
     row for a materials placement, the first bookkeeping evidence revision for a bookkeeping
     placement. A placement day counts only for the route that placed the cost. `last_cost_on` in
@@ -306,10 +309,16 @@ reads or writes it.
     which a person settles by cancelling or adjusting the work order).
   - `variation_cost_not_in`: a variation that is agreed (not `pending_approval` or `sent`, not
     dead) carries a cost estimate, and the cost Job Profit counts that reached the job after it was
-    agreed is less than half the estimate (`variation_cost_cover_share`). It is agreed when accepted
+    agreed is less than half (`variation_cost_cover_share`) of the estimates of every variation
+    agreed at or after that moment, taken together, so the same dollars never cover two
+    variations. It is agreed when accepted
     or approved, or when made for a staff variation auto-approved under the limit (which carries
     neither time). A cost bought before the variation was agreed does not cover it; a person
     settles that by adjusting the estimate.
+  - `draft_bill_on_job`: a supplier bill still at `DRAFT` or `SUBMITTED` in Xero
+    (`draft_bill_statuses`), with an amount, names the job: linked to it in Xero, placed on it as
+    materials, or its job number in the reference or a line. Job Profit counts no such bill until
+    it is approved, so the job's cost is not in.
   So `final` says the cost is complete; it does not say the job was invoiced.
 - **Nothing is frozen.** A cost that lands on a final job moves it back to `settling` with a later
   `final_on`; a job put back into rectification or any working status reads `open`, and so does a

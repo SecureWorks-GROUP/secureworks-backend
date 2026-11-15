@@ -184,6 +184,9 @@ BEGIN
      OR (p -> 'work_order_dead_statuses') @> '["complete"]'::jsonb
      OR (p ->> 'work_order_tolerance_ex')::numeric IS DISTINCT FROM 1
      OR (p ->> 'variation_cost_cover_share')::numeric IS DISTINCT FROM 0.5
+     OR (p -> 'draft_bill_statuses') IS DISTINCT FROM '["DRAFT", "SUBMITTED"]'::jsonb
+     OR NOT (p -> 'pending_cost_reasons') @> '["draft_bill_on_job"]'::jsonb
+     OR (p -> 'not_cost_reasons') @> '["draft_bill_on_job"]'::jsonb
      OR (p -> 'not_cost_reasons') @> '["work_order_not_billed"]'::jsonb
      OR (p -> 'not_cost_reasons') @> '["variation_cost_not_in"]'::jsonb
      OR p -> 'restoration_open_quote_statuses' <> '["draft", "sent"]'::jsonb
@@ -842,6 +845,95 @@ BEGIN
         r.n, r.got15, r.got16, r.st15, r.st16, r.w15, r.why;
     END IF;
   END LOOP;
+END $$;
+
+-- 4c. Tenth review: CC-92 to CC-97.
+--   CC-92  a supplier bill still at DRAFT in Xero, linked to the job since 25 Aug: waiting on it
+--   CC-93  a DRAFT bill linked to no job whose line names the job's number (SWF-299093): waiting on it
+--   CC-94  a bill linked since 25 Aug that Xero last changed on 10 Nov (approved then): settling from 10 Nov
+--   CC-95  two costed variations (1000 each) agreed 1 Oct and 600 of cost since: one cost covers one variation
+--   CC-96  a costed variation agreed 1 Oct with 600 since, another agreed 1 Nov with 600 since: each covered
+--   CC-97  a DRAFT bill of nothing (total 0) linked to the job: no reason (control)
+INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at, updated_at, completed_at)
+SELECT ('cc000000-0000-4000-8000-0000000000' || v.n::text)::uuid, '00000000-0000-0000-0000-000000000001',
+       'complete', 'fencing', v.num, false, '{}'::jsonb, '{}',
+       '{"lanes": {"labour": {"amount_ex_gst": 500}, "materials": {"amount_ex_gst": 700}, "commission": {"amount_ex_gst": 0}}}'::jsonb,
+       timestamptz '2026-07-01T00:00:00Z', timestamptz '2026-07-01T00:00:00Z', timestamptz '2026-08-10T02:00:00Z'
+FROM (VALUES (92, 'CC-92'), (93, 'SWF-299093'), (94, 'CC-94'), (95, 'CC-95'), (96, 'CC-96'), (97, 'CC-97')) AS v(n, num);
+UPDATE public.job_status_moves m SET moved_at = j.created_at FROM public.jobs j
+ WHERE j.id = m.job_id AND j.job_number IN ('CC-92','SWF-299093','CC-94','CC-95','CC-96','CC-97');
+
+INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, line_items, raw_json, job_id, created_at)
+SELECT '00000000-0000-0000-0000-000000000001', 'CC10-S-' || right(j.id::text, 2), 'INV-CC10-' || right(j.id::text, 2), 'ACCREC', 'AUTHORISED', 'CC Customer',
+       3000, 3300, date '2026-08-25',
+       jsonb_build_array(jsonb_build_object('Description', 'Work', 'AccountCode', '200', 'LineAmount', 3000, 'TaxAmount', 300)),
+       '{"LineAmountTypes": "Exclusive"}'::jsonb, j.id, timestamptz '2026-08-25T02:00:00Z'
+FROM public.jobs j WHERE j.job_number IN ('CC-92','SWF-299093','CC-94','CC-95','CC-96','CC-97');
+INSERT INTO public.job_materials_facts (job_id, xero_invoice_id, invoice_number, contact_name, lane, kind, amount_ex_gst, confidence, fact_date, automation_source, created_at)
+SELECT j.id, 'CC10-L-' || right(j.id::text, 2), 'BL-CC10-' || right(j.id::text, 2), 'CC Installer', 'labour', 'actual', 500, 'high', date '2026-08-20', 'manual_queue', timestamptz '2026-08-20T02:00:00Z'
+FROM public.jobs j WHERE j.job_number IN ('CC-92','SWF-299093','CC-94','CC-95','CC-96','CC-97')
+UNION ALL
+SELECT j.id, 'CC10-M-' || right(j.id::text, 2), 'BM-CC10-' || right(j.id::text, 2), 'CC Steel', 'materials', 'actual', 600, 'high', date '2026-08-20', 'manual_queue', timestamptz '2026-08-20T02:00:00Z'
+FROM public.jobs j WHERE j.job_number IN ('CC-92','SWF-299093','CC-94','CC-95','CC-96','CC-97');
+
+-- Supplier bills. The link stamp is set as xero-sync left it on 25 Aug, so the stamping trigger is held off.
+ALTER TABLE public.xero_invoices DISABLE TRIGGER xero_invoices_job_linked_at;
+INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, invoice_date, line_items, raw_json, job_id, reference, created_at, job_linked_at)
+VALUES
+  ('00000000-0000-0000-0000-000000000001', 'CC10-DRAFT-92', 'BD-CC-92', 'ACCPAY', 'DRAFT', 'CC Steel', 2000, 2200, date '2026-08-24',
+   jsonb_build_array(jsonb_build_object('LineItemID', 'li-92', 'Description', 'Steel', 'AccountCode', '310', 'LineAmount', 2000, 'TaxAmount', 200)),
+   '{"LineAmountTypes": "Exclusive"}'::jsonb, 'cc000000-0000-4000-8000-000000000092', 'CC-92',
+   timestamptz '2026-08-25T02:00:00Z', timestamptz '2026-08-25T02:00:00Z'),
+  ('00000000-0000-0000-0000-000000000001', 'CC10-DRAFT-93', 'BD-CC-93', 'ACCPAY', 'DRAFT', 'CC Steel', 800, 880, date '2026-08-24',
+   jsonb_build_array(jsonb_build_object('LineItemID', 'li-93', 'Description', 'Steel for SWF-299093', 'AccountCode', '310', 'LineAmount', 800, 'TaxAmount', 80)),
+   '{"LineAmountTypes": "Exclusive"}'::jsonb, NULL, NULL, timestamptz '2026-08-25T02:00:00Z', NULL),
+  ('00000000-0000-0000-0000-000000000001', 'CC10-AUTH-94', 'BA-CC-94', 'ACCPAY', 'AUTHORISED', 'CC Steel', 400, 440, date '2026-08-24',
+   jsonb_build_array(jsonb_build_object('LineItemID', 'li-94', 'Description', 'Steel', 'AccountCode', '310', 'LineAmount', 400, 'TaxAmount', 40)),
+   jsonb_build_object('LineAmountTypes', 'Exclusive',
+                      'UpdatedDateUTC', '/Date(' || (extract(epoch FROM timestamptz '2026-11-10T02:00:00Z') * 1000)::bigint || '+0000)/'),
+   'cc000000-0000-4000-8000-000000000094', 'CC-94', timestamptz '2026-08-25T02:00:00Z', timestamptz '2026-08-25T02:00:00Z'),
+  ('00000000-0000-0000-0000-000000000001', 'CC10-DRAFT-97', 'BD-CC-97', 'ACCPAY', 'DRAFT', 'CC Steel', 0, 0, date '2026-08-24',
+   '[]'::jsonb, '{"LineAmountTypes": "Exclusive"}'::jsonb, 'cc000000-0000-4000-8000-000000000097', 'CC-97',
+   timestamptz '2026-08-25T02:00:00Z', timestamptz '2026-08-25T02:00:00Z');
+ALTER TABLE public.xero_invoices ENABLE TRIGGER xero_invoices_job_linked_at;
+
+-- CC-95: two variations of 1000 estimate agreed 1 Oct, 600 placed 5 Oct. CC-96: 1000 agreed 1 Oct with 600
+-- placed 5 Oct, then 1000 agreed 1 Nov with 600 placed 5 Nov.
+INSERT INTO public.job_variations (job_id, variation_number, description, amount, cost_estimate, status, accepted_at, approved_at) VALUES
+  ('cc000000-0000-4000-8000-000000000095', 1, 'Extra gate', 1500, 1000, 'approved', timestamptz '2026-10-01T02:00:00Z', timestamptz '2026-10-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000095', 2, 'Extra run', 1500, 1000, 'approved', timestamptz '2026-10-01T02:00:00Z', timestamptz '2026-10-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000096', 1, 'Extra gate', 1500, 1000, 'approved', timestamptz '2026-10-01T02:00:00Z', timestamptz '2026-10-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000096', 2, 'Extra run', 1500, 1000, 'approved', timestamptz '2026-11-01T02:00:00Z', timestamptz '2026-11-01T02:00:00Z');
+INSERT INTO public.job_materials_facts (job_id, xero_invoice_id, invoice_number, contact_name, lane, kind, amount_ex_gst, confidence, fact_date, automation_source, created_at) VALUES
+  ('cc000000-0000-4000-8000-000000000095', 'CC10-V-95', 'BV-CC-95', 'CC Steel', 'materials', 'actual', 600, 'high', date '2026-10-05', 'manual_queue', timestamptz '2026-10-05T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000096', 'CC10-V-96a', 'BV-CC-96a', 'CC Steel', 'materials', 'actual', 600, 'high', date '2026-10-05', 'manual_queue', timestamptz '2026-10-05T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000096', 'CC10-V-96b', 'BV-CC-96b', 'CC Steel', 'materials', 'actual', 600, 'high', date '2026-11-05', 'manual_queue', timestamptz '2026-11-05T02:00:00Z');
+
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN
+    SELECT e.n, e.st15, e.st16, e.why, c15.cost_state AS got15, c16.cost_state AS got16, c15.waiting_on AS w15
+      FROM (VALUES ('CC-92',      'waiting',  'waiting', 'draft_bill_on_job'),
+                   ('SWF-299093', 'waiting',  'waiting', 'draft_bill_on_job'),
+                   ('CC-94',      'settling', 'final',   NULL),
+                   ('CC-95',      'waiting',  'waiting', 'variation_cost_not_in'),
+                   ('CC-96',      'settling', 'final',   NULL),
+                   ('CC-97',      'final',    'final',   NULL)) AS e(n, st15, st16, why)
+      JOIN public.jobs j ON j.job_number = e.n
+      CROSS JOIN LATERAL public.job_cost_close(ARRAY[j.id], date '2026-11-15') c15
+      CROSS JOIN LATERAL public.job_cost_close(ARRAY[j.id], date '2026-12-16') c16
+  LOOP
+    IF r.got15 IS DISTINCT FROM r.st15 OR r.got16 IS DISTINCT FROM r.st16
+       OR (r.why IS NOT NULL AND NOT (r.why = ANY (r.w15))) THEN
+      RAISE EXCEPTION '% state % on 15 Nov and % on 16 Dec, expected % and %, waiting on % (expected %)',
+        r.n, r.got15, r.got16, r.st15, r.st16, r.w15, r.why;
+    END IF;
+  END LOOP;
+  IF (SELECT final_on FROM public.job_cost_close(ARRAY['cc000000-0000-4000-8000-000000000094'::uuid], date '2026-11-15'))
+     IS DISTINCT FROM date '2026-12-10' THEN
+    RAISE EXCEPTION 'CC-94: a bill Xero last changed on 10 Nov must count from 10 Nov';
+  END IF;
 END $$;
 
 -- 5. The service role can read it; nothing was stored by reading.

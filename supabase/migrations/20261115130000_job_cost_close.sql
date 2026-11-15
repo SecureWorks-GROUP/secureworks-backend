@@ -103,7 +103,9 @@
 -- history floor.
 -- The day a cost reached the job is not its document date. A bill dated in August and placed on the job in
 -- November changed the job in November, so it counts from November: the later of its date, the day its row was
--- written (xero_invoices, trade_invoices, purchase_orders) and the day its own route put it on this job
+-- written (xero_invoices, trade_invoices, purchase_orders), the bill's last change in Xero (UpdatedDateUTC in
+-- the stored Xero record, so a draft approved or an amount edited restarts the count; a payment does too, which
+-- only waits longer), a crew invoice's submission, and the day its own route put it on this job
 -- (xero_invoices.job_linked_at for a bill placed by its job link, the first job_materials_facts row for a
 -- materials placement, the first bookkeeping evidence revision for a bookkeeping placement). Each placement day
 -- counts only for the route that placed it. last_cost_on in the output is still Job Profit's document date.
@@ -117,7 +119,11 @@
 --     the larger of the two totals counts, never their sum;
 --   variation_cost_not_in  a variation agreed (not being decided, not dead; agreed when accepted or approved, or
 --     when it was made for one auto-approved with neither) carries a cost estimate, and the cost Job Profit counts
---     that reached the job after that moment is less than variation_cost_cover_share (half) of the estimate.
+--     that reached the job after that moment is less than variation_cost_cover_share (half) of the estimates of
+--     every variation agreed at or after it, taken together, so one cost never covers two variations;
+--   draft_bill_on_job  a supplier bill still at DRAFT or SUBMITTED in Xero (draft_bill_statuses) names the job:
+--     linked to it, placed on it as materials, or its job number in the reference or a line. Job Profit counts no
+--     such bill until it is approved.
 -- With no finish day on record at all, the quiet count runs from the newer of the last cost and the day the job
 -- record last changed (jobs.updated_at), so a job put away today is not final today.
 -- finished_basis names what dated it: work_done (completed_at or a sign-off), first_invoice, repair_stage,
@@ -138,8 +144,9 @@
 -- logged as a warning, the way the existing status trigger on jobs (jobs_open_job_work_order) does. A move lost
 -- that way is still bounded by jobs.updated_at.
 -- Measured on production with the record simulated as starting today (read only, 15 Nov 2026): of 2,090 jobs,
--- 284 read final, 89 settling, 609 waiting, 906 open and 202 not applicable. 77 are held by a cost that reached
--- the job late, 57 by a work order, 17 by a Dispatch order and 3 by a variation being decided; no cancelled or
+-- 284 read final, 87 settling, 611 waiting, 906 open and 202 not applicable. 77 are held by a cost that reached
+-- the job late, 57 by a work order, 17 by a Dispatch order, 7 by a bill still in draft in Xero and 3 by a
+-- variation being decided; no cancelled or
 -- lost job reads open. Most settling jobs turn final on 2 and 3 Dec, 30 days after the bookkeeping load placed
 -- their costs.
 -- Rollback: supabase/rollbacks/20261115130000_job_cost_close_down.sql (drops both triggers, the functions and the
@@ -173,8 +180,14 @@ BEGIN
          AND a.attname IN ('cycle_number', 'reopen_reason')) <> 2 THEN
     RAISE EXCEPTION 'job cost close: makesafe_job_details.cycle_number or reopen_reason is missing';
   END IF;
+  IF to_regprocedure('public.job_cost_bill_line_job_id(text)') IS NULL THEN
+    RAISE EXCEPTION 'job cost close: job_cost_bill_line_job_id(text) is missing';
+  END IF;
   IF (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = 'public.xero_invoices'::regclass AND NOT a.attisdropped
-         AND a.attname IN ('xero_invoice_id', 'created_at', 'job_linked_at')) <> 3
+         AND a.attname IN ('xero_invoice_id', 'created_at', 'job_linked_at', 'raw_json', 'invoice_type', 'status', 'total',
+                           'reference', 'line_items', 'job_id')) <> 10
+     OR (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = 'public.trade_invoices'::regclass AND NOT a.attisdropped
+            AND a.attname IN ('id', 'created_at', 'submitted_at')) <> 3
      OR (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = 'public.job_materials_facts'::regclass
             AND NOT a.attisdropped AND a.attname IN ('xero_invoice_id', 'job_id', 'created_at')) <> 3
      OR (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = 'public.bookkeeping_line_evidence'::regclass
@@ -320,18 +333,19 @@ AS $policy$
                                               'ordered_not_billed_over_30_days', 'po_no_bill_overdue',
                                               'invoice_emailed_bill_not_placed', 'installer_bill_unconfirmed',
                                               'unapproved_trade_charges', 'dispatch_order_not_billed',
-                                              'work_order_not_billed', 'variation_cost_not_in'),
+                                              'work_order_not_billed', 'variation_cost_not_in', 'draft_bill_on_job'),
     'restoration_open_quote_statuses', jsonb_build_array('draft', 'sent'),
     'variation_open_statuses', jsonb_build_array('pending_approval', 'sent'),
     'variation_dead_statuses', jsonb_build_array('declined', 'cancelled', 'rejected', 'void', 'voided', 'withdrawn'),
     'work_order_dead_statuses', jsonb_build_array('draft', 'cancelled', 'void', 'voided', 'declined', 'rejected'),
     'work_order_tolerance_ex', 1,
-    'variation_cost_cover_share', 0.5
+    'variation_cost_cover_share', 0.5,
+    'draft_bill_statuses', jsonb_build_array('DRAFT', 'SUBMITTED')
   );
 $policy$;
 
 COMMENT ON FUNCTION public.job_cost_close_policy() IS
-  'Job cost close (20261115130000): the numbers and lists job_cost_close reads. quiet_days: Perth days with no new cost, after the newer of the finish day and the last cost, before a finished job''s cost is final. finished_statuses: the statuses that finish a job with no repair stage; a day on the job never does by itself. did_not_go_ahead_statuses: cancelled or lost. reopened_statuses: never finished while here. invoice_marks_finished_types: work types whose first approved customer invoice marks the finish, only at a status in invoice_finish_statuses, never for a subtype in invoice_never_finishes_subtypes or a job with a restoration stage, never a job with a repair stage, never one reopened or past its first attendance. repair_finished_stages: values of jobs.metadata.repair_stage that mean the repair is finished. closed_statuses: statuses that finish a job carrying a repair stage whatever its stage. status_events: the job_events types that carry or imply a status move, each with the status it implies when the event names none (a restoration stage move names it job_status; a quote accepted, a quote run declined and a callback each set one). reopen_event_types and reopen_note_prefix: the job_events rows that put a job back to work whatever status they name (a re-attend, a quote accepted, a quote run declined, a callback opened, and a reopen note whose text starts with the prefix); each counts as a working move. callback_opened_event and callback_resolved_event: a job with a callback opened and none resolved after it is not finished. restoration_open_quote_statuses: a restoration quote at one of these is not decided, and the job is not finished. variation_open_statuses: a variation at one of these is not decided, and the job is not finished; any other variation not in variation_dead_statuses is agreed (when accepted or approved, else when made) and restarts the quiet count on that day, and while it carries a cost estimate and the cost Job Profit counts that reached the job since is less than variation_cost_cover_share of it, the job waits on variation_cost_not_in (this read''s own reason). dispatch_order_not_billed is this read''s own reason: a Dispatch order sent with no bill dated on or after it on the job''s cost. work_order_not_billed is this read''s own reason: the job''s work orders not in work_order_dead_statuses agree more labour than the labour Job Profit counts on the job, by more than work_order_tolerance_ex. not_cost_reasons: Job Profit reasons that are not about cost and never hold a close. pending_cost_reasons: reasons that say a cost is still to come, so a cancelled or lost job carrying one is waiting, not out of scope. Change only by migration. Service role only.';
+  'Job cost close (20261115130000): the numbers and lists job_cost_close reads. quiet_days: Perth days with no new cost, after the newer of the finish day and the last cost, before a finished job''s cost is final. finished_statuses: the statuses that finish a job with no repair stage; a day on the job never does by itself. did_not_go_ahead_statuses: cancelled or lost. reopened_statuses: never finished while here. invoice_marks_finished_types: work types whose first approved customer invoice marks the finish, only at a status in invoice_finish_statuses, never for a subtype in invoice_never_finishes_subtypes or a job with a restoration stage, never a job with a repair stage, never one reopened or past its first attendance. repair_finished_stages: values of jobs.metadata.repair_stage that mean the repair is finished. closed_statuses: statuses that finish a job carrying a repair stage whatever its stage. status_events: the job_events types that carry or imply a status move, each with the status it implies when the event names none (a restoration stage move names it job_status; a quote accepted, a quote run declined and a callback each set one). reopen_event_types and reopen_note_prefix: the job_events rows that put a job back to work whatever status they name (a re-attend, a quote accepted, a quote run declined, a callback opened, and a reopen note whose text starts with the prefix); each counts as a working move. callback_opened_event and callback_resolved_event: a job with a callback opened and none resolved after it is not finished. restoration_open_quote_statuses: a restoration quote at one of these is not decided, and the job is not finished. variation_open_statuses: a variation at one of these is not decided, and the job is not finished; any other variation not in variation_dead_statuses is agreed (when accepted or approved, else when made) and restarts the quiet count on that day, and while the cost Job Profit counts that reached the job since it was agreed is less than variation_cost_cover_share of the cost estimates of every variation agreed at or after it, together, the job waits on variation_cost_not_in (this read''s own reason). draft_bill_statuses: a supplier bill at one of these in Xero that names the job (linked, placed as materials, or its job number in the reference or a line) holds the job on draft_bill_on_job (this read''s own reason). dispatch_order_not_billed is this read''s own reason: a Dispatch order sent with no bill dated on or after it on the job''s cost. work_order_not_billed is this read''s own reason: the job''s work orders not in work_order_dead_statuses agree more labour than the labour Job Profit counts on the job, by more than work_order_tolerance_ex. not_cost_reasons: Job Profit reasons that are not about cost and never hold a close. pending_cost_reasons: reasons that say a cost is still to come, so a cancelled or lost job carrying one is waiting, not out of scope. Change only by migration. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.job_cost_close(p_job_ids uuid[] DEFAULT NULL, p_as_of date DEFAULT NULL)
 RETURNS TABLE (
@@ -384,6 +398,7 @@ AS $fn$
            ARRAY(SELECT jsonb_array_elements_text(p.pol -> 'work_order_dead_statuses')) AS work_order_dead_statuses,
            (p.pol ->> 'work_order_tolerance_ex')::numeric AS work_order_tolerance_ex,
            (p.pol ->> 'variation_cost_cover_share')::numeric AS variation_cost_cover_share,
+           ARRAY(SELECT jsonb_array_elements_text(p.pol -> 'draft_bill_statuses')) AS draft_bill_statuses,
            COALESCE(p_as_of, (now() AT TIME ZONE 'Australia/Perth')::date) AS as_of
       FROM (SELECT public.job_cost_close_policy() AS pol) p
   ), moves AS (
@@ -507,12 +522,16 @@ AS $fn$
   ), ce_arr AS (
     -- The moment each cost reached the job, which can be long after the document's own date: the latest of its
     -- date (Perth midnight), the moment the document reached our copy (a Xero bill first synced, a crew invoice
-    -- or an order made), and the moment the route that counts it put it on this job (the bill linked to the job
-    -- in Xero, the first materials placement, or the first Bookkeeping evidence naming this job). A cost that
-    -- lands on a quiet job restarts the count whatever its date. GREATEST skips a null.
+    -- or an order made), the bill's last change in Xero (UpdatedDateUTC: a draft approved, an amount edited, a
+    -- payment made), a crew invoice's submission, and the moment the route that counts it put it on this job (the
+    -- bill linked to the job in Xero, the first materials placement, or the first Bookkeeping evidence naming
+    -- this job). A cost that lands on a quiet job restarts the count whatever its date. GREATEST skips a null.
+    -- xero_invoices.updated_at is not used: it is our row's last write, which every sync touches.
     SELECT c.*,
            GREATEST(c.event_date::timestamp AT TIME ZONE 'Australia/Perth',
                     x.created_at,
+                    to_timestamp(substring(x.raw_json ->> 'UpdatedDateUTC' FROM '^/Date\((\d+)')::bigint / 1000.0),
+                    t.submitted_at,
                     CASE WHEN c.match_method = 'xero_invoices.job_id' THEN x.job_linked_at END,
                     t.created_at,
                     po.created_at,
@@ -546,24 +565,30 @@ AS $fn$
      WHERE NOT COALESCE(w.status = ANY (pr.work_order_dead_statuses), false) AND w.agreed_labour_ex > 0
        AND (p_job_ids IS NULL OR w.job_id = ANY (p_job_ids))
      GROUP BY w.job_id
-  ), varied AS (
+  ), agreed_var AS (
     -- Variations agreed: not still being decided and not dead. Agreed at the moment accepted or approved, or for
     -- one with neither (a staff variation auto-approved under the limit), the moment it was made. Approving a
-    -- variation changes no status. A variation with a cost estimate is uncosted while the cost Job Profit
-    -- counts that reached the job after it was agreed is less than variation_cost_cover_share of its estimate.
-    SELECT v.job_id,
-           max((ag.agreed_at AT TIME ZONE 'Australia/Perth')::date) AS agreed_on,
-           bool_or(v.cost_estimate > 0
-                   AND COALESCE((SELECT sum(c.amount_ex) FROM ce_arr c
-                                  WHERE c.job_id = v.job_id AND c.is_actual AND c.arrived_at > ag.agreed_at), 0)
-                       < v.cost_estimate * pr.variation_cost_cover_share) AS uncosted
+    -- variation changes no status.
+    SELECT v.job_id, ag.agreed_at, COALESCE(v.cost_estimate, 0) AS cost_estimate
       FROM public.job_variations v CROSS JOIN params pr
      CROSS JOIN LATERAL (SELECT COALESCE(GREATEST(v.accepted_at, v.approved_at), v.created_at) AS agreed_at) ag
      WHERE ag.agreed_at IS NOT NULL
        AND NOT COALESCE(v.status = ANY (pr.variation_dead_statuses), false)
        AND NOT COALESCE(v.status = ANY (pr.variation_open_statuses), false)
        AND (p_job_ids IS NULL OR v.job_id = ANY (p_job_ids))
-     GROUP BY v.job_id
+  ), varied AS (
+    -- The cost of work agreed at a moment can only reach the job after it. So for each moment a variation was
+    -- agreed, the cost Job Profit counts that reached the job after it must cover variation_cost_cover_share of
+    -- every estimate agreed at or after it, together: the same dollars never cover two variations.
+    SELECT a.job_id,
+           max((a.agreed_at AT TIME ZONE 'Australia/Perth')::date) AS agreed_on,
+           bool_or(a.cost_estimate > 0
+                   AND COALESCE((SELECT sum(c.amount_ex) FROM ce_arr c
+                                  WHERE c.job_id = a.job_id AND c.is_actual AND c.arrived_at > a.agreed_at), 0)
+                       < (SELECT sum(b.cost_estimate) FROM agreed_var b
+                           WHERE b.job_id = a.job_id AND b.agreed_at >= a.agreed_at) * pr.variation_cost_cover_share) AS uncosted
+      FROM agreed_var a CROSS JOIN params pr
+     GROUP BY a.job_id
   ), dispatch_open AS (
     -- Supplier orders sent from Dispatch (Job Profit does not read these): the day the last one went, and
     -- whether one has no bill dated on or after it that is on this job's cost. A bill matched by text alone,
@@ -580,6 +605,23 @@ AS $fn$
      WHERE o.order_kind = 'dispatch_v2_email'
        AND (p_job_ids IS NULL OR o.job_id = ANY (p_job_ids))
      GROUP BY o.job_id
+  ), draft_bill AS (
+    -- Supplier bills still in draft or submitted in Xero (draft_bill_statuses) that name the job: linked to it in
+    -- Xero, placed on it as materials, or carrying its job number in the reference or a line. Job Profit counts
+    -- none of them until approved, so the job's cost is not in.
+    SELECT DISTINCT d.job_id
+      FROM (SELECT x.xero_invoice_id, x.job_id, x.reference, x.line_items
+              FROM public.xero_invoices x CROSS JOIN params pr
+             WHERE x.invoice_type = 'ACCPAY' AND x.status = ANY (pr.draft_bill_statuses)
+               AND COALESCE(x.total, 0) <> 0) x
+     CROSS JOIN LATERAL (
+       SELECT x.job_id
+       UNION ALL SELECT f.job_id FROM public.job_materials_facts f WHERE f.xero_invoice_id = x.xero_invoice_id
+       UNION ALL SELECT public.job_cost_bill_line_job_id(x.reference)
+       UNION ALL SELECT public.job_cost_bill_line_job_id(li ->> 'Description')
+                   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(x.line_items) = 'array' THEN x.line_items
+                                                  ELSE '[]'::jsonb END) li) d(job_id)
+     WHERE d.job_id IS NOT NULL AND (p_job_ids IS NULL OR d.job_id = ANY (p_job_ids))
   ), src AS (
     SELECT jp.job_id, jp.org_id, jp.job_number, jp.status, jp.work_type, jp.work_subtype, jp.holding_job,
            jp.actual_cost_events, jp.actual_cost_ex, jp.last_cost_date, jp.first_invoice_date, jp.invoiced_ex,
@@ -599,6 +641,7 @@ AS $fn$
            av.last_arrived_on,
            va.agreed_on AS variation_agreed_on,
            COALESCE(va.uncosted, false) AS variation_uncosted,
+           EXISTS (SELECT 1 FROM draft_bill db WHERE db.job_id = jp.job_id) AS draft_bill_open,
            COALESCE(wo.agreed_labour_ex > COALESCE(av.labour_ex, 0) + pr0.work_order_tolerance_ex, false) AS work_order_open,
            EXISTS (SELECT 1 FROM public.job_variations v
                     WHERE v.job_id = jp.job_id AND v.status = ANY (pr0.variation_open_statuses)) AS variation_open,
@@ -669,7 +712,8 @@ AS $fn$
                   ORDER BY min(u.o))
              || CASE WHEN s.dispatch_order_open THEN ARRAY['dispatch_order_not_billed'] ELSE ARRAY[]::text[] END
              || CASE WHEN s.work_order_open THEN ARRAY['work_order_not_billed'] ELSE ARRAY[]::text[] END
-             || CASE WHEN s.variation_uncosted THEN ARRAY['variation_cost_not_in'] ELSE ARRAY[]::text[] END AS cost_reasons
+             || CASE WHEN s.variation_uncosted THEN ARRAY['variation_cost_not_in'] ELSE ARRAY[]::text[] END
+             || CASE WHEN s.draft_bill_open THEN ARRAY['draft_bill_on_job'] ELSE ARRAY[]::text[] END AS cost_reasons
       FROM src s CROSS JOIN params pr
      -- The last working move. A make-safe or a job with a repair stage rests at accepted, scheduled or
      -- processing while it is finished (its status is not its stage), so a move there is not a return to work.
@@ -785,7 +829,7 @@ AS $fn$
 $fn$;
 
 COMMENT ON FUNCTION public.job_cost_close(uuid[], date) IS
-  'Job cost close (20261115130000): per job in v_job_profit, whether its cost is final. cost_state: not_applicable (holding job, or cancelled or lost with no cost, none still to come and nothing still under way), open (work not finished, or in rectification), waiting (finished; waiting_on names what stands in the way), settling (finished, nothing outstanding, quiet for fewer than quiet_days; final_on is the day it turns final), final (final_on is the day it became final, closed_by the rule). Finished is where the job stands now (a finished status; for a job with a repair stage, stage complete or archived; or an approved invoice on a make-safe that is at a resting status, on its first attendance and not restoration work), never a day on the job alone. finished_on is the later of the work day (completed_at or a standing sign-off) and the day the job came to stand where it stands (the stage moving to complete, the make-safe''s first invoice, or the first move into a finished status after the last move out of one); a day stands only while the status has not moved to a working one after it, and an invoice that does not stand finishes nothing; with no day, the quiet count runs from the newer of the last cost and the day the job record last changed. A job with a callback open (jobs.is_callback or an unresolved callback_opened) or a crew visit still to come or under way, or an undecided restoration quote or variation, is not finished. The quiet count runs from the newest of the finish day, the day the last cost reached the job (the later of its document date, the day its row was written and the day its own route placed it on the job), the last crew visit, the last Dispatch order sent and the last variation agreed. waiting_on also names dispatch_order_not_billed (a Dispatch order sent with no bill dated on or after it on the job''s cost), work_order_not_billed (work orders agree more labour than the labour Job Profit counts) and variation_cost_not_in (a costed variation agreed with less than half its estimate in counted cost reaching the job since). last_cost_on is still Job Profit''s document date. A make-safe once taken out of a finished status is finished again only by a finished status. Status moves are read from job_status_moves (the database''s own record, complete from the day it began) and from the application''s events before that; for the time before the record began, final_on is never earlier than quiet_days after the earlier of the day the job row last changed and the day its record began. Derived on every read from Job Profit''s row: a later cost or reason reopens it. waiting_on is Job Profit''s completeness and cost flag less the reasons that are not about cost; any cost flag other than ok holds a close. Says the cost is complete, not that every line is evidenced (job_profit_line_evidence). Null ids: every job. Null as_of: today in Perth; as_of moves only the day the quiet count is measured to, the costs, status and reasons are always today''s. Read only. Service role only.';
+  'Job cost close (20261115130000): per job in v_job_profit, whether its cost is final. cost_state: not_applicable (holding job, or cancelled or lost with no cost, none still to come and nothing still under way), open (work not finished, or in rectification), waiting (finished; waiting_on names what stands in the way), settling (finished, nothing outstanding, quiet for fewer than quiet_days; final_on is the day it turns final), final (final_on is the day it became final, closed_by the rule). Finished is where the job stands now (a finished status; for a job with a repair stage, stage complete or archived; or an approved invoice on a make-safe that is at a resting status, on its first attendance and not restoration work), never a day on the job alone. finished_on is the later of the work day (completed_at or a standing sign-off) and the day the job came to stand where it stands (the stage moving to complete, the make-safe''s first invoice, or the first move into a finished status after the last move out of one); a day stands only while the status has not moved to a working one after it, and an invoice that does not stand finishes nothing; with no day, the quiet count runs from the newer of the last cost and the day the job record last changed. A job with a callback open (jobs.is_callback or an unresolved callback_opened) or a crew visit still to come or under way, or an undecided restoration quote or variation, is not finished. The quiet count runs from the newest of the finish day, the day the last cost reached the job (the latest of its document date, the day its row was written, the bill''s last change in Xero, a crew invoice''s submission and the day its own route placed it on the job), the last crew visit, the last Dispatch order sent and the last variation agreed. waiting_on also names dispatch_order_not_billed (a Dispatch order sent with no bill dated on or after it on the job''s cost), work_order_not_billed (work orders agree more labour than the labour Job Profit counts) variation_cost_not_in (counted cost reaching the job since a variation was agreed is less than half the estimates of the variations agreed from then on) and draft_bill_on_job (a supplier bill still in draft in Xero names the job). last_cost_on is still Job Profit''s document date. A make-safe once taken out of a finished status is finished again only by a finished status. Status moves are read from job_status_moves (the database''s own record, complete from the day it began) and from the application''s events before that; for the time before the record began, final_on is never earlier than quiet_days after the earlier of the day the job row last changed and the day its record began. Derived on every read from Job Profit''s row: a later cost or reason reopens it. waiting_on is Job Profit''s completeness and cost flag less the reasons that are not about cost; any cost flag other than ok holds a close. Says the cost is complete, not that every line is evidenced (job_profit_line_evidence). Null ids: every job. Null as_of: today in Perth; as_of moves only the day the quiet count is measured to, the costs, status and reasons are always today''s. Read only. Service role only.';
 
 REVOKE ALL ON FUNCTION public.job_cost_close_policy() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.job_cost_close(uuid[], date) FROM PUBLIC, anon, authenticated;
