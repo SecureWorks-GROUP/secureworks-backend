@@ -1232,3 +1232,11 @@ ops-api|supabase/migrations/20261112090000_trade_invoice_commission_super_base.s
 xero-sync|supabase/migrations/20261112090000_trade_invoice_commission_super_base.sql|column|trade_invoices.super_base_ex
 ops-api|supabase/migrations/20261112140000_makesafe_company_restoration_recipients.sql|column|makesafe_companies.restoration_recipients
 ops-api|supabase/migrations/20261112190000_makesafe_company_restoration_cc.sql|column|makesafe_companies.restoration_cc
+# xero-sync writes each bank transaction's lines and the chart of accounts into
+# their own service-role-only tables; ops-api's xero_tieout asks the spend and
+# revenue read beside the bills tie-out.
+xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|table|xero_bank_transaction_lines
+xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|column|xero_bank_transaction_lines.line_amount_types
+xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|column|xero_bank_transaction_lines.xero_type
+xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|table|xero_accounts
+ops-api|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|function|xero_spend_revenue_monthly
