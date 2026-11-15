@@ -131,7 +131,11 @@ BEGIN
     'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): (notes freshness, 20261009132000) %Earlier (eighth review) %')
  ) v(sig, vol, cmt) LOOP
   SELECT pr.prosecdef, pr.provolatile, pr.proconfig INTO p FROM pg_proc pr WHERE pr.oid = to_regprocedure(x.sig);
-  PERFORM pg_temp.nf_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'] AND p.provolatile = x.vol,
+  -- (widened by the due list's time, 20261115092000: the due list alone may also carry
+  -- statement_timeout=45s, which PostgREST hoists onto the worker's request)
+  PERFORM pg_temp.nf_assert(p.prosecdef AND (p.proconfig = ARRAY['search_path=public, pg_temp']
+    OR (x.sig = 'public.context_ledger_due(integer)' AND p.proconfig = ARRAY['search_path=public, pg_temp', 'statement_timeout=45s']))
+   AND p.provolatile = x.vol,
    x.sig || ' must stay a definer with search_path public, pg_temp and volatility ' || x.vol);
   PERFORM pg_temp.nf_assert(has_function_privilege('service_role', x.sig, 'EXECUTE') AND NOT has_function_privilege('anon', x.sig, 'EXECUTE')
    AND NOT has_function_privilege('authenticated', x.sig, 'EXECUTE'), x.sig || ' access wrong');
