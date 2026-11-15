@@ -10,6 +10,7 @@ import {
   countsAgainstWorkOrder,
   incomingLabourByJob,
   readWorkOrderCapFacts,
+  withWorkOrderCaps,
   WorkOrderTotalCapReadError,
   workOrderTotalCapRefusal,
 } from "./work_order_total_cap.ts";
@@ -401,4 +402,87 @@ Deno.test("check: a deduction raised to 0 is checked; without force it would sli
   });
   assertEquals(forced?.code, "work_order_total_over_agreed");
   assertEquals(forced?.jobs[0].most_this_invoice_ex, 0);
+});
+
+Deno.test("list: an approved work order with its amount carries the cap the doors refuse by; others carry null", async () => {
+  const lines = [
+    line("1", "pushed_to_xero", "work order", 1000),
+    line("2", "approved", "travel", 300),
+    line("3", "approved", "commission", 400),
+    line("4", "draft", "work order", 900),
+  ];
+  const lanes = lines.map((l) => ({ line_id: l.id, cost_lane: "labour" }));
+  const variations = [
+    {
+      job_id: JOB,
+      work_order_id: WO,
+      status: "approved",
+      trade_allocation_ex: 100,
+    },
+  ];
+  const out = await withWorkOrderCaps(
+    fakeClient({ lines, lanes, variations }),
+    {
+      schema: "job-work-orders.v1",
+      work_orders: [
+        {
+          id: WO,
+          job_id: JOB,
+          job_number: "SWF-1",
+          status: "approved",
+          agreed_labour_ex: 1200,
+        },
+        {
+          id: "draft-wo",
+          job_id: "j2",
+          status: "draft",
+          agreed_labour_ex: null,
+        },
+      ],
+    },
+  );
+  assertEquals(out.cap_read, "ok");
+  assertEquals(out.work_orders[0].cap, {
+    allowed_ex: 1300,
+    billed_ex: 1300,
+    remaining_ex: 0,
+    billed_in_full: true,
+    over: false,
+  });
+  assertEquals(out.work_orders[1].cap, null);
+  assertEquals(out.schema, "job-work-orders.v1");
+});
+
+Deno.test("list: over the work order says so, with a negative remainder", async () => {
+  const lines = [line("1", "paid", "work order", 1500)];
+  const lanes = [{ line_id: "1", cost_lane: "labour" }];
+  const out = await withWorkOrderCaps(fakeClient({ lines, lanes }), {
+    work_orders: [{
+      id: WO,
+      job_id: JOB,
+      status: "approved",
+      agreed_labour_ex: 1000,
+    }],
+  });
+  assertEquals(out.work_orders[0].cap.over, true);
+  assertEquals(out.work_orders[0].cap.remaining_ex, -500);
+});
+
+Deno.test("list: a failed read never reads as nothing billed", async () => {
+  const out = await withWorkOrderCaps(
+    fakeClient({
+      lines: [line("1", "paid", "work order", 1)],
+      fail: "trade_invoice_lines",
+    }),
+    {
+      work_orders: [{
+        id: WO,
+        job_id: JOB,
+        status: "approved",
+        agreed_labour_ex: 1000,
+      }],
+    },
+  );
+  assertEquals(out.cap_read, "failed");
+  assertEquals(out.work_orders[0].cap, null);
 });
