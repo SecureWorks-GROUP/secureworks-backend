@@ -308,17 +308,25 @@ reads or writes it.
     sum (57 jobs on 15 Nov 2026; some will be work orders agreed above what was finally billed,
     which a person settles by cancelling or adjusting the work order).
   - `variation_cost_not_in`: a variation that is agreed (not `pending_approval` or `sent`, not
-    dead) carries a cost estimate, and the cost Job Profit counts that reached the job after it was
-    agreed is less than half (`variation_cost_cover_share`) of the estimates of every variation
+    dead) carries a cost estimate, and the cost Job Profit counts that is dated on or after the day
+    it was agreed and reached the job after it was agreed is less than half (`variation_cost_cover_share`) of the estimates of every variation
     agreed at or after that moment, taken together, so the same dollars never cover two
     variations. It is agreed when accepted
     or approved, or when made for a staff variation auto-approved under the limit (which carries
-    neither time). A cost bought before the variation was agreed does not cover it; a person
-    settles that by adjusting the estimate.
+    neither time). A cost bought before the variation was agreed does not cover it, even when that
+    older bill is paid, synced or re-linked after it; a person settles that by adjusting the
+    estimate. Coverage is a total, not a match of costs to the work: an unrelated new cost can
+    cover a variation, and another crew's labour can cover a crew work order.
   - `draft_bill_on_job`: a supplier bill still at `DRAFT` or `SUBMITTED` in Xero
     (`draft_bill_statuses`), with an amount, names the job: linked to it in Xero, placed on it as
     materials, or its job number in the reference or a line. Job Profit counts no such bill until
-    it is approved, so the job's cost is not in.
+    it is approved, so the job's cost is not in. A crew bill mirrored from a trade invoice is left
+    out, because Job Profit counts that labour through the trade invoice's lines. A draft named
+    only in its reference holds the close, but once approved Job Profit does not read the
+    reference, so a person places it.
+  The read is planned for each call's own job ids (plpgsql, `plan_cache_mode =
+  force_custom_plan`); ops-api always passes the ids and runs the single-job read beside the
+  other Job Profit reads.
   So `final` says the cost is complete; it does not say the job was invoiced.
 - **Nothing is frozen.** A cost that lands on a final job moves it back to `settling` with a later
   `final_on`; a job put back into rectification or any working status reads `open`, and so does a

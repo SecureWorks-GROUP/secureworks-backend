@@ -835,9 +835,10 @@ Deno.test("job_profit: line evidence comes with the figures; a failed read is un
   const r1 = await jobProfitAction(ok, new URLSearchParams(`job_id=${JOB}`));
   assertEquals(r1.status, 200);
   assertEquals((r1.body as any).line_evidence, { status: "provisional", items: 3, evidenced: 1 });
+  // The cost close read starts first and runs while the other reads run.
   assertEquals(seen, [
-    ["job_profit_line_evidence", { p_job_id: JOB }],
     ["job_cost_close", { p_job_ids: [JOB] }],
+    ["job_profit_line_evidence", { p_job_id: JOB }],
   ]);
   // The cost close read rides beside the figures: an answer that is not its rows is unknown.
   assertEquals((r1.body as any).cost_close, { ok: false, reason: "cost close read returned nothing" });

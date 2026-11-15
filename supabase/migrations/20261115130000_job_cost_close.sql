@@ -119,11 +119,14 @@
 --     the larger of the two totals counts, never their sum;
 --   variation_cost_not_in  a variation agreed (not being decided, not dead; agreed when accepted or approved, or
 --     when it was made for one auto-approved with neither) carries a cost estimate, and the cost Job Profit counts
---     that reached the job after that moment is less than variation_cost_cover_share (half) of the estimates of
---     every variation agreed at or after it, taken together, so one cost never covers two variations;
+--     that is dated on or after the day it was agreed and reached the job after that moment is less than
+--     variation_cost_cover_share (half) of the estimates of every variation agreed at or after it, taken together,
+--     so one cost never covers two variations (an older bill paid or re-linked after it covers nothing);
 --   draft_bill_on_job  a supplier bill still at DRAFT or SUBMITTED in Xero (draft_bill_statuses) names the job:
 --     linked to it, placed on it as materials, or its job number in the reference or a line. Job Profit counts no
---     such bill until it is approved.
+--     such bill until it is approved. A crew bill mirrored from a trade invoice is left out: Job Profit counts
+--     that labour through the trade invoice's lines. A draft named only in its reference holds the close, but
+--     once approved Job Profit does not read the reference, so a person places it (0 such bills on 15 Nov 2026).
 -- With no finish day on record at all, the quiet count runs from the newer of the last cost and the day the job
 -- record last changed (jobs.updated_at), so a job put away today is not final today.
 -- finished_basis names what dated it: work_done (completed_at or a sign-off), first_invoice, repair_stage,
@@ -187,7 +190,7 @@ BEGIN
          AND a.attname IN ('xero_invoice_id', 'created_at', 'job_linked_at', 'raw_json', 'invoice_type', 'status', 'total',
                            'reference', 'line_items', 'job_id')) <> 10
      OR (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = 'public.trade_invoices'::regclass AND NOT a.attisdropped
-            AND a.attname IN ('id', 'created_at', 'submitted_at')) <> 3
+            AND a.attname IN ('id', 'created_at', 'submitted_at', 'xero_bill_id')) <> 4
      OR (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = 'public.job_materials_facts'::regclass
             AND NOT a.attisdropped AND a.attname IN ('xero_invoice_id', 'job_id', 'created_at')) <> 3
      OR (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = 'public.bookkeeping_line_evidence'::regclass
@@ -236,6 +239,8 @@ CREATE TABLE IF NOT EXISTS public.job_status_moves (
   moved_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS job_status_moves_job_moved_idx ON public.job_status_moves (job_id, moved_at);
+-- The read finds the status a job's last logged move set by job and time (80,778 events on 15 Nov 2026).
+CREATE INDEX IF NOT EXISTS job_events_job_created_idx ON public.job_events (job_id, created_at);
 
 COMMENT ON TABLE public.job_status_moves IS
   'Job cost close (20261115130000): the database''s own record of job status moves. One row each time a job row is created (source created), its status changes (source changed, from_status and to_status) or its metadata.repair_stage changes (source repair_stage, the old and new stage in from_status and to_status), written by trigger on jobs whoever makes the change. One baseline row per job that existed when the record began: where it stood then, not a move. Rows are never changed. Read by job_cost_close. Service role reads only; nothing else reads or writes it.';
@@ -367,13 +372,20 @@ RETURNS TABLE (
   as_of date,
   rule text
 )
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 SET search_path = public, pg_temp
 -- The read is one large statement over a few thousand rows. Compiling it costs seconds and saves nothing
 -- (measured locally: 5 s with, 0.2 s without). Production already runs with it off.
 SET jit = off
+-- Planned for each call's own job ids, so a read of a page of jobs filters every source by those ids. A plan
+-- made for any ids at all reads every job's rows (measured on production 15 Nov 2026: 5.3 s for one job).
+-- That is why this is plpgsql: a SQL function's statements are planned with the ids unknown.
+SET plan_cache_mode = force_custom_plan
 AS $fn$
+#variable_conflict use_column
+BEGIN
+  RETURN QUERY
   WITH params AS (
     SELECT (p.pol ->> 'quiet_days')::integer AS quiet_days,
            p.pol ->> 'version' AS rule,
@@ -577,14 +589,17 @@ AS $fn$
        AND NOT COALESCE(v.status = ANY (pr.variation_open_statuses), false)
        AND (p_job_ids IS NULL OR v.job_id = ANY (p_job_ids))
   ), varied AS (
-    -- The cost of work agreed at a moment can only reach the job after it. So for each moment a variation was
-    -- agreed, the cost Job Profit counts that reached the job after it must cover variation_cost_cover_share of
-    -- every estimate agreed at or after it, together: the same dollars never cover two variations.
+    -- The cost of work agreed at a moment can only be bought after it. So for each moment a variation was agreed,
+    -- the cost Job Profit counts that is dated on or after that day and reached the job after that moment must
+    -- cover variation_cost_cover_share of every estimate agreed at or after it, together: the same dollars never
+    -- cover two variations. Both tests: an older bill paid, synced or re-linked after the variation reached the
+    -- job late but was bought for the base work, so it covers nothing.
     SELECT a.job_id,
            max((a.agreed_at AT TIME ZONE 'Australia/Perth')::date) AS agreed_on,
            bool_or(a.cost_estimate > 0
                    AND COALESCE((SELECT sum(c.amount_ex) FROM ce_arr c
-                                  WHERE c.job_id = a.job_id AND c.is_actual AND c.arrived_at > a.agreed_at), 0)
+                                  WHERE c.job_id = a.job_id AND c.is_actual AND c.arrived_at > a.agreed_at
+                                    AND c.event_date >= (a.agreed_at AT TIME ZONE 'Australia/Perth')::date), 0)
                        < (SELECT sum(b.cost_estimate) FROM agreed_var b
                            WHERE b.job_id = a.job_id AND b.agreed_at >= a.agreed_at) * pr.variation_cost_cover_share) AS uncosted
       FROM agreed_var a CROSS JOIN params pr
@@ -608,12 +623,14 @@ AS $fn$
   ), draft_bill AS (
     -- Supplier bills still in draft or submitted in Xero (draft_bill_statuses) that name the job: linked to it in
     -- Xero, placed on it as materials, or carrying its job number in the reference or a line. Job Profit counts
-    -- none of them until approved, so the job's cost is not in.
+    -- none of them until approved, so the job's cost is not in. A crew bill mirrored from a trade invoice is left
+    -- out: Job Profit already counts its labour through the trade invoice's lines.
     SELECT DISTINCT d.job_id
       FROM (SELECT x.xero_invoice_id, x.job_id, x.reference, x.line_items
               FROM public.xero_invoices x CROSS JOIN params pr
              WHERE x.invoice_type = 'ACCPAY' AND x.status = ANY (pr.draft_bill_statuses)
-               AND COALESCE(x.total, 0) <> 0) x
+               AND COALESCE(x.total, 0) <> 0
+               AND NOT EXISTS (SELECT 1 FROM public.trade_invoices t WHERE t.xero_bill_id = x.xero_invoice_id)) x
      CROSS JOIN LATERAL (
        SELECT x.job_id
        UNION ALL SELECT f.job_id FROM public.job_materials_facts f WHERE f.xero_invoice_id = x.xero_invoice_id
@@ -826,6 +843,7 @@ AS $fn$
          t.costs_verified_paid AS all_costs_paid,
          t.quiet_days, t.as_of, t.rule
     FROM stated t;
+END
 $fn$;
 
 COMMENT ON FUNCTION public.job_cost_close(uuid[], date) IS

@@ -631,6 +631,8 @@ export async function jobProfitAction(
     }
   }
 
+  // The cost close read takes seconds on production data, so it runs while the other reads below run.
+  const costClose = readJobCostClose(client, String(summary.job_id));
   return {
     status: 200,
     body: {
@@ -645,7 +647,7 @@ export async function jobProfitAction(
       revenue_events: revenueEvents,
       timeline: buildJobProfitTimeline(costEvents, revenueEvents),
       line_evidence: await readJobLineEvidence(client, summary.job_id),
-      cost_close: await readJobCostClose(client, String(summary.job_id)),
+      cost_close: await costClose,
       labels: JOB_PROFIT_LABELS,
       ...(await patioExpectedPart(client, patioScope, patioFrozen, summary)),
     },

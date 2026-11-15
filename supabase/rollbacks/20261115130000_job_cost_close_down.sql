@@ -8,3 +8,4 @@ DROP TRIGGER IF EXISTS trg_jobs_record_status_created ON public.jobs;
 DROP TRIGGER IF EXISTS trg_jobs_record_status_changed ON public.jobs;
 DROP FUNCTION IF EXISTS public.jobs_record_status_move();
 DROP TABLE IF EXISTS public.job_status_moves;
+DROP INDEX IF EXISTS public.job_events_job_created_idx;
