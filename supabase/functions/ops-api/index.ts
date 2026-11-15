@@ -857,6 +857,7 @@ import {
 } from './job_work_order_office.ts'
 import { releaseVoidedTradeInvoice, VoidedTradeInvoiceReleaseError } from './trade_invoice_voided_release.ts'
 import { presentTradeInvoiceBillOutcome } from './trade_invoice_bill_outcome.ts'
+import { TradeJobRateError, tradeJobRateNote, tradeTypedJobRate } from './trade_rate_per_job.ts'
 import { ExtraRateRuleError, extraLineRateHold, listExtraRateRules, loadExtraRateRules, setExtraRateRule, type ExtraRateHold } from './trade_invoice_extra_rate_rule.ts'
 import { findNoWeekClaimConflict, isNoWeekClaimRefusal, NO_WEEK_CLAIM_MESSAGE, NO_WEEK_CLAIM_REFUSAL } from './trade_invoice_no_week_claim.ts'
 import { isTradeInvoiceNumberCollision, nextTradeInvoiceNumber, tradeInvoiceDay, tradeInvoiceInitials } from './trade_invoice_number.ts'
@@ -14379,9 +14380,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let assignments: any[] = []
             let reviewFlag: string | null = null
             if (!weeklyInvoice && week_start && weekEnd && hasManualAssignments) {
-              // Rate guard: the rate is SERVER-SIDE ONLY (trade_rates). A client
-              // rate on a manual row is never read; a missing server rate blocks
-              // the submission instead of trusting the client.  [audit 2026-09]
+              // Rate guard: the office rate is trade_rates. A rate the trade
+              // typed on a card is read below (owner, 15 Nov 2026), but a
+              // missing office rate still blocks the submission instead of
+              // trusting the client.  [audit 2026-09]
               if (resolvedRate <= 0) {
                 // B3: RATE_NOT_CONFIGURED — structured error the FE can surface as a toast
                 return json({
@@ -14465,11 +14467,24 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 // hours>16/day is implausible — flag for ops review, do not reject. [F2]
                 if (h > 16) reviewFlag = 'hours_excess'
                 const manualRow = row.m || {}
-                // Server-resolved rate only. Any rate / subtotal / gst / super /
-                // total the client put on the row is never read.  [audit 2026-09]
+                // The trade's own rate for this job card (owner, 15 Nov 2026),
+                // else the office rate. Only a rate the app marks as typed by
+                // the trade (rate_source client_entered) is read: both apps
+                // also send the office rate they showed, which may be stale.
+                // Any subtotal / gst / super / total the client put on the row
+                // is never read.  [audit 2026-09]
+                let typedRate: number | null = null
+                try {
+                  typedRate = manualRow.rate_source === 'client_entered'
+                    ? tradeTypedJobRate(manualRow.rate, resolvedRate, `the job card for ${a.scheduled_date || 'a day'}`)
+                    : null
+                } catch (rateErr) {
+                  if (rateErr instanceof TradeJobRateError) throw new ApiError(rateErr.message, 422)
+                  throw rateErr
+                }
                 assignments.push({
-                  id: a.id, job_id: a.job_id, hours_worked: h, hourly_rate: resolvedRate,
-                  rate_source: 'server_resolved',
+                  id: a.id, job_id: a.job_id, hours_worked: h, hourly_rate: typedRate ?? resolvedRate,
+                  rate_source: typedRate != null ? 'client_entered' : 'server_resolved',
                   description: manualRow.description || null,
                   // M4 U1: carry the trade's variation explanation (trade-app capture
                   // is U2/Deckhand B) so the jobGroups loop can attach it to a flagged
@@ -14544,7 +14559,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // Group by job
             const jobGroups: Record<string, any[]> = {}
             for (const a of assignments) {
-              const groupKey = a._lineKey || a.job_id
+              // A card billed at the trade's own rate never shares a line with
+              // a card at another rate on the same job.
+              const groupKey = a._lineKey || (a.rate_source === 'client_entered' ? `${a.job_id}@${a.hourly_rate}` : a.job_id)
               if (!jobGroups[groupKey]) jobGroups[groupKey] = []
               jobGroups[groupKey].push(a)
             }
@@ -14635,9 +14652,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               const lineTotal = Math.round(jobHours * rate * 100) / 100
               totalHours += jobHours
 
-              const rateNote = rateSource === 'client_entered'
-                ? 'Client-entered rate: $' + rate + '/hr. Ops must verify before approval.'
-                : 'Server-resolved rate from trade_rates.'
+              const rateNote = tradeJobRateNote(rate, resolvedRate, rateSource === 'client_entered')
 
               // ── M4 U1: make-safe hours flag (assigned/clocked path) ────────
               // Structured activation (jobs.type='makesafe'); the SWMS- prefix is
@@ -57664,6 +57679,9 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     // rate_resolved=false signals the client to show a "Rate not set — contact
     // office" card state and BLOCK that card's inclusion (never a silent $0).  [F5]
     rate_resolved: rate > 0,
+    // A rate the trade types on a booked job card bills that card (owner,
+    // 15 Nov 2026); one above the office rate is flagged for the office.
+    trade_rate_editable: rate > 0,
     is_per_metre: isPerMetre,
     week_ending: weekEnding,
     week_start: weekStart,
