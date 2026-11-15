@@ -14338,9 +14338,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let assignments: any[] = []
             let reviewFlag: string | null = null
             if (!weeklyInvoice && week_start && weekEnd && hasManualAssignments) {
-              // Rate guard: the rate is SERVER-SIDE ONLY (trade_rates). A client
-              // rate on a manual row is never read; a missing server rate blocks
-              // the submission instead of trusting the client.  [audit 2026-09]
+              // Rate guard: the office rate is trade_rates. A rate the trade
+              // typed on a card is read below (owner, 15 Nov 2026), but a
+              // missing office rate still blocks the submission instead of
+              // trusting the client.  [audit 2026-09]
               if (resolvedRate <= 0) {
                 // B3: RATE_NOT_CONFIGURED — structured error the FE can surface as a toast
                 return json({
@@ -14425,11 +14426,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 if (h > 16) reviewFlag = 'hours_excess'
                 const manualRow = row.m || {}
                 // The trade's own rate for this job card (owner, 15 Nov 2026),
-                // else the office rate. Any subtotal / gst / super / total the
-                // client put on the row is never read.  [audit 2026-09]
+                // else the office rate. Only a rate the app marks as typed by
+                // the trade (rate_source client_entered) is read: both apps
+                // also send the office rate they showed, which may be stale.
+                // Any subtotal / gst / super / total the client put on the row
+                // is never read.  [audit 2026-09]
                 let typedRate: number | null = null
                 try {
-                  typedRate = tradeTypedJobRate(manualRow.rate, resolvedRate, `the job card for ${a.scheduled_date || 'a day'}`)
+                  typedRate = manualRow.rate_source === 'client_entered'
+                    ? tradeTypedJobRate(manualRow.rate, resolvedRate, `the job card for ${a.scheduled_date || 'a day'}`)
+                    : null
                 } catch (rateErr) {
                   if (rateErr instanceof TradeJobRateError) throw new ApiError(rateErr.message, 422)
                   throw rateErr
