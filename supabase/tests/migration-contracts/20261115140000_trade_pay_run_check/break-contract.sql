@@ -5,7 +5,7 @@
 DO $$
 DECLARE d text := pg_get_functiondef('public.trade_pay_run_check(date,integer,uuid)'::regprocedure);
 DECLARE needle text := 'AND (COALESCE(i.xero_adjustments_ex, 0) > 0.005';
-DECLARE needle2 text := 'OR (jsonb_typeof(x->''amount'') = ''number'' AND (x->>''amount'')::numeric > 0.005)';
+DECLARE needle2 text := 'OR CASE WHEN jsonb_typeof(x->''amount'') = ''number'' THEN (x->>''amount'')::numeric END > 0.005';
 BEGIN
   IF position(needle IN d) = 0 OR position(needle2 IN d) = 0 THEN
     RAISE EXCEPTION 'break: the changed-by-hand test was not found';

@@ -83,16 +83,18 @@ which would read as "every bill clean".
 |---|---|
 | `invoice_not_approved` | The invoice's status is not `approved`, `pushed_to_xero` or `paid` (for example `pending_acknowledgment`, `queried` or `failed`). |
 | `lines_differ` | The invoice's lines do not add up to its `subtotal_ex` (within 5 cents), or it has no lines. |
+| `pay_above_lines` | `net_pay` is more than `subtotal_ex` (5 cents). Super and deductions only ever take money off, so the invoice would pay more than its lines. |
 | `not_in_xero` | The invoice has no Xero bill. |
 | `xero_bill_voided` | Its Xero bill is VOIDED or DELETED. |
 | `xero_amount_differs` | The Xero bill total is more than 5 cents from `invoice_pays`. |
 | `xero_total_not_read` | The invoice has a Xero bill whose total has not been read yet, so it cannot be compared. |
-| `xero_changed_by_hand` | The bill was changed in Xero to pay the trade more (`xero_adjustments_ex` above 0), any office line on it adds money (so a plus and a minus that cancel out still stop), or one of the invoice's own lines was edited in Xero (a `xero_adjustment_lines` entry of kind `unexplained`). `invoice_pays` adds back every Xero change, so without this stop a changed bill would always match. |
+| `xero_changed_by_hand` | The bill was changed in Xero to pay the trade more (`xero_adjustments_ex` above 0), any office line on it adds money (so a plus and a minus that cancel out still stop), an adjustment line's amount is not a number, or one of the invoice's own lines was edited in Xero (a `xero_adjustment_lines` entry of kind `unexplained`). `invoice_pays` adds back every Xero change, so without this stop a changed bill would always match. |
 | `work_order_over_agreed` | The `work order` lines on one job work order, across every live invoice of every trade and any week (bills voided or deleted in Xero left out), add up to more than `work_orders.agreed_labour_ex`. Every invoice holding such a line is stopped. Crew shares (`group share`) are left out: each share carries 12% super inside it, so the shares add up to more than the agreed labour, and the group work order's own release already holds the shares until they add up to its pool. |
 | `work_order_not_agreed` | A `work order` line whose work order has no agreed amount on file, so nothing can say the amount is right. |
 | `rate_above_office` | An hourly labour line's rate (`labour`, `general labour`, `make safe`; `hourly_rate`, else `unit_rate`, which most older lines carry instead) is above the trade's office rate on that day (`trade_rates`) and is not the rate on the trade's live (not cancelled) booking for that job (`job_assignments.hourly_rate`). Trades set their own rate on each job (owner, 15 Nov 2026), so a rate at or below the office rate passes. With no office rate on file the rate is not judged. |
 | `line_on_no_job` | A labour, make safe or agreed-amount line has no job. |
-| `second_invoice_same_week` | Another live invoice of the same source from the same trade for the same week, or, for a crew share, another live invoice from the same trade holding a share of the same group work order (`group_share_id`, else `job_work_order_id`). |
+| `second_invoice_same_week` | Another live invoice of the same source from the same trade for the same week, or, for a crew share, another live invoice or line from the same trade holding a share of the same group work order (the same `group_share_id` or the same `job_work_order_id`). |
+| `share_without_group` | A crew share line names neither a `group_share_id` nor a `job_work_order_id`, so nothing can show it is not paid twice. |
 
 ## Notes: shown, never stop a bill
 
@@ -112,7 +114,8 @@ invoice can carry more than one): no agreed amount on the work order 24, rate
 above the office rate 20, Xero total differs 2, second invoice in the same week
 2, not approved 1, not in Xero 1, work order over the agreed amount 1. No
 invoice's lines differed from its subtotal, no crew share was invoiced twice
-and no bill was changed by hand in Xero. Of the 5 invoices not yet paid, 3 were
+no bill was changed by hand in Xero, no invoice paid more than its lines,
+and every share line names its group. Of the 5 invoices not yet paid, 3 were
 clean.
 
 What the numbers say:

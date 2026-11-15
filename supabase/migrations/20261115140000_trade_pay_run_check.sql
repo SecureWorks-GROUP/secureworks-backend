@@ -22,6 +22,9 @@
 --                            queried, failed and the like).
 --   lines_differ             the invoice's lines do not add up to its
 --                            subtotal_ex (5 cents), or it has no lines.
+--   pay_above_lines          net_pay is more than subtotal_ex (5 cents): super
+--                            and deductions only ever take money off, so the
+--                            invoice pays more than its lines.
 --   not_in_xero              the invoice has no Xero bill.
 --   xero_bill_voided         its Xero bill is VOIDED or DELETED.
 --   xero_amount_differs      the Xero bill total differs by more than 5 cents
@@ -33,7 +36,8 @@
 --                            invoice, any office line that adds money (so a
 --                            plus and a minus that cancel out still stop), or
 --                            one of the invoice's own lines was edited there
---                            (xero_adjustment_lines kind 'unexplained'). invoice_pays adds every Xero
+--                            (xero_adjustment_lines kind 'unexplained'), or an
+--                            adjustment line whose amount is not a number. invoice_pays adds every Xero
 --                            change back, so the amount check alone cannot see
 --                            these.
 --   work_order_over_agreed   the 'work order' lines on one job work order,
@@ -60,8 +64,13 @@
 --   Labour here is 'labour', 'general labour' and 'make safe' lines.
 --   second_invoice_same_week another live invoice of the same source from the
 --                            same trade for the same week, or for a crew share,
---                            another live invoice from the same trade holding
---                            a share of the same group work order.
+--                            another live invoice (or another line) from the
+--                            same trade holding a share of the same group work
+--                            order: the same group_share_id or the same
+--                            job_work_order_id.
+--   share_without_group      a crew share line names no group_share_id and no
+--                            job_work_order_id, so nothing can say it is not
+--                            paid twice.
 --
 -- A NOTE is shown and never stops a bill:
 --   hours_over_expected      the line already carries flag hours_over_baseline.
@@ -127,11 +136,10 @@ AS $$
       AND (w.org_id IS NULL OR i.org_id = w.org_id)
   ), share_line AS (
     -- Every crew share line on a live invoice, for the duplicate share check.
-    SELECT l.trade_invoice_id, li.user_id, COALESCE(l.group_share_id::text, l.job_work_order_id::text) AS share_key
+    SELECT l.id AS line_id, l.trade_invoice_id, li.user_id, l.group_share_id, l.job_work_order_id
     FROM public.trade_invoice_lines l
     JOIN live_inv li ON li.id = l.trade_invoice_id
     WHERE l.line_type = 'group share'
-      AND COALESCE(l.group_share_id::text, l.job_work_order_id::text) IS NOT NULL
   ), ln AS (
     SELECT l.*, i.user_id, i.pay_week
     FROM public.trade_invoice_lines l
@@ -174,6 +182,12 @@ AS $$
     FROM inv i JOIN line_sums s ON s.id = i.id
     WHERE s.n_lines = 0 OR abs(s.lines_ex - COALESCE(i.subtotal_ex, 0)) > 0.05
     UNION ALL
+    SELECT i.id, 'stop', 'pay_above_lines',
+           'The invoice pays $' || to_char(COALESCE(i.net_pay, 0), 'FM999,999,999,990.00')
+             || ' before GST, more than its lines come to ($' || to_char(COALESCE(i.subtotal_ex, 0), 'FM999,999,999,990.00') || ').', 0
+    FROM inv i
+    WHERE COALESCE(i.net_pay, 0) > COALESCE(i.subtotal_ex, 0) + 0.05
+    UNION ALL
     SELECT i.id, 'stop', 'not_in_xero', 'Not in Xero yet.', 1
     FROM inv i WHERE i.xero_bill_id IS NULL
     UNION ALL
@@ -205,6 +219,10 @@ AS $$
                                CASE WHEN jsonb_typeof(i.xero_adjustment_lines) = 'array' THEN i.xero_adjustment_lines ELSE '[]'::jsonb END) x
                              WHERE x->>'kind' = 'unexplained')
                 THEN 'A line from the invoice was changed by hand in Xero.'
+                WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(
+                               CASE WHEN jsonb_typeof(i.xero_adjustment_lines) = 'array' THEN i.xero_adjustment_lines ELSE '[]'::jsonb END) x
+                             WHERE jsonb_typeof(x->'amount') IS DISTINCT FROM 'number')
+                THEN 'A line on the Xero bill could not be read.'
                 WHEN COALESCE(i.xero_adjustments_ex, 0) > 0.005
                 THEN 'The Xero bill was changed by hand to pay $' || to_char(i.xero_adjustments_ex, 'FM999,999,999,990.00') || ' more.'
                 ELSE 'A line adding money was put on the Xero bill by hand.' END, 3
@@ -214,7 +232,8 @@ AS $$
            OR EXISTS (SELECT 1 FROM jsonb_array_elements(
                         CASE WHEN jsonb_typeof(i.xero_adjustment_lines) = 'array' THEN i.xero_adjustment_lines ELSE '[]'::jsonb END) x
                       WHERE x->>'kind' = 'unexplained'
-                         OR (jsonb_typeof(x->'amount') = 'number' AND (x->>'amount')::numeric > 0.005)))
+                         OR jsonb_typeof(x->'amount') IS DISTINCT FROM 'number'
+                         OR CASE WHEN jsonb_typeof(x->'amount') = 'number' THEN (x->>'amount')::numeric END > 0.005))
     UNION ALL
     SELECT * FROM (
       SELECT DISTINCT ON (l.trade_invoice_id, l.job_work_order_id)
@@ -286,8 +305,14 @@ AS $$
     JOIN inv i ON i.id = a.trade_invoice_id
     WHERE EXISTS (
       SELECT 1 FROM share_line b
-      WHERE b.user_id = a.user_id AND b.share_key = a.share_key
-        AND b.trade_invoice_id <> a.trade_invoice_id)
+      WHERE b.user_id = a.user_id AND b.line_id <> a.line_id
+        AND (b.group_share_id = a.group_share_id OR b.job_work_order_id = a.job_work_order_id))
+    UNION ALL
+    SELECT DISTINCT a.trade_invoice_id, 'stop', 'share_without_group',
+           'A crew share line names no group work order.', 7
+    FROM share_line a
+    JOIN inv i ON i.id = a.trade_invoice_id
+    WHERE a.group_share_id IS NULL AND a.job_work_order_id IS NULL
     UNION ALL
     SELECT * FROM (
       SELECT DISTINCT ON (l.trade_invoice_id, l.job_id)
@@ -388,7 +413,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION public.trade_pay_run_check(date, integer, uuid) IS
-  'Trade pay-run check, rule trade-pay-check-v1 (20261115140000): every live trade invoice (not draft or ops-reject) in the p_weeks Monday pay weeks ending with the week of p_as_of (Perth today when null; 1 to 26 weeks, default 2; a crew share counts in the week it was sent), marked clean or stopped. Stops: invoice_not_approved (status not approved, pushed_to_xero or paid), lines_differ (lines do not add up to subtotal_ex, or no lines), not_in_xero, xero_bill_voided, xero_amount_differs (more than 5 cents from net_pay plus GST when gst_on, less the weekly deduction, plus office lines added in Xero), xero_total_not_read, xero_changed_by_hand (pays more than the invoice, an office line adding money, or an invoice line edited in Xero), work_order_over_agreed (work order lines on one job work order across every live invoice, voided bills and crew shares left out, above agreed_labour_ex), work_order_not_agreed, rate_above_office (hourly rate, else unit rate, above the office rate on the day and not a live booking rate; trades set their own rate, at or below the office rate passes), line_on_no_job, second_invoice_same_week (same week, or the same crew share twice). Labour includes make safe lines. Notes never stop a bill: hours_over_expected, labour_over_agreed, day_not_booked, changed_in_xero (money taken off in Xero). counts.undated counts live invoices with no date, which no window holds. p_org_id scopes every read. Read only, writes nothing, never calls Xero. Service role only. Contract: docs/trade-pay-run-check-v1.md.';
+  'Trade pay-run check, rule trade-pay-check-v1 (20261115140000): every live trade invoice (not draft or ops-reject) in the p_weeks Monday pay weeks ending with the week of p_as_of (Perth today when null; 1 to 26 weeks, default 2; a crew share counts in the week it was sent), marked clean or stopped. Stops: invoice_not_approved (status not approved, pushed_to_xero or paid), lines_differ (lines do not add up to subtotal_ex, or no lines), pay_above_lines (net_pay above subtotal_ex), not_in_xero, xero_bill_voided, xero_amount_differs (more than 5 cents from net_pay plus GST when gst_on, less the weekly deduction, plus office lines added in Xero), xero_total_not_read, xero_changed_by_hand (pays more than the invoice, an office line adding money, an unreadable adjustment line, or an invoice line edited in Xero), work_order_over_agreed (work order lines on one job work order across every live invoice, voided bills and crew shares left out, above agreed_labour_ex), work_order_not_agreed, rate_above_office (hourly rate, else unit rate, above the office rate on the day and not a live booking rate; trades set their own rate, at or below the office rate passes), line_on_no_job, second_invoice_same_week (same week, or the same crew share twice), share_without_group. Labour includes make safe lines. Notes never stop a bill: hours_over_expected, labour_over_agreed, day_not_booked, changed_in_xero (money taken off in Xero). counts.undated counts live invoices with no date, which no window holds. p_org_id scopes every read. Read only, writes nothing, never calls Xero. Service role only. Contract: docs/trade-pay-run-check-v1.md.';
 
 REVOKE ALL ON FUNCTION public.trade_pay_run_check(date, integer, uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.trade_pay_run_check(date, integer, uuid) TO service_role;
