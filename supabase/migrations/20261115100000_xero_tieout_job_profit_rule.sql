@@ -24,7 +24,15 @@
 --   * Order: before, overhead was taken first and job rows were capped at the rest. Now job rows are first, because
 --     "on a job" must equal what Job Profit counts. A bill Job Profit counts on a job that was also filed not job
 --     related shows in over_allocated, so the disagreement is visible.
---   * Trade-app labour bills, negative bills, drafts, spend, the months, the six-month line, parts_add_up and the
+--   * Trade-app labour: a bill that reads as a trade-app bill (materials_ai_trade_mirror) and has no Job Profit
+--     cost row on a job. One that Job Profit does count on a job (the cost view lets bookkeeping's evidence or a
+--     placement put such a bill on a job) is on a job here too. Rehearsal: 1 of 246 such bills since June 2026.
+--   * Over allocated: job rows plus the greater of the holding-job rows and the not-a-job claim, above the bill.
+--     The two are not added: a bill linked in Xero to the holding job has every line on it whatever bookkeeping
+--     ruled, and adding them would report a bill ruled overhead as placed twice.
+--   * A bill whose cost rows sit on another org's job is not on a job in its own org's figures (unplaced, rows
+--     short of the bill). Production has one org; this is stated so it is not read as a promise.
+--   * Negative bills, drafts, spend, the months, the six-month line, parts_add_up and the
 --     whole credit note section (TP-07) are unchanged. Every key of the answer is kept; two are added (on_job_rule,
 --     non_job.by_basis). ops-api xero_tieout passes the answer through and needs no change.
 --
@@ -40,7 +48,7 @@
 --   2026-07  168,568.87 /  15,064.16 /  8.94%      2026-10  224,053.75 / 13,435.25 /  6.00%
 --   2026-08  211,342.36 /  12,650.88 /  5.99%      2026-11   80,499.37 / 18,679.62 / 23.20%
 -- Every month's parts add up to its bills total, and each total equals the live function's. Over allocated: 19 bills,
--- 6,623.73, none in a total.
+-- 6,623.73, none in a total (read before the holding-job change above, which can only lower it).
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
@@ -112,6 +120,7 @@ AS $$
   eng AS MATERIALIZED (
     SELECT j.org_id, e.document_id AS xero_invoice_id,
            count(*) AS n,
+           count(*) FILTER (WHERE e.is_actual AND NOT j.hold) AS job_n,
            COALESCE(sum(e.amount_ex) FILTER (WHERE e.is_actual AND NOT j.hold), 0) AS job_ex,
            COALESCE(sum(e.amount_ex) FILTER (WHERE e.is_actual AND j.hold), 0) AS hold_ex,
            COALESCE(bool_or(NOT e.is_actual AND e.amount_ex > 0), false) AS unconfirmed
@@ -140,7 +149,11 @@ AS $$
            -- In the total: a bill of 0 or more. Below 0: negative_bill only.
            (b.bill_ex IS NOT NULL AND b.bill_ex >= 0) AS counted,
            (b.bill_ex IS NOT NULL AND b.bill_ex < 0) AS negative,
-           public.materials_ai_trade_mirror(b.xero_invoice_id, b.line_items) AS mirror,
+           -- Trade-app labour only while Job Profit has no cost row of the bill
+           -- on a job: a bill that reads as a trade-app bill but that Job
+           -- Profit counts on a job (bookkeeping's evidence, a placement) is
+           -- on a job here too.
+           (public.materials_ai_trade_mirror(b.xero_invoice_id, b.line_items) AND COALESCE(g.job_n, 0) = 0) AS mirror,
            q.status AS queue_status,
            round(GREATEST(COALESCE(q.overhead_ex, 0), 0), 2) AS overhead_part,
            COALESCE(g.n, 0) AS row_count,
@@ -191,12 +204,15 @@ AS $$
            CASE WHEN counted AND mirror THEN bill_ex ELSE 0 END AS mirror_ex,
            -- Overhead next, capped at what the job rows left of the bill.
            LEAST(nonjob_claim_ex, CASE WHEN counted AND NOT mirror THEN bill_ex - on_job_ex ELSE 0 END) AS overhead_ex,
-           -- Everything the job rows (summed with their signs), the holding-job
-           -- rows and the not-a-job claim say, above the bill. A trade-app
-           -- labour bill is read whole and its rows are not read, so it is
-           -- never over allocated.
+           -- What the job rows (summed with their signs) and the dollars said
+           -- to be on no real job say, above the bill. Holding-job rows and the
+           -- not-a-job claim both say "no real job" and can name the same
+           -- lines (a bill linked in Xero to the holding job has every line on
+           -- it, whatever bookkeeping ruled), so the greater of the two is
+           -- taken, not their sum. A trade-app labour bill is read whole and
+           -- has no job rows, so it is never over allocated.
            CASE WHEN counted AND NOT mirror
-                THEN GREATEST(job_rows_ex + hold_rows_ex + nonjob_claim_ex - bill_ex, 0)
+                THEN GREATEST(job_rows_ex + GREATEST(hold_rows_ex, nonjob_claim_ex) - bill_ex, 0)
                 ELSE 0 END AS over_ex
       FROM b3
   ),
@@ -538,6 +554,6 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION public.xero_tieout_monthly(date, integer, uuid) IS
-  'TP-01 Xero tie-out, Job Profit rule (20261115100000; built on 20261029121500 and TP-07 20261030060000): by month, every AUTHORISED or PAID supplier bill dollar of 0 or more (ex GST) in our copy of Xero sorted into on a job, trade-app labour (already counted on jobs by the trade app), overhead / not job related (stock and vehicles not yet separated) or unplaced, with the unplaced share (rounded up, never below 0) and the last 6 months. On a job is what Job Profit counts for the bill today: its actual cost rows for the bill in v_job_cost_events (sources supplier_bill and materials_fact) on a job that is not a holding job, summed with their signs and capped at the bill, so every route that puts a bill line on a job (a placement, the Xero job link, a job number on the line, bookkeeping''s line evidence) is counted here the day Job Profit counts it. A row Job Profit holds back (an installer placement nobody has confirmed, JP-12) is unplaced: installer_awaiting_confirmation. Overhead is next, capped at what the job rows left: the greater of what a person filed in Bills to place (the overhead part of a split, else a bill filed not job related whole) and the lines bookkeeping''s current evidence rules are no job''s cost (v_bookkeeping_line_evidence_current, evidenced, no job, allocation overhead or not_job_cost); non_job.by_basis splits it. Unplaced is the bill''s remainder, by reason. A bill below 0 is shown only as negative_bill; job rows, holding-job rows and the not-a-job claim above a bill that is not trade-app labour are shown as over_allocated; neither is in the total. parts_add_up checks the buckets against the bills read directly. p_org_id scopes every read to one org (null reads every org, a bill per org and Xero id; a bill''s cost rows are read in the org of the job they sit on). as_of picks the months only: cost rows, Bills to place states and evidence are as of today. Spend money (TP-08) is not_yet_read with a null amount, never $0. Supplier credit notes (TP-07) are read exactly as 20261030060000 reads them: not_yet_read until xero-sync has finished a full read of the org''s credit notes, then shown beside each month from v_supplier_credit_placement, never netted from the bills total. Read only, aggregates only, service role only.';
+  'TP-01 Xero tie-out, Job Profit rule (20261115100000; built on 20261029121500 and TP-07 20261030060000): by month, every AUTHORISED or PAID supplier bill dollar of 0 or more (ex GST) in our copy of Xero sorted into on a job, trade-app labour (already counted on jobs by the trade app), overhead / not job related (stock and vehicles not yet separated) or unplaced, with the unplaced share (rounded up, never below 0) and the last 6 months. On a job is what Job Profit counts for the bill today: its actual cost rows for the bill in v_job_cost_events (sources supplier_bill and materials_fact) on a job that is not a holding job, summed with their signs and capped at the bill, so every route that puts a bill line on a job (a placement, the Xero job link, a job number on the line, bookkeeping''s line evidence) is counted here the day Job Profit counts it, for a job in the bill''s own org. A bill that reads as a trade-app bill is trade-app labour only while Job Profit has no cost row of it on a job. A row Job Profit holds back (an installer placement nobody has confirmed, JP-12) is unplaced: installer_awaiting_confirmation. Overhead is next, capped at what the job rows left: the greater of what a person filed in Bills to place (the overhead part of a split, else a bill filed not job related whole) and the lines bookkeeping''s current evidence rules are no job''s cost (v_bookkeeping_line_evidence_current, evidenced, no job, allocation overhead or not_job_cost); non_job.by_basis splits it. Unplaced is the bill''s remainder, by reason. A bill below 0 is shown only as negative_bill; job rows plus the greater of the holding-job rows and the not-a-job claim, above a bill that is not trade-app labour, are shown as over_allocated; neither is in the total. parts_add_up checks the buckets against the bills read directly. p_org_id scopes every read to one org (null reads every org, a bill per org and Xero id; a bill''s cost rows are read in the org of the job they sit on). as_of picks the months only: cost rows, Bills to place states and evidence are as of today. Spend money (TP-08) is not_yet_read with a null amount, never $0. Supplier credit notes (TP-07) are read exactly as 20261030060000 reads them: not_yet_read until xero-sync has finished a full read of the org''s credit notes, then shown beside each month from v_supplier_credit_placement, never netted from the bills total. Read only, aggregates only, service role only.';
 REVOKE ALL ON FUNCTION public.xero_tieout_monthly(date, integer, uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.xero_tieout_monthly(date, integer, uuid) TO service_role;

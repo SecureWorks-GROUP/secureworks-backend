@@ -20,8 +20,8 @@
 --   CN8  DRAFT, allocated to BILL-A          (never placed)
 --   CN9  no status sent, allocated to BILL-A (never placed)
 BEGIN;
--- 20261115100000 gave the tie-out Job Profit's own rule, and the earlier tie-out migrations and their downs refuse
--- that body. This contract rolls 20261030060000 back below, so it rolls 20261115100000 back first, inside this
+-- 20261115100000 gave the tie-out Job Profit's own rule. 20261030060000 and its down refuse that body by its
+-- comment; 20261029121500 has no such guard and would replace or drop it without a word. This contract rolls 20261030060000 back below, so it rolls 20261115100000 back first, inside this
 -- transaction: the ROLLBACK at the end puts it back.
 SELECT COALESCE(obj_description(to_regprocedure('public.xero_tieout_monthly(date,integer,uuid)'), 'pg_proc'), '') LIKE 'TP-01 Xero tie-out, Job Profit rule (20261115100000%' AS tieout_has_job_profit_rule \gset
 \if :tieout_has_job_profit_rule
