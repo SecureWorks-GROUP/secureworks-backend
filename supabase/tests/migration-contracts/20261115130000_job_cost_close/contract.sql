@@ -14,7 +14,7 @@
 --   CC-11  repair, processing, repair stage on_site, invoiced   open (an invoice does not finish a repair)
 --   CC-12  repair, accepted, repair stage complete, invoiced    final, finished by its repair stage, no finish day
 --   CC-13  fencing, archived, never marked complete             final, finished by status, no finish day
---   CC-14  fencing, complete 10 Aug, client signed off 3 Aug    finished on 3 Aug (the earlier day)
+--   CC-14  fencing, complete 10 Aug, client signed off 14 Aug   finished on 14 Aug (the later day)
 --   CC-15  the holding job, costs on it                         not_applicable
 --   CC-16  fencing, complete, clean costs, a priced open order  waiting on open_purchase_orders
 --   CC-17  fencing, completed 10 Aug 17:00 UTC                  finished on 11 Aug (the Perth day)
@@ -25,11 +25,24 @@
 --   CC-21  make-safe, accepted, invoiced, on its second attendance   open (the invoice belongs to the attendance before)
 --   CC-22  make-safe, processing, invoiced, reopened at cycle 1      open
 --   CC-23  make-safe, archived, on its second attendance             final, finished by status, no finish day
---   CC-24  fencing, complete 10 Aug, signed 1 Aug, revoked 5 Aug     finished on 10 Aug (a revoked sign-off is no sign-off)
---   CC-25  fencing, complete 10 Aug, signed, revoked, signed 6 Aug   finished on 6 Aug (the sign-off that stands)
+--   CC-24  fencing, complete 10 Aug, signed 15 Aug, revoked 18 Aug   finished on 10 Aug (a revoked sign-off is no sign-off)
+--   CC-25  fencing, complete 10 Aug, signed, revoked, signed 12 Aug  finished on 12 Aug (the sign-off that stands)
 --   CC-26  fencing, cancelled, no cost, a priced open order          waiting on open_purchase_orders (a cost is still to come)
 --   CC-27  make-safe, complete 10 Aug, first attendance, invoiced    finished on 10 Aug by work_done (the status finishes it)
---   CC-28  repair, archived, repair stage on_site                    final, finished by status
+--   CC-28  repair, archived, repair stage on_site                    final, finished by status (archived puts the card away)
+--  Third review, 15 Nov 2026:
+--   CC-29  repair, invoiced, repair stage on_site                    open (the stage, not the status, is where a repair stands)
+--   CC-30  make-safe, in_progress, invoiced, first attendance        open (an invoice finishes a make-safe only at a resting status)
+--   CC-31  restoration make-safe, processing, invoiced               open (restoration is invoiced before its works)
+--   CC-32  fencing, complete 10 Aug, rectification 1 Oct, complete 20 Oct, completed_at still 10 Aug
+--                                                                    settling, finished on 20 Oct by status, final on 19 Nov
+--   CC-33  fencing, complete 10 Nov, an old sign-off from 1 Feb      settling, finished on 10 Nov, final on 10 Dec
+--   CC-34  fencing, archived, no day and no status move on record, record last changed 1 Nov
+--                                                                    settling, no finish day, final on 1 Dec
+--   CC-35  fencing, archived on 25 Oct by a status move, no completed_at   settling, finished on 25 Oct by status, final on 24 Nov
+--   CC-36  repair, processing, stage moved to complete 28 Oct        settling, finished on 28 Oct by repair_stage, final on 27 Nov
+--   CC-37  make-safe, archived 1 Nov, invoiced 25 Aug, moved to processing 26 Aug   final on 24 Sep by first_invoice
+--                                                                    (putting an invoiced make-safe away does not restart its count)
 
 \set ON_ERROR_STOP on
 
@@ -57,6 +70,9 @@ BEGIN
   IF p ->> 'version' <> 'cost-close-v1' OR (p ->> 'quiet_days')::int <> 30
      OR p -> 'invoice_marks_finished_types' <> '["makesafe"]'::jsonb
      OR p -> 'repair_finished_stages' <> '["complete"]'::jsonb
+     OR p -> 'invoice_finish_statuses' <> '["accepted", "scheduled", "processing"]'::jsonb
+     OR p -> 'invoice_never_finishes_subtypes' <> '["restoration"]'::jsonb
+     OR p -> 'closed_statuses' <> '["archived"]'::jsonb
      OR p -> 'reopened_statuses' <> '["rectification"]'::jsonb
      OR p -> 'did_not_go_ahead_statuses' <> '["cancelled", "lost"]'::jsonb
      OR NOT (p -> 'finished_statuses') @> '["complete", "invoiced", "archived"]'::jsonb
@@ -81,12 +97,16 @@ END $$;
 BEGIN;
 SET LOCAL TimeZone = 'UTC';
 
-INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at, completed_at)
+-- updated_at is fixed at 1 Jul, before every cost, so a job with no finish day counts from its last cost
+-- unless its case says otherwise (CC-34).
+INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata, pricing_json, expected_costs, created_at, updated_at, completed_at)
 SELECT ('cc000000-0000-4000-8000-0000000000' || lpad(v.n::text, 2, '0'))::uuid, '00000000-0000-0000-0000-000000000001',
        v.status, v.type, 'CC-' || lpad(v.n::text, 2, '0'), false, v.meta::jsonb, '{}',
        CASE WHEN v.type = 'fencing'
             THEN '{"lanes": {"labour": {"amount_ex_gst": 500}, "materials": {"amount_ex_gst": 700}, "commission": {"amount_ex_gst": 0}}}'::jsonb END,
-       timestamptz '2026-07-01T00:00:00Z', v.completed::timestamptz
+       timestamptz '2026-07-01T00:00:00Z',
+       CASE WHEN v.n = 34 THEN timestamptz '2026-11-01T02:00:00Z' ELSE timestamptz '2026-07-01T00:00:00Z' END,
+       v.completed::timestamptz
 FROM (VALUES
   (1,  'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
   (2,  'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
@@ -115,8 +135,34 @@ FROM (VALUES
   (25, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
   (26, 'cancelled',     'fencing',  '{}', NULL),
   (27, 'complete',      'makesafe', '{}', '2026-08-10T02:00:00Z'),
-  (28, 'archived',      'repair',   '{"repair_stage": "on_site"}', NULL)
+  (28, 'archived',      'repair',   '{"repair_stage": "on_site"}', NULL),
+  (29, 'invoiced',      'repair',   '{"repair_stage": "on_site"}', NULL),
+  (30, 'in_progress',   'makesafe', '{}', NULL),
+  (31, 'processing',    'makesafe', '{"ses_family": "restoration"}', NULL),
+  (32, 'complete',      'fencing',  '{}', '2026-08-10T02:00:00Z'),
+  (33, 'complete',      'fencing',  '{}', '2026-11-10T02:00:00Z'),
+  (34, 'archived',      'fencing',  '{}', NULL),
+  (35, 'archived',      'fencing',  '{}', NULL),
+  (36, 'processing',    'repair',   '{"repair_stage": "complete"}', NULL),
+  (37, 'archived',      'makesafe', '{}', NULL)
 ) AS v(n, status, type, meta, completed);
+
+-- Status and stage moves on record. Most jobs have none, as most of production's older jobs have none.
+INSERT INTO public.job_events (job_id, event_type, detail_json, created_at) VALUES
+  ('cc000000-0000-4000-8000-000000000032', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000032', 'status_changed', '{"new_status": "rectification"}', timestamptz '2026-10-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000032', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-10-20T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000032', 'status_changed', '{"new_status": "invoiced"}',      timestamptz '2026-10-22T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000033', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-11-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000033', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-11-10T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000035', 'status_change',  '{"from": "scheduled", "to": "archived"}', timestamptz '2026-10-25T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000036', 'repair_stage_changed', '{"from_stage": "on_site", "to_stage": "complete"}', timestamptz '2026-10-28T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000037', 'status_changed', '{"new_status": "processing"}',    timestamptz '2026-08-26T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000037', 'status_changed', '{"new_status": "archived"}',      timestamptz '2026-11-01T02:00:00Z'),
+  -- A normal run through the finished statuses does not move the finish day: CC-01 was invoiced, then archived.
+  ('cc000000-0000-4000-8000-000000000001', 'status_changed', '{"new_status": "scheduled"}',     timestamptz '2026-08-01T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000001', 'status_changed', '{"new_status": "complete"}',      timestamptz '2026-08-10T02:00:01Z'),
+  ('cc000000-0000-4000-8000-000000000001', 'status_changed', '{"new_status": "invoiced"}',      timestamptz '2026-08-25T02:00:00Z');
 
 -- Where each make-safe stands on its attendances. CC-09, CC-10 and CC-18 have no details row at all: that reads
 -- as a first attendance.
@@ -145,13 +191,14 @@ SELECT j.id, 'CC-M-' || right(j.job_number, 2), 'BM-CC-' || right(j.job_number, 
 FROM public.jobs j WHERE j.job_number LIKE 'CC-%' AND j.type = 'fencing' AND j.job_number NOT IN ('CC-03', 'CC-04', 'CC-07', 'CC-26');
 
 INSERT INTO public.job_client_signoffs (job_id, method, waiver_reason, captured_by_actor, created_at) VALUES
-  ('cc000000-0000-4000-8000-000000000014', 'office_waiver', 'Customer away, office signed', 'contract@test', timestamptz '2026-08-03T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000014', 'office_waiver', 'Customer away, office signed', 'contract@test', timestamptz '2026-08-14T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000033', 'office_waiver', 'Customer away, office signed', 'contract@test', timestamptz '2026-02-01T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000019', 'office_waiver', 'Customer away, office signed', 'contract@test', timestamptz '2026-08-03T02:00:00Z'),
-  ('cc000000-0000-4000-8000-000000000024', 'office_waiver', 'Customer away, office signed', 'contract@test', timestamptz '2026-08-01T02:00:00Z'),
-  ('cc000000-0000-4000-8000-000000000024', 'revoked',       NULL,                           'contract@test', timestamptz '2026-08-05T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000024', 'office_waiver', 'Customer away, office signed', 'contract@test', timestamptz '2026-08-15T02:00:00Z'),
+  ('cc000000-0000-4000-8000-000000000024', 'revoked',       NULL,                           'contract@test', timestamptz '2026-08-18T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000025', 'office_waiver', 'Customer away, office signed', 'contract@test', timestamptz '2026-08-01T02:00:00Z'),
   ('cc000000-0000-4000-8000-000000000025', 'revoked',       NULL,                           'contract@test', timestamptz '2026-08-03T02:00:00Z'),
-  ('cc000000-0000-4000-8000-000000000025', 'office_waiver', 'Customer back, office signed', 'contract@test', timestamptz '2026-08-06T02:00:00Z');
+  ('cc000000-0000-4000-8000-000000000025', 'office_waiver', 'Customer back, office signed', 'contract@test', timestamptz '2026-08-12T02:00:00Z');
 
 -- CC-16 and CC-26: a priced order sent, delivery 10 days ago, no bill. Not overdue, still open.
 INSERT INTO public.purchase_orders (id, org_id, job_id, po_number, supplier_name, source, status, subtotal, total, delivery_date, created_at, last_sent_at, invoice_received_at) VALUES
@@ -176,7 +223,7 @@ INSERT INTO cc_key VALUES
   ('CC-11', 'open',           NULL,         false, NULL,         NULL,               NULL),
   ('CC-12', 'final',          '2026-09-19', true,  NULL,         'repair_stage',     NULL),
   ('CC-13', 'final',          '2026-09-19', true,  NULL,         'status',           NULL),
-  ('CC-14', 'final',          '2026-09-19', true,  '2026-08-03', 'work_done',        NULL),
+  ('CC-14', 'final',          '2026-09-19', true,  '2026-08-14', 'work_done',        NULL),
   ('CC-15', 'not_applicable', NULL,         false, NULL,         NULL,               NULL),
   ('CC-16', 'waiting',        NULL,         true,  '2026-08-10', 'work_done',        'open_purchase_orders'),
   ('CC-17', 'final',          '2026-09-19', true,  '2026-08-11', 'work_done',        NULL),
@@ -187,10 +234,19 @@ INSERT INTO cc_key VALUES
   ('CC-22', 'open',           NULL,         false, NULL,         NULL,               NULL),
   ('CC-23', 'final',          '2026-09-19', true,  NULL,         'status',           NULL),
   ('CC-24', 'final',          '2026-09-19', true,  '2026-08-10', 'work_done',        NULL),
-  ('CC-25', 'final',          '2026-09-19', true,  '2026-08-06', 'work_done',        NULL),
+  ('CC-25', 'final',          '2026-09-19', true,  '2026-08-12', 'work_done',        NULL),
   ('CC-26', 'waiting',        NULL,         true,  NULL,         'did_not_go_ahead', 'open_purchase_orders'),
   ('CC-27', 'final',          '2026-09-19', true,  '2026-08-10', 'work_done',        NULL),
-  ('CC-28', 'final',          '2026-09-19', true,  NULL,         'status',           NULL);
+  ('CC-28', 'final',          '2026-09-19', true,  NULL,         'status',           NULL),
+  ('CC-29', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-30', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-31', 'open',           NULL,         false, NULL,         NULL,               NULL),
+  ('CC-32', 'settling',       '2026-11-19', true,  '2026-10-20', 'status',           NULL),
+  ('CC-33', 'settling',       '2026-12-10', true,  '2026-11-10', 'work_done',        NULL),
+  ('CC-34', 'settling',       '2026-12-01', true,  NULL,         'status',           NULL),
+  ('CC-35', 'settling',       '2026-11-24', true,  '2026-10-25', 'status',           NULL),
+  ('CC-36', 'settling',       '2026-11-27', true,  '2026-10-28', 'repair_stage',     NULL),
+  ('CC-37', 'final',          '2026-09-24', true,  '2026-08-25', 'first_invoice',    NULL);
 
 DO $$
 DECLARE r record; out text := ''; ids uuid[];
@@ -257,7 +313,7 @@ BEGIN
   IF (SELECT count(*) FROM public.job_cost_close(one, date '2026-09-19')) <> 1 THEN
     RAISE EXCEPTION 'job cost close contract: asked for one job, got another count';
   END IF;
-  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 28 THEN
+  IF (SELECT count(*) FROM public.job_cost_close(NULL, date '2026-11-15') WHERE job_number LIKE 'CC-%') <> 37 THEN
     RAISE EXCEPTION 'job cost close contract: null ids did not return every job';
   END IF;
   IF (SELECT count(*) FROM public.job_cost_close()) <> (SELECT count(*) FROM public.v_job_profit) THEN

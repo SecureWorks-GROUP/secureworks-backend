@@ -8,7 +8,7 @@ DO $$
 DECLARE t text;
 BEGIN
   FOREACH t IN ARRAY ARRAY['public.v_job_profit', 'public.jobs', 'public.job_client_signoffs',
-                           'public.makesafe_job_details',
+                           'public.makesafe_job_details', 'public.job_events',
                            'public.job_materials_facts', 'public.xero_invoices', 'public.purchase_orders'] LOOP
     IF to_regclass(t) IS NULL THEN
       RAISE EXCEPTION 'job cost close setup: % missing from the registered stack', t;
@@ -23,3 +23,4 @@ ALTER TABLE public.makesafe_job_details
   ADD COLUMN IF NOT EXISTS cycle_number integer NOT NULL DEFAULT 1,
   ADD COLUMN IF NOT EXISTS reopen_reason text;
 GRANT SELECT ON public.makesafe_job_details TO service_role;
+GRANT SELECT ON public.job_events TO service_role;
