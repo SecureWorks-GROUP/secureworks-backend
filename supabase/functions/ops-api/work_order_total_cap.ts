@@ -251,3 +251,67 @@ export async function checkWorkOrderTotalCap(client: any, input: {
     force: input.force,
   });
 }
+
+/** The cap as the office list shows it, for one approved job work order. */
+export type WorkOrderCapSummary = {
+  allowed_ex: number;
+  billed_ex: number;
+  remaining_ex: number;
+  billed_in_full: boolean;
+  over: boolean;
+};
+
+/**
+ * Adds `cap` to every approved job work order with its agreed labour in a
+ * list_work_orders kind=job answer, read by the same rule the invoice doors
+ * refuse by (readWorkOrderCapFacts). Other rows get `cap: null`. A failed read
+ * never reads as nothing billed: every row gets `cap: null` and the answer
+ * says `cap_read: "failed"`. Reads only; it changes nothing.
+ */
+export async function withWorkOrderCaps<
+  T extends { work_orders: any[] },
+>(client: any, listing: T): Promise<
+  T & { cap_read: "ok" | "failed"; work_orders: any[] }
+> {
+  const rows = Array.isArray(listing?.work_orders) ? listing.work_orders : [];
+  const capped = rows.filter((r) =>
+    String(r?.status) === "approved" && r?.agreed_labour_ex != null &&
+    r?.job_id && r?.id
+  );
+  let summaries = new Map<string, WorkOrderCapSummary>();
+  let read: "ok" | "failed" = "ok";
+  try {
+    const facts = await readWorkOrderCapFacts(
+      client,
+      capped.map((r) => ({
+        jobId: String(r.job_id),
+        ref: String(r.job_number || r.job_id),
+        agreedEx: Number(r.agreed_labour_ex) || 0,
+        workOrderId: String(r.id),
+      })),
+    );
+    const allowedByJob = new Map(facts.jobs.map((j) => [j.jobId, j.allowedEx]));
+    summaries = new Map(capped.map((r) => {
+      const allowed = allowedByJob.get(String(r.job_id)) ?? 0;
+      const billed = facts.billedEx.get(String(r.job_id)) ?? 0;
+      return [String(r.id), {
+        allowed_ex: allowed,
+        billed_ex: billed,
+        remaining_ex: (cents(allowed) - cents(billed)) / 100,
+        billed_in_full: cents(billed) >= cents(allowed),
+        over: cents(billed) > cents(allowed),
+      }];
+    }));
+  } catch {
+    read = "failed";
+    summaries = new Map();
+  }
+  return {
+    ...listing,
+    cap_read: read,
+    work_orders: rows.map((r) => ({
+      ...r,
+      cap: read === "ok" ? summaries.get(String(r?.id)) ?? null : null,
+    })),
+  };
+}

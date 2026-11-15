@@ -16,6 +16,7 @@ import {
 } from './trade_invoice_mode.ts'
 import {
   checkWorkOrderTotalCap,
+  withWorkOrderCaps,
   WorkOrderTotalCapReadError,
   type WorkOrderTotalCapRefusal,
 } from './work_order_total_cap.ts'
@@ -9803,7 +9804,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
       case 'list_work_orders':
         if (url.searchParams.get('kind') === 'job') {
-          return json(await runJobWorkOrder(() => listJobWorkOrders(client, url.searchParams)))
+          // Each approved job work order also carries `cap`: the cap the invoice
+          // doors refuse by (work_order_total_cap.ts), for the office's list.
+          return json(await runJobWorkOrder(async () =>
+            withWorkOrderCaps(client, await listJobWorkOrders(client, url.searchParams))
+          ))
         }
         return json(await listWorkOrders(client, url.searchParams))
       case 'job_work_order':
