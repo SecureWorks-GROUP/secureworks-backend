@@ -7,7 +7,7 @@ SET LOCAL statement_timeout = '60s';
 DO $guard$
 DECLARE pol jsonb := public.context_scorecard_run_policy();
 BEGIN
- IF pol->>'version' IS DISTINCT FROM 'context-scorecard-hourly-v1' OR NOT (pol->>'statement_timeout' IN ('60s', '110s')) THEN
+ IF pol->>'version' IS DISTINCT FROM 'context-scorecard-hourly-v1' OR coalesce(pol->>'statement_timeout', '') NOT IN ('60s', '110s') THEN
   RAISE EXCEPTION 'context_scorecard_hourly_timeout_down_refused: a later change replaced the policy, roll it back first: %', pol;
  END IF;
 END $guard$;
@@ -50,8 +50,8 @@ COMMENT ON FUNCTION public.context_scorecard_run_policy() IS
  'Context scorecard hourly (20261007040000): every number of the hourly scorecard run in one place: the pg_cron job (context-scorecard-hourly, 40 * * * * UTC, its command), the run''s statement and lock timeouts (60 s, 10 s), late (75 min), the missed-hour window (24 h) and grades, slow (30 s), keep (180 days), and the report (surface context_scorecard_run_status; readers whose receipts count: rayleigh; a receipt counts for 75 min). Changed only by migration.';
 
 
--- The job, back to the policys command. Skipped where pg_cron is absent (the contract runner) or the job
--- is not scheduled; a job already on the new command is left alone.
+-- The job, back to the policy's command. Skipped where pg_cron is absent (the contract runner) or the job
+-- is not scheduled; a job already on that command is left alone.
 DO $cron$
 DECLARE v_pol jsonb := public.context_scorecard_run_policy(); v_id bigint;
 BEGIN

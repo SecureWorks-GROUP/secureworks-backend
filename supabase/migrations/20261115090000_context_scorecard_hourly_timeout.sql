@@ -36,14 +36,14 @@ BEGIN
   problems := problems || 'public.context_scorecard_run_policy() is not the hourly migration''s'::text;
  END IF;
  pol := public.context_scorecard_run_policy();
- IF pol->>'version' IS DISTINCT FROM 'context-scorecard-hourly-v1' OR NOT (pol->>'statement_timeout' IN ('60s', '110s'))
+ IF pol->>'version' IS DISTINCT FROM 'context-scorecard-hourly-v1' OR coalesce(pol->>'statement_timeout', '') NOT IN ('60s', '110s')
     OR pol->>'lock_timeout' IS DISTINCT FROM '10s' OR pol->>'schedule' IS DISTINCT FROM '40 * * * *'
     OR pol->>'command' IS DISTINCT FROM format('SET statement_timeout = %L; SET lock_timeout = %L; SELECT public.context_scorecard_record_run(%L)',
          pol->>'statement_timeout', pol->>'lock_timeout', 'cron') THEN
   problems := problems || format('the policy is not the hourly migration''s at 60 s or this one''s at 110 s: %s', pol);
  END IF;
  IF to_regclass('cron.job') IS NOT NULL THEN
-  EXECUTE 'SELECT count(*) FROM cron.job WHERE jobname = $1 AND (schedule IS DISTINCT FROM $2 OR NOT (command = ANY ($3)))'
+  EXECUTE 'SELECT count(*) FROM cron.job WHERE jobname = $1 AND (schedule IS DISTINCT FROM $2 OR coalesce(command, '''') <> ALL ($3))'
    INTO n USING 'context-scorecard-hourly', '40 * * * *', ARRAY[
     'SET statement_timeout = ''60s''; SET lock_timeout = ''10s''; SELECT public.context_scorecard_record_run(''cron'')',
     'SET statement_timeout = ''110s''; SET lock_timeout = ''10s''; SELECT public.context_scorecard_record_run(''cron'')'];
@@ -76,8 +76,9 @@ AS $fn$
   -- Grading the hourly run (row 10, lane hourly_run). Late: the newest run is
   -- older than this many minutes (an hour plus 15 minutes of grace). Missed:
   -- a whole UTC hour in the window, since the first run, with no ok run; one
-  -- missed hour is amber, more is red. Slow: an ok run took longer than this,
-  -- half the statement timeout (amber).
+  -- missed hour is amber, more is red. Slow: an ok run took longer than this
+  -- (amber). It was half the 60 s timeout and is left at 30 s on purpose: at
+  -- 110 s every run that passes today reads slow, which is true.
   'late_after_minutes', 75,
   'window_hours', 24,
   'missed_hours', jsonb_build_object('green', 0, 'amber', 1),
@@ -97,13 +98,21 @@ COMMENT ON FUNCTION public.context_scorecard_run_policy() IS
  'Context scorecard hourly (20261007040000): every number of the hourly scorecard run in one place: the pg_cron job (context-scorecard-hourly, 40 * * * * UTC, its command), the run''s statement and lock timeouts (110 s, 10 s), late (75 min), the missed-hour window (24 h) and grades, slow (30 s), keep (180 days), and the report (surface context_scorecard_run_status; readers whose receipts count: rayleigh; a receipt counts for 75 min). Changed only by migration. Hourly timeout (20261115090000): 110 s, was 60 s.';
 
 
--- 2. The job. Skipped where pg_cron is absent (the contract runner) or the job
--- is not scheduled; a job already on the new command is left alone.
+-- 2. The job. Skipped where pg_cron is absent (the contract runner); a job
+-- already on the new command is left alone. A job this role cannot see (not
+-- scheduled, or hidden by pg_cron's row security) is said out loud, and a job
+-- that is seen and still not on the policy's command afterwards stops the
+-- migration: the policy and the job must never disagree in silence.
 DO $cron$
-DECLARE v_pol jsonb := public.context_scorecard_run_policy(); v_id bigint;
+DECLARE v_pol jsonb := public.context_scorecard_run_policy(); v_id bigint; v_seen integer; v_left integer;
 BEGIN
  IF to_regclass('cron.job') IS NULL THEN
   RAISE NOTICE 'context-scorecard-hourly: pg_cron absent, job not altered';
+  RETURN;
+ END IF;
+ EXECUTE 'SELECT count(*) FROM cron.job WHERE jobname = $1' INTO v_seen USING v_pol->>'cron_job';
+ IF v_seen = 0 THEN
+  RAISE NOTICE 'context-scorecard-hourly: no job of that name is visible to %, nothing altered (check cron.job as its owner)', current_user;
   RETURN;
  END IF;
  EXECUTE 'SELECT jobid FROM cron.job WHERE jobname = $1 AND command IS DISTINCT FROM $2' INTO v_id
@@ -114,5 +123,10 @@ BEGIN
   ELSE
    EXECUTE 'UPDATE cron.job SET command = $1 WHERE jobid = $2' USING v_pol->>'command', v_id;
   END IF;
+ END IF;
+ EXECUTE 'SELECT count(*) FROM cron.job WHERE jobname = $1 AND command IS DISTINCT FROM $2' INTO v_left
+  USING v_pol->>'cron_job', v_pol->>'command';
+ IF v_left > 0 THEN
+  RAISE EXCEPTION 'context_scorecard_hourly_timeout_job_not_moved: cron job % is not on the policy''s command after the alter', v_pol->>'cron_job';
  END IF;
 END $cron$;
