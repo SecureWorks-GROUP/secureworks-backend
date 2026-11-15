@@ -1078,7 +1078,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Scheduled-job reminder texts: the switch, the once-a-day
                       # record, the run log and the noon cron trigger
                       # (job_schedule_reminders.ts).
-                      ("20261113120000", "job_schedule_reminders")]:
+                      ("20261113120000", "job_schedule_reminders"),
+                      # TP-08 Xero tie-out: xero_tieout also calls
+                      # xero_spend_revenue_monthly (xero_tieout.ts).
+                      ("20261115110000", "xero_spend_revenue_tieout")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

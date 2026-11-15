@@ -2,7 +2,7 @@
 -- against Job Profit, by month.
 --
 -- Synthetic rows only, no customer data, dated 2035 so no other case's fixtures fall in the months read. Everything
--- rolls back. The read is called with a fixed as_of (2035-10-15, seven months: April to October), never the clock.
+-- rolls back. The read is called with a fixed as_of (2035-11-15, eight months: April to November), never the clock.
 --
 -- Org 1 is ours; org 2 is another org, never read by an org-1 call.
 -- Chart (org 1): 305 direct cost; 302 fuel (expense); 800 loan (liability); 710 equipment (asset); 200 sales
@@ -21,8 +21,16 @@
 --         + account unknown 50.00 + no line detail 95.25 + lines differ 0.01. Status partial.
 -- July: SP-NULL, no subtotal in the copy, one 10.00 line: partial, amount unknown 1, does not add up.
 -- August: SP-A1 40.00 on the equipment account: read, adds up, not a cost 40.00.
--- September: nothing: read, zero.
+-- September (every transaction has lines and a known account, so the status is read):
+--   SP-J1 100.00 with one 60.00 line and SP-J2 60.00 with one 100.00 line, both fuel: the two differences cancel
+--         to 0.00, and the month still does not add up, because differences are counted per transaction (2).
+--   SP-P1 300.00 a supplier prepayment coded to the direct cost account, SP-P2 45.00 an overpayment on the loan
+--         account: both are paid ahead (345.00), never direct cost or not a cost.
+--   September: 4 transactions, 505.00 = overhead 160.00 + paid ahead 345.00 + lines differ 0.00.
 -- October: SP-O1 60.00 with no lines: not_yet_read (amounts null, the raw total still shown).
+-- November: SP-J3 25.00 whose one line holds its amount as text: the line is not read (unread lines 1), the month
+--   is partial and does not add up, and the 25.00 sits in lines differ, never in a sorted part.
+-- December (its own call): inside the copy, nothing spent: read, zero.
 -- April and May: before the copy's first transaction: not_in_copy.
 -- Org 2, June: SP2-1 70.00 on its own account 305, which org 2's chart calls an expense: overhead in org 2.
 --
@@ -74,7 +82,12 @@ INSERT INTO public.xero_bank_transactions (org_id, xero_txn_id, account_id, txn_
   ('00000000-0000-0000-0000-000000000001', 'SP-NULL', 'BANK-1', '2035-07-02', 'SPEND', 'Synthetic Fuel', 11.00, NULL, NULL, 'AUTHORISED', '2035-10-10T00:00:00Z'),
   ('00000000-0000-0000-0000-000000000001', 'SP-A1', 'BANK-1', '2035-08-02', 'SPEND', 'Synthetic Plant', 44.00, 40.00, 4.00, 'AUTHORISED', '2035-10-10T00:00:00Z'),
   ('00000000-0000-0000-0000-000000000001', 'SP-O1', 'BANK-1', '2035-10-02', 'SPEND', 'Synthetic New', 66.00, 60.00, 6.00, 'AUTHORISED', '2035-10-11T00:00:00Z'),
-  ('00000000-0000-0000-0000-000000000002', 'SP2-1', 'BANK-2', '2035-06-02', 'SPEND', 'Synthetic Other', 77.00, 70.00, 7.00, 'AUTHORISED', '2035-10-10T00:00:00Z');
+  ('00000000-0000-0000-0000-000000000002', 'SP2-1', 'BANK-2', '2035-06-02', 'SPEND', 'Synthetic Other', 77.00, 70.00, 7.00, 'AUTHORISED', '2035-10-10T00:00:00Z'),
+  ('00000000-0000-0000-0000-000000000001', 'SP-J1', 'BANK-1', '2035-09-02', 'SPEND', 'Synthetic Fuel', 110.00, 100.00, 10.00, 'AUTHORISED', '2035-10-10T00:00:00Z'),
+  ('00000000-0000-0000-0000-000000000001', 'SP-J2', 'BANK-1', '2035-09-03', 'SPEND', 'Synthetic Fuel', 66.00, 60.00, 6.00, 'AUTHORISED', '2035-10-10T00:00:00Z'),
+  ('00000000-0000-0000-0000-000000000001', 'SP-P1', 'BANK-1', '2035-09-04', 'SPEND', 'Synthetic Steel', 330.00, 300.00, 30.00, 'AUTHORISED', '2035-10-10T00:00:00Z'),
+  ('00000000-0000-0000-0000-000000000001', 'SP-P2', 'BANK-1', '2035-09-05', 'SPEND', 'Synthetic Lender', 45.00, 45.00, 0, 'AUTHORISED', '2035-10-10T00:00:00Z'),
+  ('00000000-0000-0000-0000-000000000001', 'SP-J3', 'BANK-1', '2035-11-02', 'SPEND', 'Synthetic Fuel', 27.50, 25.00, 2.50, 'AUTHORISED', '2035-10-10T00:00:00Z');
 
 INSERT INTO public.xero_bank_transaction_lines (org_id, xero_txn_id, line_amount_types, line_items, synced_at) VALUES
   ('00000000-0000-0000-0000-000000000001', 'SP-1', 'Inclusive',
@@ -101,6 +114,19 @@ INSERT INTO public.xero_bank_transaction_lines (org_id, xero_txn_id, line_amount
    '[{"Description": "Other org", "LineAmount": 75.25, "AccountCode": "305"}]', '2035-10-10T00:00:00Z'),
   ('00000000-0000-0000-0000-000000000002', 'SP2-1', 'Exclusive',
    '[{"Description": "Other org", "LineAmount": 70.00, "TaxAmount": 7.00, "AccountCode": "305"}]', '2035-10-10T00:00:00Z');
+
+-- Xero's own type travels with the lines. A row without one (every row above) is plain spend.
+INSERT INTO public.xero_bank_transaction_lines (org_id, xero_txn_id, xero_type, line_amount_types, line_items, synced_at) VALUES
+  ('00000000-0000-0000-0000-000000000001', 'SP-J1', 'SPEND', 'Exclusive',
+   '[{"Description": "Diesel", "LineAmount": 60.00, "TaxAmount": 6.00, "AccountCode": "302"}]', '2035-10-10T00:00:00Z'),
+  ('00000000-0000-0000-0000-000000000001', 'SP-J2', 'SPEND', 'Exclusive',
+   '[{"Description": "Diesel", "LineAmount": 100.00, "TaxAmount": 10.00, "AccountCode": "302"}]', '2035-10-10T00:00:00Z'),
+  ('00000000-0000-0000-0000-000000000001', 'SP-P1', 'SPEND-PREPAYMENT', 'Exclusive',
+   '[{"Description": "Deposit on steel", "LineAmount": 300.00, "TaxAmount": 30.00, "AccountID": "A-305", "AccountCode": "305"}]', '2035-10-10T00:00:00Z'),
+  ('00000000-0000-0000-0000-000000000001', 'SP-P2', 'spend-overpayment', 'NoTax',
+   '[{"Description": "Paid over", "LineAmount": 45.00, "TaxAmount": 0, "AccountID": "A-800"}]', '2035-10-10T00:00:00Z'),
+  ('00000000-0000-0000-0000-000000000001', 'SP-J3', 'SPEND', 'Exclusive',
+   '[{"Description": "Diesel", "LineAmount": "25.00", "TaxAmount": 2.50, "AccountCode": "302"}]', '2035-10-10T00:00:00Z');
 
 INSERT INTO public.xero_sync_state (key, cursor_at, note) VALUES
   ('bank_transactions_full:00000000-0000-0000-0000-000000000001:synthetic-tenant', '2035-10-10T01:00:00Z', 'contract'),
@@ -140,10 +166,11 @@ DO $$
 DECLARE
   o1 constant uuid := '00000000-0000-0000-0000-000000000001';
   o2 constant uuid := '00000000-0000-0000-0000-000000000002';
-  d jsonb := public.xero_spend_revenue_monthly('2035-10-15', 7, o1);
-  jun jsonb; jul jsonb; aug jsonb; sep jsonb; oct jsonb; may jsonb; s jsonb; r jsonb;
+  d jsonb := public.xero_spend_revenue_monthly('2035-11-15', 8, o1);
+  jun jsonb; jul jsonb; aug jsonb; sep jsonb; oct jsonb; nov jsonb; may jsonb; s jsonb; r jsonb;
   fn regprocedure := 'public.xero_spend_revenue_monthly(date,integer,uuid)'::regprocedure;
 BEGIN
+  SELECT m INTO nov FROM jsonb_array_elements(d -> 'months') m WHERE m ->> 'month' = '2035-11';
   SELECT m INTO oct FROM jsonb_array_elements(d -> 'months') m WHERE m ->> 'month' = '2035-10';
   SELECT m INTO sep FROM jsonb_array_elements(d -> 'months') m WHERE m ->> 'month' = '2035-09';
   SELECT m INTO aug FROM jsonb_array_elements(d -> 'months') m WHERE m ->> 'month' = '2035-08';
@@ -151,8 +178,8 @@ BEGIN
   SELECT m INTO jun FROM jsonb_array_elements(d -> 'months') m WHERE m ->> 'month' = '2035-06';
   SELECT m INTO may FROM jsonb_array_elements(d -> 'months') m WHERE m ->> 'month' = '2035-05';
 
-  PERFORM pg_temp.srt_is('months shown', jsonb_array_length(d -> 'months'), 7);
-  PERFORM pg_temp.srt_is('newest month first', d -> 'months' -> 0 ->> 'month', '2035-10');
+  PERFORM pg_temp.srt_is('months shown', jsonb_array_length(d -> 'months'), 8);
+  PERFORM pg_temp.srt_is('newest month first', d -> 'months' -> 0 ->> 'month', '2035-11');
   PERFORM pg_temp.srt_is('from month', d ->> 'from_month', '2035-04-01');
 
   -- June spend: every dollar sorted once, by the account each line was coded to.
@@ -170,6 +197,10 @@ BEGIN
   PERFORM pg_temp.srt_is('June account unknown lines', (s ->> 'account_unknown_lines')::int, 1);
   PERFORM pg_temp.srt_is('June no line detail', (s ->> 'no_line_detail_ex')::numeric, 95.25);
   PERFORM pg_temp.srt_is('June lines differ', (s ->> 'lines_differ_ex')::numeric, 0.01);
+  -- A cent of rounding is not a difference: only more than 5 cents on one transaction is counted.
+  PERFORM pg_temp.srt_is('June lines differ transactions', (s ->> 'lines_differ_transactions')::int, 0);
+  PERFORM pg_temp.srt_is('June unread lines', (s ->> 'unread_lines')::int, 0);
+  PERFORM pg_temp.srt_is('June paid ahead', (s ->> 'paid_ahead_ex')::numeric, 0::numeric);
   PERFORM pg_temp.srt_is('June spend adds up', (s ->> 'parts_add_up')::boolean, true);
   PERFORM pg_temp.srt_is('June spend counted', (s ->> 'counted')::boolean, false);
   -- Direct cost spend is on no job, and says so: null with the reason, never 0.
@@ -200,11 +231,32 @@ BEGIN
   PERFORM pg_temp.srt_is('August direct cost', (s -> 'direct_cost' ->> 'ex')::numeric, 0::numeric);
   PERFORM pg_temp.srt_is('August spend adds up', (s ->> 'parts_add_up')::boolean, true);
 
-  -- September: inside the copy, nothing spent.
+  -- September: two differences that cancel still stop the month adding up; money paid ahead is its own part.
   s := sep -> 'spend';
   PERFORM pg_temp.srt_is('September spend status', s ->> 'status', 'read');
-  PERFORM pg_temp.srt_is('September spend amount', (s ->> 'amount_ex')::numeric, 0::numeric);
-  PERFORM pg_temp.srt_is('September transactions', (s ->> 'transactions')::int, 0);
+  PERFORM pg_temp.srt_is('September transactions', (s ->> 'transactions')::int, 4);
+  PERFORM pg_temp.srt_is('September spend total', (s ->> 'total_ex')::numeric, 505.00);
+  PERFORM pg_temp.srt_is('September overhead', (s ->> 'overhead_ex')::numeric, 160.00);
+  PERFORM pg_temp.srt_is('September paid ahead', (s ->> 'paid_ahead_ex')::numeric, 345.00);
+  PERFORM pg_temp.srt_is('September paid ahead lines', (s ->> 'paid_ahead_lines')::int, 2);
+  PERFORM pg_temp.srt_is('September direct cost', (s -> 'direct_cost' ->> 'ex')::numeric, 0::numeric);
+  PERFORM pg_temp.srt_is('September not a cost', (s ->> 'not_a_cost_ex')::numeric, 0::numeric);
+  PERFORM pg_temp.srt_is('September lines differ', (s ->> 'lines_differ_ex')::numeric, 0::numeric);
+  PERFORM pg_temp.srt_is('September lines differ transactions', (s ->> 'lines_differ_transactions')::int, 2);
+  PERFORM pg_temp.srt_is('September spend adds up', (s ->> 'parts_add_up')::boolean, false);
+  PERFORM pg_temp.srt_is('September by account', s -> 'by_account',
+    '[{"code": "305", "name": "Direct Material Cost", "kind": "paid_ahead", "lines": 1, "ex": 300.00},
+      {"code": "302", "name": "Fuel", "kind": "overhead", "lines": 2, "ex": 160.00},
+      {"code": "800", "name": "Vehicle loan", "kind": "paid_ahead", "lines": 1, "ex": 45.00}]'::jsonb);
+
+  -- November: a line whose amount cannot be read is counted, makes the month partial and is in no sorted part.
+  s := nov -> 'spend';
+  PERFORM pg_temp.srt_is('November spend status', s ->> 'status', 'partial');
+  PERFORM pg_temp.srt_is('November unread lines', (s ->> 'unread_lines')::int, 1);
+  PERFORM pg_temp.srt_is('November overhead', (s ->> 'overhead_ex')::numeric, 0::numeric);
+  PERFORM pg_temp.srt_is('November lines differ', (s ->> 'lines_differ_ex')::numeric, 25.00);
+  PERFORM pg_temp.srt_is('November lines differ transactions', (s ->> 'lines_differ_transactions')::int, 1);
+  PERFORM pg_temp.srt_is('November spend adds up', (s ->> 'parts_add_up')::boolean, false);
 
   -- October: transactions with no lines at all are not yet read: no sorted figure, the raw total still shown.
   s := oct -> 'spend';
@@ -254,14 +306,22 @@ BEGIN
   PERFORM pg_temp.srt_is('August revenue share is null', jsonb_typeof(aug -> 'revenue' -> 'not_on_job_share'), 'null');
   PERFORM pg_temp.srt_is('August revenue adds up', (aug -> 'revenue' ->> 'parts_add_up')::boolean, true);
 
-  -- Last six months (May to October): spend is summed over the months that were read, and says how many.
-  PERFORM pg_temp.srt_is('six months from', d -> 'last_6_months' ->> 'from', '2035-05');
+  -- Last six months (June to November): spend is summed over the months that were read, and says how many.
+  PERFORM pg_temp.srt_is('six months from', d -> 'last_6_months' ->> 'from', '2035-06');
   PERFORM pg_temp.srt_is('six months revenue', (d -> 'last_6_months' ->> 'revenue_total_ex')::numeric, 2400.00);
   PERFORM pg_temp.srt_is('six months revenue not on job', (d -> 'last_6_months' ->> 'revenue_not_on_job_ex')::numeric, 850.00);
   PERFORM pg_temp.srt_is('six months revenue on job share', (d -> 'last_6_months' ->> 'revenue_on_job_share')::numeric, 0.6458);
-  PERFORM pg_temp.srt_is('six months spend months read', (d -> 'last_6_months' ->> 'spend_months_read')::int, 4);
-  PERFORM pg_temp.srt_is('six months spend', (d -> 'last_6_months' ->> 'spend_total_ex')::numeric, 615.26);
+  PERFORM pg_temp.srt_is('six months spend months read', (d -> 'last_6_months' ->> 'spend_months_read')::int, 5);
+  PERFORM pg_temp.srt_is('six months spend', (d -> 'last_6_months' ->> 'spend_total_ex')::numeric, 1145.26);
   PERFORM pg_temp.srt_is('six months direct cost', (d -> 'last_6_months' ->> 'spend_direct_cost_ex')::numeric, 130.00);
+
+  -- December: inside the copy, nothing spent. Read, zero, adds up.
+  d := public.xero_spend_revenue_monthly('2035-12-15', 1, o1);
+  s := d -> 'months' -> 0 -> 'spend';
+  PERFORM pg_temp.srt_is('December spend status', s ->> 'status', 'read');
+  PERFORM pg_temp.srt_is('December spend amount', (s ->> 'amount_ex')::numeric, 0::numeric);
+  PERFORM pg_temp.srt_is('December transactions', (s ->> 'transactions')::int, 0);
+  PERFORM pg_temp.srt_is('December spend adds up', (s ->> 'parts_add_up')::boolean, true);
 
   -- Org 2 reads only its own rows, by its own chart: its account 305 is an expense there.
   d := public.xero_spend_revenue_monthly('2035-06-15', 1, o2);

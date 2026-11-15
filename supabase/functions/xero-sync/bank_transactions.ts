@@ -67,6 +67,7 @@ export type BankTransactionRow = {
 export type BankTransactionLinesRow = {
   org_id: string;
   xero_txn_id: string;
+  xero_type: string | null;
   line_amount_types: string | null;
   line_items: XeroRecord[];
   xero_updated_at: string | null;
@@ -129,6 +130,8 @@ export function bankTransactionLinesRow(txn: XeroRecord, orgId: string, now: Dat
   return {
     org_id: orgId,
     xero_txn_id: id,
+    // Xero's own type, unfolded: a prepayment or overpayment is told apart from plain spend by it.
+    xero_type: xeroText(txn.Type),
     line_amount_types: xeroText(txn.LineAmountTypes),
     line_items: lines,
     xero_updated_at: xeroInstant(txn.UpdatedDateUTC),
@@ -220,7 +223,16 @@ function notModified(e: unknown): boolean {
   return (e as { status?: unknown } | null)?.status === 304;
 }
 
-type PagedRead = { ids: Set<string>; pages: number; written: number; skipped: number; firstError: string | null };
+// ids: every transaction the pages returned. withLines: those that came with lines, so a lines row was
+// built for them. A transaction is read only when it is in withLines and no row was refused (skipped 0).
+type PagedRead = {
+  ids: Set<string>;
+  withLines: Set<string>;
+  pages: number;
+  written: number;
+  skipped: number;
+  firstError: string | null;
+};
 
 /** One paged traversal, written page by page. Throws on anything but a clean end. */
 async function readPages(
@@ -232,6 +244,7 @@ async function readPages(
   at: Date,
 ): Promise<PagedRead> {
   const ids = new Set<string>();
+  const withLines = new Set<string>();
   const head: Tally = { synced: 0, skipped: 0, firstError: null };
   const lines: Tally = { synced: 0, skipped: 0, firstError: null };
   let pages = 0;
@@ -261,16 +274,14 @@ async function readPages(
       return true;
     });
     await upsertAll(sb, "xero_bank_transactions", unique(fresh.map((r) => bankTransactionRow(r, orgId, at))), head);
-    await upsertAll(
-      sb,
-      "xero_bank_transaction_lines",
-      unique(fresh.map((r) => bankTransactionLinesRow(r, orgId, at))),
-      lines,
-    );
+    const lineRows = unique(fresh.map((r) => bankTransactionLinesRow(r, orgId, at)));
+    for (const r of lineRows) withLines.add(r.xero_txn_id);
+    await upsertAll(sb, "xero_bank_transaction_lines", lineRows, lines);
     if (rows.length < BANK_TXN_PAGE_SIZE) break;
   }
   return {
     ids,
+    withLines,
     pages,
     written: lines.synced,
     skipped: head.skipped + lines.skipped,
@@ -332,15 +343,22 @@ export async function syncBankTransactionLines(
 
     // What changed since the last complete read, over the wide window.
     let healed = 0;
+    let incrementalRefused: string | null = null;
     if (since) {
       const read = await readPages(sb, orgId, get, bankTransactionsWhere(wide), { "If-Modified-Since": since }, startedAt);
       pages += read.pages;
       written += read.written;
-      const { error } = await stamp([key], `Bank transaction lines ${read.written}; incremental`);
-      if (error) throw new Error(`cursor write failed: ${error.message}`);
+      // A row that would not write holds the cursor: the next run reads the same changes again.
+      if (read.skipped > 0) {
+        incrementalRefused = `${read.skipped} rows would not write (${read.firstError}); incremental cursor retained`;
+      } else {
+        const { error } = await stamp([key], `Bank transaction lines ${read.written}; incremental`);
+        if (error) throw new Error(`cursor write failed: ${error.message}`);
+      }
     }
     if (!opts.whole) {
       if (!since) return result({ ok: null, mode: "waiting", reason: "awaiting_first_whole_read" });
+      if (incrementalRefused) return result({ ok: false, mode, reason: incrementalRefused, pages, written });
       return result({ ok: true, mode, pages, written, modified_since: since, healed });
     }
 
@@ -361,20 +379,18 @@ export async function syncBankTransactionLines(
     const read = await readPages(sb, orgId, get, bankTransactionsWhere(from), {}, startedAt);
     pages += read.pages;
     written += read.written;
-    const missed = [...expected].filter((id) => !read.ids.has(id));
-    // A transaction the pages skipped is fetched by its own id, a bounded number a run.
+    // Read means it came with its lines. A transaction the pages skipped, or returned without lines, is
+    // fetched by its own id, a bounded number a run, and counts only when its lines row was built and written.
+    const missed = [...expected].filter((id) => !read.withLines.has(id));
     let left = missed.length;
     for (const id of missed.slice(0, BANK_TXN_HEAL_LIMIT)) {
-      const one = xeroCollection(await get(`/BankTransactions/${id}`, {}, {}), "BankTransactions");
+      const one = xeroCollection(await get(`/BankTransactions/${id}`, {}, {}), "BankTransactions")
+        .filter((r) => xeroText(r.BankTransactionID) === id);
       const tally: Tally = { synced: 0, skipped: 0, firstError: null };
       await upsertAll(sb, "xero_bank_transactions", unique(one.map((r) => bankTransactionRow(r, orgId, startedAt))), tally);
-      await upsertAll(
-        sb,
-        "xero_bank_transaction_lines",
-        unique(one.map((r) => bankTransactionLinesRow(r, orgId, startedAt))),
-        tally,
-      );
-      if (tally.skipped === 0 && one.some((r) => xeroText(r.BankTransactionID) === id)) {
+      const lineRows = unique(one.map((r) => bankTransactionLinesRow(r, orgId, startedAt)));
+      await upsertAll(sb, "xero_bank_transaction_lines", lineRows, tally);
+      if (tally.skipped === 0 && lineRows.length > 0) {
         healed++;
         left--;
         written++;

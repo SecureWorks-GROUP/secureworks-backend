@@ -20,14 +20,21 @@
 --                 direct_cost (Xero type DIRECTCOSTS), overhead (any other EXPENSE class account), not_a_cost
 --                 (ASSET, LIABILITY, EQUITY: loan repayments, tax, wages payable, drawings, prepayments),
 --                 income_account (REVENUE class), account_unknown (no such account in our copy of the chart),
---                 no_line_detail (a transaction copied before lines were read), lines_differ (cents between the
---                 lines and the transaction's own subtotal). Job Profit has no route from spend money to a job,
---                 so direct cost spend is on no job: on_job_ex is null with the reason, never 0.
+--                 paid_ahead (every line of a supplier prepayment or overpayment, whatever its account: the
+--                 cost usually arrives again on a supplier bill, so it is shown apart and never called a cost),
+--                 no_line_detail (a transaction copied before lines were read), lines_differ (the difference
+--                 between the lines and the transaction's own subtotal). A month adds up only when no
+--                 transaction's lines differ from its subtotal by more than 5 cents; differences are counted
+--                 per transaction, so two that cancel still show. Job Profit has no route from spend money to
+--                 a job, so direct cost spend is on no job: on_job_ex is null with the reason, never 0.
 --        revenue  every AUTHORISED or PAID customer invoice dollar (ex GST) in our copy, as on a job (what Job
 --                 Profit counts as invoiced for that invoice on a job that is not a holding job), on a holding
 --                 job, or not on a job; with the invoices not counted (draft, submitted) beside it.
 --      It changes no figure anywhere: xero_tieout_monthly, Job Profit and every view are untouched. ops-api joins
 --      the two answers for the Tie to Xero page.
+--
+-- Known limit, not fixed here: the copy is only ever added to. A transaction unreconciled or removed in Xero
+-- after it was copied is not read again and stays counted until the copy is corrected.
 --
 -- A holding job is lower(coalesce(metadata->>'do_not_schedule','')) = 'true', Job Profit's rule.
 -- as_of picks the months only; everything is read as it stands today.
@@ -65,6 +72,7 @@ $guard$;
 CREATE TABLE IF NOT EXISTS public.xero_bank_transaction_lines (
   org_id            uuid        NOT NULL,
   xero_txn_id       text        NOT NULL,
+  xero_type         text,
   line_amount_types text,
   line_items        jsonb       NOT NULL,
   xero_updated_at   timestamptz,
@@ -74,7 +82,7 @@ CREATE TABLE IF NOT EXISTS public.xero_bank_transaction_lines (
 );
 
 COMMENT ON TABLE public.xero_bank_transaction_lines IS
-  'The lines of each Xero bank transaction (20261115110000): one row per transaction (org, Xero id), line_items exactly as Xero sent them and line_amount_types (Inclusive, Exclusive, NoTax) saying whether line amounts hold GST. Written only by xero-sync (xero-sync/bank_transactions.ts). Kept apart from xero_bank_transactions, which browser roles can read; this table is service role only. Read by xero_spend_revenue_monthly.';
+  'The lines of each Xero bank transaction (20261115110000): one row per transaction (org, Xero id), line_items exactly as Xero sent them, xero_type Xero''s own transaction type (SPEND, SPEND-PREPAYMENT, SPEND-OVERPAYMENT and so on, before it is folded to SPEND, RECEIVE or TRANSFER) and line_amount_types (Inclusive, Exclusive, NoTax) saying whether line amounts hold GST. Written only by xero-sync (xero-sync/bank_transactions.ts). Kept apart from xero_bank_transactions, which browser roles can read; this table is service role only. Read by xero_spend_revenue_monthly.';
 
 ALTER TABLE public.xero_bank_transaction_lines ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.xero_bank_transaction_lines FROM PUBLIC, anon, authenticated, service_role;
@@ -130,7 +138,8 @@ AS $$
            date_trunc('month', t.txn_date)::date AS month,
            round(abs(t.sub_total), 2) AS txn_ex,
            CASE WHEN jsonb_array_length(tl.line_items) > 0 THEN tl.line_items END AS lines,
-           tl.line_amount_types
+           tl.line_amount_types,
+           upper(COALESCE(tl.xero_type, '')) IN ('SPEND-PREPAYMENT', 'SPEND-OVERPAYMENT') AS paid_ahead
       FROM public.xero_bank_transactions t
       LEFT JOIN public.xero_bank_transaction_lines tl
         ON tl.org_id = t.org_id AND tl.xero_txn_id = t.xero_txn_id
@@ -144,7 +153,7 @@ AS $$
   -- One row per line: its amount without GST (Xero says on the transaction
   -- whether line amounts include it) and the account it was coded to.
   line AS (
-    SELECT t.org_id, t.xero_txn_id, t.month,
+    SELECT t.org_id, t.xero_txn_id, t.month, t.paid_ahead,
            round(CASE WHEN jsonb_typeof(l.value -> 'LineAmount') = 'number' THEN
                    (l.value ->> 'LineAmount')::numeric
                    - CASE WHEN lower(COALESCE(t.line_amount_types, '')) = 'inclusive'
@@ -158,10 +167,13 @@ AS $$
      WHERE t.lines IS NOT NULL
        AND t.txn_date >= (SELECT from_month FROM win) AND t.txn_date < (SELECT to_excl FROM win)
   ),
-  -- The account by Xero's id, else by its code in the same org.
+  -- The account by Xero's id, else by its code in the same org. A supplier
+  -- prepayment or overpayment is paid ahead whatever account its lines name:
+  -- the cost usually arrives again on a supplier bill.
   line_acct AS (
     SELECT l.*, a.code AS acct_code, a.name AS acct_name, a.type AS acct_type, a.class AS acct_class,
            CASE
+             WHEN l.paid_ahead THEN 'paid_ahead'
              WHEN a.xero_account_id IS NULL THEN 'account_unknown'
              WHEN upper(COALESCE(a.type, '')) = 'DIRECTCOSTS' THEN 'direct_cost'
              WHEN upper(COALESCE(a.class, '')) = 'EXPENSE' THEN 'overhead'
@@ -191,7 +203,9 @@ AS $$
            COALESCE(sum(t.txn_ex), 0) AS total_ex,
            count(*) FILTER (WHERE t.lines IS NOT NULL) AS with_lines,
            COALESCE(sum(t.txn_ex) FILTER (WHERE t.lines IS NULL), 0) AS no_line_detail_ex,
-           COALESCE(sum(t.txn_ex - tl.lines_ex) FILTER (WHERE t.lines IS NOT NULL), 0) AS lines_differ_ex
+           COALESCE(sum(t.txn_ex - tl.lines_ex) FILTER (WHERE t.lines IS NOT NULL), 0) AS lines_differ_ex,
+           count(*) FILTER (WHERE t.lines IS NOT NULL AND abs(t.txn_ex - tl.lines_ex) > 0.05) AS lines_differ_n,
+           COALESCE(sum(tl.unread_lines), 0) AS unread_lines
       FROM txn t
       LEFT JOIN txn_lines tl ON tl.org_id = t.org_id AND tl.xero_txn_id = t.xero_txn_id
      WHERE t.txn_date >= (SELECT from_month FROM win) AND t.txn_date < (SELECT to_excl FROM win)
@@ -204,7 +218,9 @@ AS $$
            COALESCE(sum(l.line_ex) FILTER (WHERE l.kind = 'not_a_cost'), 0) AS not_a_cost_ex,
            COALESCE(sum(l.line_ex) FILTER (WHERE l.kind = 'income_account'), 0) AS income_account_ex,
            COALESCE(sum(l.line_ex) FILTER (WHERE l.kind = 'account_unknown'), 0) AS account_unknown_ex,
-           count(*) FILTER (WHERE l.kind = 'account_unknown') AS account_unknown_lines
+           count(*) FILTER (WHERE l.kind = 'account_unknown') AS account_unknown_lines,
+           COALESCE(sum(l.line_ex) FILTER (WHERE l.kind = 'paid_ahead'), 0) AS paid_ahead_ex,
+           count(*) FILTER (WHERE l.kind = 'paid_ahead') AS paid_ahead_lines
       FROM line_acct l GROUP BY l.month
   ),
   spend_account_month AS (
@@ -244,12 +260,14 @@ AS $$
              WHEN (SELECT n FROM chart) = 0 THEN 'not_yet_read'
              WHEN COALESCE(st.n, 0) = 0 THEN 'read'
              WHEN st.with_lines = 0 THEN 'not_yet_read'
-             WHEN st.with_lines < st.n OR COALESCE(sk.account_unknown_lines, 0) > 0 OR st.amount_unknown > 0 THEN 'partial'
+             WHEN st.with_lines < st.n OR COALESCE(sk.account_unknown_lines, 0) > 0 OR st.amount_unknown > 0
+                  OR st.unread_lines > 0 THEN 'partial'
              ELSE 'read'
            END AS status,
            st.n, st.amount_unknown, st.total_ex, st.with_lines, st.no_line_detail_ex, st.lines_differ_ex,
+           st.lines_differ_n, st.unread_lines,
            sk.direct_cost_ex, sk.overhead_ex, sk.not_a_cost_ex, sk.income_account_ex, sk.account_unknown_ex,
-           sk.account_unknown_lines, sa.doc AS by_account, sd.doc AS direct_by_tracking
+           sk.account_unknown_lines, sk.paid_ahead_ex, sk.paid_ahead_lines, sa.doc AS by_account, sd.doc AS direct_by_tracking
       FROM month_list ml
       CROSS JOIN copy_range cr
       LEFT JOIN spend_txn_month st ON st.month = ml.month
@@ -334,15 +352,21 @@ AS $$
                'income_account_ex', CASE WHEN sp.status IN ('read', 'partial') THEN COALESCE(sp.income_account_ex, 0) END,
                'account_unknown_ex', CASE WHEN sp.status IN ('read', 'partial') THEN COALESCE(sp.account_unknown_ex, 0) END,
                'account_unknown_lines', COALESCE(sp.account_unknown_lines, 0),
+               'paid_ahead_ex', CASE WHEN sp.status IN ('read', 'partial') THEN COALESCE(sp.paid_ahead_ex, 0) END,
+               'paid_ahead_lines', COALESCE(sp.paid_ahead_lines, 0),
+               'paid_ahead_reads', 'Supplier prepayments and overpayments. The cost usually arrives again on a supplier bill, so these are shown apart and are in no other part.',
                'no_line_detail_ex', CASE WHEN sp.status = 'not_in_copy' THEN NULL ELSE COALESCE(sp.no_line_detail_ex, 0) END,
                'lines_differ_ex', CASE WHEN sp.status IN ('read', 'partial') THEN COALESCE(sp.lines_differ_ex, 0) END,
+               'lines_differ_transactions', COALESCE(sp.lines_differ_n, 0),
+               'unread_lines', COALESCE(sp.unread_lines, 0),
                'by_account', CASE WHEN sp.status IN ('read', 'partial') THEN COALESCE(sp.by_account, '[]'::jsonb) END,
                'parts_add_up', CASE WHEN sp.status IN ('read', 'partial') THEN
                  (COALESCE(sp.direct_cost_ex, 0) + COALESCE(sp.overhead_ex, 0) + COALESCE(sp.not_a_cost_ex, 0)
                   + COALESCE(sp.income_account_ex, 0) + COALESCE(sp.account_unknown_ex, 0)
+                  + COALESCE(sp.paid_ahead_ex, 0)
                   + COALESCE(sp.no_line_detail_ex, 0) + COALESCE(sp.lines_differ_ex, 0) = COALESCE(sp.total_ex, 0))
-                 AND abs(COALESCE(sp.lines_differ_ex, 0)) < 1 END,
-               'parts_check', 'each line less its GST, by the account it was coded to, plus transactions with no line detail, against the transactions'' own subtotals; lines_differ is the cents between the two and must stay under a dollar a month'),
+                 AND COALESCE(sp.lines_differ_n, 0) = 0 END,
+               'parts_check', 'each line less its GST, by the account it was coded to (prepayments and overpayments apart), plus transactions with no line detail, against the transactions'' own subtotals; lines_differ is the difference between the two, and the month adds up only when no transaction''s lines differ from its subtotal by more than 5 cents'),
              'revenue', jsonb_build_object(
                'invoices', COALESCE(rv.n, 0),
                'amount_unknown_count', COALESCE(rv.amount_unknown, 0),
@@ -376,7 +400,7 @@ AS $$
     'months_shown', win.months,
     'from_month', win.from_month,
     'basis', 'ex GST, to the cent; spend money by transaction date, customer invoices by invoice date',
-    'spend_basis', 'Reconciled spend money in our copy of Xero (card and bank payments entered straight into Xero, supplier prepayments and overpayments among them). Transfers between our own accounts and money received are not spend. A supplier bill paid from the bank is a payment of that bill and is not here. Each line is sorted by the Xero account it was coded to, by Xero''s own account type.',
+    'spend_basis', 'Reconciled spend money in our copy of Xero (card and bank payments entered straight into Xero, supplier prepayments and overpayments among them). Transfers between our own accounts and money received are not spend. A supplier bill paid from the bank is a payment of that bill and is not here. Each line is sorted by the Xero account it was coded to, by Xero''s own account type; the lines of a supplier prepayment or overpayment are shown apart as paid ahead. A transaction unreconciled or removed in Xero after it was copied stays counted.',
     'spend_copy', jsonb_build_object(
       'first_transaction_date', (SELECT first_date FROM copy_range),
       'lines_read_at', (SELECT read_at FROM lines_cursor),
@@ -404,7 +428,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION public.xero_spend_revenue_monthly(date, integer, uuid) IS
-  'TP-08 Xero tie-out, spend money and customer invoices (20261115110000): by month, read only, aggregates only. spend: every reconciled spend money dollar (ex GST) in our copy of Xero''s bank transactions (type SPEND, not deleted or voided; transfers and money received are not spend), each line less its GST sorted by the Xero account it was coded to, read from xero_bank_transaction_lines and sorted by Xero''s own account type and class in xero_accounts: direct_cost (type DIRECTCOSTS), overhead (other EXPENSE class), not_a_cost (ASSET, LIABILITY, EQUITY), income_account (REVENUE), account_unknown (not in our copy of the chart), with no_line_detail for a transaction copied before its lines were read and lines_differ for the cents between lines and subtotal. Job Profit has no route from spend money to a job, so direct_cost.on_job_ex is null (no_route_yet), never 0. status: read, partial (some transactions without lines, an unknown account or an unknown amount), not_yet_read (no chart or no lines), not_in_copy (before the copy''s first transaction; amounts null). revenue: every AUTHORISED or PAID customer invoice dollar (ex GST) as on a job (what Job Profit counts as invoiced for the invoice in v_job_revenue_events on a job that is not a holding job), on a holding job, or not on a job (the invoice''s remainder); more counted than the invoice holds is over_counted and never netted. Changes no figure elsewhere. p_org_id scopes every read (null reads every org). as_of picks the months only. Service role only.';
+  'TP-08 Xero tie-out, spend money and customer invoices (20261115110000): by month, read only, aggregates only. spend: every reconciled spend money dollar (ex GST) in our copy of Xero''s bank transactions (type SPEND, not deleted or voided; transfers and money received are not spend), each line less its GST sorted by the Xero account it was coded to, read from xero_bank_transaction_lines and sorted by Xero''s own account type and class in xero_accounts: direct_cost (type DIRECTCOSTS), overhead (other EXPENSE class), not_a_cost (ASSET, LIABILITY, EQUITY), income_account (REVENUE), account_unknown (not in our copy of the chart), paid_ahead (every line of a SPEND-PREPAYMENT or SPEND-OVERPAYMENT, whatever its account, because the cost usually arrives again on a supplier bill), with no_line_detail for a transaction copied before its lines were read and lines_differ for the difference between lines and subtotal; parts_add_up needs no transaction whose lines differ from its subtotal by more than 5 cents (lines_differ_transactions 0), so differences that cancel still show. Job Profit has no route from spend money to a job, so direct_cost.on_job_ex is null (no_route_yet), never 0. status: read, partial (some transactions without lines, an unknown account, an unknown amount or a line with no readable amount), not_yet_read (no chart or no lines), not_in_copy (before the copy''s first transaction; amounts null). revenue: every AUTHORISED or PAID customer invoice dollar (ex GST) as on a job (what Job Profit counts as invoiced for the invoice in v_job_revenue_events on a job that is not a holding job), on a holding job, or not on a job (the invoice''s remainder); more counted than the invoice holds is over_counted and never netted. Changes no figure elsewhere. p_org_id scopes every read (null reads every org). as_of picks the months only. Service role only.';
 
 REVOKE ALL ON FUNCTION public.xero_spend_revenue_monthly(date, integer, uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.xero_spend_revenue_monthly(date, integer, uuid) TO service_role;

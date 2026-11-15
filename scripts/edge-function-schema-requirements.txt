@@ -1237,5 +1237,6 @@ ops-api|supabase/migrations/20261112190000_makesafe_company_restoration_cc.sql|c
 # revenue read beside the bills tie-out.
 xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|table|xero_bank_transaction_lines
 xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|column|xero_bank_transaction_lines.line_amount_types
+xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|column|xero_bank_transaction_lines.xero_type
 xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|table|xero_accounts
 ops-api|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|function|xero_spend_revenue_monthly
