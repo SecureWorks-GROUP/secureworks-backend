@@ -83,6 +83,59 @@ A restoration job's trade is paid against the job's work order (the one
   Super is worked out on it by the trade invoice money rules, never taken out
   of it.
 
+## Report
+
+The restoration report is the PDF a builder's claims team reads after we
+attend: what we were asked to do, what we found, what we did in order, what we
+used, and the photos. It is rendered by `restoration_report_render.ts` on the
+shared report design (`report_design.ts`), which the make-safe report, the roof
+report and the restoration quote use too, so every document reads as one family.
+
+The look (owner, 14 Nov 2026, approved mockup "SecureWorks report v3"): the
+logo with the report name and reference beside it and one orange rule; a
+"Job details" table of label and value pairs, two to a row, with the work
+order and materials on full-width rows; slate section bars ("What we found",
+"What we did" with the subtitle on the bar, "Outcome", "Photos"); the words in
+a ruled box under each bar, orange square bullets for findings and outcome and
+numbered steps for the works; the first before and after photos as a large
+pair, then the rest four to a row, each "Photo N" with its caption; a running
+header, a closing "Report issued by" table, and a footer with the ABN and
+"Page x of y". The look lives only in `report_design.ts`.
+
+`POST ops-api?action=restoration_render_report` (staff session or the ops key;
+never the routine key, the agent key or a trade):
+
+- `job_id` or `job_number`. A job that is not a restoration card is refused
+  (`not_a_restoration_job`).
+- `report`: the words. `subtitle` (the headline), `issued_on` (the date of
+  issue printed at the end, as it should read), `attended_on`, `arrived_at`,
+  `crew_line`, `outcome`, `work_order_instruction`, `approved_quote_note`,
+  `findings` and `works_completed` (each `{paragraphs, bullets, closing}` or one
+  string; both are required; the bullets of `works_completed` are drawn as
+  numbered steps), and `materials`. Our job number, the builder's name and
+  references, the site address and the policyholder are read from the job.
+- Photos: by default this attendance's site photos in upload order, captioned
+  from each photo's label (receipts and quote builder photos are never used).
+  `photo_media_ids` names them and their order; `photos` (`[{media_id, caption,
+  area, stage}]`) also sets a caption, a room and `before` / `during` /
+  `after`, which is printed once at the start of the caption. A caption that
+  starts "Before" or "After" sets the stage by itself. Every photo is in the
+  photographic record, numbered in the order given.
+- `dry_run` (default `true`) returns `pdf_base64`, `pages`, `bytes`,
+  `file_name` and the job facts it printed, and writes nothing. `dry_run:
+  false` uploads the PDF and files it as the job's `makesafe_report` document
+  through `attachMakesafeDocument`; the file name is stable per job
+  (`Restoration Report - <job number> - <builder reference>.pdf`), so making
+  it again replaces the same document. It returns `document_id` and `url`.
+
+It sends nothing, moves no stage and touches no invoice. It is a price-free
+document: wording that carries money, or our internal words, is refused
+(`report_wording_not_allowed`), because the document is filed where a trade can
+read it. A photo that cannot be read refuses the whole report
+(`photo_unreadable`) so a report never quietly leaves one out; more than 60
+photos, or more than 24 MB of them, is refused with the reason. Tests:
+`restoration_report_render_test.ts`.
+
 ## Xero
 
 SWRESTO- jobs book to their own Business Unit tracking option, `SW - RESTORATION`
