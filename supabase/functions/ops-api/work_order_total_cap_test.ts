@@ -532,7 +532,7 @@ Deno.test("hourly: within the sealed maximum passes; one cent over is refused by
     limit: "hourly_maximum",
     hourly_maximum_ex: 900,
   }]);
-  assertStringIncludes(over.message, "hourly maximum of $900.00");
+  assertStringIncludes(over.message, "paid by the hour, and its work order pays the crew at most $900.00");
   assertStringIncludes(over.message, "can bill at most $400.00 more");
   assertStringIncludes(over.message, "A higher hourly rate does not raise");
   assertEquals(

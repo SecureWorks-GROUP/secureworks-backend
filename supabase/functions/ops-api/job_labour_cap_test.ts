@@ -21,6 +21,8 @@ import {
   readNewestJobBudgetLabour,
 } from "./job_labour_cap.ts";
 import { decideTradeInvoiceMode, loadTradeInvoiceJobModes, TradeInvoiceModeReadError } from "./trade_invoice_mode.ts";
+import { patioBase } from "../_shared/job_budget/budget_examples.ts";
+import { budgetAddedUp, checkBudget } from "../_shared/job_budget/budget_v1.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
 const JOB_A = "11111111-1111-4111-8111-11111111111a";
@@ -375,4 +377,60 @@ Deno.test("guard: a budget, switch or limit read that fails, returned or thrown,
     const err: any = await assertRejects(() => guard(guardDb(edit), 1), ApiError, undefined, label);
     assertEquals([err.status, err.body?.code], [503, "work_order_cap_unavailable"], label);
   }
+});
+
+// Ruling 18 B: the patio money14 named. 70 x 40 = 2800 by the hour, plus a
+// 250 removal the crew does (removal lane, paid to the crew), added up the way
+// the tool's finish does.
+function hourlyPatioWithRemoval(): any {
+  const base = patioBase() as any;
+  base.labour.pay = "hourly_capped";
+  base.labour.hourly = { rate_ex_gst: 70, max_hours: 40, max_ex_gst: 2800 };
+  base.other.push({
+    lane: "removal",
+    lines: [{ key: "r1", description: "Remove old patio", quantity: 1, unit: "job", cost_ex_gst: 250, in_total: true, paid_to: "crew", supplier: null }],
+    total_ex_gst: 250,
+  });
+  const added = budgetAddedUp(base);
+  if (!added.ok) throw new Error(JSON.stringify(added));
+  const checked = checkBudget(added.budget);
+  if (!checked.ok) throw new Error(JSON.stringify(checked));
+  return added.budget;
+}
+
+Deno.test("guard: ruling 18 B, an hourly patio with a crew removal: work order, fill and cap agree at 3050", async () => {
+  const budget = hourlyPatioWithRemoval();
+  assertEquals(
+    [budget.labour.amount_ex_gst, budget.labour.work_order_amount_ex_gst, budget.labour.hourly],
+    [2800, 3050, { rate_ex_gst: 70, max_hours: 40, max_ex_gst: 2800 }],
+    "the work order is the maximum plus the crew removal; the rate and hours are untouched",
+  );
+  // The fill's figure (agreed_labour_ex) for this budget.
+  assertEquals(budgetAgreedLabour(budget), 3050);
+  // The limit read's answer for this budget: its work order amount plus no
+  // raises (job_labour_cap_state; the migration contract's removal case runs
+  // the SQL on this labour and removal lane).
+  const state = {
+    state: "capped",
+    unreadable_reason: null,
+    rate_ex_gst: 70,
+    max_hours: 40,
+    max_ex_gst: 2800,
+    crew_options_ex_gst: 0,
+    crew_lines_ex_gst: 250,
+    work_order_ex_gst: budget.labour.work_order_amount_ex_gst,
+    raised_ex_gst: 0,
+    cap_ex_gst: budget.labour.work_order_amount_ex_gst,
+  };
+  const db = () => guardDb((d) => (d.rpcAnswer = { data: state, error: null }));
+  const lines = (removal: number) => [
+    { job_id: JOB_A, line_type: "labour", line_total_ex: 2800 },
+    { job_id: JOB_A, line_type: "other", description: "Remove old patio", line_total_ex: removal },
+  ];
+  // The agreed 2800 of hours and the 250 removal: allowed.
+  await _assertWithinWorkOrderTotal(db(), { id: TRADE, orgId: ORG }, lines(250));
+  // One cent over: the one cap's 409, naming the work order's 3050.
+  const err: any = await assertRejects(() => _assertWithinWorkOrderTotal(db(), { id: TRADE, orgId: ORG }, lines(250.01)), ApiError);
+  assertEquals([err.status, err.body?.code, err.body?.jobs?.[0]?.hourly_maximum_ex], [409, "work_order_total_over_agreed", 3050]);
+  assert(String(err.message).includes("pays the crew at most $3,050.00"), err.message);
 });

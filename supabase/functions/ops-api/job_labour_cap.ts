@@ -7,9 +7,11 @@
 // work_order_total_cap.ts): same doors, same count, same codes. This module
 // only supplies what that guard needs for an hourly job: which jobs are paid
 // hourly up to a maximum, and each one's limit, read from the database's one
-// read job_labour_cap_state (20261114030000_job_labour_cap.sql): the sealed
-// maximum (plus any crew option the customer took) plus the approver's
-// raises. raise_job_labour_cap is the only writer of a raise (an approver
+// read job_labour_cap_state (20261114030000_job_labour_cap.sql): what the
+// work order promises the crew (ruling 18 B: the budget's work order amount,
+// which is the sealed maximum, plus any crew option the customer took, plus
+// every line in another lane paid to the crew, a removal for one) plus the
+// approver's raises. raise_job_labour_cap is the only writer of a raise (an approver
 // owner_approval_authority already names). Also here: the switch, the pay
 // mode the invoice mode reads and the staff read and raise doors.
 //

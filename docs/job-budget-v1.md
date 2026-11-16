@@ -237,7 +237,8 @@ order fill are exactly as before.
   null. Otherwise `checkBudget` refuses `labour_hourly_invalid` or
   `labour_hourly_mismatch` and nothing is stored.
 - **The work order.** The job work order's `agreed_labour_ex` is the budget's
-  `labour.work_order_amount_ex_gst` (taken crew options already in it), read
+  `labour.work_order_amount_ex_gst` (taken crew options and every counted
+  line in another lane paid to the crew, such as a removal, already in it), read
   from the newest stored budget when it is for the same accepted revision the
   fill reads (`job_work_order_quote_fill.ts`). A budget for another revision
   leaves the quote's figure. An unreadable budget, or one with no amount,
@@ -256,25 +257,33 @@ order fill are exactly as before.
   work-order job the limit stays its agreed labour plus approved customer
   variations (the fill above puts the budget's labour into
   `agreed_labour_ex`). On an `hourly_capped` job the limit is
-  `job_labour_cap_state(job)`'s `cap_ex_gst`: the budget's labour (the
-  sealed `max_hours` times the sealed `rate_ex_gst`, plus any crew option the
-  customer took, `crew_options_ex_gst`) plus the approver's raises on that
-  budget. The count is the work order cap's for both: every line on a
+  `job_labour_cap_state(job)`'s `cap_ex_gst`: what the work order promises
+  the crew (ruling 18 B), the budget's `labour.work_order_amount_ex_gst`
+  (`work_order_ex_gst`: the sealed `max_hours` times the sealed
+  `rate_ex_gst`, plus any crew option the customer took,
+  `crew_options_ex_gst`, plus every counted line in another lane paid to the
+  crew, `crew_lines_ex_gst`, a removal for one) plus the approver's raises on
+  that budget. So the printed work order, Cost review, the fill and the cap
+  agree to the cent: 70 x 40 plus a 250 crew removal caps at 3050. The count is the work order cap's for both: every line on a
   billed invoice except commission (deductions come off), plus this
   invoice's. The cap is in dollars: a trade's own rate on a job above the
   sealed rate never raises it; the job stops at the maximum until the
   approver raises it.
 - **The refusal.** Over: 409 `work_order_total_over_agreed`, nothing saved.
   On an hourly job the job entry carries `limit: "hourly_maximum"` and
-  `hourly_maximum_ex`, and the message names the hourly maximum and the most
-  this invoice may still bill (never another trade's figure). A maximum that
+  `hourly_maximum_ex` (that whole limit), and the message names the most the
+  work order pays the crew and the most this invoice may still bill (never
+  another trade's figure). A maximum that
   cannot be read is `capped_unreadable` with a zero limit and the budget
   check's code in `unreadable_reason`: `labour_hourly_invalid` (no `hourly`,
   `{}`, any property missing or not a number, a rate or hours not above zero,
   a figure past the cent) or `labour_hourly_mismatch` (the maximum is not
   rate x hours to the cent, or the labour amount is below the maximum; a
   budget stored by an older writer is read by today's rules, and neither of
-  two figures that disagree is picked). That, or any failed read (returned
+  two figures that disagree is picked), `work_order_amount_unknown` (no work
+  order amount, or a line paid to the crew whose cost is unknown) or
+  `work_order_amount_mismatch` (the work order is not the labour plus the
+  crew's lines in other lanes, to the cent). That, or any failed read (returned
   as an error or thrown), is 503 `work_order_cap_unavailable`, never let
   through. The work order
   cap's known limits (two invoices at the same moment can both pass; the
@@ -291,14 +300,16 @@ order fill are exactly as before.
 - **Reading it.** `GET ops-api?action=job_labour_cap&job_id=` (staff in the
   job's company): `state` (`no_budget`, `not_capped`, `capped`,
   `capped_unreadable`, with `unreadable_reason`), `rate_ex_gst`, `max_hours`, `max_ex_gst`,
-  `crew_options_ex_gst`, `raised_ex_gst`, `cap_ex_gst`, and on a capped job
+  `crew_options_ex_gst`, `crew_lines_ex_gst`, `work_order_ex_gst`,
+  `raised_ex_gst`, `cap_ex_gst`, and on a capped job
   `billed_ex_gst` and `remaining_ex_gst` by the guard's own count. The office
   work order list (`list_work_orders` `kind=job`) shows an hourly job's row
   with that limit (`cap.limit: "hourly_maximum"`). Never shown to a trade
   beyond the refusal.
 
-Open for the director: whether the crew is paid for fence removal (17a T3)
-is the tool's labour lines; this step caps whatever labour the budget names.
+Fence removal paid to the crew (17a T3) is settled by ruling 18 A7: it is
+whatever the scoper sets on the removal line. A removal line paid to the crew
+is in the work order amount, so it is in the fill and the cap.
 
 ## Tests
 

@@ -17,8 +17,10 @@
 --      own maximum).
 --   2. job_labour_cap_state(job): the one read of a job's limit. The job's
 --      newest stored budget (job_budgets) says how the crew is paid; on
---      'hourly_capped' the limit is the budget's labour (the sealed hours
---      times the sealed rate, plus any crew option the customer took) plus
+--      'hourly_capped' the limit is what the work order promises the crew
+--      (ruling 18 B): the budget's work order amount (the sealed hours times
+--      the sealed rate, plus any crew option the customer took, plus every
+--      counted line in another lane paid to the crew, a removal for one) plus
 --      the raises. What counts against it is counted by the guard, not here.
 --   3. raise_job_labour_cap(...): the only writer of a raise. Only an approver
 --      the database already names (owner_approval_authority; the list is not
@@ -113,6 +115,9 @@ DECLARE
   v_hours    numeric;
   v_max      numeric;
   v_labour   numeric;
+  v_crew     numeric;
+  v_crew_unknown integer;
+  v_wo       numeric;
   v_valid    boolean;
   v_reason   text;
   v_raised   numeric;
@@ -146,8 +151,8 @@ BEGIN
     v_rate := (v_hourly->>'rate_ex_gst')::numeric;
     v_hours := (v_hourly->>'max_hours')::numeric;
     v_max := (v_hourly->>'max_ex_gst')::numeric;
-    -- The labour the crew may bill: the hourly maximum plus every crew option
-    -- the customer took (budget.v1 labour.amount_ex_gst, checked at storing).
+    -- The labour: the hourly maximum plus every crew option the customer
+    -- took (budget.v1 labour.amount_ex_gst, checked at storing).
     v_labour := (b.budget #>> '{labour,amount_ex_gst}')::numeric;
     -- The budget check's own rules (budget_v1.ts, labour.hourly), so a budget
     -- stored before a rule or by an older writer is read by today's rules:
@@ -163,18 +168,47 @@ BEGIN
       v_reason := 'labour_hourly_mismatch';
     END IF;
   END IF;
+  -- The limit is the agreed work order, one figure (ruling 17c): the crew is
+  -- held to everything the work order pays it, and the guard counts every
+  -- line the crew bills except commission. budget.v1 work_order_amount_ex_gst
+  -- is the labour above plus every counted line in another lane paid to the
+  -- crew (a removal the crew does, for one). It is read by the budget check's
+  -- own rule (work_order_amount_mismatch): a line paid to the crew whose cost
+  -- is unknown leaves the work order unknown, and a work order that is not
+  -- the labour plus those lines, to the cent, is two numbers that disagree.
+  -- Neither is picked; the rate and the hours are never changed for it.
+  IF v_reason IS NULL THEN
+    SELECT count(*) FILTER (WHERE jsonb_typeof(l->'cost_ex_gst') IS DISTINCT FROM 'number'),
+           COALESCE(sum((l->>'cost_ex_gst')::numeric)
+                      FILTER (WHERE jsonb_typeof(l->'cost_ex_gst') = 'number'), 0)
+      INTO v_crew_unknown, v_crew
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(b.budget->'other') = 'array'
+                                     THEN b.budget->'other' ELSE '[]'::jsonb END) o,
+           jsonb_array_elements(CASE WHEN jsonb_typeof(o->'lines') = 'array'
+                                     THEN o->'lines' ELSE '[]'::jsonb END) l
+     WHERE l->'in_total' = 'true'::jsonb AND l->>'paid_to' = 'crew';
+    IF v_crew_unknown > 0
+       OR COALESCE(jsonb_typeof(b.budget #> '{labour,work_order_amount_ex_gst}') = 'number', false) IS NOT TRUE THEN
+      v_reason := 'work_order_amount_unknown';
+    ELSE
+      v_wo := (b.budget #>> '{labour,work_order_amount_ex_gst}')::numeric;
+      IF v_wo <> round(v_wo, 2) OR v_crew <> round(v_crew, 2) OR v_wo <> v_labour + v_crew THEN
+        v_reason := 'work_order_amount_mismatch';
+      END IF;
+    END IF;
+  END IF;
   v_valid := v_reason IS NULL;
   -- A stored maximum that cannot be read is never a limit: the state says
   -- capped_unreadable with a zero cap and names why (unreadable_reason, the
   -- budget check's code), and the ops-api guard refuses such a job as
   -- unreadable (503), never lets labour through on a guess.
   IF NOT v_valid THEN
-    v_rate := NULL; v_hours := NULL; v_max := 0; v_labour := 0;
+    v_rate := NULL; v_hours := NULL; v_max := 0; v_labour := 0; v_crew := 0; v_wo := 0;
   END IF;
   SELECT COALESCE(sum(r.amount_ex_gst), 0) INTO v_raised
     FROM public.job_labour_cap_raises r
    WHERE r.job_id = p_job AND r.budget_id = b.id;
-  v_cap := round(v_labour + v_raised, 2);
+  v_cap := round(v_wo + v_raised, 2);
   RETURN jsonb_build_object(
     'state', CASE WHEN v_valid THEN 'capped' ELSE 'capped_unreadable' END,
     'unreadable_reason', v_reason,
@@ -187,6 +221,8 @@ BEGIN
     'max_hours', v_hours,
     'max_ex_gst', round(v_max, 2),
     'crew_options_ex_gst', round(v_labour - v_max, 2),
+    'crew_lines_ex_gst', round(v_crew, 2),
+    'work_order_ex_gst', round(v_wo, 2),
     'raised_ex_gst', round(v_raised, 2),
     'cap_ex_gst', v_cap);
 END

@@ -22,6 +22,8 @@ import {
   tradeJobWorkOrderRead,
 } from "./job_work_orders.ts";
 import { tradeJobWorkOrderRedaction } from "./index.ts";
+import { patioBase } from "../_shared/job_budget/budget_examples.ts";
+import { budgetAddedUp } from "../_shared/job_budget/budget_v1.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
 const JOB = "11111111-1111-4111-8111-111111111111";
@@ -1940,6 +1942,25 @@ Deno.test("R17 step 4: with the switch on, the agreed labour is the budget's wor
   assertEquals(p.result.agreed_labour_ex, 912.4);
   const r: any = await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
   assertEquals(r.work_order.agreed_labour_ex, 912.4);
+});
+
+Deno.test("R17 step 4 (ruling 18 B): an hourly patio with a 250 crew removal fills the work order at 3050, the cap's figure", async () => {
+  const base = patioBase() as any;
+  base.labour.pay = "hourly_capped";
+  base.labour.hourly = { rate_ex_gst: 70, max_hours: 40, max_ex_gst: 2800 };
+  base.other.push({
+    lane: "removal",
+    lines: [{ key: "r1", description: "Remove old patio", quantity: 1, unit: "job", cost_ex_gst: 250, in_total: true, paid_to: "crew", supplier: null }],
+    total_ex_gst: 250,
+  });
+  const added = budgetAddedUp(base);
+  assert(added.ok);
+  const row = { ...budgetRow(REV_ACCEPTED, null), labour: (added.budget as any).labour };
+  const db = baseDb({ feature_flags: LABOUR_SWITCH_ON, job_budgets: [row] });
+  const p = await previewQuoteWorkOrderLines(db, JOB);
+  assertEquals(p.result.agreed_labour_ex, 3050);
+  const r: any = await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
+  assertEquals(r.work_order.agreed_labour_ex, 3050);
 });
 
 Deno.test("R17 step 4: the newest budget decides, and only when it is the accepted revision's", async () => {

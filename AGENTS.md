@@ -5208,9 +5208,11 @@ is invoiced by the hour and capped (ruling 17c) by the one work order cap
 guard, `_assertWithinWorkOrderTotal`: same doors, same count, same codes (409
 `work_order_total_over_agreed` naming the hourly maximum, 503
 `work_order_cap_unavailable`). Its limit is `job_labour_cap_state`'s
-`cap_ex_gst` (sealed hours times sealed rate, plus taken crew options, plus
-the approver's raises); an unreadable maximum or switch refuses, never reads
-as no cap. Only `raise_job_labour_cap` lifts it, for an approver
+`cap_ex_gst`: what the work order promises the crew (ruling 18 B), the
+budget's `work_order_amount_ex_gst` (sealed hours times sealed rate, plus
+taken crew options, plus crew lines in other lanes such as a removal) plus the
+approver's raises; an unreadable maximum, work order or switch refuses, never
+reads as no cap. Only `raise_job_labour_cap` lifts it, for an approver
 `owner_approval_authority` names. Never add a second labour refusal (a
 database guard or another code), and never let a trade's own rate raise it.
 

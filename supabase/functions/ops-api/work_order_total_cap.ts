@@ -15,9 +15,11 @@
 // - Ruling 17c (16 Nov 2026): a job billed hourly because its job budget pays
 //   the crew by the hour up to a sealed maximum (invoice_mode_reason
 //   hourly_capped, job_labour_cap.ts, while job_labour_budget_v1 is on) is
-//   capped by this same rule, counted the same way, at its hourly maximum:
-//   the budget's labour (sealed hours times the sealed rate, plus any crew
-//   option the customer took) plus the approver's raises. A trade's own rate
+//   capped by this same rule, counted the same way, at what its work order
+//   promises the crew: the budget's work order amount (sealed hours times the
+//   sealed rate, plus any crew option the customer took, plus every line in
+//   another lane paid to the crew, a removal for one) plus the approver's
+//   raises (ruling 18 B, job_labour_cap_state). A trade's own rate
 //   on a job never raises it. Other hourly jobs, group work orders and jobs
 //   with no agreed amount keep their own rules; the pay-run check stops a
 //   work order with no agreed amount.
@@ -73,7 +75,7 @@ export type WorkOrderCapJob = {
   /** The job number, for the message. */
   ref: string;
   /** Agreed labour plus approved customer variations, ex GST; on an hourly
-   *  job, its hourly maximum plus the approver's raises. */
+   *  job, its budget's work order amount plus the approver's raises. */
   allowedEx: number;
   /** Set on a job paid hourly up to a sealed maximum (ruling 17c). */
   limit?: "hourly_maximum";
@@ -88,6 +90,7 @@ export type WorkOrderTotalCapRefusal = {
     most_this_invoice_ex: number;
     /** Only on a job paid hourly up to a sealed maximum. */
     limit?: "hourly_maximum";
+    /** That job's whole limit: the work order amount plus raises. */
     hourly_maximum_ex?: number;
   }>;
 };
@@ -137,14 +140,14 @@ export function workOrderTotalCapRefusal(input: {
   const message = over.map((j) =>
     j.limit === "hourly_maximum"
       ? j.most_this_invoice_ex > 0
-        ? `Job ${j.job}: it is paid by the hour up to an hourly maximum of ${
+        ? `Job ${j.job}: it is paid by the hour, and its work order pays the crew at most ${
           dollars(j.hourly_maximum_ex ?? 0)
-        } in labour, and this invoice can bill at most ${
+        } (the hours and any other work it lists). This invoice can bill at most ${
           dollars(j.most_this_invoice_ex)
         } more on it. A higher hourly rate does not raise the maximum. Ask the office if it needs raising.`
-        : `Job ${j.job}: its hourly maximum of ${
+        : `Job ${j.job}: it is paid by the hour, and the most its work order pays the crew, ${
           dollars(j.hourly_maximum_ex ?? 0)
-        } in labour has been billed in full. A higher hourly rate does not raise it. Ask the office if it needs raising.`
+        }, has been billed in full. A higher hourly rate does not raise it. Ask the office if it needs raising.`
       : j.most_this_invoice_ex > 0
       ? `Job ${j.job}: this invoice can bill at most ${
         dollars(j.most_this_invoice_ex)
