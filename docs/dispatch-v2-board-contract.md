@@ -1702,6 +1702,19 @@ Fencing (`info@westlinefencing.com.au`, pay first, fencing, approved by Shaun
 row), so it is not linked: its orders wait under Emails to sort until a
 Westline supplier contact exists in Xero and is linked to the entry.
 
+### 3g.4 Solarspan is Bondor (approved by Shaun 11 Nov 2026)
+
+Migration `20261111160000_dispatch_v2_solarspan_as_bondor.sql`. An approved
+entry can carry **recognise-only addresses** (`also_known_emails`): they count
+in 3g.1 rule 4 (who an order went to), in the reply scan (who a reply came
+from) and in the email reader's supplier domains, but Dispatch's own order
+emails still go To `to_emails` and CC `cc_emails` only. Bondor's entry carries
+`wasales@solarspan.com.au` (Solarspan is Bondor's brand), so an order sent to
+it from Outlook is a Bondor order and replies from bondor.com.au or
+solarspan.com.au tie to it. The old Solarspan entry is retired (kept, not
+active). An order sent before the on-send clock started (SWP-26100, 10 Nov) is
+picked up only by the catch-up (3g.2, dry run first).
+
 ## Tweak 4: the approved supplier names on the board (5 Nov 2026)
 
 Full rules: docs/dispatch-v2-emails-contract.md, section "Tweak 4".

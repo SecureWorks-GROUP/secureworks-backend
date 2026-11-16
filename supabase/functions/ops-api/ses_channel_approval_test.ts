@@ -919,3 +919,12 @@ Deno.test("the downstream refusal is the cockpit's, unchanged", async () => {
     "not mechanically clean",
   );
 });
+
+Deno.test("an SWRESTO- restoration card reads as a card, and its digits are never a code", () => {
+  const intent = parseSesChannelApprovalMessage("APPROVE SWRESTO-261800 123456");
+  assertEquals(intent.card_references, ["SWRESTO-261800"]);
+  assertEquals(intent.totp_code, "123456");
+  const bare = parseSesChannelApprovalMessage("APPROVE SWRESTO-261800");
+  assertEquals(bare.card_references, ["SWRESTO-261800"]);
+  assertEquals(bare.totp_code, null);
+});

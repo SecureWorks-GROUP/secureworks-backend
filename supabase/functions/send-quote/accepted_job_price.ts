@@ -33,15 +33,19 @@ export function samePricing(a: unknown, b: unknown): boolean {
 
 export async function setJobPriceToAcceptedQuote(
   sb: { from: (table: string) => any },
-  input: { job_id: string; document_id: string; job_pricing: unknown },
+  // `pricing` (ruling 14): the released pricing with the customer's ticked options
+  // applied (quote_options.ts acceptedPricing). Written only when the accepted
+  // document has a released row, exactly as the plain released pricing is.
+  input: { job_id: string; document_id: string; job_pricing: unknown; pricing?: Record<string, unknown> },
 ): Promise<AcceptedJobPrice> {
   try {
     const release = await readAcceptedRelease(sb, input.document_id)
     if (!release.ok) return { updated: false, reason: release.reason }
-    if (samePricing(release.pricing, input.job_pricing)) return { updated: false, reason: 'already_the_accepted_price' }
-    const { error } = await sb.from('jobs').update({ pricing_json: release.pricing }).eq('id', input.job_id)
+    const accepted = input.pricing ?? release.pricing
+    if (samePricing(accepted, input.job_pricing)) return { updated: false, reason: 'already_the_accepted_price' }
+    const { error } = await sb.from('jobs').update({ pricing_json: accepted }).eq('id', input.job_id)
     if (error) return { updated: false, reason: 'job_price_write_failed' }
-    return { updated: true, revisionId: release.revisionId, pricing: release.pricing }
+    return { updated: true, revisionId: release.revisionId, pricing: accepted }
   } catch {
     return { updated: false, reason: 'job_price_write_failed' }
   }

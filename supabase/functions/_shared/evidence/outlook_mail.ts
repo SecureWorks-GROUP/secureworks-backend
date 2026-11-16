@@ -184,8 +184,8 @@ const PLATFORM_DOMAIN =
   /(^|\.)(xero\.com|myob\.com|docusign\.net|docusign\.com|stripe\.com|paypal\.com|intuit\.com|mailchimp\.com|mcsv\.net|hubspot\.com|linkedin\.com|facebookmail\.com|google\.com|microsoft\.com|office\.com|office365\.com)$/;
 const NO_REPLY_LOCAL =
   /^(no[-_.]?reply|do[-_.]?not[-_.]?reply|donotreply|notifications?|notify|mailer[-_.]?daemon|postmaster|bounces?|alerts?|newsletter|news|marketing|info[-_.]?noreply)([-_.+].*)?$/;
-/** Our reference grammar: job numbers (SWP-, SWF-, SWD-, SWR-, SWMS-, legacy SW1234), INV-, PO-. */
-const OUR_REF = /^(SW[A-Z]{0,3}-?\d{3,}|INV-\d{3,}|PO-?\d{4,})$/;
+/** Our reference grammar: job numbers (SWP-, SWF-, SWD-, SWR-, SWMS-, SWRESTO-, legacy SW1234), INV-, PO-. */
+const OUR_REF = /^(SW[A-Z]{0,5}-?\d{3,}|INV-\d{3,}|PO-?\d{4,})$/;
 /**
  * A platform's address that sends one organisation's own document on its
  * behalf, never the platform's own news: Xero (invoices, quotes, credit

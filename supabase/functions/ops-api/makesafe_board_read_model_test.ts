@@ -3511,3 +3511,113 @@ Deno.test("synthetic live-fire release members cannot be approved or executed", 
     "synthetic_livefire_release_forbidden",
   );
 });
+
+Deno.test("restoration card: the ops card carries the price-free phase; placement and trade are unchanged", () => {
+  const sentQuote = {
+    version: "restoration-workflow/v1",
+    mode: "assess_and_quote",
+    mode_source: "work_order_scope",
+    authority_limit_ex_gst: 1000,
+    authority_limit_source: "work_order_scope",
+    equipment_day_cap: 5,
+    quotes: [{
+      revision: 1,
+      quote_number: "SWMS-261709-Q1",
+      status: "sent",
+      prepared_by: "office@example.invalid",
+      prepared_at: "2026-11-12T02:00:00.000Z",
+      document_id: "doc-quote",
+      content_hash: "sha256:abc",
+      sent: {
+        at: "2026-11-12T03:00:00.000Z",
+        to: "coordinator@builder.example",
+        channel: "email",
+        recorded_by: "office@example.invalid",
+        note: null,
+      },
+      decision: null,
+    }],
+    updated_at: "2026-11-12T03:00:00.000Z",
+    updated_by: "office@example.invalid",
+  };
+  const metadataFor = (family: string, restoration?: unknown) => ({
+    builder_claim_ref: "MLR-41228",
+    builder_po_number: "PO-64545",
+    makesafe_job_family: family,
+    ...(restoration ? { restoration } : {}),
+  });
+  const withPlan = baseJob("allocated", "resto-sent", {
+    ...evidenceFor("allocated"),
+    metadata: metadataFor("restoration", sentQuote),
+  });
+  const withoutPlan = baseJob("allocated", "resto-none", {
+    ...evidenceFor("allocated"),
+    metadata: metadataFor("restoration"),
+    makesafe_details: {
+      substatus: "waiting_on_trade_report",
+      cycle_number: 1,
+      special_instructions:
+        "Please attend to inspect. Please provide a quote for structural drying.",
+    },
+  });
+  const makesafe = baseJob(
+    "allocated",
+    "plain-makesafe",
+    evidenceFor("allocated"),
+  );
+  const extras = { computedAt: NOW };
+
+  const cards = buildCanonicalMakesafeRows(
+    [withPlan, withoutPlan, makesafe],
+    extras,
+    "card",
+  );
+  const full = buildCanonicalMakesafeRows(
+    [withPlan, withoutPlan, makesafe],
+    extras,
+    "full",
+  );
+  const [sent, unsent, plain] = cards;
+
+  assertEquals(sent.ses_family, "restoration");
+  assertEquals(sent.restoration.phase, "awaiting_approval");
+  assertEquals(sent.restoration.phase_label, "Quote with builder");
+  assertEquals(sent.restoration.mode, "assess_and_quote");
+  assertEquals(sent.restoration.quote_number, "SWMS-261709-Q1");
+  assertEquals(sent.restoration.quote_sent_at, "2026-11-12T03:00:00.000Z");
+  // No limit, total or price reaches the card.
+  assert(!/limit|total|price|\$/i.test(JSON.stringify(sent.restoration)));
+  // Nothing stored yet: the mode is read off the work order's own words.
+  assertEquals(unsent.restoration.phase, "assess");
+  assertEquals(unsent.restoration.stored, false);
+  assertEquals(plain.restoration, null);
+
+  // Card and full shapes agree, and the card projection keeps it.
+  assertEquals(full[0].restoration, sent.restoration);
+  assertEquals(
+    projectOpsMakesafeCardRow(full[0]).restoration,
+    sent.restoration,
+  );
+  assertEquals(projectOpsMakesafeCardRow(full[2]).restoration, null);
+
+  // Presentation only: the plan never moves the card.
+  const [bare] = buildCanonicalMakesafeRows([
+    baseJob("allocated", "resto-sent", {
+      ...evidenceFor("allocated"),
+      metadata: metadataFor("restoration"),
+    }),
+  ], extras, "card");
+  assertEquals(sent.canonical_stage, bare.canonical_stage);
+
+  // The trade projection leaves it out.
+  const trade = projectTradeMakesafeBoard(full, {
+    userId: "dispatcher-id",
+    name: "Dispatcher",
+    role: "admin",
+    managedVerticals: ["makesafe"],
+  });
+  const tradeRows = Object.values(trade.columns).flat() as any[];
+  assert(tradeRows.length > 0);
+  assert(tradeRows.every((row) => !("restoration" in row)));
+  assert(!JSON.stringify(tradeRows).includes("SWMS-261709-Q1"));
+});

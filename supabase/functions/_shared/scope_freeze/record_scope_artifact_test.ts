@@ -58,6 +58,11 @@ class MockChain {
       const payload = this.insertPayload as Row
       // Mirror the migration's append-only + hash-regex constraints.
       if (this.table === 'scope_artifacts') {
+        // A database without a given artifact type (its migration not applied)
+        // refuses the row through scope_artifacts_artifact_type_check.
+        if ((this.state as any).refusedTypes?.includes(payload.artifact_type)) {
+          return { data: null, error: { code: '23514', message: 'new row violates check constraint "scope_artifacts_artifact_type_check"' } }
+        }
         const sha = String(payload.sha256 ?? '')
         if (!/^[0-9a-f]{64}$/.test(sha)) {
           return { data: null, error: { message: 'check constraint sha256 format' } }
@@ -80,12 +85,13 @@ class MockChain {
   }
 }
 
-function makeMock(seed: Partial<State> = {}, opts: { uploadFails?: boolean; duplicate?: boolean } = {}) {
+function makeMock(seed: Partial<State> = {}, opts: { uploadFails?: boolean; duplicate?: boolean; refusedTypes?: string[] } = {}) {
   const state: State = {
     scope_revisions: seed.scope_revisions ?? [],
     scope_artifacts: seed.scope_artifacts ?? [],
     storage_uploads: [],
   }
+  ;(state as any).refusedTypes = opts.refusedTypes ?? []
   const client = {
     from(table: string) { return new MockChain(table as DbTable, state) },
     storage: {
@@ -507,4 +513,74 @@ Deno.test('recordScopeArtifact — multiple artefacts of same type are allowed (
   if (!a.ok || !b.ok) return
   assertNotEquals(a.scope_artifact_id, b.scope_artifact_id)
   assertEquals(c._state.scope_artifacts.length, 2)
+})
+
+Deno.test('recordScopeArtifact: accepts customer_model as JSON, stored with a .json path', async () => {
+  const bytes = new TextEncoder().encode(JSON.stringify({ what: 'patio', shapes: [] }))
+  const sha = await sha256Hex(bytes)
+  const c = makeMock({ scope_revisions: [FROZEN_REV] })
+  const r = await recordScopeArtifact(c as any, {
+    scope_revision_id: 'rev-frozen',
+    artifact_type: 'customer_model',
+    content_base64: await bytesToBase64(bytes),
+    content_type: 'application/json',
+    sha256: sha,
+    label: 'customer 3D page',
+  })
+  assert(r.ok, 'customer_model must be accepted as application/json')
+  if (!r.ok) return
+  assertEquals(r.artifact_type, 'customer_model')
+  assertEquals(r.storage_path, `rev-frozen/${sha}.json`)
+  assertEquals((c._state.scope_artifacts[0] as any).content_type, 'application/json')
+})
+
+Deno.test('recordScopeArtifact: JSON is only for customer_model, and customer_model is only JSON', async () => {
+  const json = new TextEncoder().encode('{}')
+  const jsonSha = await sha256Hex(json)
+  const asRender = await recordScopeArtifact(makeMock({ scope_revisions: [FROZEN_REV] }) as any, {
+    scope_revision_id: 'rev-frozen',
+    artifact_type: 'render_hero',
+    content_base64: await bytesToBase64(json),
+    content_type: 'application/json',
+    sha256: jsonSha,
+  })
+  assert(!asRender.ok)
+  if (!asRender.ok) assertEquals(asRender.error.code, 'invalid_content_type')
+
+  const png = makeTinyPng()
+  const asModel = await recordScopeArtifact(makeMock({ scope_revisions: [FROZEN_REV] }) as any, {
+    scope_revision_id: 'rev-frozen',
+    artifact_type: 'customer_model',
+    content_base64: await bytesToBase64(png),
+    content_type: 'image/png',
+    sha256: await sha256Hex(png),
+  })
+  assert(!asModel.ok)
+  if (!asModel.ok) assertEquals(asModel.error.code, 'invalid_content_type')
+})
+
+Deno.test('recordScopeArtifact: customer_model before its migration is applied is a plain refusal; the saved revision is untouched', async () => {
+  const bytes = new TextEncoder().encode(JSON.stringify({ what: 'fence', shapes: [] }))
+  const sha = await sha256Hex(bytes)
+  const input = {
+    scope_revision_id: 'rev-frozen',
+    artifact_type: 'customer_model' as const,
+    content_base64: await bytesToBase64(bytes),
+    content_type: 'application/json',
+    sha256: sha,
+  }
+  // The bucket refuses application/json (first half of the migration missing).
+  const noMime = makeMock({ scope_revisions: [{ ...FROZEN_REV }] }, { uploadFails: true })
+  const r1 = await recordScopeArtifact(noMime as any, input)
+  assert(!r1.ok)
+  if (!r1.ok) assertEquals(r1.error.code, 'storage_upload_failed')
+  assertEquals(noMime._state.scope_artifacts.length, 0)
+  assertEquals(noMime._state.scope_revisions, [{ id: 'rev-frozen', status: 'frozen' }])
+  // The type check refuses the row (second half missing).
+  const noType = makeMock({ scope_revisions: [{ ...FROZEN_REV }] }, { refusedTypes: ['customer_model'] })
+  const r2 = await recordScopeArtifact(noType as any, input)
+  assert(!r2.ok)
+  if (!r2.ok) assertEquals(r2.error.code, 'db_error')
+  assertEquals(noType._state.scope_artifacts.length, 0)
+  assertEquals(noType._state.scope_revisions, [{ id: 'rev-frozen', status: 'frozen' }])
 })

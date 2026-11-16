@@ -206,6 +206,18 @@
       ],
       "changes_books": "yes",
       "sends_outside": false
+    },
+    {
+      "id": "X16",
+      "write": "Add a Business Unit tracking option (allow-listed name: SW - RESTORATION)",
+      "owner": "Bookkeeping (owner, 12 Nov 2026)",
+      "gate_today": "Ops server key only; POST; the option name must be on XERO_TRACKING_OPTIONS_WE_MAY_ADD; an existing option is returned, never changed",
+      "cfo_confirmed": false,
+      "call_sites": [
+        "ops-api/index.ts :: case ensure_xero_tracking_option :: PUT /TrackingCategories/{id}/Options"
+      ],
+      "changes_books": "no",
+      "sends_outside": false
     }
   ],
   "not_writes": [

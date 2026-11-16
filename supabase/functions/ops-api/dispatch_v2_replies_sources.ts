@@ -15,7 +15,9 @@
 //       is the "order" this slice matches replies to.
 //   Approved supplier order emails (same branch):
 //     dispatch_approved_supplier_emails       id, org_id, name, to_emails,
-//                                             cc_emails, active
+//                                             cc_emails, active,
+//                                             also_known_emails (11 Nov 2026:
+//                                             recognise-only addresses)
 //     dispatch_approved_supplier_email_links  supplier_id, approved_id
 //   The confirmed delivery date (board v2 branch, migration
 //   20261023160000_dispatch_v2_board_arrival_dates.sql), on the supplier box
@@ -39,6 +41,7 @@
 
 import {
   type ApprovedSupplierSender,
+  approvedMatchEmails,
   perthDay,
   supplierKeyOf,
   type V2Order,
@@ -262,7 +265,7 @@ export function postgrestDispatchRepliesSources(
 
     async listApprovedSenders(orgId) {
       const entries = await client.from("dispatch_approved_supplier_emails")
-        .select("id, name, to_emails, cc_emails, active")
+        .select("id, name, to_emails, cc_emails, also_known_emails, active")
         .eq("org_id", orgId)
         .eq("active", true);
       if (entries.error) {
@@ -289,9 +292,9 @@ export function postgrestDispatchRepliesSources(
           supplier_key: supplierKeyOf(e.name),
           supplier_name: String(e.name),
           supplier_ids: idsByEntry.get(String(e.id)) ?? [],
-          emails: [...(e.to_emails || []), ...(e.cc_emails || [])]
-            .map((x: unknown) => String(x).trim().toLowerCase())
-            .filter(Boolean),
+          // To, CC and the recognise-only addresses (Solarspan on Bondor's
+          // entry, Shaun 11 Nov 2026), for matching who a reply came from.
+          emails: approvedMatchEmails(e),
         })),
       };
     },

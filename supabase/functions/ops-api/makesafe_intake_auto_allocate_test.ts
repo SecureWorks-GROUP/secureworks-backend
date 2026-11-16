@@ -7,6 +7,7 @@ import {
   _createMakesafeJob,
   _isMakesafeHugoAssigneeForTest,
   _resolveMakesafeDefaultAssigneeForTest,
+  _resolveRestorationIntakeCrewForTest,
 } from "./index.ts";
 
 type Row = Record<string, any>;
@@ -27,7 +28,22 @@ const SHAUN = {
   created_at: "2020-01-01T00:00:00Z",
 };
 
-function makeStore(users: Row[] = [SHAUN, HUGO]): Store {
+const MARNIN = {
+  id: "user-marnin",
+  name: "Marnin",
+  email: "marnin@secureworkswa.com.au",
+  role: "admin",
+  created_at: "2020-01-01T00:00:00Z",
+};
+const JEAN = {
+  id: "user-jean",
+  name: "Jean Crous",
+  email: "jeancrous44@gmail.com",
+  role: "crew",
+  created_at: "2025-01-01T00:00:00Z",
+};
+
+function makeStore(users: Row[] = [SHAUN, HUGO, MARNIN, JEAN]): Store {
   return {
     tables: {
       jobs: [],
@@ -44,7 +60,8 @@ function makeStore(users: Row[] = [SHAUN, HUGO]): Store {
   };
 }
 
-function makeClient(store: Store) {
+function makeClient(store: Store, opts: { restorationPrefixApplied?: boolean } = {}) {
+  const restorationPrefixApplied = opts.restorationPrefixApplied !== false;
   function builder(table: string) {
     let operation: "select" | "insert" | "update" | "delete" = "select";
     let insertValue: Row | Row[] | null = null;
@@ -154,6 +171,10 @@ function makeClient(store: Store) {
         const n = 29001 + store.tables.jobs.length;
         if (String(args.job_type || "") === "repair") {
           return { data: `SWR-${n}`, error: null };
+        }
+        if (String(args.job_type || "") === "restoration") {
+          // Before 20261112150000 the live function answers SW- for an unknown type.
+          return { data: restorationPrefixApplied ? `SWRESTO-${n}` : `SW-${n}`, error: null };
         }
         return { data: `SWMS-${n}`, error: null };
       }
@@ -295,6 +316,100 @@ Deno.test("mint still succeeds when Hugo is missing, and no assignment is invent
     assertEquals(result.ok, true);
     assert(result.job.id);
     assertEquals(store.tables.job_assignments, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("restoration mint books Marnin and Jean, never Hugo", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch =
+    (() =>
+      Promise.resolve(new Response("{}", { status: 200 }))) as typeof fetch;
+  try {
+    const store = makeStore();
+    const result = await _createMakesafeJob(
+      makeClient(store),
+      { ...physicalInput(), makesafe_job_family: "restoration" },
+      { suppressGeocoding: true },
+    );
+    assertEquals(result.ok, true);
+    const real = store.tables.job_assignments.filter((row) =>
+      row.job_id === result.job.id && row.is_ghost !== true
+    );
+    assertEquals(
+      real.map((row) => row.user_id).sort(),
+      [JEAN.id, MARNIN.id].sort(),
+    );
+    assert(real.every((row) => row.user_id !== HUGO.id));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("restoration crew lookup skips a missing member and books the other", async () => {
+  const crew = await _resolveRestorationIntakeCrewForTest(
+    makeClient(makeStore([SHAUN, HUGO, JEAN])),
+  );
+  assertEquals(crew.map((member) => member.id), [JEAN.id]);
+});
+
+Deno.test("restoration mint is numbered SWRESTO-, not SWMS-, and stays a make-safe board card", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch =
+    (() =>
+      Promise.resolve(new Response("{}", { status: 200 }))) as typeof fetch;
+  try {
+    const store = makeStore();
+    const result = await _createMakesafeJob(
+      makeClient(store),
+      { ...physicalInput(), makesafe_job_family: "restoration" },
+      { suppressGeocoding: true },
+    );
+    assertEquals(result.ok, true);
+    const job = store.tables.jobs.find((row) => row.id === result.job.id)!;
+    assert(String(job.job_number).startsWith("SWRESTO-"), String(job.job_number));
+    assertEquals(job.type, "makesafe");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("restoration mint falls back to SWMS- when the SWRESTO migration is not applied", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch =
+    (() =>
+      Promise.resolve(new Response("{}", { status: 200 }))) as typeof fetch;
+  try {
+    const store = makeStore();
+    const result = await _createMakesafeJob(
+      makeClient(store, { restorationPrefixApplied: false }),
+      { ...physicalInput(), makesafe_job_family: "restoration" },
+      { suppressGeocoding: true },
+    );
+    assertEquals(result.ok, true);
+    const job = store.tables.jobs.find((row) => row.id === result.job.id)!;
+    assert(String(job.job_number).startsWith("SWMS-"), String(job.job_number));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("a general make-safe mint is still numbered SWMS-", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch =
+    (() =>
+      Promise.resolve(new Response("{}", { status: 200 }))) as typeof fetch;
+  try {
+    const store = makeStore();
+    const result = await _createMakesafeJob(
+      makeClient(store),
+      physicalInput(),
+      { suppressGeocoding: true },
+    );
+    assertEquals(result.ok, true);
+    const job = store.tables.jobs.find((row) => row.id === result.job.id)!;
+    assert(String(job.job_number).startsWith("SWMS-"), String(job.job_number));
   } finally {
     globalThis.fetch = originalFetch;
   }

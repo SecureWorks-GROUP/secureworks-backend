@@ -453,3 +453,31 @@ Deno.test("sources: approved senders come from the app-kept list, To and CC, wit
     emails: ["tradewa@stratcowa.com.au", "tony.bacich@stratcowa.com.au"],
   }]);
 });
+
+Deno.test("sources: an entry's recognise-only addresses join its match list (Solarspan on Bondor, 11 Nov 2026)", async () => {
+  const { client, calls } = fakeClient((call) =>
+    call.table === "dispatch_approved_supplier_emails"
+      ? {
+        data: [{
+          id: "a1",
+          name: "Bondor",
+          to_emails: ["wa@bondor.com.au"],
+          cc_emails: [],
+          also_known_emails: ["WASales@solarspan.com.au"],
+          active: true,
+        }],
+      }
+      : { data: [{ supplier_id: "s1", approved_id: "a1" }] }
+  );
+  const r = await postgrestDispatchRepliesSources(client).listApprovedSenders(
+    "org",
+  );
+  assertEquals(r.rows, [{
+    supplier_key: "bondor",
+    supplier_name: "Bondor",
+    supplier_ids: ["s1"],
+    emails: ["wa@bondor.com.au", "wasales@solarspan.com.au"],
+  }]);
+  const entries = calls.find((c) => c.table === "dispatch_approved_supplier_emails")!;
+  assert(String(step(entries, "select")[0][0]).includes("also_known_emails"));
+});

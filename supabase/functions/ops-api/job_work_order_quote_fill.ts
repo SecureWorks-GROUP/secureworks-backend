@@ -27,10 +27,22 @@ import {
   buildQuoteWorkOrderLines,
   FENCE_LABOUR_COST_ITEM_KEYS,
   QUOTE_LINE_FLAGS,
+  QUOTE_OPTION_LABOUR_UNKNOWN_FLAG,
   QUOTE_RESULT_FLAGS,
+  quoteOptionLabourLines,
   type QuoteCostTable,
   type QuoteWorkOrderLines,
 } from "./quote_work_order_lines.ts";
+import {
+  readTakenQuoteOptions,
+  takenLines,
+  type TakenQuoteOption,
+} from "../_shared/quote_options/taken_options.ts";
+
+/** A taken crew option with no sealed labour line to copy. */
+export const QUOTE_OPTION_LINE_MISSING_FLAG = "quote_option_labour_line_missing";
+/** The job's quote option record could not be read. */
+export const QUOTE_OPTIONS_UNREADABLE_FLAG = "quote_options_unreadable";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -392,6 +404,18 @@ async function linesForJob(
     ...quote.flags,
     ...result.flags.filter((f) => !LINE_SCOPED_RESULT_FLAGS.has(f)),
   ];
+  // Ruling 14 step 1 (contract 4.4): each taken crew option's sealed labour
+  // line joins the lines and its total the agreed labour. An untaken option is
+  // not here. An option record that cannot be read holds the draft for the
+  // approver and it is never issued on its own.
+  if (pricing) {
+    const options = await readTakenQuoteOptions(client, String(job.id));
+    if (options.state === "unreadable") {
+      reviewFlags.push(QUOTE_OPTIONS_UNREADABLE_FLAG);
+    } else if (options.state === "taken") {
+      reviewFlags.push(...addTakenCrewOptions(result, options.options));
+    }
+  }
   if (reviewFlags.length > 0) result.needs_review = true;
   for (const line of result.lines) {
     for (const flag of reviewFlags) {
@@ -409,6 +433,30 @@ async function linesForJob(
     quote,
     result,
   };
+}
+
+/** Adds the taken crew options to built lines: one line each, the totals to the
+ *  agreed labour when the quote has one. Returns the review flags it raised
+ *  (an option with no labour line, or one whose total is unknown, which then
+ *  leaves the agreed labour for the approver). Pure. */
+export function addTakenCrewOptions(
+  result: QuoteWorkOrderLines,
+  options: TakenQuoteOption[],
+): string[] {
+  const flags: string[] = [];
+  const crew = options.filter((o) => o.goes === "crew");
+  if (crew.length === 0) return flags;
+  const withLine = takenLines(crew, "crew");
+  if (withLine.length !== crew.length) flags.push(QUOTE_OPTION_LINE_MISSING_FLAG);
+  const lines = quoteOptionLabourLines(withLine);
+  result.lines.push(...lines);
+  const unknown = lines.some((l) => l.total === null);
+  if (unknown) flags.push(QUOTE_OPTION_LABOUR_UNKNOWN_FLAG);
+  if (result.agreed_labour_ex !== null) {
+    const add = lines.reduce((sum, l) => sum + (l.total ?? 0), 0);
+    result.agreed_labour_ex = Math.round((result.agreed_labour_ex + add) * 100) / 100;
+  }
+  return flags;
 }
 
 /** Read-only preview: the work order lines the accepted quote gives a job. */
@@ -493,7 +541,12 @@ export async function fillJobWorkOrderDraftFromQuote(
   const labourFromScope = result.lines.some((l) =>
     l.flags.includes(QUOTE_LINE_FLAGS.labourFromScopeConfig)
   );
-  if (!draft.hand_edited_at && !labourFromScope) {
+  const optionsInDoubt = result.lines.some((l) =>
+    l.flags.includes(QUOTE_OPTIONS_UNREADABLE_FLAG) ||
+    l.flags.includes(QUOTE_OPTION_LINE_MISSING_FLAG) ||
+    l.flags.includes(QUOTE_OPTION_LABOUR_UNKNOWN_FLAG)
+  );
+  if (!draft.hand_edited_at && !labourFromScope && !optionsInDoubt) {
     patch.quote_filled_at = new Date().toISOString();
   }
   // The revision the lines came from, on the row itself (Dispatch S6, R7;

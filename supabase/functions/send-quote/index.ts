@@ -113,14 +113,30 @@ import {
 } from '../_shared/release_packet/build_v2_augmentation.ts'
 import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from './quote_run.ts'
 import { depositHeldMessage, namedPartyDeposit, neighbourLetter, readAcceptedRelease, runDepositFromRelease } from './accepted_deposit.ts'
+import { acceptSentenceHtml, acceptSentenceRecord, readAcceptSentence, type AcceptSentenceRead } from './accept_sentence.ts'
+import { buildCouncilKickoffEmail, councilKickoffApplies, sendCouncilKickoffEmail } from './council_kickoff_email.ts'
 import { setJobPriceToAcceptedQuote } from './accepted_job_price.ts'
+import {
+  acceptanceInvoiceRequestHeaders,
+  alertAcceptanceInvoiceFailed,
+  depositPaymentLine,
+  heldDepositFailure,
+  noDepositAmountLine,
+  requestAcceptanceInvoice,
+  runDepositLines,
+  uncertainFailure,
+  type AcceptanceInvoiceFailure,
+} from './acceptance_invoice_outcome.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
 // match_status + extraction enqueue). When OFF, legacy raw insert.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { freezeExpectedCostsOnAcceptance } from '../_shared/expected_costs/expected_costs_freeze.ts'
+import { recordJobBudgetOnAcceptance } from '../_shared/job_budget/record_job_budget.ts'
+import { withoutBudget } from '../_shared/job_budget/budget_v1.ts'
 import { inspectSealedSesJob } from '../_shared/sealed_ses_money_fence.ts'
+import { customerSiteLine } from '../_shared/customer_site_line.ts'
 import {
   claimInvoiceEmailSend,
   publishInvoiceEmailSendOrRevert,
@@ -129,6 +145,20 @@ import {
 } from './invoice_email_send_claim.ts'
 import { authorizeSendInvoiceAccess } from './send_invoice_access.ts'
 import { sendRunsJobTypeRefusal, sendRunsRequestRefusal } from './send_runs_request.ts'
+import { handleUploadPlans, resolveUploadPlansJob } from './upload_plans.ts'
+import {
+  acceptedPricing,
+  chooseOptions,
+  optionAcceptanceRecord,
+  optionRefusalMessage,
+  partyOptionDeposit,
+  readQuoteOptions,
+  tickedNothing,
+  type OptionChoice,
+  type QuoteOptionsOffer,
+} from './quote_options.ts'
+import { buildQuoteOptionsCard, QUOTE_OPTIONS_CSS } from './quote_options_page.ts'
+import { acceptDocumentWithOptions, loadDocumentOptions, readOptionAcceptances } from './quote_options_store.ts'
 import {
   decideSendQuoteAuth,
   jobOrgIdFromQuoteSendDocument,
@@ -137,7 +167,17 @@ import {
   resolveSendInvoiceDelivery,
   type SendQuoteAuthUser,
 } from './quote_send_auth.ts'
-import { ghlEmailNoteRequest, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
+import { ghlEmailNoteRequest, ghlMoveStageOutcome, quoteAcceptedStageId, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
+import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailHeading, quoteEmailProjectWords, quoteEmailSubject } from './division_routing.ts'
+import {
+  customer3dLink,
+  customer3dPageUrl,
+  customerModelEmailBlock,
+  customerModelWhat,
+  handleCustomerModelRequest,
+  scopeRevisionHasCustomerModel,
+  stampRunDocumentsRelease,
+} from './customer_model.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -147,23 +187,15 @@ const FROM_EMAIL = Deno.env.get('FROM_EMAIL') || 'quotes@secureworksgroup.app'
 const FROM_NAME = Deno.env.get('FROM_NAME') || 'SecureWorks Group'
 const BASE_URL = Deno.env.get('PUBLIC_URL') || SUPABASE_URL
 const QUOTE_VIEWER_BASE = Deno.env.get('QUOTE_VIEWER_URL') || 'https://secureworks-website.pages.dev/quote.html'
+// The hosted customer 3D page (customer_model.ts); its origin is the only one allowed to read send-quote/model.
+const CUSTOMER_3D_PAGE_URL = customer3dPageUrl(Deno.env.get('CUSTOMER_3D_PAGE_URL'))
 const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
 let _xeroAppKey: Promise<string> | null = null
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 
-// ── Reply-to routing: fencing jobs → fencing@, everything else → patios@ ──
-function getClientReplyTo(jobType: string | null, jobNumber?: string | null): string {
-  const dept = jobType === 'fencing' ? 'fencing' : 'patios'
-  const tag = jobNumber ? `+${jobNumber}` : ''
-  return `${dept}${tag}@secureworkswa.com.au`
-}
-
-// ── Division CC: fencing jobs → fencing@, everything else → patios@ ──
-function getDivisionInbox(jobType: string | null | undefined): string {
-  return jobType === 'fencing' ? 'fencing@secureworkswa.com.au' : 'patios@secureworkswa.com.au'
-}
+// Reply-to and division copy (getClientReplyTo, getDivisionInbox): ./division_routing.ts
 
 // ── Division phone (Marnin ruling 2026-06-12): fencing client-facing → 0489 267 772.
 // 0489 267 771 is the admin line — patio + general templates keep 771 as the default. ──
@@ -814,6 +846,13 @@ serve(async (req: Request) => {
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
   }
 
+  // Customer 3D view: public, by the quote link's token, readable cross-site
+  // only from the hosted 3D page (customer_model.ts). Before the shared
+  // OPTIONS answer, which allows every origin.
+  if (path === 'model') {
+    return await handleCustomerModelRequest(req, createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY), CUSTOMER_3D_PAGE_URL)
+  }
+
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders })
   }
@@ -834,7 +873,7 @@ serve(async (req: Request) => {
     //             body-supplied client_email / payment fields.
     let sendAuthMode: 'api_key' | 'jwt' = 'api_key'
     let sendAuthUser: SendQuoteAuthUser | null = null
-    if (path === 'send' || path === 'send-invoice' || path === 'send-runs') {
+    if (path === 'send' || path === 'send-invoice' || path === 'send-runs' || path === 'accept-for-customer') {
       const decided = await decideSendQuoteAuth({
         req,
         sb,
@@ -945,7 +984,7 @@ serve(async (req: Request) => {
         doc.jobs?.type === 'patio' ? 'patio' : 'misc'
 
       // Send email via Resend
-      const emailSubject = customSubject || `Your ${doc.jobs?.type || 'project'} quote from SecureWorks Group`
+      const emailSubject = customSubject || quoteEmailSubject(doc.jobs?.type)
       if (!RESEND_API_KEY) {
         return jsonResponse({ error: 'Email service not configured — contact admin' }, 503, corsHeaders)
       }
@@ -1037,9 +1076,17 @@ serve(async (req: Request) => {
         })
       }
       {
+        // Customer 3D view: a third button only when the sealed revision this
+        // send releases has a saved customer model (customer_model.ts).
+        const model3dUrl = sealedSource.kind === 'sealed' && doc.share_token &&
+            await scopeRevisionHasCustomerModel(sb, sealedSource.revision_id)
+          ? customer3dLink(CUSTOMER_3D_PAGE_URL, doc.share_token)
+          : null
         const emailHtml = buildQuoteEmail({
           clientName: client_name,
           viewUrl,
+          model3dUrl,
+          model3dWhat: customerModelWhat(doc.jobs?.type),
           pdfUrl: doc.pdf_url,
           projectType: doc.jobs?.type || 'project',
           suburb: doc.jobs?.site_suburb || '',
@@ -1294,7 +1341,7 @@ serve(async (req: Request) => {
               media: mediaRows ?? [],
               quote_pdf_url: doc.pdf_url || '',
               quote_pdf_size_bytes: null,
-              email_subject: customSubject || `Your ${doc.jobs?.type || 'project'} quote from SecureWorks Group`,
+              email_subject: customSubject || quoteEmailSubject(doc.jobs?.type),
               email_custom_message: message || '',
               email_template_version: 'v1',
               scoper_name: scoper_name || 'The SecureWorks Team',
@@ -1542,7 +1589,21 @@ serve(async (req: Request) => {
       else if (latest.viewed_at) status = 'viewed'
       else if (latest.sent_at) status = 'sent'
 
+      // Ruling 14 read-back: the options taken on an accepted quote whose
+      // revision offered any. Absent: no options on that quote. A failed read is
+      // said, never shown as "no options".
+      let optionReadBack: Record<string, unknown> = {}
+      if (latest.accepted_at) {
+        const records = await readOptionAcceptances(sb, [latest.id])
+        if (records === null) optionReadBack = { accepted_options_unreadable: true }
+        else {
+          const row = records.get(latest.id)
+          if (row) optionReadBack = { accepted_option_ids: row.taken_option_ids || [] }
+        }
+      }
+
       return jsonResponse({
+        ...optionReadBack,
         status,
         quote_number: latest.quote_number,
         sent_at: latest.sent_at,
@@ -1701,6 +1762,8 @@ serve(async (req: Request) => {
           .eq('id', doc.job_id)
           .single()
 
+        // Ruling 17: the customer's page never carries the staff-only budget.
+        if (fullJob) fullJob.pricing_json = withoutBudget(fullJob.pricing_json)
         if (fullJob?.pricing_json?.runs) {
           const pj = typeof fullJob.pricing_json === 'string' ? JSON.parse(fullJob.pricing_json) : fullJob.pricing_json
           const run = findQuoteRun(pj, sourceRunLabel)
@@ -1709,7 +1772,11 @@ serve(async (req: Request) => {
             const isNeighbour = doc.job_contact_id && fullJob.job_contacts?.some(
               (c: any) => c.id === doc.job_contact_id && !c.is_primary
             )
-            return await htmlResponse(buildRunQuotePage(doc, token, run, fullJob, isNeighbour ? 'neighbour' : 'client'))
+            // Ruling 11 item 8: the run's sealed sentence beside Accept Quote.
+            const runAcceptWords = !doc.accepted_at && !doc.declined_at
+              ? await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel, job_contact_id: doc.job_contact_id ?? null })
+              : null
+            return await htmlResponse(buildRunQuotePage(doc, token, run, fullJob, isNeighbour ? 'neighbour' : 'client', runAcceptWords))
           }
         }
       }
@@ -1760,12 +1827,25 @@ serve(async (req: Request) => {
         }
       }
 
+      // ── RULING 14: options the customer can tick ──
+      // Read from the released revision of this document. A quote with options
+      // is always shown on this page (never the HTML viewer redirect below),
+      // because the tick boxes and the live total live here.
+      let viewOptions: QuoteOptionsOffer | null = null
+      if (!doc.accepted_at && !doc.declined_at) {
+        const loaded = await loadDocumentOptions(sb, doc, sourceRunLabel)
+        if (loaded.kind === 'unreadable') return await htmlResponse(quoteViewRetryPage())
+        // The client's whole quote offers them on a shared fence too (the tool's
+        // party figures); a neighbour's document never does.
+        if (loaded.kind === 'offer' && !loaded.neighbour) viewOptions = loaded.offer
+      }
+
       // ── HTML REDIRECT (Slice 3) ──
       // Single-option docs with an html_url → redirect the client directly to the
       // interactive HTML quote. Docs with html_url NULL fall through to buildClientPage
       // (zero regression). Multi-option and per-run fencing paths have already returned
       // above, so this only fires for the single-doc case.
-      if (doc.html_url) {
+      if (doc.html_url && !viewOptions) {
         // html_url is uploaded best-effort by the client-side scoping tool and can be
         // absent on a significant portion of sent quotes. Verify the object exists before
         // redirecting; if missing, timed-out, or errored, fall through to the reliable
@@ -1786,7 +1866,12 @@ serve(async (req: Request) => {
         // Object missing — fall through to the reliable server-rendered client page below
       }
 
-      return await htmlResponse(buildClientPage(doc, token, heroUrl))
+      // Ruling 11 item 8: the sealed "You are accepting: ..." sentence beside
+      // Accept Quote. No sealed sentence (every older quote): the page is as before.
+      const acceptWords = !doc.accepted_at && !doc.declined_at
+        ? await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel, job_contact_id: doc.job_contact_id ?? null })
+        : null
+      return await htmlResponse(buildClientPage(doc, token, heroUrl, viewOptions, acceptWords))
     }
 
     // ── VARIATION ACCEPT/DECLINE ──
@@ -1828,19 +1913,71 @@ serve(async (req: Request) => {
       }
     }
 
-    // ── CLIENT ACCEPTS QUOTE ──
-    if (path === 'accept' && req.method === 'POST') {
-      const token = url.searchParams.get('token')
-      if (!token) return jsonResponse({ error: 'Token required' }, 400, corsHeaders)
+    // ── CLIENT ACCEPTS QUOTE (and, ruling 14, office phone acceptance) ──
+    // POST /accept?token= is the customer's link. POST /accept-for-customer is the
+    // office accepting for a customer on the phone: a signed-in office person
+    // (decideSendQuoteAuth, office roles, same tenant rule as /send) names the
+    // sent document and ticks the same option boxes. Both run the one acceptance
+    // below; only the reply differs (the office gets JSON, the customer a page).
+    const staffAccept = path === 'accept-for-customer' && req.method === 'POST'
+    if ((path === 'accept' && req.method === 'POST') || staffAccept) {
+      const acceptBody = await req.json().catch(() => ({})) as Record<string, unknown> | null
+      const tickedOptionIds = acceptBody && typeof acceptBody === 'object' && !Array.isArray(acceptBody)
+        ? acceptBody.option_ids
+        : undefined
+      const acceptVia: 'public_link' | 'staff_phone' = staffAccept ? 'staff_phone' : 'public_link'
+      const staffUserId: string | null = staffAccept ? (sendAuthUser?.id ?? null) : null
+      const acceptHtmlHeaders = { ...corsHeaders, 'Content-Type': 'text/html' }
+      const refuseAccept = (message: string, status = 200, code = 'acceptance_refused') =>
+        staffAccept
+          ? jsonResponse({ error: message, code }, status === 200 ? 409 : status, corsHeaders)
+          : new Response(errorPage(message), { status, headers: acceptHtmlHeaders })
+      const retryAccept = () =>
+        staffAccept
+          ? jsonResponse({ error: 'The quote could not be read just now. Nothing was saved; try again.', code: 'acceptance_read_failed' }, 503, corsHeaders)
+          : new Response(quoteViewRetryPage(), { status: 503, headers: acceptHtmlHeaders })
 
-      const { data: doc, error } = await sb
-        .from('job_documents')
-        .select('*, job_contacts(id, contact_label, client_name, share_percentage, quote_value_ex_gst, source_party_key)')
-        .eq('share_token', token)
-        .eq('sent_to_client', true)
-        .single()
+      let token: string | null = null
+      let doc: any = null
+      if (staffAccept) {
+        if (sendAuthMode !== 'jwt' || !sendAuthUser?.id) {
+          return jsonResponse({ error: 'Phone acceptance needs a signed-in office person', code: 'identified_staff_required' }, 403, corsHeaders)
+        }
+        const documentId = acceptBody?.document_id
+        if (typeof documentId !== 'string' || !documentId) {
+          return jsonResponse({ error: 'document_id required' }, 400, corsHeaders)
+        }
+        const { data: staffDoc, error: staffDocError } = await sb
+          .from('job_documents')
+          .select('*, job_contacts(id, contact_label, client_name, share_percentage, quote_value_ex_gst, source_party_key), jobs(org_id)')
+          .eq('id', documentId)
+          .eq('type', 'quote')
+          .eq('sent_to_client', true)
+          .maybeSingle()
+        if (staffDocError) return retryAccept()
+        const refused = quoteSendMissingOrForeignRefusal(
+          sendAuthMode,
+          !staffDoc,
+          staffDoc ? quoteSendTenantAccess(sendAuthMode, sendAuthUser?.orgId, staffDoc?.jobs?.org_id) : { ok: true },
+          'Document not found',
+        )
+        if (refused) return jsonResponse(refused.body, refused.status, corsHeaders)
+        doc = staffDoc
+        token = staffDoc.share_token || null
+      } else {
+        token = url.searchParams.get('token')
+        if (!token) return jsonResponse({ error: 'Token required' }, 400, corsHeaders)
 
-      if (error || !doc) return jsonResponse({ error: 'Quote not found' }, 404, corsHeaders)
+        const { data: linkDoc, error } = await sb
+          .from('job_documents')
+          .select('*, job_contacts(id, contact_label, client_name, share_percentage, quote_value_ex_gst, source_party_key)')
+          .eq('share_token', token)
+          .eq('sent_to_client', true)
+          .single()
+
+        if (error || !linkDoc) return jsonResponse({ error: 'Quote not found' }, 404, corsHeaders)
+        doc = linkDoc
+      }
 
       const sourceRunLabel = quoteDocumentRunLabel(doc)
 
@@ -1855,10 +1992,7 @@ serve(async (req: Request) => {
       // Scoped to whole-quote options only (run_label IS NULL): per-run fencing
       // acceptances have their own state machine below and must not be blocked.
       if (doc.superseded_at) {
-        return new Response(
-          errorPage('This option is no longer available — another option was already accepted.'),
-          { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
-        )
+        return refuseAccept('This option is no longer available — another option was already accepted.', 200)
       }
       if (doc.job_id && sourceRunLabel !== null) {
         // A fence-run link is acceptable only when it is its party's CURRENT
@@ -1879,16 +2013,10 @@ serve(async (req: Request) => {
         const { data: partyDocs, error: partyErr } = await partyQuery
         if (partyErr) {
           console.error('[accept] party current-document read failed:', partyErr.message)
-          return new Response(
-            errorPage('We could not confirm this quote right now. Please try again shortly.'),
-            { status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
-          )
+          return refuseAccept('We could not confirm this quote right now. Please try again shortly.', 503)
         }
         if (!quoteDocumentAcceptable(doc, partyDocs || [])) {
-          return new Response(
-            errorPage('This quote link is no longer current. Please open the latest quote we sent you.'),
-            { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
-          )
+          return refuseAccept('This quote link is no longer current. Please open the latest quote we sent you.', 200)
         }
       }
       if (doc.job_id && sourceRunLabel === null) {
@@ -1907,15 +2035,52 @@ serve(async (req: Request) => {
           : siblingQuery.is('job_contact_id', null)
         const { data: acceptedSiblings, error: acceptedSiblingsError } = await siblingQuery
         if (acceptedSiblingsError) {
-          return new Response(quoteViewRetryPage(), {
-            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
-          })
+          return retryAccept()
         }
         if (!quoteDocumentAcceptable(doc, acceptedSiblings || [])) {
-          return new Response(
-            errorPage('This option is no longer available — another option was already accepted.'),
-            { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
-          )
+          return refuseAccept('This option is no longer available — another option was already accepted.', 200)
+        }
+      }
+
+      // ── RULING 14: the options the customer ticked ──
+      // Read from the RELEASED revision of this document (the pricing that was
+      // sent), never the live job. A quote with no options is today's acceptance:
+      // optionPlan stays null and nothing below changes. Every refusal here is
+      // before any write, so the customer can correct the ticks and try again.
+      let optionPlan: {
+        offer: QuoteOptionsOffer
+        pricing: Record<string, unknown>
+        revisionId: string
+        shared: boolean
+        choice: Extract<OptionChoice, { ok: true }>
+      } | null = null
+      let optionsUnreadable: string | null = null
+      {
+        const loaded = await loadDocumentOptions(sb, doc, sourceRunLabel)
+        if (loaded.kind === 'unreadable') return retryAccept()
+        if (loaded.kind === 'offer') {
+          // Options are the client's alone (contract section 6): a shared
+          // fence's client takes them on their whole quote, with the tool's
+          // party figures; a neighbour's document offers none.
+          // A neighbour accepts their quote plainly: no option record is written
+          // for them, so the job's one option record is the client's.
+          if (loaded.neighbour) {
+            if (!tickedNothing(tickedOptionIds)) {
+              return refuseAccept(optionRefusalMessage('options_on_neighbour_quote'), 200, 'options_on_neighbour_quote')
+            }
+          } else {
+            const choice = chooseOptions(loaded.offer, tickedOptionIds)
+            if (!choice.ok) return refuseAccept(optionRefusalMessage(choice.reason), 200, choice.reason)
+            optionPlan = { offer: loaded.offer, pricing: loaded.pricing, revisionId: loaded.revisionId, shared: loaded.shared, choice }
+          }
+        } else if (!tickedNothing(tickedOptionIds)) {
+          const code = loaded.kind === 'invalid' ? loaded.reason : 'options_not_offered'
+          return refuseAccept(optionRefusalMessage(code), 200, code)
+        } else if (loaded.kind === 'invalid') {
+          // The offer cannot be checked, so nothing can be ticked: the base price
+          // is accepted (it never includes options) and the office is told below.
+          optionsUnreadable = loaded.reason
+          console.error('[accept] quote options unreadable; base price accepted:', JSON.stringify({ document_id: doc.id, reason: loaded.reason }))
         }
       }
 
@@ -1944,9 +2109,7 @@ serve(async (req: Request) => {
         ])
         if (quoteAcceptanceReadFailed([acceptancesRead, documentsRead, runItemsRead])) {
           console.error('[accept] pre-acceptance read failed; nothing written')
-          return new Response(quoteViewRetryPage(), {
-            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
-          })
+          return retryAccept()
         }
         acceptanceSnapshot = withPendingAcceptance({
           documents: documentsRead.data || [],
@@ -1955,11 +2118,55 @@ serve(async (req: Request) => {
         }, doc, sourceRunLabel, acceptedAt)
       }
 
-      const { error: acceptError } = await sb
-        .from('job_documents')
-        .update({ accepted_at: acceptedAt })
-        .eq('id', doc.id)
-      if (acceptError) throw acceptError
+      // Ruling 11 item 8: what was accepted, in the sealed design's own words,
+      // kept with the acceptance below. A failed read never blocks accepting.
+      const acceptWords = await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel, job_contact_id: doc.job_contact_id ?? null })
+
+      if (optionPlan && doc.job_id) {
+        // Options decide money, so the acceptance and its record are one
+        // database transaction (accept_quote_document_with_options): the
+        // document is claimed once, and never accepted without the record of
+        // which options, at what total and deposit. A failed write writes
+        // nothing, so the customer's retry completes the same selection.
+        const accepted = await acceptDocumentWithOptions(sb, doc.id, acceptedAt, optionAcceptanceRecord({
+          jobId: doc.job_id,
+          documentId: doc.id,
+          revisionId: optionPlan.revisionId,
+          via: acceptVia,
+          staffUserId,
+          offer: optionPlan.offer,
+          choice: optionPlan.choice,
+        }))
+        if (!accepted.ok) {
+          console.error('[accept] option acceptance not written; nothing accepted:', JSON.stringify({ document_id: doc.id, reason: accepted.reason }))
+          return retryAccept()
+        }
+        if (!accepted.claimed) return jsonResponse({ error: 'Already accepted' }, 400, corsHeaders)
+      } else {
+        const { error: acceptError } = await sb
+          .from('job_documents')
+          .update({ accepted_at: acceptedAt })
+          .eq('id', doc.id)
+        if (acceptError) throw acceptError
+      }
+
+      if (doc.job_id && optionsUnreadable) {
+        try {
+          await sb.from('job_events').insert({
+            job_id: doc.job_id,
+            event_type: 'quote_options_unreadable',
+            detail_json: {
+              document_id: doc.id,
+              reason: optionsUnreadable,
+              message: 'This quote listed options that could not be read, so none could be ticked. The base price was accepted: ask the customer which options they want.',
+            },
+          })
+        } catch {
+          // The console line above is the record of last resort.
+        }
+      }
+      // The options the customer took: their record is written with the acceptance.
+      const optionsTaken = optionPlan ? optionPlan.choice.taken : []
 
       // ── SUPERSEDE SIBLING OPTIONS ON ACCEPT (money-path, awaited) ──
       // Right after the accepted_at write: mark the OTHER whole-quote options for
@@ -1997,11 +2204,14 @@ serve(async (req: Request) => {
         const sharedPayload = {
           quote_revision_id: doc.id,
           quote_number: doc.quote_number || null,
-          accepted_via: 'public_link',
+          accepted_via: acceptVia,
+          ...(staffUserId ? { accepted_by: staffUserId } : {}),
+          ...(optionPlan ? { accepted_option_ids: optionsTaken.map((o) => o.id) } : {}),
           contact_id: doc.job_contact_id || null,
           contact_name: doc.job_contacts?.client_name || null,
           run_label: doc.run_label || null,
           quote_value_ex_gst: doc.job_contacts?.quote_value_ex_gst ?? null,
+          ...acceptSentenceRecord(acceptWords),
         }
         const legacyAcceptRow = {
           event_type: 'quote.accepted',
@@ -2135,6 +2345,14 @@ serve(async (req: Request) => {
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
           }
+          // Ruling 17 step 1: the job budget, beside the baseline (which is unchanged).
+          // Never blocks the acceptance; a budget that does not add up is a refusal event.
+          try {
+            const jb = await recordJobBudgetOnAcceptance(sb, doc.job_id)
+            console.log('[send-quote] job budget (run flow)', JSON.stringify({ job_id: doc.job_id, result: jb }))
+          } catch (e) {
+            console.error('[send-quote] job budget failed (non-blocking):', (e as Error).message)
+          }
           try {
             const { releaseScopeJobDraftsOnAcceptance } = await import('../_shared/scope_freeze/release_scope_job_drafts.ts')
             await releaseScopeJobDraftsOnAcceptance(sb, doc.job_id)
@@ -2166,7 +2384,6 @@ serve(async (req: Request) => {
           }).then(() => {}, () => {})
 
           // Create deposit invoices via ops-api for each party
-          const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 
           // Get all contacts for this run
           const { data: contacts } = await sb.from('job_contacts')
@@ -2174,9 +2391,28 @@ serve(async (req: Request) => {
             .eq('job_id', doc.job_id)
             .eq('status', 'active')
 
+          // Each payer whose deposit invoice does not go out: the office is told and
+          // the page says it will be emailed (acceptance_invoice_outcome.ts).
+          let runInvoiceFailed = false
+          const alertRunInvoice = async (failure: AcceptanceInvoiceFailure, jobContactId: string | null, jobDocumentId: string | null) => {
+            runInvoiceFailed = true
+            console.log(`[accept] Run deposit invoice failed: ${failure.reason}`)
+            await alertAcceptanceInvoiceFailed(sb, {
+              jobId: doc.job_id,
+              jobNumber: job?.job_number,
+              failure,
+              jobDocumentId,
+              jobContactId,
+              runLabel,
+            })
+          }
+
           for (const ra of depositAcceptances) {
             const contact = (contacts || []).find((c: any) => c.id === ra.job_contact_id)
-            if (!contact) continue
+            if (!contact) {
+              await alertRunInvoice(heldDepositFailure('the accepting party is not an active contact on the job'), ra.job_contact_id || null, (ra as any).job_document_id || doc.id)
+              continue
+            }
 
             const isClient = contact.is_primary
             // D1F-1: price the deposit from the version this party accepted,
@@ -2201,38 +2437,45 @@ serve(async (req: Request) => {
                 },
                 metadata: {},
               }).then(() => {}, () => {})
+              await alertRunInvoice(heldDepositFailure(deposit.reason), contact.id, acceptedDocId)
               continue
             }
             if (deposit.amount <= 0) continue
 
-            try {
-              await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
-                body: JSON.stringify({
-                  job_id: doc.job_id,
-                  job_contact_id: contact.id,
-                  job_document_id: acceptedDocId,
-                  deposit_amount: deposit.amount,
-                  deposit_percent: deposit.percent,
-                  run_label: runLabel,
-                }),
-              })
-            } catch (e: any) {
-              console.log(`[accept] Failed to create deposit for ${contact.client_name}:`, e.message)
-            }
+            const outcome = await requestAcceptanceInvoice(fetch, `${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
+              method: 'POST',
+              headers: acceptanceInvoiceRequestHeaders(SUPABASE_SERVICE_KEY),
+              body: JSON.stringify({
+                job_id: doc.job_id,
+                job_contact_id: contact.id,
+                job_document_id: acceptedDocId,
+                deposit_amount: deposit.amount,
+                deposit_percent: deposit.percent,
+                run_label: runLabel,
+              }),
+            })
+            if (!outcome.ok) await alertRunInvoice(outcome, contact.id, acceptedDocId)
           }
 
           // Return "Next Steps" page for fully accepted run
-          return await htmlResponse(buildRunAcceptedPage(job, run, doc.job_contacts?.client_name || ''))
+          if (staffAccept) {
+            return jsonResponse({ accepted: true, accepted_via: 'staff_phone', document_id: doc.id, run_label: runLabel, run_fully_accepted: true, deposit_invoice_failed: runInvoiceFailed }, 200, corsHeaders)
+          }
+          return await htmlResponse(buildRunAcceptedPage(job, run, doc.job_contacts?.client_name || '', { invoiceFailed: runInvoiceFailed }))
         } else {
           // ── WAITING FOR OTHER PARTY ──
+          if (staffAccept) {
+            return jsonResponse({ accepted: true, accepted_via: 'staff_phone', document_id: doc.id, run_label: runLabel, run_fully_accepted: false }, 200, corsHeaders)
+          }
           return await htmlResponse(buildWaitingPage(job, run, doc.job_contacts?.client_name || '', runLabel))
         }
       }
 
       // Track invoice result for Next Steps page (existing non-run flow)
       let invoiceResult: any = null
+      // The deposit invoice was asked for and did not go out (acceptance_invoice_outcome.ts).
+      // Null when it went out or was never asked for.
+      let invoiceFailure: AcceptanceInvoiceFailure | null = null
 
       if (doc.job_id) {
         // Get full job data for notifications + invoicing
@@ -2257,17 +2500,39 @@ serve(async (req: Request) => {
         // B1 follow-on: the job carries the price the customer accepted (accepted_job_price.ts), set before the
         // status, the expected-cost baseline, the acceptance event, the GHL note and the deposit read it. One quote
         // party only; a quote sent before #1271 has no released row and keeps the job's price as it is.
-        if (!isMultiContact && job) {
-          const priced = await setJobPriceToAcceptedQuote(sb, { job_id: doc.job_id, document_id: doc.id, job_pricing: job.pricing_json })
+        // Ruling 14: with an option offer, the accepted price is the tool's
+        // combination for the ticked set (quote_options.ts acceptedPricing); with
+        // none ticked it is the base price, naming that none was taken.
+        // A shared fence's client who took options moves the whole job's price
+        // too (the combination carries every party's share, only theirs changed).
+        let optionJobPriceHeld: string | null = null
+        if (job && (!isMultiContact || (optionPlan && optionsTaken.length > 0))) {
+          const optionPricing = optionPlan
+            ? acceptedPricing(optionPlan.pricing, optionPlan.offer, optionPlan.choice)
+            : undefined
+          const priced = await setJobPriceToAcceptedQuote(sb, {
+            job_id: doc.job_id,
+            document_id: doc.id,
+            job_pricing: job.pricing_json,
+            ...(optionPricing ? { pricing: optionPricing } : {}),
+          })
           if (priced.updated) {
             job.pricing_json = priced.pricing
             await sb.from('job_events').insert({
               job_id: doc.job_id,
               event_type: 'job_price_from_accepted_quote',
-              detail_json: { document_id: doc.id, quote_number: doc.quote_number || null, quote_revision_id: priced.revisionId },
+              detail_json: {
+                document_id: doc.id,
+                quote_number: doc.quote_number || null,
+                quote_revision_id: priced.revisionId,
+                ...(optionPricing ? { accepted_option_ids: optionsTaken.map((o) => o.id) } : {}),
+              },
             })
           } else if (priced.reason !== 'already_the_accepted_price') {
             console.warn('[accept] job price not set from the accepted quote:', JSON.stringify({ job_id: doc.job_id, document_id: doc.id, reason: priced.reason }))
+            // A deposit on the accepted options must not be raised against a job
+            // still priced without them (its invoice wording reads the job's total).
+            if (optionsTaken.length > 0) optionJobPriceHeld = priced.reason
           }
         }
 
@@ -2286,17 +2551,45 @@ serve(async (req: Request) => {
         // once the whole job is accepted, matching the accepted_at write above.
         if (newStatus === 'accepted') {
           try {
+            // Ruling 14 step 1: each taken option's cost joins its lane, read by
+            // the freeze from the job's option record whichever party accepted last.
             const efc = await freezeExpectedCostsOnAcceptance(sb, { job_id: doc.job_id, quote_acceptance: true })
             console.log('[send-quote] expected-cost baseline', JSON.stringify({ job_id: doc.job_id, result: efc }))
           } catch (e) {
             console.error('[send-quote] expected-cost freeze failed (non-blocking):', (e as Error).message)
           }
+          // Ruling 17 step 1: the job budget, beside the baseline (which is unchanged).
+          try {
+            const jb = await recordJobBudgetOnAcceptance(sb, doc.job_id)
+            console.log('[send-quote] job budget', JSON.stringify({ job_id: doc.job_id, result: jb }))
+          } catch (e) {
+            console.error('[send-quote] job budget failed (non-blocking):', (e as Error).message)
+          }
+          // Taken options are added to the drafts (work order lines, payer
+          // amounts, payment stages) before they are released.
           try {
             const { releaseScopeJobDraftsOnAcceptance } = await import('../_shared/scope_freeze/release_scope_job_drafts.ts')
             await releaseScopeJobDraftsOnAcceptance(sb, doc.job_id)
           } catch {
             console.error('[send-quote] scope work-order release held for retry (non-blocking); customer acceptance retained')
           }
+        }
+
+        // Ruling 14 step 1: which options the customer took and where each
+        // goes (supplier order, work order, office list). Ids, names and
+        // destinations only: job_events is readable by trades, so no amount.
+        if (optionsTaken.length > 0) {
+          try {
+            await sb.from('job_events').insert({
+              job_id: doc.job_id,
+              event_type: 'quote_options_taken',
+              detail_json: {
+                document_id: doc.id,
+                options: optionsTaken.map((o) => ({ id: o.id, name: o.name, goes: o.goes })),
+                message: `Customer took ${optionsTaken.length} quote option${optionsTaken.length === 1 ? '' : 's'}: ${optionsTaken.map((o) => `${o.name} (${o.goes === 'supplier' ? 'supplier order' : o.goes === 'crew' ? 'work order' : 'office list'})`).join(', ')}.`,
+              },
+            })
+          } catch { /* the record and the acceptance stand */ }
         }
 
         // Log rich event for Ops Dashboard attention panel
@@ -2313,22 +2606,33 @@ serve(async (req: Request) => {
           event_type: 'quote_accepted',
           detail_json: {
             document_id: doc.id,
-            accepted_via: 'share_link',
+            accepted_via: staffAccept ? 'staff_phone' : 'share_link',
+            ...(staffUserId ? { accepted_by: staffUserId } : {}),
+            ...(optionPlan ? {
+              accepted_option_ids: optionsTaken.map((o) => o.id),
+              offered_option_ids: optionPlan.offer.options.map((o) => o.id),
+            } : {}),
             accepted_at: new Date().toISOString(),
             job_number: job?.job_number || null,
             client_name: acceptorName,
             contact_label: contactLabel,
-            amount: totalIncGST || null,
+            amount: (optionsTaken.length > 0 && optionPlan ? optionPlan.choice.combination.totalIncGST : totalIncGST) || null,
             is_multi_contact: isMultiContact,
             new_status: newStatus,
+            ...acceptSentenceRecord(acceptWords),
             message: `${acceptorName}${contactLabel ? ' (' + contactLabel + ')' : ''} accepted quote${job?.job_number ? ' for ' + job.job_number : ''}${isMultiContact ? ' — status: ' + newStatus : ''}`,
           },
         })
 
-        // Push GHL stage (only to 'accepted' when fully accepted)
-        if (newStatus === 'accepted' && job?.ghl_opportunity_id) {
+        // Push GHL stage (only when fully accepted): the sales pipeline's accepted stage, where
+        // GHL's own workflow takes the job on to Execution. Non-blocking; a refusal is logged as one.
+        const acceptedStageId = quoteAcceptedStageId(job?.type)
+        if (newStatus === 'accepted' && job?.ghl_opportunity_id && !acceptedStageId) {
+          console.log(`[send-quote] GHL stage not moved: no accepted sales stage for job type ${job?.type || 'unknown'}`)
+        }
+        if (newStatus === 'accepted' && job?.ghl_opportunity_id && acceptedStageId) {
           try {
-            await fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=move_stage`, {
+            const stageRes = await fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=move_stage`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -2336,11 +2640,16 @@ serve(async (req: Request) => {
               },
               body: JSON.stringify({
                 opportunityId: job.ghl_opportunity_id,
-                status: 'accepted',
+                stageId: acceptedStageId,
                 jobType: job.type,
               }),
             })
-            console.log(`[send-quote] GHL stage pushed to accepted for ${job.ghl_opportunity_id}`)
+            const stageOutcome = ghlMoveStageOutcome(stageRes.status, await stageRes.json().catch(() => null))
+            if (stageOutcome.moved) {
+              console.log(`[send-quote] GHL stage moved to accepted for ${job.ghl_opportunity_id}`)
+            } else {
+              console.log(`[send-quote] GHL stage move to accepted refused for ${job.ghl_opportunity_id} (non-blocking): ${stageOutcome.reason}`)
+            }
           } catch (e) {
             console.log('[send-quote] GHL stage push failed (non-blocking):', (e as Error).message)
           }
@@ -2442,12 +2751,21 @@ serve(async (req: Request) => {
         // D1F-1/D1F-2: a named party's deposit comes from the version they accepted
         // (a neighbour's from their share of it, never their live contact value);
         // held with a reason when that cannot be read or matched.
-        const partyDeposit = job?.id && doc.job_contact_id && doc.job_contacts
+        // Ruling 14: ticked options put the deposit on the accepted total: the
+        // tool's precomputed first payment for the ticked set. On a shared
+        // fence it is the client's own amount on that first payment.
+        const optionCombination = optionsTaken.length > 0 && optionPlan ? optionPlan.choice.combination : null
+        const optionDeposit = optionCombination
+          ? (isMultiContact
+            ? partyOptionDeposit(optionPlan!.pricing, optionCombination, optionsTaken[0].payer_id)
+            : optionCombination.deposit_inc_gst)
+          : null
+        const partyDeposit = !optionCombination && job?.id && doc.job_contact_id && doc.job_contacts
           ? await namedPartyDeposit(sb, doc)
           : null
         // A party whose quoted share is $0 (a neighbour paid for the only gate, say)
         // owes no deposit: 0 is a real answer, never read as "missing".
-        const partyPaysNothing = neighbourLetter(doc.job_contacts?.contact_label)
+        const partyPaysNothing = optionCombination ? false : neighbourLetter(doc.job_contacts?.contact_label)
           ? partyDeposit?.ok === true && partyDeposit.amount === 0
           : !!(doc.job_contact_id && doc.job_contacts &&
             doc.job_contacts.quote_value_ex_gst != null && Number(doc.job_contacts.quote_value_ex_gst) === 0)
@@ -2463,6 +2781,17 @@ serve(async (req: Request) => {
 
             // If this is a per-neighbour document, pass the contact info for portion-based invoicing
             let depositHeld: string | null = null
+            if (optionJobPriceHeld) depositHeld = 'quote_options_job_price_not_set'
+            else if (optionCombination && optionDeposit === null) depositHeld = 'quote_options_party_deposit_unknown'
+            else if (optionCombination && optionDeposit !== null) {
+              if (isMultiContact && doc.job_contact_id) invoiceBody.job_contact_id = doc.job_contact_id
+              invoiceBody.deposit_amount = optionDeposit
+              const pct = Number((optionPlan!.pricing.deposit as Record<string, unknown> | undefined)?.percent)
+              if (Number.isFinite(pct) && pct > 0) invoiceBody.deposit_percent = pct
+              // The tool's first payment is the whole deposit as sealed (council
+              // fee included where the tool bakes it in): never add it again.
+              invoiceBody.council_fees = 0
+            }
             if (partyDeposit) {
               invoiceBody.job_contact_id = doc.job_contact_id
               const deposit = partyDeposit
@@ -2490,36 +2819,42 @@ serve(async (req: Request) => {
               }
             }
 
-            if (depositHeld) throw new Error(`deposit_held:${depositHeld}`)
-            const depRes = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-              },
-              body: JSON.stringify(invoiceBody),
-            })
-            invoiceResult = await depRes.json()
-            if (invoiceResult.success) {
+            const outcome = depositHeld
+              ? heldDepositFailure(depositHeld)
+              : await requestAcceptanceInvoice(fetch, `${SUPABASE_URL}/functions/v1/ops-api?action=send_acceptance_invoice`, {
+                method: 'POST',
+                headers: acceptanceInvoiceRequestHeaders(SUPABASE_SERVICE_KEY),
+                body: JSON.stringify(invoiceBody),
+              })
+            if (outcome.ok) {
+              invoiceResult = outcome.result
               console.log(`[send-quote] Acceptance invoice sent: ${invoiceResult.invoice_number} — payment URL: ${invoiceResult.payment_url}`)
             } else {
-              console.log(`[send-quote] Acceptance invoice failed: ${invoiceResult.error || 'unknown'}`)
+              console.log(`[send-quote] Acceptance invoice failed: ${outcome.reason}`)
               invoiceResult = null
+              invoiceFailure = outcome
             }
           } catch (e) {
             console.log('[send-quote] Acceptance invoice failed (non-blocking):', (e as Error).message)
             invoiceResult = null
+            invoiceFailure = uncertainFailure((e as Error).message)
+          }
+          // The office is told once; the customer is told it will be emailed shortly.
+          if (invoiceFailure) {
+            await alertAcceptanceInvoiceFailed(sb, {
+              jobId: job.id,
+              jobNumber: job.job_number,
+              failure: invoiceFailure,
+              jobDocumentId: doc.id,
+              jobContactId: doc.job_contact_id || null,
+            })
           }
         }
 
         // ── Auto-start council process for patio jobs (fire-and-forget) ──
         let councilSubmissionId: string | null = null
-        const isPatio = job?.type === 'patio' || job?.job_number?.startsWith('SWP')
+        const isPatio = councilKickoffApplies(job)
         if (isPatio && job) {
-          // This projection currently omits a job email. Preserve its existing
-          // contact fallback without adding a new recipient lookup.
-          const councilJobEmail = 'client_email' in job && typeof job.client_email === 'string'
-            ? job.client_email : ''
           try {
             const councilRes = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=create_council_submission`, {
               method: 'POST',
@@ -2535,51 +2870,30 @@ serve(async (req: Request) => {
             console.log('[send-quote] Council auto-create failed (non-blocking):', (e as Error).message)
           }
 
-          // Send "Next Steps & House Plans" email (fire-and-forget — don't block acceptance page)
+          // Send "Next Steps & House Plans" email (fire-and-forget — don't block acceptance page).
+          // To the address the quote itself was sent to; recorded 'sent' only when Resend accepts it
+          // (council_kickoff_email.ts).
           {
             const clientFirst = (acceptorName || '').split(' ')[0] || 'there'
-            const uploadUrl = `${BASE_URL}/functions/v1/send-quote/upload-plans?token=${token}&job=${job.id}`
-            const replyToCouncil = councilSubmissionId
-              ? `council+${job.job_number}+CS${councilSubmissionId.slice(0, 8)}+S0@secureworksgroup.app`
-              : `approvals@secureworksgroup.app`
-
-            fetch('https://api.resend.com/emails', {
-              method: 'POST',
-              headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                from: 'SecureWorks Group <approvals@secureworksgroup.app>',
-                reply_to: getClientReplyTo(job?.type, job?.job_number),
-                to: [councilJobEmail || doc.job_contacts?.client_email || ''],
-                subject: `Your Patio Project - Next Steps & What We Need From You`,
-                html: buildCouncilKickoffEmail(clientFirst, job.site_address || '', job.site_suburb || '', uploadUrl),
-              }),
-            })
-            .then(() => {
-              console.log(`[send-quote] Council kickoff email sent for ${job.job_number}`)
-              logEmailToGHL(job?.ghl_contact_id, 'Council Kickoff - Next Steps & House Plans', councilJobEmail)
-              // Record in po_communications for council thread
-              if (councilSubmissionId) {
-                sb.from('po_communications').insert({
-                  job_id: job.id,
-                  direction: 'outbound',
-                  from_email: 'approvals@secureworksgroup.app',
-                  to_email: councilJobEmail,
-                  subject: 'Your Patio Project - Next Steps & What We Need From You',
-                  body_text: 'House plans request sent to client on acceptance',
-                  communication_type: 'council',
-                  council_submission_id: councilSubmissionId,
-                  council_step_index: 0,
-                  sent_at: new Date().toISOString(),
-                  delivery_status: 'sent',
-                }).then(() => {}, () => {})
-              }
+            sendCouncilKickoffEmail({
+              sb,
+              fetch,
+              resendApiKey: RESEND_API_KEY,
+              logGhl: (subject, recipient) => logEmailToGHL(job?.ghl_contact_id, subject, recipient),
+            }, {
+              jobId: job.id,
+              jobNumber: job.job_number,
+              documentId: doc.id,
+              councilSubmissionId,
+              replyTo: getClientReplyTo(job?.type, job?.job_number),
+              html: buildCouncilKickoffEmail(clientFirst, job.site_address || '', job.site_suburb || ''),
             })
             .catch((e: Error) => console.log('[send-quote] Council email failed (non-blocking):', e.message))
           }
         }
 
         // Return Next Steps HTML page directly (not via redirect — this is fetched by JS, not loaded as a page)
-        const address = [job?.site_address, job?.site_suburb].filter(Boolean).join(', ')
+        const address = customerSiteLine(job?.site_address, job?.site_suburb)
         // D1F-1: with no invoice, show the deposit from the accepted version, not the live job.
         const acceptedForPage = invoiceResult?.deposit_amount ? null : await readAcceptedRelease(sb, doc.id)
         const acceptedDeposit = acceptedForPage?.ok ? (acceptedForPage.pricing.deposit || {}) : {}
@@ -2587,14 +2901,30 @@ serve(async (req: Request) => {
           clientName: acceptorName,
           projectType: job?.type || 'project',
           address,
-          depositAmount: invoiceResult?.deposit_amount || acceptedDeposit.total_deposit_inc_gst || 0,
+          depositAmount: invoiceResult?.deposit_amount ||
+            (optionDeposit !== null ? optionDeposit : acceptedDeposit.total_deposit_inc_gst) || 0,
           depositDescription: acceptedDeposit.description || depositConfig.description || '',
           paymentUrl: invoiceResult?.payment_url || '',
           invoiceNumber: invoiceResult?.invoice_number || job?.job_number || '',
-          shareToken: token,
+          shareToken: token || undefined,
           isPatio,
           jobId: job?.id || '',
+          invoiceFailed: !!invoiceFailure,
         })
+        if (staffAccept) {
+          return jsonResponse({
+            accepted: true,
+            accepted_via: 'staff_phone',
+            document_id: doc.id,
+            job_status: newStatus,
+            accepted_option_ids: optionPlan ? optionsTaken.map((o) => o.id) : null,
+            accepted_total_inc_gst: optionPlan ? optionPlan.choice.combination.totalIncGST : null,
+            deposit_invoice: invoiceResult
+              ? { invoice_number: invoiceResult.invoice_number || null, deposit_amount: invoiceResult.deposit_amount ?? null }
+              : null,
+            deposit_invoice_failed: !!invoiceFailure,
+          }, 200, corsHeaders)
+        }
         return new Response(nextStepsHtml, {
           status: 200,
           headers: { ...corsHeaders, 'Content-Type': 'text/html' },
@@ -2602,6 +2932,7 @@ serve(async (req: Request) => {
       }
 
       // Fallback if no job_id (shouldn't happen, but safe)
+      if (staffAccept) return jsonResponse({ accepted: true, accepted_via: 'staff_phone', document_id: doc.id, job_status: null }, 200, corsHeaders)
       const fallbackHtml = buildNextStepsPage({
         clientName: 'Customer',
         projectType: 'project',
@@ -2817,9 +3148,12 @@ serve(async (req: Request) => {
       // pricing, not from the live job. An unprovable named revision refuses
       // here, before any claim or email.
       let ownerPriceRuns: OwnerPriceGate
+      // No type annotation: send_runs_request_test runs this prelude as plain JS.
+      let runsSealedRevisionId = null
       let approvedRunPdfs: Map<string, Uint8Array> = new Map()
       {
         const sealedRuns = sealedSendSource(await sourceScopeRevisionReadRuns, job.id)
+        if (sealedRuns.kind === 'sealed') runsSealedRevisionId = sealedRuns.revision_id
         if (sealedRuns.kind === 'refused') {
           console.log('[send-quote] send-runs sealed revision refused', JSON.stringify({
             job_id: job.id, code: sealedRuns.body.code, reason: sealedRuns.body.reason,
@@ -3164,6 +3498,9 @@ serve(async (req: Request) => {
 
       // Send emails grouped by recipient
       const viewBaseUrl = `${SUPABASE_URL}/functions/v1/send-quote/view`
+      // Customer 3D view: a third button only when the sealed revision this
+      // send releases has a saved customer model (customer_model.ts).
+      const runsHasModel = await scopeRevisionHasCustomerModel(sb, runsSealedRevisionId)
       let emailsSent = 0
       let primarySent = false
       const successfulEmails: string[] = []
@@ -3174,30 +3511,16 @@ serve(async (req: Request) => {
           const run = recipient.runs[i]
           return `<a href="${viewBaseUrl}?token=${doc.share_token}" style="display:block;padding:12px 16px;margin:8px 0;background:#f8f9fa;border-radius:8px;border-left:3px solid #F15A29;text-decoration:none;color:#293C46;font-weight:600;">${run.run_name || run.run_label || 'Fence run'} - View &amp; Accept &rarr;</a>`
         }).join('')
-
-        const emailHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-<body style="margin:0;padding:0;background:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#fff;">
-<tr><td style="background:#F15A29;height:4px;"></td></tr>
-<tr><td style="background:#293C46;padding:20px 32px;">
-  <span style="color:#fff;font-size:18px;font-weight:700;">SecureWorks</span>
-  <span style="color:rgba(255,255,255,0.6);font-size:16px;font-weight:400;margin-left:4px;">Group</span>
-</td></tr>
-<tr><td style="padding:32px;">
-  <h1 style="margin:0 0 16px;color:#293C46;font-size:22px;">Your fencing quote is ready</h1>
-  <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Hi ${recipient.name},</p>
-  ${message ? `<p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 16px;">${message}</p>` : ''}
-  <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">
-    Thank you for giving us the opportunity to quote on your fencing project${job.site_suburb ? ' in ' + job.site_suburb : ''}.
-    This job has ${recipient.runs.length} fence run${recipient.runs.length > 1 ? 's' : ''} - each with its own quote below.
-  </p>
-  ${runLinks}
-  <p style="color:#4C6A7C;font-size:13px;margin-top:24px;">Each quote is valid for 30 days. You can accept or decline each run independently.</p>
-</td></tr>
-<tr><td style="padding:16px 32px;border-top:1px solid #eee;text-align:center;">
-  <p style="color:#999;font-size:12px;">SecureWorks Group Pty Ltd | ABN 64 689 223 416</p>
-</td></tr>
-</table></body></html>`
+        // The recipient's own first quote token: never another party's link.
+        const model3dToken = runsHasModel ? recipient.docs.find((d: any) => d?.share_token)?.share_token : null
+        const emailHtml = buildRunsQuoteEmail({
+          recipientName: recipient.name,
+          message: message || '',
+          suburb: job.site_suburb || '',
+          runCount: recipient.runs.length,
+          runLinks,
+          model3dUrl: model3dToken ? customer3dLink(CUSTOMER_3D_PAGE_URL, model3dToken) : null,
+        })
 
         try {
           // Build attachments from PDFs (if available)
@@ -3634,6 +3957,16 @@ serve(async (req: Request) => {
             source_scope_revision: sourceScopeRevisionReadRuns,
           }, { handler: 'send-quote/send-runs', job_id: job.id })
         }
+        // Customer 3D view: every run document of this call names the call's
+        // release, so each recipient's own token reaches the sealed model.
+        if (runsHasModel && releasedRevisionIdRuns) {
+          await stampRunDocumentsRelease(
+            sb,
+            [...createdDocs, ...publishedExistingDocs].map((d: any) => d?.id),
+            releasedRevisionIdRuns,
+            { job_id: job.id },
+          )
+        }
 
         // N2 — see send-quote/send above. Structured body_preview so the
         // extractor pre-filter doesn't skip with "quote quote.sent <UUID>".
@@ -3802,6 +4135,7 @@ serve(async (req: Request) => {
       const emailHtml = buildInvoiceEmail({
         firstName,
         jobType: typeName,
+        projectLabel: nextStepsProjectLabel(job_type),
         address: address || '',
         invoiceNumber: invoice_number || '',
         depositAmount: depositFormatted,
@@ -3982,78 +4316,29 @@ serve(async (req: Request) => {
 
     // ── UPLOAD PLANS — client uploads house plans for council process ──
     if (path === 'upload-plans' && req.method === 'GET') {
-      const token = url.searchParams.get('token')
-      const jobId = url.searchParams.get('job')
-      if (!token) return new Response('Invalid link', { status: 400, headers: corsHeaders })
-
-      // Validate token
-      const { data: doc } = await sb.from('job_documents').select('job_id, accepted_at, jobs(site_address, site_suburb)').eq('share_token', token).maybeSingle()
-      // The job foreign key is a to-one join. Do not choose an arbitrary job
-      // if a malformed/ambiguous response ever returns a list instead.
-      const site: unknown = doc?.jobs
-      const addr = site && typeof site === 'object' && !Array.isArray(site)
-        ? [('site_address' in site ? site.site_address : null), ('site_suburb' in site ? site.site_suburb : null)].filter(Boolean).join(', ')
-        : ''
-
-      return new Response(buildUploadPlansPage(token, jobId || doc?.job_id || '', addr), {
+      // Only a real share token, for the job the link names (upload_plans.ts).
+      const job = await resolveUploadPlansJob(sb, url.searchParams.get('token'), url.searchParams.get('job'))
+      if (!job.ok) return new Response('Invalid link', { status: job.status, headers: corsHeaders })
+      const addr = customerSiteLine(job.site?.site_address, job.site?.site_suburb)
+      return new Response(buildUploadPlansPage(url.searchParams.get('token') || '', job.jobId, addr), {
         status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
       })
     }
 
     if (path === 'upload-plans' && req.method === 'POST') {
-      const body = await req.json()
-      const { token, job_id, filename, content_base64, content_type } = body
-      if (!token || !content_base64) return jsonResponse({ error: 'token and content_base64 required' }, 400, corsHeaders)
-
-      // Validate token
-      const { data: doc } = await sb.from('job_documents').select('job_id').eq('share_token', token).maybeSingle()
-      const jId = job_id || doc?.job_id
-      if (!jId) return jsonResponse({ error: 'Invalid token or job not found' }, 404, corsHeaders)
-
-      // Upload to Storage
-      try { await sb.storage.createBucket('job-documents', { public: true }) } catch { /* exists */ }
-      const filePath = `${jId}/council/house-plans/${Date.now()}-${filename || 'house-plans.pdf'}`
-      const fileBuffer = Uint8Array.from(atob(content_base64), c => c.charCodeAt(0))
-      await sb.storage.from('job-documents').upload(filePath, fileBuffer, {
-        contentType: content_type || 'application/pdf', upsert: true,
-      })
-      const { data: urlData } = sb.storage.from('job-documents').getPublicUrl(filePath)
-
-      // Business event
-      await insertCapturedEvidence(sb, {
-        event_type: 'council.plans_received',
-        entity_type: 'job',
-        entity_id: jId,
-        detail_json: { filename, source: 'upload_page', url: urlData?.publicUrl },
-      }).then(() => {}, () => {})
-
-      // Annotation
-      await sb.from('ai_annotations').insert({
-        org_id: DEFAULT_ORG_ID,
-        entity_type: 'job',
-        entity_id: jId,
-        ui_location: 'job_overview',
-        annotation_type: 'council_plans_received',
-        category: 'council',
-        title: 'House plans uploaded by client',
-        body: `${filename || 'Plans'} uploaded via acceptance page`,
-        priority: 60,
-        severity: 'info',
-        source: 'send-quote',
-        source_ref: `plans:${jId}:${Date.now()}`,
-        confidence: 1.0,
-      }).then(() => {}, () => {})
-
-      // Update council submission step 0 if exists
-      const { data: submission } = await sb.from('council_submissions')
-        .select('id, steps').eq('job_id', jId).maybeSingle()
-      if (submission && submission.steps && submission.steps[0]?.status === 'pending') {
-        const steps = [...submission.steps]
-        steps[0] = { ...steps[0], status: 'complete', completed_at: new Date().toISOString(), documents_received: [{ filename, url: urlData?.publicUrl }] }
-        await sb.from('council_submissions').update({ steps, current_step_index: 1 }).eq('id', submission.id)
-      }
-
-      return jsonResponse({ success: true, url: urlData?.publicUrl }, 200, corsHeaders)
+      // Refused (and nothing written) unless the token belongs to the job; success only once stored.
+      const result = await handleUploadPlans({
+        sb,
+        store: async (filePath, bytes, contentType) => {
+          try { await sb.storage.createBucket('job-documents', { public: true }) } catch { /* exists */ }
+          const { error } = await sb.storage.from('job-documents').upload(filePath, bytes, { contentType, upsert: true })
+          return { error }
+        },
+        publicUrl: (filePath) => sb.storage.from('job-documents').getPublicUrl(filePath)?.data?.publicUrl ?? null,
+        recordEvidence: (row) => insertCapturedEvidence(sb, row as any),
+        orgId: DEFAULT_ORG_ID,
+      }, await req.json().catch(() => null))
+      return jsonResponse(result.body, result.status, corsHeaders)
     }
 
     // ── NEIGHBOUR NUDGE SMS (T7 — gated, call via cron or manual trigger) ──
@@ -4236,9 +4521,46 @@ async function htmlResponse(html: string) {
 // EMAIL TEMPLATE
 // ════════════════════════════════════════════════════════════
 
-function buildQuoteEmail(opts: {
+// The fence runs quote email (/send-runs), one per recipient.
+export function buildRunsQuoteEmail(opts: {
+  recipientName: string
+  message: string
+  suburb: string
+  runCount: number
+  runLinks: string
+  model3dUrl?: string | null
+}): string {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#fff;">
+<tr><td style="background:#F15A29;height:4px;"></td></tr>
+<tr><td style="background:#293C46;padding:20px 32px;">
+  <span style="color:#fff;font-size:18px;font-weight:700;">SecureWorks</span>
+  <span style="color:rgba(255,255,255,0.6);font-size:16px;font-weight:400;margin-left:4px;">Group</span>
+</td></tr>
+<tr><td style="padding:32px;">
+  <h1 style="margin:0 0 16px;color:#293C46;font-size:22px;">Your fencing quote is ready</h1>
+  <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Hi ${opts.recipientName},</p>
+  ${opts.message ? `<p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 16px;">${opts.message}</p>` : ''}
+  <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">
+    Thank you for giving us the opportunity to quote on your fencing project${opts.suburb ? ' in ' + opts.suburb : ''}.
+    This job has ${opts.runCount} fence run${opts.runCount > 1 ? 's' : ''} - each with its own quote below.
+  </p>
+  ${opts.runLinks}
+  ${customerModelEmailBlock({ what: 'fence', url: opts.model3dUrl })}
+  <p style="color:#4C6A7C;font-size:13px;margin-top:24px;">Each quote is valid for 30 days. You can accept or decline each run independently.</p>
+</td></tr>
+<tr><td style="padding:16px 32px;border-top:1px solid #eee;text-align:center;">
+  <p style="color:#999;font-size:12px;">SecureWorks Group Pty Ltd | ABN 64 689 223 416</p>
+</td></tr>
+</table></body></html>`
+}
+
+export function buildQuoteEmail(opts: {
   clientName: string
   viewUrl: string
+  model3dUrl?: string | null
+  model3dWhat?: 'patio' | 'fence'
   pdfUrl: string
   projectType: string
   suburb: string
@@ -4259,13 +4581,13 @@ function buildQuoteEmail(opts: {
 
     <!-- Body -->
     <tr><td style="padding:32px;">
-      <h1 style="margin:0 0 16px;color:#293C46;font-size:22px;">Your ${opts.projectType} quote is ready</h1>
+      <h1 style="margin:0 0 16px;color:#293C46;font-size:22px;">${quoteEmailHeading(opts.projectType)}</h1>
       <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">
         Hi ${opts.clientName},
       </p>
       ${opts.customMessage ? `<p style="color:#333;font-size:15px;line-height:1.6;margin:0 0 16px;">${opts.customMessage}</p>` : ''}
       <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 24px;">
-        Thank you for giving us the opportunity to quote on your ${opts.projectType} project${opts.suburb ? ' in ' + opts.suburb : ''}.
+        Thank you for giving us the opportunity to quote on your ${quoteEmailProjectWords(opts.projectType)}${opts.suburb ? ' in ' + opts.suburb : ''}.
         You can view your detailed quote online, or download it as a PDF, using the buttons below.
       </p>
 
@@ -4286,6 +4608,7 @@ function buildQuoteEmail(opts: {
           </a>
         </td></tr>
       </table>` : ''}
+      ${customerModelEmailBlock({ what: opts.model3dWhat ?? 'patio', url: opts.model3dUrl })}
 
       <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
 
@@ -4324,10 +4647,12 @@ function buildQuoteEmail(opts: {
 // CLIENT-FACING QUOTE PAGE
 // ════════════════════════════════════════════════════════════
 
-function buildClientPage(doc: any, token: string, heroUrl: string | null = null): string {
+function buildClientPage(doc: any, token: string, heroUrl: string | null = null, options: QuoteOptionsOffer | null = null, acceptWords: AcceptSentenceRead | null = null): string {
   // heroUrl retained in signature for backwards compat but not rendered — PDF has its own cover
   const isAccepted = !!doc.accepted_at
   const isDeclined = !!doc.declined_at
+  // Ruling 11 item 8: empty unless the released quote sealed the sentence.
+  const acceptingLine = acceptSentenceHtml(acceptWords)
 
   // Mobile card display fields — omit gracefully if absent
   const mobQuoteRef = doc.quote_number || ''
@@ -4375,6 +4700,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
     .btn { display: inline-block; padding: 13px 32px; border-radius: 8px; font-size: 15px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; text-align: center; width: 100%; margin-bottom: 8px; font-family: inherit; }
     .btn-accept { background: #34C759; color: #fff; }
     .btn-decline { background: transparent; color: #FF6B60; border: 1px solid #FF6B60; }
+    .accept-sentence { color: #fff; font-size: 15px; font-weight: 600; line-height: 1.45; margin-bottom: 14px; }
     .btn-view-pdf { background: #F15A29; color: #fff; display: inline-block; width: auto; padding: 13px 40px; }
     .btn:hover { opacity: 0.88; }
     /* Decline form */
@@ -4420,6 +4746,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
       .topbar { padding: 12px 16px; }
       .container { padding: 16px 16px 40px; }
     }
+    ${options ? QUOTE_OPTIONS_CSS : ''}
   </style>
 </head>
 <body>
@@ -4447,6 +4774,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
       <a href="${doc.pdf_url}" download class="btn-mob-secondary">Download PDF</a>
       ${!isAccepted && !isDeclined ? `
       <div class="mob-actions-sep">
+        ${acceptingLine}
         <button class="btn btn-accept" onclick="respondToQuote('accept')" style="margin-bottom:8px;">Accept Quote</button>
         <button class="btn btn-decline" onclick="showDeclineForm()">Decline</button>
       </div>` : statusHtml ? `<div class="mob-actions-sep">${statusHtml}</div>` : ''}
@@ -4457,9 +4785,12 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
   <div class="container">
     ${statusHtml}
 
+    ${!isAccepted && !isDeclined && options ? buildQuoteOptionsCard(options) : ''}
+
     ${!isAccepted && !isDeclined ? `
     <div class="actions-card">
       <p style="color:rgba(255,255,255,0.7);font-size:14px;margin-bottom:16px;">Happy with the quote? Accept below to confirm and we'll be in touch to schedule your project.</p>
+      ${acceptingLine}
       <button class="btn btn-accept" onclick="respondToQuote('accept')">Accept Quote</button>
       <button class="btn btn-decline" onclick="showDeclineForm()">Decline</button>
     </div>
@@ -4517,6 +4848,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
         '<div style="font-size:36px;margin-bottom:12px">&#9989;</div>' +
         '<h3 style="color:#293C46;font-size:18px;margin-bottom:8px">Accept this quote?</h3>' +
         '<p style="color:#4C6A7C;font-size:14px;margin-bottom:20px">This confirms your agreement to the terms and conditions included.</p>' +
+        acceptConfirmOptionsLine() +
         '<div style="display:flex;gap:8px">' +
         '<button onclick="this.closest(\\'.confirm-overlay\\').remove()" style="flex:1;padding:12px;border:1px solid #ddd;border-radius:8px;background:#fff;font-size:15px;cursor:pointer;font-family:inherit">Cancel</button>' +
         '<button onclick="this.closest(\\'.confirm-overlay\\').remove();doAccept()" style="flex:1;padding:12px;border:none;border-radius:8px;background:#34C759;color:#fff;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit">Yes, Accept</button>' +
@@ -4524,6 +4856,16 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
       document.body.appendChild(overlay);
     }
     function doAccept() { respondToQuote('accept_confirmed'); }
+    // Ruling 14: the ticked options and their figures, when the quote offers any.
+    function acceptConfirmOptionsLine() {
+      if (typeof currentOptionFigures !== 'function') return '';
+      var f = currentOptionFigures();
+      if (!f) return '';
+      var n = tickedOptionIds().length;
+      return '<p style="color:#293C46;font-size:14px;margin-bottom:20px">' +
+        (n ? (n === 1 ? '1 option added. ' : n + ' options added. ') : 'No options added. ') +
+        'Total ' + f.total + ', deposit ' + f.deposit + '.</p>';
+    }
 
     async function respondToQuote(action, declineData) {
       if (action === 'accept') {
@@ -4544,6 +4886,9 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
       }
 
       var payload = {};
+      if (action === 'accept' && typeof tickedOptionIds === 'function') {
+        payload = { option_ids: tickedOptionIds() };
+      }
       if (action === 'decline' && declineData) {
         payload = {
           reason: declineData.reason,
@@ -4591,7 +4936,9 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null)
 // PER-RUN FENCING QUOTE PAGE (multi-neighbour)
 // ════════════════════════════════════════════════════════════
 
-function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerType: string): string {
+function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerType: string, acceptWords: AcceptSentenceRead | null = null): string {
+  // Ruling 11 item 8: empty unless the released quote sealed this run's words.
+  const acceptingLine = acceptSentenceHtml(acceptWords)
   const clientName = job?.client_name || 'Customer'
   const clientAddress = job?.site_address || ''
   const suburb = job?.site_suburb || ''
@@ -4730,6 +5077,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
     .btn-accept { background: #34C759; color: #fff; }
     .btn-decline { background: #f5f5f7; color: #FF3B30; border: 1px solid #FF3B30; }
     .btn:hover { opacity: 0.9; }
+    .accept-sentence { color: #293C46; font-size: 15px; font-weight: 600; line-height: 1.45; margin-bottom: 14px; }
     .footer { text-align: center; color: #999; font-size: 12px; padding: 24px; }
     @media print {
       body { background: #fff; }
@@ -4771,6 +5119,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
       ${!isAccepted && !isDeclined ? `
       <div class="no-print" style="margin-top:24px;padding-top:24px;border-top:1px solid #eee;">
         <p style="color:#4C6A7C;font-size:14px;margin-bottom:16px;">Happy with this quote? Accept below to confirm.</p>
+        ${acceptingLine}
         <button class="btn btn-accept" onclick="respondToQuote('accept')">Accept Quote</button>
         <button class="btn btn-decline" onclick="respondToQuote('decline')">Decline</button>
       </div>
@@ -4829,7 +5178,8 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
 // PER-RUN ACCEPTANCE CONFIRMATION PAGES
 // ════════════════════════════════════════════════════════════
 
-function buildRunAcceptedPage(job: any, run: any, acceptorName: string): string {
+export function buildRunAcceptedPage(job: any, run: any, acceptorName: string, opts: { invoiceFailed?: boolean } = {}): string {
+  const deposit = runDepositLines(opts)
   const jobNumber = job?.job_number || ''
   const runName = run?.run_name || run?.run_label || 'Fence'
   const suburb = job?.site_suburb || ''
@@ -4847,12 +5197,12 @@ function buildRunAcceptedPage(job: any, run: any, acceptorName: string): string 
     <p style="color:#4C6A7C;font-size:15px;margin-bottom:24px">${jobNumber}${suburb ? ', ' + suburb : ''}</p>
     <div style="background:#34C75915;border:1px solid #34C75930;border-radius:8px;padding:16px;margin-bottom:24px;">
       <p style="color:#34C759;font-weight:600;font-size:15px;">Both parties have confirmed this run.</p>
-      <p style="color:#4C6A7C;font-size:13px;margin-top:8px;">Deposit invoices are being created now. You'll receive yours by email shortly with a payment link.</p>
+      <p style="color:#4C6A7C;font-size:13px;margin-top:8px;">${deposit.note}</p>
     </div>
     <div style="text-align:left;background:#f8f9fa;padding:16px;border-radius:8px;">
       <p style="font-weight:600;color:#293C46;margin-bottom:8px;">What happens next?</p>
       <ol style="color:#4C6A7C;font-size:14px;line-height:2;padding-left:20px;">
-        <li>Pay your deposit via the invoice link (check your email)</li>
+        <li>${deposit.firstStep}</li>
         <li>We'll order materials once deposits are received</li>
         <li>Our team will be in touch to schedule the installation</li>
       </ol>
@@ -5271,7 +5621,7 @@ export const _createXeroQuoteForTest = createXeroQuote
 // NEXT STEPS PAGE (shown after quote acceptance)
 // ════════════════════════════════════════════════════════════
 
-function buildNextStepsPage(opts: {
+export function buildNextStepsPage(opts: {
   clientName: string
   projectType: string
   address: string
@@ -5285,16 +5635,16 @@ function buildNextStepsPage(opts: {
   bankName?: string
   isPatio?: boolean
   jobId?: string
+  // The deposit invoice was asked for and not made: say it will be emailed, never that it was.
+  invoiceFailed?: boolean
 }): string {
   const firstName = opts.clientName?.split(' ')[0] || 'there'
-  const typeName = opts.projectType === 'fencing' ? 'fencing' : opts.projectType === 'decking' ? 'decking' : 'patio'
+  const projectLabel = nextStepsProjectLabel(opts.projectType)
   const depositFormatted = opts.depositAmount > 0
     ? '$' + opts.depositAmount.toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
     : ''
 
-  const payButton = opts.paymentUrl
-    ? `<a href="${opts.paymentUrl}" class="btn btn-pay" target="_blank">Pay Now - Card or Bank Transfer</a>`
-    : '<p style="color:#4C6A7C;font-size:14px;">Your deposit invoice has been emailed to you. You can pay by card or bank transfer.</p>'
+  const payButton = depositPaymentLine({ paymentUrl: opts.paymentUrl, invoiceFailed: opts.invoiceFailed })
 
   // "I've paid" secondary button — links to payment-confirmed handler
   const paidButton = opts.shareToken
@@ -5363,7 +5713,7 @@ function buildNextStepsPage(opts: {
         <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
       </div>
       <h1>Quote Accepted!</h1>
-      <p>Your ${typeName} project${opts.address ? ' at ' + opts.address : ''} is confirmed.</p>
+      <p>Your ${projectLabel}${opts.address ? ' at ' + opts.address : ''} is confirmed.</p>
     </div>
 
     ${depositFormatted ? `
@@ -5377,7 +5727,7 @@ function buildNextStepsPage(opts: {
     </div>
     ` : `
     <div class="card">
-      <p style="color:#4C6A7C;font-size:14px;">Your deposit invoice will be sent to you shortly. You can pay by card or bank transfer.</p>
+      ${noDepositAmountLine({ invoiceFailed: opts.invoiceFailed })}
     </div>
     `}
 
@@ -5442,7 +5792,7 @@ function buildNextStepsPage(opts: {
                     content_type: file.type || 'application/pdf'
                   })
                 }).then(function(r) { return r.json(); }).then(function(data) {
-                  if (data.error) reject(new Error(data.error));
+                  if (data.error || data.success !== true) reject(new Error(data.error || 'upload_failed'));
                   else resolve(data);
                 }).catch(reject);
               };
@@ -5482,9 +5832,11 @@ function buildNextStepsPage(opts: {
 // BRANDED INVOICE EMAIL TEMPLATE (T3 + T8 referral footer)
 // ════════════════════════════════════════════════════════════
 
-function buildInvoiceEmail(opts: {
+export function buildInvoiceEmail(opts: {
   firstName: string
   jobType: string
+  // "your <this>": a general job's says "project", never "patio project" (division_routing.ts).
+  projectLabel: string
   address: string
   invoiceNumber: string
   depositAmount: string
@@ -5535,7 +5887,7 @@ function buildInvoiceEmail(opts: {
         Hi ${opts.firstName},
       </p>
       <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 24px;">
-        Your deposit invoice for your ${opts.jobType} project${opts.address ? ' at ' + opts.address : ''} is ready.
+        Your deposit invoice for your ${opts.projectLabel}${opts.address ? ' at ' + opts.address : ''} is ready.
       </p>
 
       <!-- Invoice card with orange left border -->
@@ -5683,61 +6035,13 @@ async function doUpload(files) {
         body: JSON.stringify({token:'${token}',job_id:'${jobId}',filename:f.name,content_base64:b64,content_type:f.type})
       });
       var data = await resp.json();
-      if (data.error) throw new Error(data.error);
+      if (!resp.ok || data.error || data.success !== true) throw new Error(data.error || 'upload_failed');
     }
     dz.style.display = 'none';
     document.getElementById('success').style.display = '';
   } catch(e) { dz.innerHTML = '<div style="color:#E74C3C">Upload failed: '+e.message+'</div>'; }
 }
 </script></body></html>`
-}
-
-function buildCouncilKickoffEmail(clientFirst: string, address: string, suburb: string, uploadUrl: string): string {
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-<body style="margin:0;padding:0;background:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#fff;">
-  <tr><td style="background:#F15A29;height:4px;"></td></tr>
-  <tr><td style="background:#293C46;padding:20px 32px;">
-    <span style="color:#fff;font-size:18px;font-weight:700;">SecureWorks</span>
-    <span style="color:rgba(255,255,255,0.6);font-size:16px;font-weight:400;margin-left:4px;">Group</span>
-  </td></tr>
-  <tr><td style="padding:32px;background:#fff;">
-    <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Hi ${clientFirst},</p>
-    <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Thanks for choosing SecureWorks Group for your patio project${address ? ' at ' + address : ''}!</p>
-    <p style="color:#4C6A7C;font-size:15px;line-height:1.6;margin:0 0 16px;">Your deposit invoice has been sent separately. While we wait for that to come through, there's one thing we need from you to get started:</p>
-
-    <div style="background:#293C46;border-radius:8px;padding:20px;margin:20px 0;text-align:center;">
-      <div style="color:#fff;font-size:18px;font-weight:700;margin-bottom:8px;">📋 We Need Your House Plans</div>
-      <p style="color:rgba(255,255,255,0.8);font-size:14px;margin:0 0 16px;">To begin engineering and council approval, we need a copy of your original house plans showing the building footprint.</p>
-      <a href="${uploadUrl}" style="display:inline-block;padding:12px 28px;background:#F15A29;color:#fff;text-decoration:none;border-radius:6px;font-weight:700;font-size:15px;">Upload Your Plans Here</a>
-    </div>
-
-    <p style="color:#4C6A7C;font-size:14px;line-height:1.6;margin:0 0 8px;">Or simply <strong>reply to this email</strong> with your plans attached.</p>
-    <p style="color:#999;font-size:13px;line-height:1.6;margin:0 0 20px;">Not sure where to find them? Check your original build pack, request a copy from your local council${suburb ? ' (' + suburb + ')' : ''}, or ask your builder.</p>
-
-    <div style="border-top:1px solid #eee;padding-top:20px;margin-top:20px;">
-      <p style="color:#293C46;font-size:14px;font-weight:700;margin:0 0 12px;">What happens from here:</p>
-      <ol style="color:#4C6A7C;font-size:14px;line-height:1.8;padding-left:20px;margin:0;">
-        <li>Our engineer prepares structural drawings (1–2 weeks)</li>
-        <li>We submit your CDC application to council</li>
-        <li>Council reviews and issues a building permit (typically 6–8 weeks)</li>
-        <li>We order materials and schedule your build</li>
-      </ol>
-      <p style="color:#4C6A7C;font-size:13px;margin-top:12px;">We handle the entire council process for you - no need for you to contact council directly.</p>
-    </div>
-
-    <p style="color:#4C6A7C;font-size:14px;margin-top:20px;">Questions? Call <a href="tel:+61489267771" style="color:#F15A29;text-decoration:none;font-weight:600;">0489 267 771</a> or reply to this email.</p>
-  </td></tr>
-  <tr><td style="background:#293C46;padding:20px 32px;">
-    <p style="color:#ffffff;font-size:13px;margin:0;text-align:center;line-height:1.6;">
-      <strong>SecureWorks Group</strong> - Insulated Patios | Fencing &amp; Screening | Composite Decking<br>
-      <span style="color:#F15A29;">Transform your entire outdoor space - ask us about a complete package</span>
-    </p>
-  </td></tr>
-  <tr><td style="background:#f5f5f7;padding:16px 32px;">
-    <p style="color:#999;font-size:11px;margin:0;text-align:center;">SecureWorks Group Pty Ltd | ABN 64 689 223 416</p>
-  </td></tr>
-</table></body></html>`
 }
 
 function buildPaymentConfirmPromptPage(token: string): string {

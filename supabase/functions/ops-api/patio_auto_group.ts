@@ -36,6 +36,7 @@ import {
   GROUP_PAY_BASIS_EMPLOYER_SUPER,
   groupFeatureOn,
   GroupWorkOrderError,
+  PATIO_PAY_GROUP_ONLY_FLAG,
   readGroupWorkOrderCrew,
   newShareToken,
 } from "./group_work_order.ts";
@@ -48,10 +49,12 @@ export const PATIO_AUTO_GROUP_MIN_CREW = 2;
 /**
  * Owner, 3 Nov 2026: "all patio pay needs to go through [group work orders]
  * from now", one person or many, for patio jobs after Zoo. While this switch
- * is on a patio job needs 1 crew for its group, and ordinary hours on a patio
- * job are refused (group_work_order.ts assertPatioPaysThroughGroup).
+ * (and group_work_order_v1) is on a patio job needs 1 crew for its group, and
+ * ordinary hours on a patio job are refused (group_work_order.ts
+ * assertPatioPaysThroughGroup). The flag name has one home, group_work_order.ts;
+ * it is re-exported here for existing importers.
  */
-export const PATIO_PAY_GROUP_ONLY_FLAG = "patio_pay_group_only_v1";
+export { PATIO_PAY_GROUP_ONLY_FLAG };
 
 async function minCrewFor(client: any, kind: { jobType: string }): Promise<number> {
   if (kind.jobType === "patio" && await flagOn(client, PATIO_PAY_GROUP_ONLY_FLAG)) return 1;

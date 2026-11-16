@@ -1108,6 +1108,13 @@ ops-api|supabase/migrations/20261105010000_job_auto_start.sql|table|job_auto_sta
 ops-api|supabase/migrations/20261105010000_job_auto_start.sql|column|job_auto_start_runs.moved_job_numbers
 ops-api|supabase/migrations/20261105010000_job_auto_start.sql|policy|job_auto_start_runs.job_auto_start_runs_service_role_all
 ops-api|supabase/migrations/20261105010000_job_auto_start.sql|function|trigger_job_auto_start
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|column|job_closeout_settings.schedule_reminder_mode
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|table|job_schedule_reminders
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|constraint|job_schedule_reminders_once_a_day
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|policy|job_schedule_reminders.job_schedule_reminders_service_role_all
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|table|job_schedule_reminder_runs
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|policy|job_schedule_reminder_runs.job_schedule_reminder_runs_service_role_all
+ops-api|supabase/migrations/20261113120000_job_schedule_reminders.sql|function|trigger_job_schedule_reminders
 # Dispatch v2 Tweak 1: the order-confirmed step remembers each crew pickup line
 # it wrote (dispatch_v2_order_confirmed_write.ts), so ops-api must not deploy
 # ahead of the table.
@@ -1134,6 +1141,15 @@ ops-api|supabase/migrations/20261105170000_dispatch_v2_outlook_orders.sql|functi
 ops-api|supabase/migrations/20261106120000_dispatch_v2_outlook_order_on_send.sql|column|dispatch_v2_reply_scan_state.sent_orders_since
 ops-api|supabase/migrations/20261106120000_dispatch_v2_outlook_order_on_send.sql|index|dispatch_supplier_order_emails_source_event_supplier_idx
 ops-api|supabase/migrations/20261106120000_dispatch_v2_outlook_order_on_send.sql|function|dispatch_v2_record_outlook_order_on_send
+# Solarspan is Bondor (Shaun, 11 Nov 2026): the approved list's recognise-only
+# addresses. ops-api's Outlook send rule and reply scan select the column (a
+# 42703 there would leave the send rule failing and the reply scan with no
+# approved senders), and the email reader's supplier domains
+# (_shared/evidence/outlook_partners.ts) select it in outlook-mail-capture and
+# context-capture-census, where a failed read stops the partner list.
+ops-api|supabase/migrations/20261111160000_dispatch_v2_solarspan_as_bondor.sql|column|dispatch_approved_supplier_emails.also_known_emails
+outlook-mail-capture|supabase/migrations/20261111160000_dispatch_v2_solarspan_as_bondor.sql|column|dispatch_approved_supplier_emails.also_known_emails
+context-capture-census|supabase/migrations/20261111160000_dispatch_v2_solarspan_as_bondor.sql|column|dispatch_approved_supplier_emails.also_known_emails
 #
 # Dispatch v2 Tweak 2 piece 2: the job number in a supplier's stored PDF, saved
 # with the rung pdf_job_number (dispatch_v2_replies.ts, dispatch_v2_reply_pdf.ts).
@@ -1181,6 +1197,10 @@ ops-api|supabase/migrations/20261106062000_scope_work_order_saved_handoff.sql|fu
 # open status; the release accepts them from 20261110200000. Ahead of it a move
 # to Deposit or Scheduled would only log a held release, so wait for it.
 ops-api|supabase/migrations/20261110200000_scope_draft_release_open_status.sql|function|release_scope_job_drafts
+# RQ-17.c: a scope draft prepare registers the sealed payers as job parties
+# (register_scope_payer_parties); ahead of it every prepare reports the
+# registration unavailable, so wait for it.
+ops-api|supabase/migrations/20261111120000_scope_payer_parties.sql|function|register_scope_payer_parties
 ops-api|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|table|trade_invoice_events
 ops-api|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|table|trade_invoice_extra_rate_rules
 ops-api|supabase/migrations/20261106163712_trade_invoice_money_controls.sql|index|trade_invoices_invoice_number_key
@@ -1207,3 +1227,23 @@ ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|functi
 ops-api|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|function|revoke_job_deposit_gate_override
 send-po-email|supabase/migrations/20261111110000_job_deposit_gate_overrides.sql|table|job_deposit_gate_overrides
 send-po-email|supabase/migrations/20261106040518_scope_job_drafts.sql|table|scope_job_draft_invoices
+ops-api|supabase/migrations/20261112090000_trade_invoice_commission_super_base.sql|column|trade_invoices.super_base_ex
+ops-api|supabase/migrations/20261112090000_trade_invoice_commission_super_base.sql|constraint|trade_invoices_super_gst_split_check
+xero-sync|supabase/migrations/20261112090000_trade_invoice_commission_super_base.sql|column|trade_invoices.super_base_ex
+ops-api|supabase/migrations/20261112140000_makesafe_company_restoration_recipients.sql|column|makesafe_companies.restoration_recipients
+ops-api|supabase/migrations/20261112190000_makesafe_company_restoration_cc.sql|column|makesafe_companies.restoration_cc
+# xero-sync writes each bank transaction's lines and the chart of accounts into
+# their own service-role-only tables; ops-api's xero_tieout asks the spend and
+# revenue read beside the bills tie-out.
+xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|table|xero_bank_transaction_lines
+xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|column|xero_bank_transaction_lines.line_amount_types
+xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|column|xero_bank_transaction_lines.xero_type
+xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|table|xero_accounts
+ops-api|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|function|xero_spend_revenue_monthly
+# ops-api job_profit and job_profit_list ask the cost close rule beside the
+# Job Profit figures (job_cost_close.ts).
+ops-api|supabase/migrations/20261115143000_job_cost_close.sql|function|job_cost_close
+ops-api|supabase/migrations/20261115143000_job_cost_close.sql|function|job_cost_close_policy
+# Trade pay-run check (trade-pay-check-v1): ops-api's trade_pay_run_check door
+# calls the SQL read, so ops-api must not deploy ahead of the migration.
+ops-api|supabase/migrations/20261116011500_trade_pay_run_check.sql|function|trade_pay_run_check

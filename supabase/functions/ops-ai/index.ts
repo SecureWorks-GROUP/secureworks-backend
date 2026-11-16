@@ -15,6 +15,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { isSupplierPricedDefault, NON_SUPPLIER_PRICED_CATEGORY_FILTER } from '../_shared/supplier_price_defaults.ts'
 import { opsAiReviewRequestMessage } from './review_request.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -2007,8 +2008,8 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
       } else if (category !== 'all') {
         defaultsQuery = defaultsQuery.eq('category', category)
       }
-      // Skip surcharge/panel-width rows — not comparable to supplier prices
-      defaultsQuery = defaultsQuery.not('category', 'in', '("fencing_surcharge","fencing_panels")')
+      // Skip surcharge/panel-width and staff_only rows — not comparable to supplier prices
+      defaultsQuery = defaultsQuery.not('category', 'in', NON_SUPPLIER_PRICED_CATEGORY_FILTER)
       const { data: defaults } = await defaultsQuery
 
       // Get recent confirmed ledger prices (last 90 days)
@@ -2033,6 +2034,7 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
       // Compare: for each default, find matching ledger entries and compute drift
       const driftItems: any[] = []
       for (const def of (defaults || [])) {
+        if (!isSupplierPricedDefault(def)) continue
         const defScopeTool = def.scope_tool || 'patio-tool'
         const isFencingDefault = defScopeTool === 'fence-designer'
 

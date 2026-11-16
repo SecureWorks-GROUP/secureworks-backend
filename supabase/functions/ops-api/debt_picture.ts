@@ -65,7 +65,7 @@ function isoDate(value: unknown, field: string): string | null {
 export function debtTypeFromReference(reference: unknown): typeof DEBT_TYPES[number] {
   const r = String(reference ?? '').toUpperCase().trim()
   if (!r) return 'no_reference'
-  if (/MLB-|PO-?\d|SWMS|AJBR|WB\d|^\d{2}-\d{3}-|^PO\d/.test(r)) return 'work_order'
+  if (/MLB-|MLR-|PO-?\d|SWMS|AJBR|WB\d|^\d{2}-\d{3}-|^PO\d/.test(r)) return 'work_order'
   const seg = r.split(/[-_ /]+/)
   if (seg.includes('DEP') || seg.some((x) => /^DEP\d+$/.test(x))) return 'deposit'
   if (seg.includes('FINBAL') || seg.includes('FINAL') || seg.some((x) => /^FINBAL\d+$/.test(x))) return 'final_balance'

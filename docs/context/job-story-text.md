@@ -166,6 +166,20 @@ the bill read once (in the overview), not twice.
   AI reading, a message row recorded since and quiet for 15 minutes. Then the
   lead rule (`context_lead_monitored_jobs`) for the survivors only. At most 5 a
   call, oldest checked first.
+- `context_job_story_enqueue_first(limit)` (`20261115091000`) -> `{outcome off |
+  reserve | queued, queued, job_ids, candidates, reason}`: the one rule for
+  "this job has no written story", run by the worker each tick beside the
+  changed-jobs rule (which only sees jobs that already hold a current story).
+  A live job (never a holding job) with live AI notes (never only a shadow
+  reading), no current story, no open request and no request closed failed
+  inside the 24-hour backoff or since its notes last changed, that the lead
+  rule still monitors; most recently read first. Its two numbers are in
+  `context_job_story_first_policy()`: first stories are queued only while more
+  than `reserve_calls` (60) of the day's 240 story calls are unused (else
+  `reserve`, so real changes and staff asks keep calls), and only while fewer
+  than `first_open_max` (5) requests are open. Requests are `job_changed`,
+  `requested_by` `luna-story-first`. Every candidate is kept before the lead
+  rule, so a refused lead never holds the head of the order.
 - `context_job_story_claim(limit)` -> `{outcome off | budget | idle | claimed,
   reason, resets_at, closed, requests [{request_id, job_id, lease_token,
   lease_expires_at, reason, attempts}]}`. Asked first, FOR UPDATE SKIP LOCKED,

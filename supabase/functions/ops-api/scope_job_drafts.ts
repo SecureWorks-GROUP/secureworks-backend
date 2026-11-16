@@ -3,6 +3,7 @@
 // The read also carries both owner approval decisions for this revision, the
 // work order's actual state and what the caller may approve (worked out on
 // the server from owner_approval_authority, never from the client).
+// A prepare also registers the sealed payers as job parties (payer_parties).
 import type { WorkOrderApprover } from "./job_work_orders.ts";
 import { ownerApprovalCapabilities } from "./scope_owner_approvals.ts";
 
@@ -93,5 +94,48 @@ export async function scopeJobDraftsAction(
       ),
     });
   }
+  if (action === "prepare_scope_job_drafts" && typeof data === "object") {
+    return reply({
+      ...data,
+      payer_parties: await registerScopePayerParties(client, {
+        p_job_id: input.job_id,
+        p_scope_revision_id: input.scope_revision_id,
+        p_org_id: actor.orgId,
+      }),
+    });
+  }
   return reply(data);
+}
+
+// RQ-17.c: each payer the sealed quote names becomes a party on the job
+// (register_scope_payer_parties, through the one party writer), so its deposit
+// and its own invoice bind to it. A refusal never undoes the saved drafts: it
+// is reported by code, and the deposit gate keeps the job held while the
+// quote names a payer the job has no party for.
+async function registerScopePayerParties(
+  // deno-lint-ignore no-explicit-any
+  client: any,
+  args: { p_job_id: unknown; p_scope_revision_id: unknown; p_org_id: string },
+): Promise<unknown> {
+  try {
+    const { data, error } = await client.rpc(
+      "register_scope_payer_parties",
+      args,
+    );
+    if (error) {
+      const code = String(error.message ?? "");
+      return {
+        outcome: "refused",
+        code: /^(scope_payer_parties_|party_)[a-z_]+$/.test(code)
+          ? code
+          : "scope_payer_parties_unavailable",
+      };
+    }
+    return data ?? {
+      outcome: "refused",
+      code: "scope_payer_parties_unavailable",
+    };
+  } catch {
+    return { outcome: "refused", code: "scope_payer_parties_unavailable" };
+  }
 }

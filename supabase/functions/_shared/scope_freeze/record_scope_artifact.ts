@@ -14,7 +14,8 @@
 //     callers compute on the client; we recompute and refuse on mismatch).
 //   * size_bytes must equal the actual decoded length and be within the
 //     bucket's 25 MB cap.
-//   * content_type must be in the allowlist (PNG / JPEG / PDF / GLB).
+//   * content_type must be in the allowlist (PNG / JPEG / PDF / GLB, and JSON
+//     for the customer 3D model only).
 //   * No artefact is persisted without a verified sha256.
 //
 // The helper does NOT touch scope_revisions itself — append-only artefact
@@ -48,6 +49,10 @@ export type ArtifactType =
   // is gable).
   | 'render_gutter_detail'
   | 'render_ridge_detail'
+  // The customer 3D page's model (JSON), saved beside the sealed revision and
+  // served only through send-quote/model with the quote link's token. Added
+  // with migration 20261112210000_scope_artifacts_customer_model.sql.
+  | 'customer_model'
 
 export const ARTIFACT_TYPES: ReadonlyArray<ArtifactType> = [
   'render_hero', 'render_front', 'render_side', 'render_site_plan',
@@ -55,6 +60,7 @@ export const ARTIFACT_TYPES: ReadonlyArray<ArtifactType> = [
   'quote_pdf', 'per_contact_pdf', 'work_order_pdf', 'material_order_pdf',
   'model_glb', 'drawing',
   'render_gutter_detail', 'render_ridge_detail',
+  'customer_model',
 ]
 
 export function isArtifactType(v: unknown): v is ArtifactType {
@@ -66,7 +72,12 @@ const ALLOWED_CONTENT_TYPES = new Set([
   'image/jpeg',
   'application/pdf',
   'model/gltf-binary',
+  'application/json',
 ])
+
+// application/json is only for the customer 3D model, and the customer 3D
+// model is only ever application/json: one never stands in for the other.
+const JSON_ONLY_TYPE: ArtifactType = 'customer_model'
 
 // Mirror of the bucket-level 25 MB cap from the applied migration. Enforced
 // here so a 26 MB upload fails fast with a structured error before bytes
@@ -81,6 +92,7 @@ const EXTENSION_BY_CONTENT_TYPE: Record<string, string> = {
   'image/jpeg': 'jpg',
   'application/pdf': 'pdf',
   'model/gltf-binary': 'glb',
+  'application/json': 'json',
 }
 
 export type RecordScopeArtifactInput = {
@@ -167,6 +179,9 @@ export async function recordScopeArtifact(
   }
   if (typeof input.content_type !== 'string' || !ALLOWED_CONTENT_TYPES.has(input.content_type)) {
     return { ok: false, error: { code: 'invalid_content_type', provided: String(input.content_type) } }
+  }
+  if ((input.artifact_type === JSON_ONLY_TYPE) !== (input.content_type === 'application/json')) {
+    return { ok: false, error: { code: 'invalid_content_type', provided: input.content_type } }
   }
   if (typeof input.sha256 !== 'string' || !SHA256_RE.test(input.sha256)) {
     return { ok: false, error: { code: 'invalid_sha256_format', provided: String(input.sha256) } }

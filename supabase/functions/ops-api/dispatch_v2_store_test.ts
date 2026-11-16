@@ -218,6 +218,8 @@ const SCHEMA: Record<string, string[]> = {
     "updated_at",
     // 20261029120000_dispatch_v2_on_account_suppliers.sql
     "on_account",
+    // 20261111160000_dispatch_v2_solarspan_as_bondor.sql (recognise-only)
+    "also_known_emails",
   ],
   dispatch_approved_supplier_email_links: [
     "supplier_id",
@@ -2218,9 +2220,95 @@ Deno.test("B3 fence fill: each row carries its sealed line and unit; Shaun's ema
   assertOnlyV2Writes(db);
 });
 
+// ── The sealed supplier split: Dispatch boxes equal the sealed supplier orders ──
+// Go-live walk, 12 Nov 2026: a fence sealed its gate hardware (stiles, latch,
+// rail) to one supplier and the panels, sheets and gate posts to another, but
+// the fill put every line in the box of the one supplier typed on the scope.
+
+Deno.test("supplier split: a fence's lines go in the box of their own sealed line's supplier, line for line", async () => {
+  const init = bdSeed();
+  const fw = { approved: uuid("c9", 1), contact: uuid("c9", 2) };
+  init.suppliers.push({
+    id: fw.contact,
+    org_id: ORG,
+    name: "Fencing Warehouse WA Pty Ltd",
+    email: "xero-sync-owns-this@example.test",
+    is_active: true,
+    xero_contact_id: "xc-fw",
+  });
+  init.dispatch_approved_supplier_emails.push({
+    id: fw.approved,
+    org_id: ORG,
+    name: "Fencing Warehouse WA",
+    used_for: "fencing",
+    to_emails: ["orders@fw.test"],
+    cc_emails: [],
+    active: true,
+    on_account: false,
+    approved_by: "Shaun",
+    approved_on: "2026-10-23",
+  });
+  init.dispatch_approved_supplier_email_links.push({ supplier_id: fw.contact, approved_id: fw.approved, org_id: ORG });
+  const RR = { supplierId: "r-and-r-fencing", supplierName: "R&R Fencing" };
+  const FW = { supplierId: "fencing-warehouse-wa", supplierName: "Fencing Warehouse WA" };
+  const sealedLines = [
+    { id: "SL-kit", description: "Panel kit 1800H + 2400H post (2380mm wide)", quantity: 2, unit: "each", category: "panels", ...RR },
+    { id: "SL-stile", description: "Gate 1: gate stile pair 1760mm, Monument", quantity: 1, unit: "each", category: "gates", ...FW },
+    { id: "SL-latch", description: "Gate 1: Lokklatch Deluxe latch and Truclose regular hinge pair", quantity: 1, unit: "each", category: "gates", ...FW },
+    { id: "SL-rail", description: "Gate 1: long rail 3125mm (gate frame)", quantity: 1, unit: "each", category: "gates", ...FW },
+    { id: "SL-sheet", description: "Gate 1: 1800mm infill sheet, Sameside, Monument ×2", quantity: 2, unit: "each", category: "gates", ...RR },
+    { id: "SL-gpost", description: "50x50mm SHS gate post, L2400mm ×2 (gate 1)", quantity: 2, unit: "each", category: "gates", ...RR },
+  ];
+  const scopeWith = (lines: any[]) => ({
+    ...fenceScope("RNR"),
+    tool: "fencing",
+    job: { ...fenceScope("RNR").job, gates: [{ type: "pedestrian", width: 900, height: 1800 }] },
+    lines,
+  });
+
+  const db = makeDb(structuredClone(init));
+  db.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = scopeWith(sealedLines);
+  await seal(db, JOB.fence);
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
+  assertEquals(out.added, 6);
+  const rows = [...db.tables.job_material_lines].sort((a: any, b: any) => a.position - b.position);
+  assertEquals(rows.map((r: any) => [r.description, r.source_line_id, r.supplier_id]), [
+    ["1800H standard width panels with 2400H posts", "SL-kit", BD.rr],
+    ["gate posts", "SL-gpost", BD.rr],
+    ["gate stiles pair", "SL-stile", fw.contact],
+    ["1800mm Colorbond infill sheets", "SL-sheet", BD.rr],
+    ["Lokklatch kit", "SL-latch", fw.contact],
+    ["long rail", "SL-rail", fw.contact],
+  ]);
+  assertEquals(
+    db.tables.job_material_suppliers.map((b: any) => b.supplier_id).sort(),
+    [BD.rr, fw.contact].sort(),
+  );
+
+  // A gate part the sealed order does not place is held on the draft list,
+  // not guessed into either box.
+  const db2 = makeDb(structuredClone(init));
+  db2.tables.jobs.find((j: any) => j.id === JOB.fence)!.scope_json = scopeWith(
+    sealedLines.map((l) => l.id === "SL-rail" ? { ...l, supplierId: null, supplierName: null } : l),
+  );
+  await seal(db2, JOB.fence);
+  const out2 = await call(db2, "dispatch_v2_suggest_draft", { job_id: JOB.fence, auto: true });
+  const rail = db2.tables.job_material_lines.find((r: any) => r.description === "long rail")!;
+  assertEquals([rail.source_line_id, rail.supplier_id], ["SL-rail", null]);
+  assert(
+    out2.notes.includes("1 line has no supplier in the sealed order, so it is on the draft list: long rail."),
+    JSON.stringify(out2.notes),
+  );
+  // Only Dispatch's own tables are written (the seed here adds contacts, so
+  // assertOnlyV2Writes' default-seed contact check does not apply).
+  for (const w of [...db.writes(), ...db2.writes()]) {
+    assert(V2_WRITABLE.has(w.table), `wrote ${w.kind} ${w.table}`);
+  }
+});
+
 // ── Boxes and the main tick ─────────────────────────────────────────────────
 
-Deno.test("boxes: add flags a supplier with no approved email; an occupied box cannot be removed", async () => {
+Deno.test("boxes: add flags a supplier with no approved email; the X takes a box off with its lines", async () => {
   const db = makeDb();
   const plain = await addBox(db, JOB.fence, SUP.plain);
   assertEquals(plain.supplier.send_blocked.code, "no_approved_email");
@@ -2238,22 +2326,143 @@ Deno.test("boxes: add flags a supplier with no approved email; an occupied box c
   await refused(addBox(db, JOB.fence, SUP.inactive), 409, "supplier_inactive");
   await refused(addBox(db, JOB.fence, SUP.otherOrg), 404, "supplier_not_found");
   await addLine(db, JOB.fence, 1, { supplier_id: SUP.stratco, description: "x" });
-  await refused(
-    call(db, "dispatch_v2_remove_supplier", {
-      job_id: JOB.fence,
-      supplier_id: SUP.stratco,
-    }),
-    409,
-    "supplier_has_lines",
+  // Shaun, 12 Nov 2026: a box with lines comes off too, lines and all.
+  const out = await call(db, "dispatch_v2_remove_supplier", {
+    job_id: JOB.fence,
+    supplier_id: SUP.stratco,
+  });
+  assertEquals(out.removed, {
+    lines: 1,
+    photos_deleted: 0,
+    photos_kept: 0,
+    held_emails_discarded: 0,
+    sent_emails_kept: 0,
+  });
+  assertEquals(
+    db.tables.job_material_lines.filter((l) => l.supplier_id === SUP.stratco),
+    [],
   );
   await call(db, "dispatch_v2_remove_supplier", {
     job_id: JOB.fence,
     supplier_id: SUP.plain,
   });
   assertEquals(
-    db.tables.job_material_suppliers.map((b) => b.supplier_id).sort(),
-    [SUP.oldlink, SUP.stratco].sort(),
+    db.tables.job_material_suppliers.map((b) => b.supplier_id),
+    [SUP.oldlink],
   );
+  // Gone already: nothing to do.
+  assertEquals(
+    (await call(db, "dispatch_v2_remove_supplier", {
+      job_id: JOB.fence,
+      supplier_id: SUP.stratco,
+    })).unchanged,
+    true,
+  );
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("remove: the X discards the held email, deletes lines and unsent photos, keeps the sent email and its photo", async () => {
+  const db = await fencingJob();
+  // A first order to Stratco went, with one photo on it.
+  const sentPhoto = await uploadPhoto(db, JOB.fence, SUP.stratco, "sent.jpg");
+  await makeEmail(db, JOB.fence, SUP.stratco);
+  const sent = db.tables.dispatch_supplier_order_emails.find((e: any) =>
+    e.supplier_id === SUP.stratco
+  )!;
+  sent.status = "sent";
+  sent.sent_at = "2026-11-05T01:00:00.000Z";
+  sent.photo_ids = [sentPhoto.id];
+  for (const line of db.tables.job_material_lines) {
+    if (line.supplier_id === SUP.stratco) line.dispatch_order_email_id = sent.id;
+  }
+  // A second order is made up and held, with a new line and a new photo.
+  await addLine(db, JOB.fence, 5, {
+    supplier_id: SUP.stratco,
+    description: "150mm long width plinths",
+    quantity: 2,
+  });
+  const heldPhoto = await uploadPhoto(db, JOB.fence, SUP.stratco, "held.jpg");
+  await makeEmail(db, JOB.fence, SUP.stratco);
+  const held = db.tables.dispatch_supplier_order_emails.find((e: any) =>
+    e.supplier_id === SUP.stratco && e.status === "draft"
+  )!;
+  const heldPath = db.tables.dispatch_material_photos.find((p: any) =>
+    p.id === heldPhoto.id
+  )!.storage_path;
+
+  const out = await call(db, "dispatch_v2_remove_supplier", {
+    job_id: JOB.fence,
+    supplier_id: SUP.stratco,
+  });
+  assertEquals(out.removed, {
+    lines: 4,
+    photos_deleted: 1,
+    photos_kept: 1,
+    held_emails_discarded: 1,
+    sent_emails_kept: 1,
+  });
+  // The box and its lines are gone; Metroll's box and line are untouched.
+  assertEquals(
+    db.tables.job_material_suppliers.map((b) => b.supplier_id),
+    [SUP.metroll],
+  );
+  assertEquals(
+    db.tables.job_material_lines.map((l) => l.supplier_id),
+    [SUP.metroll],
+  );
+  // The held email is discarded; the sent one is kept as it was.
+  assertEquals(held.status, "discarded");
+  assertEquals(sent.status, "sent");
+  // The sent photo is kept, now on the draft list; the held one is deleted
+  // with its file.
+  assertEquals(
+    db.tables.dispatch_material_photos.map((p: any) => [p.id, p.supplier_id]),
+    [[sentPhoto.id, null]],
+  );
+  assert(
+    db.requests.some((r: any) =>
+      r.table === "storage" && r.kind === "remove" && r.select === heldPath
+    ),
+    "the held photo's file is removed",
+  );
+  // The read: no Stratco box, and the sent email still listed for the panel.
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.fence });
+  assertEquals(read.suppliers.map((s: any) => s.supplier_id), [SUP.metroll]);
+  assertEquals(read.main_supplier_id, SUP.metroll);
+  assertEquals(read.unboxed_sent_emails.length, 1);
+  assertEquals(read.unboxed_sent_emails[0].supplier_id, SUP.stratco);
+  assertEquals(read.unboxed_sent_emails[0].email.id, sent.id);
+  assertEquals(read.draft_list.photos.map((p: any) => p.id), [sentPhoto.id]);
+  assertOnlyV2Writes(db);
+});
+
+Deno.test("remove: an order email sending now, or that may have gone, keeps the box", async () => {
+  for (const status of ["sending", "send_unknown"]) {
+    const db = await fencingJob();
+    await makeEmail(db, JOB.fence, SUP.metroll);
+    const row = db.tables.dispatch_supplier_order_emails.find((e: any) =>
+      e.supplier_id === SUP.metroll
+    )!;
+    row.status = status;
+    if (status === "sending") row.send_claimed_at = "2026-11-12T01:00:00.000Z";
+    await refused(
+      call(db, "dispatch_v2_remove_supplier", {
+        job_id: JOB.fence,
+        supplier_id: SUP.metroll,
+      }),
+      409,
+      "supplier_email_sending",
+    );
+    assert(
+      db.tables.job_material_suppliers.some((b) => b.supplier_id === SUP.metroll),
+    );
+    assertEquals(
+      db.tables.job_material_lines.filter((l) => l.supplier_id === SUP.metroll)
+        .length,
+      1,
+    );
+    assertEquals(row.status, status);
+  }
 });
 
 Deno.test("main tick: moves the standing lines to the ticked box; null clears it", async () => {
@@ -2386,6 +2595,22 @@ Deno.test("make email: fencing main supplier, To and CC from the approved list p
   assertOnlyV2Writes(db);
 });
 
+Deno.test("make email: a recognise-only address (Solarspan on Bondor, 11 Nov 2026) is never sent to or copied", async () => {
+  const db = makeDb();
+  const stratco = db.tables.dispatch_approved_supplier_emails.find((e) =>
+    e.id === APPROVED.stratco
+  )!;
+  stratco.also_known_emails = ["wasales@brand.stratco.test"];
+  await fencingJob(db);
+  const made = await makeEmail(db, JOB.fence, SUP.stratco);
+  assertEquals(made.email.to, ["tradewa@stratcowa.com.au"]);
+  assertEquals(made.email.cc, [
+    "tony.bacich@stratcowa.com.au",
+    "fencing@secureworkswa.com.au",
+  ]);
+  assert(!JSON.stringify(made).includes("brand.stratco.test"));
+});
+
 Deno.test("make email: patio CCs patios@, repair CCs ses@, decking CCs patios@ and says it is open", async () => {
   const db = makeDb();
   for (const jobId of [JOB.patio, JOB.repair, JOB.decking]) {
@@ -2464,6 +2689,7 @@ Deno.test("make email: a box with only a photo makes a photo-only email and send
       "Hi Team, could we please order the following for pickup:",
       "",
       "Date: 10 November 2026",
+      "Contact: (Jeremy)",
       "",
       "Materials Needed:",
       "",
