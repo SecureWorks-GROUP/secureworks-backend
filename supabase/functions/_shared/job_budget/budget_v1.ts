@@ -635,21 +635,29 @@ function addUp(b: Rec): Rec {
  * A pricing record (jobs.pricing_json or a sealed revision's pricing) without
  * its budget, for any read a customer, a trade or a crew document receives.
  * The budget carries commission and the salesperson (contract section 7).
+ * The sealed order list (`order`, ruling 17b-1) rides beside the budget and is
+ * shown nowhere new, so it goes with it.
  * Accepts an object or a JSON string and gives back the same kind.
  */
+const PRIVATE_PRICING_KEYS = ['budget', 'order'] as const
+
+function withoutPrivate(record: Record<string, unknown>): Record<string, unknown> {
+  const rest = { ...record }
+  for (const k of PRIVATE_PRICING_KEYS) delete rest[k]
+  return rest
+}
+
 export function withoutBudget<T>(pricing: T): T {
   if (typeof pricing === 'string') {
-    if (!pricing.includes('"budget"')) return pricing
+    if (!PRIVATE_PRICING_KEYS.some((k) => pricing.includes(`"${k}"`))) return pricing
     try {
       const parsed = JSON.parse(pricing)
-      if (!isRec(parsed) || !('budget' in parsed)) return pricing
-      const { budget: _b, ...rest } = parsed
-      return JSON.stringify(rest) as unknown as T
+      if (!isRec(parsed) || !PRIVATE_PRICING_KEYS.some((k) => k in parsed)) return pricing
+      return JSON.stringify(withoutPrivate(parsed)) as unknown as T
     } catch {
       return pricing
     }
   }
-  if (!isRec(pricing) || !('budget' in pricing)) return pricing
-  const { budget: _b, ...rest } = pricing
-  return rest as unknown as T
+  if (!isRec(pricing) || !PRIVATE_PRICING_KEYS.some((k) => k in pricing)) return pricing
+  return withoutPrivate(pricing) as unknown as T
 }

@@ -217,6 +217,103 @@ no records and the rules from before step 2 run. The rollback
 (`supabase/rollbacks/20261113230000_job_commissions_down.sql`) takes away the
 cap, the trigger, the writer and the reads and keeps every row.
 
+## Dispatch lines carry cost (step 3)
+
+Ruling 17 step 3: a Dispatch material line takes its unit cost and line cost
+from the job budget, and an order line over its budget line, or a line not in
+the budget, goes out only with a named person's reason recorded. Never
+silently $0, never silently over. Migration
+`20261114020000_dispatch_line_budget_cost.sql`; the rule is one module,
+`ops-api/dispatch_v2_budget_cost.ts`; the store is `ops-api/dispatch_v2_store.ts`.
+
+Switch: `feature_flags.dispatch_budget_cost_v1`, seeded off. Off or missing:
+Dispatch fills, makes and sends exactly as before. Unreadable (the flag read
+fails): the fill, the email, the send and a reason refuse with 503
+`budget_switch_unreadable` and change nothing (try again), and the read answers
+`budget: {state: 'switch_unreadable'}`; an unreadable switch is never read as
+off, so an uncosted order cannot reach Send. On, for a job with a stored budget
+(the newest `job_budgets` version):
+
+| Step | What happens |
+| --- | --- |
+| Fill (`dispatch_v2_suggest_draft`) | Lines come from the sealed order list (ruling 17b-1, below), never from the budget's words: each `order` row is one line, in its order, and takes only its unit and line cost from the budget line whose `key` is the row's `id` (`job_material_lines.budget_id` + `budget_line_key`). The budget must be for the job's current frozen revision, else `budget_not_current_revision`. A line's detail prints what the supplier copy prints, from the row only: `Code: <supplier_code>`, `Length: <stock_length_mm>` (or `Stock length: supplier to confirm` when `stock_to_confirm`), `Cuts: <qty> x <length_mm>, ...` (else the row's `cut` words), `Variant`, `Finish`, `Gauge`, `Girth`, then its `note_to_supplier`; `profile` and `colour` fill the line's own fields. A zero or missing measure prints nothing. A note over 300 characters holds `supplier_note_too_long`; a detail over 300, or a profile or colour over 80, holds `order_detail_too_long` (never cut short). Delivery and cutting rows the supplier copy prints are lines like any other. A quote option's rows are filled only when the customer took that option. Standing lines are unchanged. |
+| Read (`dispatch_materials`) | Each line carries `cost` (basis, unit cost, line cost, needs a reason or not); the reply carries `budget` (state, version, totals by supplier, how many open lines need a reason). A budget read fault answers `budget: {state: 'unreadable'}`, never "no budget". |
+| Make the email | Every orderable line must be costed or carry a covering reason, else 409 `line_cost_needs_reason` naming the lines. The email row stores `order_cost` (`dispatch-order-cost.v1`: each line's basis and cost, the total, the supplier's budget). |
+| Send | Refuses `order_cost_missing` if the email was made without its cost, `budget_changed` if a newer budget was stored since, and `line_cost_needs_reason` if a line moved. |
+| Reason (`dispatch_v2_line_cost_reason`) | `job_id`, `line_id`, `reason` (3 to 500 characters), `expected_updated_at`, and `unit_cost_ex_gst` only where the budget has none. Signed-in staff only: the ops key is refused `named_person_required`, so every reason names who. |
+
+The sealed order list (ruling 17b-1): at seal the quote tool saves `order`
+(`order.v1`) inside the sealed revision's hashed pricing bytes, beside
+`budget`: one row per row the supplier copies print, from the one function
+behind the supplier copy, the draft order cards and the budget. A row is `id`
+(the budget materials line's `key`), `scope_line_id`, `option_id` (null, or the
+quote option it belongs to), `kind` (`item`, `delivery`, `cutting`),
+`supplier` (`{id, name}` or null), `supplier_code`, `description`, `quantity`,
+`unit`, `stock_length_mm`, `stock_to_confirm`, `cuts`, `cut`, `profile`,
+`colour`, `variant`, `finish`, `gauge_mm`, `girth_mm`, `note_to_supplier` and
+`cost_by` (`line`, `one_figure`, `allowance`). No dollars. Dispatch reads it
+from `scope_revisions.pricing_canonical_text` and re-hashes it: the hash must
+equal the revision's `pricing_hash` and the stored budget's, else 409
+`order_unreadable` (reason `order_pricing_hash_mismatch`; an unknown version or
+a bad row is `order_version_unknown` / `order_row_unreadable`). A revision
+sealed before order.v1 has no `order`: Dispatch keeps today's path (no budget
+costing) and the read answers `budget: {state: 'no_order'}`; nobody rebuilds an
+order from a live scope. The fill is held whole, 409 `order_held` with one
+reason code per row or budget line, and the read shows `budget.order.state:
+'held'`, when: a `cost_by: line` row has no budget line
+(`order_row_no_budget_line`), its line has no cost (`order_row_no_cost`), or
+the row and its line count it in different units (`order_row_unit_mismatch`;
+one unit on both, no conversion between units) or different quantities
+(`order_row_quantity_mismatch`), so an unchanged sealed order never asks a
+person for a reason; a
+budget item line is on no row (`budget_line_no_order_row`; the one-figure
+aggregate and the fixings allowance are exempt); two budget lines share a key
+(`budget_key_duplicated`) or two rows an id (`order_row_duplicated`); a
+`one_figure` or `allowance` row has nothing to cover it
+(`order_row_no_one_figure`, `order_row_no_allowance`). A `one_figure` or
+`allowance` row is not held: it is ordered with no dollars of its own (basis
+`one_figure` or `allowance`), and the order's total says what covers it. A
+delivery on no supplier copy stays a budget line only. `withoutBudget` strips
+`order` with `budget`, and both Trade App boundaries (`redactTradeScopeQuote`
+and the every-tier `stripTradePrivateCarriers`) drop an order list wherever the
+scope carries it, a fence revision pack included, as an object or as JSON text
+(`tradeSealedOrderList`: an `order` whose `version` reads `order.<n>` or that
+has `rows`); a number or plain words under `order` stay. So it is shown nowhere
+new.
+
+How a line is costed:
+
+| Basis | When | Needs |
+| --- | --- | --- |
+| `budget` | Linked, same unit, at or under the budget quantity | Nothing. At the budget quantity, line cost = the budget line's sealed cost exactly. Under it, that cost shared by quantity (sealed cost / sealed quantity, unrounded) and rounded once, whole cents half up. The shown unit cost (to the cent) is never multiplied back up, and the budget is never changed. |
+| `one_figure` | A one-figure budget's line at or under quantity | Nothing. No per-line dollars: the job has one materials figure. |
+| `allowance` | A fixings row covered by the fixings allowance | Nothing. No per-line dollars: the allowance covers it. |
+| `over_budget` | Over the budget quantity | A reason for that quantity and unit. The sealed cost shared by quantity still applies, unless the person gives a unit cost (a one-figure line also needs a unit cost). |
+| `unit_changed` | Unit differs from the budget line | A reason and a unit cost. |
+| `no_budget_cost` | The budget line has no unit cost | A reason and a unit cost. |
+| `not_in_budget` | Typed in, or from an older budget | A reason and a unit cost. |
+| `quantity_missing` | No quantity | Never ordered, never costed. |
+
+With the switch on, a budget that cannot be read refuses the fill, the email,
+the send and a reason with 503 `budget_unreadable`, never treated as no budget.
+
+A reason covers the quantity and unit as they stood; a later rise needs a new
+one. Reasons are append-only (`dispatch_line_cost_reasons`, service role read
+and add only, RLS on); the line names its current one (`cost_reason_id`), and
+the database refuses a line naming another line's reason.
+
+What it never does: print a dollar on the supplier email (the body is built
+from the line text only; the director decides any change), cost the v1
+purchase order path or an order recorded from Outlook, or write a job event
+with money. Tests: `ops-api/dispatch_v2_budget_cost_test.ts` (the rule, on the
+tool's native budgets), the `budget ...` cases in
+`ops-api/dispatch_v2_store_test.ts`, and the migration contract
+`supabase/tests/migration-contracts/20261114020000_dispatch_line_budget_cost/`.
+
+Rollout: apply the migration before the matching `ops-api`; turn the switch on
+only on the owner's word. The rollback refuses while any line link, reason or
+order cost is recorded (turn the switch off instead).
+
 ## Labour: pay mode and the hourly cap (step 4)
 
 Ruling 17 sections 4 and 5. The budget's `labour.pay` says how the crew is

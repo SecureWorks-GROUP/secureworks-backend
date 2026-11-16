@@ -348,6 +348,18 @@ jobs:
       # The owner approves the price (with the exact quote PDFs it covers) and
       # the work order before either counts (20261109040000). The Quick Quote
       # file runs the real handler to the provider with every I/O faked.
+      # Ruling 18 K2: a fence or patio quote send is judged against its sealed,
+      # newest revision and the PDF prepared for it, behind
+      # quote_send_sealed_revision_required_v1 (seeded off: recorded, sent as
+      # today). The rules run on a fake database; the wiring test pins where
+      # /send and /send-runs judge. The Postgres half is the 20261116114500
+      # migration contract.
+      - name: Test the sealed-revision send guard
+        run: |
+          deno test --allow-env --allow-read \
+            supabase/functions/_shared/scope_freeze/sealed_send_guard_test.ts \
+            supabase/functions/send-quote/sealed_send_guard_wiring_test.ts
+
       - name: Test owner approval of the price, its quote PDFs and the work order
         run: |
           deno test --allow-env --allow-read \
@@ -567,6 +579,7 @@ jobs:
             supabase/functions/ops-api/dispatch_orders_store_test.ts \
             supabase/functions/ops-api/dispatch_v2_emails_test.ts \
             supabase/functions/ops-api/dispatch_v2_store_test.ts \
+            supabase/functions/ops-api/dispatch_v2_budget_cost_test.ts \
             supabase/functions/ops-api/dispatch_v2_supplier_picker_test.ts \
             supabase/functions/ops-api/purchase_order_attribution_test.ts \
             supabase/functions/receive-po-email/po_email_tag_test.ts \
