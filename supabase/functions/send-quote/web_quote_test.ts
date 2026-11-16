@@ -11,6 +11,7 @@ import {
   LOGO_SVG,
   LOOK,
   PDF_READY_WORDS,
+  pdfPagesHtml,
   PDFJS,
   readSavedWebPages,
   SAVED_PAGE_MAX_BYTES,
@@ -228,18 +229,109 @@ Deno.test('3a: refused (the PDF\'s pages instead): a script, a handler, a frame,
 
 Deno.test('3b: no saved pages: pdf.js draws the PDF\'s pages from its customer address; a clean Download card if not', () => {
   for (const page of [build(doc(), OFFER, null), build(doc({ html_url: null }), null, null)]) {
-    assert(page.includes('<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>'))
-    assert(page.includes('lib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"'))
+    assert(page.includes(PDF_SCRIPT_TAG), 'pdf.js pinned, with its integrity hash')
     assert(page.includes(`<div class="sw-pdf-pages" id="swPdfPages" data-sw-pdf="${PDF}" aria-label="Your quote"></div>`), 'the per-page container, on the PDF\'s customer address')
     assert(page.includes("card.className='sw-pdf-page'") && page.includes("document.createElement('canvas')"), 'each page a picture card')
     assert(page.includes(`<div class="sw-pdf-ready" id="swPdfReady" hidden><p class="sw-pdf-ready-t">${PDF_READY_WORDS.title}</p><a class="sw-pdf-ready-btn" href="${PDF}" target="_blank" rel="noopener" download>${WEB_BAR_WORDS.pdf}</a></div>`))
     assert(page.includes('<noscript><div class="sw-pdf-ready"><p class="sw-pdf-ready-t">'), 'and without scripts')
-    assert(/function fail\(\)\{[^}]*box\.hidden=true;ready\.hidden=false;\}/.test(page) && page.includes('if(!lib||!lib.getDocument){fail();return;}') && page.includes('.catch(fail)'), 'any failure shows the card, never an empty box')
+    assert(/function fail\(\)\{[^}]*box\.hidden=true;ready\.hidden=false;\}/.test(page) && page.includes('.catch(fail)'), 'any failure shows the card, never an empty box')
     assert(!page.includes('<main data-sw-web-pages>'))
     assert(page.indexOf('<div class="sw-web-bar" data-sw-web-bar>') > page.indexOf('id="swPdfPages"'), 'the same bar')
   }
   const none = build(doc({ pdf_url: null, html_url: null }), null, null)
   assert(none.includes(`<div class="sw-pdf-ready"><p class="sw-pdf-ready-t">${PDF_READY_WORDS.none}</p></div>`) && !none.includes(PDFJS.lib))
+})
+
+// The 3b page's own script, run against a stand-in page (no browser, no network): what each failure path shows.
+const PDF_SCRIPT_TAG = '<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" '
+  + 'integrity="sha512-q+4liFwdPC/bNdhUpZx6aXDx/h77yEQtn4I1slHydcbZK34nLaR3cAeYSJshoxIOq3mjEf7xJE8YWIUHMn+oCQ==" '
+  + 'crossorigin="anonymous" referrerpolicy="no-referrer" async onload="swPdfStart()" onerror="swPdfFail()"></script>'
+function standIn(o: { workerStatus?: number } = {}) {
+  const page = pdfPagesHtml(PDF)
+  const code = /<script>([\s\S]*?)<\/script>/.exec(page)![1]
+  const box = { innerHTML: 'x', hidden: false, children: [] as unknown[], clientWidth: 794, getAttribute: () => PDF, appendChild() {} }
+  const ready = { hidden: true }
+  const timers: Array<() => void> = []
+  const calls = { getDocument: 0, fetched: [] as string[], blobs: 0 }
+  const win: any = {
+    crypto, Blob, URL,
+    pdfjsLib: { GlobalWorkerOptions: {} as Record<string, string>, getDocument: () => { calls.getDocument++; return { promise: new Promise(() => {}) } } },
+  }
+  const fakeFetch = (url: string) => {
+    calls.fetched.push(url)
+    return Promise.resolve(new Response('ZZTEST not the worker', { status: o.workerStatus ?? 200 }))
+  }
+  const FakeBlob = function (this: unknown) { calls.blobs++ } as unknown as typeof Blob
+  win.Blob = FakeBlob
+  new Function('window', 'document', 'fetch', 'crypto', 'setTimeout', 'clearTimeout', 'URL', 'Blob', 'btoa', code)(
+    win, { getElementById: (id: string) => (id === 'swPdfPages' ? box : ready) }, fakeFetch, crypto,
+    (fn: () => void) => { timers.push(fn); return timers.length }, () => {}, URL, FakeBlob, btoa)
+  return { page, box, ready, timers, calls, win }
+}
+const flush = () => new Promise((r) => setTimeout(r, 0))
+
+Deno.test('3b: pdf.js and its worker at one pinned version with their sha512 hashes, as named constants', () => {
+  assertEquals(PDFJS.version, '3.11.174')
+  assertEquals(PDFJS.lib, `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS.version}/pdf.min.js`)
+  assertEquals(PDFJS.worker, `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS.version}/pdf.worker.min.js`)
+  assertEquals(PDFJS.libIntegrity, 'sha512-q+4liFwdPC/bNdhUpZx6aXDx/h77yEQtn4I1slHydcbZK34nLaR3cAeYSJshoxIOq3mjEf7xJE8YWIUHMn+oCQ==')
+  assertEquals(PDFJS.workerIntegrity, 'sha512-BbrZ76UNZq5BhH7LL7pn9A4TKQpQeNCHOo65/akfelcIBbcVvYWOFQKPXIrykE3qZxYjmDX573oa4Ywsc7rpTw==')
+  const page = pdfPagesHtml(PDF)
+  assertEquals(page.split('<script src=').length - 1, 1, 'one library tag')
+  assert(page.includes(PDF_SCRIPT_TAG))
+  assert(page.includes(`fetch(${JSON.stringify(PDFJS.worker)},{mode:'cors',credentials:'omit',referrerPolicy:'no-referrer'})`))
+  assert(page.includes('"BbrZ76UNZq5BhH7LL7pn9A4TKQpQeNCHOo65/akfelcIBbcVvYWOFQKPXIrykE3qZxYjmDX573oa4Ywsc7rpTw=="'), 'the worker pin in the page')
+  assert(!/workerSrc\s*=\s*["']https?:/.test(page), 'the worker is never run from its outside address')
+})
+
+Deno.test('3b: the worker\'s SHA-512 is compared before any blob is made or pdf.js is run', () => {
+  const page = pdfPagesHtml(PDF)
+  const digest = page.indexOf("crypto.subtle.digest('SHA-512',buf)")
+  const compare = page.indexOf('if(b64(d)!==')
+  const blob = page.indexOf("new Blob([buf],{type:'text/javascript'})")
+  const run = page.indexOf('lib.getDocument(')
+  assert(digest > 0 && compare > digest && blob > compare && run > blob, 'digest, compare, then blob, then pdf.js')
+  assert(/if\(b64\(d\)!==[^)]+\)throw new Error\('worker hash'\);/.test(page), 'a mismatch throws to the card')
+})
+
+Deno.test('3b: the library failing to load (blocked, bad hash, offline) shows the Download card at once', () => {
+  const s = standIn()
+  assert(s.ready.hidden && !s.box.hidden, 'nothing shown while loading')
+  const onerror = /onerror="([^"]+)"/.exec(s.page)![1]
+  new Function('swPdfFail', onerror)(s.win.swPdfFail)
+  assertEquals(s.ready.hidden, false, 'the card')
+  assertEquals(s.box.hidden, true, 'no empty box')
+  assertEquals(s.box.innerHTML, '')
+})
+
+Deno.test('3b: the library never answering shows the card on the load timer; a late load then does nothing', async () => {
+  const s = standIn()
+  assertEquals(s.timers.length, 1)
+  s.timers[0]()
+  assert(!s.ready.hidden && s.box.hidden)
+  s.win.swPdfStart()
+  await flush()
+  assertEquals(s.calls.fetched.length, 0, 'pdf.js not run after the card')
+})
+
+Deno.test('3b: a worker that does not match its hash, or does not answer, never runs: the card instead', async () => {
+  for (const o of [{}, { workerStatus: 404 }]) {
+    const s = standIn(o)
+    s.win.swPdfStart()
+    for (let i = 0; i < 5; i++) await flush()
+    assertEquals(s.calls.fetched, [PDFJS.worker])
+    assertEquals(s.calls.blobs, 0, 'no blob made')
+    assertEquals(s.calls.getDocument, 0, 'pdf.js not run')
+    assertEquals(s.win.pdfjsLib.GlobalWorkerOptions.workerSrc, undefined)
+    assert(!s.ready.hidden && s.box.hidden, 'the card')
+  }
+})
+
+Deno.test('3b: pdf.js missing after the tag loads: the card', () => {
+  const s = standIn()
+  delete s.win.pdfjsLib
+  s.win.swPdfStart()
+  assert(!s.ready.hidden && s.box.hidden)
 })
 
 Deno.test('3c: the bar: Ready to get started?, Download PDF, Accept through the page\'s own confirm; none once accepted', () => {

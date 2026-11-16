@@ -248,33 +248,42 @@ export function savedPagesHtml(saved: SavedWebPages): string {
 
 // ── b. The PDF's pages as pictures ──
 
-/** pdf.js from cdnjs, an exact old version: the library and its worker. */
+/**
+ * pdf.js from cdnjs at ONE pinned version, each file with its sha512 (cdnjs's own SRI list). To update: change the
+ * version in both URLs and both hashes together, from cdnjs's published SRI values for that version.
+ */
 export const PDFJS = Object.freeze({
+  version: '3.11.174',
   lib: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
+  libIntegrity: 'sha512-q+4liFwdPC/bNdhUpZx6aXDx/h77yEQtn4I1slHydcbZK34nLaR3cAeYSJshoxIOq3mjEf7xJE8YWIUHMn+oCQ==',
   worker: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
+  workerIntegrity: 'sha512-BbrZ76UNZq5BhH7LL7pn9A4TKQpQeNCHOo65/akfelcIBbcVvYWOFQKPXIrykE3qZxYjmDX573oa4Ywsc7rpTw==',
 })
+
+/** How long pdf.js may take to load, and the first page to draw, before the clean Download card shows instead. */
+export const PDFJS_LOAD_MS = 15000
+export const PDF_FIRST_PAGE_MS = 20000
 
 /**
  * The PDF's pages drawn one under another, each a picture card full width (794 px at most), from the PDF's customer
- * address. pdf.js not loaded, the PDF not read, or a page not drawn: the clean card with Download PDF, never an empty
- * box. No PDF at all: the card says so.
+ * address. The library loads with its integrity hash (async, so the page never waits on it); the worker is fetched,
+ * its SHA-512 compared with the pinned value, and only a match is run (from a blob: address). The library blocked,
+ * failing its hash, offline or slow, the worker not matching, the PDF not read, or a page not drawn: the clean card
+ * with Download PDF, never an empty box. No PDF at all: the card says so.
  */
 export function pdfPagesHtml(pdf: string | null): string {
   if (!pdf) return `<div class="sw-pdf-ready"><p class="sw-pdf-ready-t">${PDF_READY_WORDS.none}</p></div>`
   const card = (hidden: boolean) => `<div class="sw-pdf-ready"${hidden ? ' id="swPdfReady" hidden' : ''}><p class="sw-pdf-ready-t">${PDF_READY_WORDS.title}</p>`
     + `<a class="sw-pdf-ready-btn" href="${esc(pdf)}" target="_blank" rel="noopener" download>${WEB_BAR_WORDS.pdf}</a></div>`
+  const workerPin = PDFJS.workerIntegrity.slice('sha512-'.length)
   return `<div class="sw-pdf-pages" id="swPdfPages" data-sw-pdf="${esc(pdf)}" aria-label="Your quote"></div>
   ${card(true)}
   <noscript>${card(false)}</noscript>
-  <script src="${PDFJS.lib}"></script>
   <script>(function(){
-    var box=document.getElementById('swPdfPages'),ready=document.getElementById('swPdfReady'),done=false,first;
-    function fail(){if(done)return;done=true;clearTimeout(first);box.innerHTML='';box.hidden=true;ready.hidden=false;}
-    var lib=window.pdfjsLib;
-    if(!lib||!lib.getDocument){fail();return;}
-    try{lib.GlobalWorkerOptions.workerSrc=${JSON.stringify(PDFJS.worker)};}catch(e){}
-    first=setTimeout(fail,20000);
-    lib.getDocument({url:box.getAttribute('data-sw-pdf')}).promise.then(function(doc){
+    var box=document.getElementById('swPdfPages'),ready=document.getElementById('swPdfReady'),done=false,started=false,timer;
+    function fail(){if(done)return;done=true;clearTimeout(timer);box.innerHTML='';box.hidden=true;ready.hidden=false;}
+    function b64(buf){var a=new Uint8Array(buf),s='';for(var i=0;i<a.length;i++)s+=String.fromCharCode(a[i]);return btoa(s);}
+    function draw(doc){
       var chain=Promise.resolve();
       for(var i=1;i<=doc.numPages;i++){(function(n){chain=chain.then(function(){return doc.getPage(n).then(function(page){
         if(done)return;
@@ -283,9 +292,26 @@ export function pdfPagesHtml(pdf: string | null): string {
         var c=document.createElement('canvas');c.width=Math.floor(vp.width);c.height=Math.floor(vp.height);
         c.setAttribute('role','img');c.setAttribute('aria-label','Quote page '+n);
         var card=document.createElement('div');card.className='sw-pdf-page';card.appendChild(c);box.appendChild(card);
-        return page.render({canvasContext:c.getContext('2d'),viewport:vp}).promise.then(function(){clearTimeout(first);});
+        return page.render({canvasContext:c.getContext('2d'),viewport:vp}).promise.then(function(){clearTimeout(timer);});
       });});})(i);}
       return chain;
-    }).then(function(){if(!box.children.length)fail();}).catch(fail);
-  })();</script>`
+    }
+    window.swPdfFail=fail;
+    window.swPdfStart=function(){
+      if(done||started)return;started=true;clearTimeout(timer);
+      var lib=window.pdfjsLib;
+      if(!lib||!lib.getDocument||!window.crypto||!crypto.subtle||!window.Blob||!window.URL){fail();return;}
+      timer=setTimeout(fail,${PDF_FIRST_PAGE_MS});
+      fetch(${JSON.stringify(PDFJS.worker)},{mode:'cors',credentials:'omit',referrerPolicy:'no-referrer'})
+        .then(function(r){if(!r.ok)throw new Error('worker');return r.arrayBuffer();})
+        .then(function(buf){return crypto.subtle.digest('SHA-512',buf).then(function(d){
+          if(b64(d)!==${JSON.stringify(workerPin)})throw new Error('worker hash');
+          lib.GlobalWorkerOptions.workerSrc=URL.createObjectURL(new Blob([buf],{type:'text/javascript'}));
+          return lib.getDocument({url:box.getAttribute('data-sw-pdf')}).promise;
+        });})
+        .then(draw).then(function(){if(!box.children.length)fail();}).catch(fail);
+    };
+    timer=setTimeout(fail,${PDFJS_LOAD_MS});
+  })();</script>
+  <script src="${PDFJS.lib}" integrity="${PDFJS.libIntegrity}" crossorigin="anonymous" referrerpolicy="no-referrer" async onload="swPdfStart()" onerror="swPdfFail()"></script>`
 }
