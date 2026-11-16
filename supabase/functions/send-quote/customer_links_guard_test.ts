@@ -36,7 +36,8 @@ Deno.test("ops-api: the variation link uses customerVariationLink", () => {
 })
 
 Deno.test("send-quote: the Google PDF viewer is used only when the company host is off", () => {
+  // Ruling 19 addendum A removed the phone card's gview link (the PDF's pages are drawn on the page); any that
+  // comes back must still be off when the company host is set.
   const lines = sendQuote.split("\n").filter((l) => l.includes("docs.google.com/gview"))
-  assert(lines.length >= 1)
   for (const l of lines) assert(/CUSTOMER_HOST \? customerUrl\(/.test(l), l)
 })

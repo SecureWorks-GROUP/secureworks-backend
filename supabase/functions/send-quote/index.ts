@@ -168,7 +168,7 @@ import {
   type SendQuoteAuthUser,
 } from './quote_send_auth.ts'
 import { ghlEmailNoteRequest, ghlMoveStageOutcome, quoteAcceptedStageId, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
-import { webLook, webPageSaved, WEB_LOOK_CSS } from './web_quote.ts'
+import { pdfPagesHtml, readSavedWebPages, savedPagesHtml, type SavedWebPages, webLook, webPageSaved, WEB_LOOK_CSS } from './web_quote.ts'
 import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailHeading, quoteEmailProjectWords, quoteEmailSubject } from './division_routing.ts'
 import {
   customer3dLink,
@@ -1888,7 +1888,10 @@ serve(async (req: Request) => {
       const acceptWords = !doc.accepted_at && !doc.declined_at
         ? await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel, job_contact_id: doc.job_contact_id ?? null })
         : null
-      return await htmlResponse(buildClientPage(doc, token, heroUrl, viewOptions, acceptWords))
+      // Ruling 19 addendum A (3a): a quote with options shows its saved web page's own printed pages inline, read
+      // from this project's job-pdfs storage (4 s). Not there, slow or unsafe: the PDF's pages drawn as pictures (3b).
+      const savedPages = viewOptions && doc.html_url ? await readSavedWebPages(doc.html_url, SUPABASE_URL) : null
+      return await htmlResponse(buildClientPage(doc, token, heroUrl, viewOptions, acceptWords, savedPages))
     }
 
     // ── VARIATION ACCEPT/DECLINE ──
@@ -4670,26 +4673,21 @@ export function buildQuoteEmail(opts: {
 // CLIENT-FACING QUOTE PAGE
 // ════════════════════════════════════════════════════════════
 
-function buildClientPage(doc: any, token: string, heroUrl: string | null = null, options: QuoteOptionsOffer | null = null, acceptWords: AcceptSentenceRead | null = null): string {
+function buildClientPage(doc: any, token: string, heroUrl: string | null = null, options: QuoteOptionsOffer | null = null, acceptWords: AcceptSentenceRead | null = null, saved: SavedWebPages | null = null): string {
   // heroUrl retained in signature for backwards compat but not rendered — PDF has its own cover
   const isAccepted = !!doc.accepted_at
   const isDeclined = !!doc.declined_at
   // Ruling 11 item 8: empty unless the released quote sealed the sentence.
   const acceptingLine = acceptSentenceHtml(acceptWords)
-  // Ruling 18 G (5): the fence web quote's backdrop and floating bar. The quote's own pictures are in its PDF, and
-  // the job's render is on a private address, so the backdrop is the dark scrim alone.
+  // Ruling 19 addendum A: the one look (the gum-tree photo under the blue wash, the white logo, the glass bar) and no
+  // PDF in a frame: the saved web page's own pages inline (3a, a quote with options), else the PDF's pages drawn as
+  // pictures (3b). The same bar on every case; its Accept is the page's own confirm (and its ticked options).
+  const pdfAddress = doc.pdf_url ? customerUrl(doc.pdf_url, CUSTOMER_HOST) : null
   const look = webLook({
-    photo: null,
-    pdf: doc.pdf_url ? customerUrl(doc.pdf_url, CUSTOMER_HOST) : null,
+    pdf: pdfAddress,
     accept: !isAccepted && !isDeclined ? "respondToQuote('accept')" : null,
   })
-
-  // Mobile card display fields — omit gracefully if absent
-  const mobQuoteRef = doc.quote_number || ''
-  const mobClientName = doc.job_contacts?.client_name || doc.jobs?.client_name || ''
-  const mobSnapshot = doc.data_snapshot_json || {}
-  const mobPriceRaw = mobSnapshot.totalIncGST || mobSnapshot.total || null
-  const mobPriceStr = mobPriceRaw ? '$' + Number(mobPriceRaw).toLocaleString('en-AU', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) : ''
+  const quotePages = saved ? savedPagesHtml(saved) : pdfPagesHtml(pdfAddress)
 
   let statusHtml = ''
   if (isAccepted) {
@@ -4704,25 +4702,11 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Your Quote - SecureWorks Group</title>
+  ${saved ? saved.head : ''}
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #1E2A30; color: #fff; min-height: 100vh; }
-    /* ── Top bar ── */
-    .topbar { background: #293C46; padding: 14px 28px; display: flex; align-items: center; border-bottom: 3px solid #F15A29; }
-    .topbar-brand { color: #fff; font-size: 18px; font-weight: 700; letter-spacing: 0.3px; }
-    .topbar-brand span { color: rgba(255,255,255,0.5); font-weight: 400; }
-    /* ── PDF presenter ── */
-    .pdf-wrap { display: flex; justify-content: center; padding: 28px 24px 0; }
-    .pdf-frame { width: 100%; max-width: 880px; height: 86vh; min-height: 640px; border: none; border-radius: 10px; box-shadow: 0 8px 48px rgba(0,0,0,0.55); background: #2a3840; display: block; }
-    @media (min-width: 1440px) {
-      .pdf-wrap { padding: 36px 60px 0; }
-      .pdf-frame { max-width: 1040px; height: 84vh; }
-    }
-    @media (max-width: 1024px) and (min-width: 769px) {
-      .pdf-wrap { padding: 20px 16px 0; }
-      .pdf-frame { max-width: 100%; height: 82vh; min-height: 560px; }
-    }
-    /* ── Actions / chrome below PDF ── */
+    /* ── Actions / chrome below the quote's pages ── */
     .container { max-width: 960px; margin: 0 auto; padding: 20px 20px 40px; }
     /* Status banner */
     /* ── Accept / Decline ── */
@@ -4731,7 +4715,6 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
     .btn-accept { background: #34C759; color: #fff; }
     .btn-decline { background: transparent; color: #FF6B60; border: 1px solid #FF6B60; }
     .accept-sentence { color: #fff; font-size: 15px; font-weight: 600; line-height: 1.45; margin-bottom: 14px; }
-    .btn-view-pdf { background: #F15A29; color: #fff; display: inline-block; width: auto; padding: 13px 40px; }
     .btn:hover { opacity: 0.88; }
     /* Decline form */
     .decline-form { margin-top: 16px; padding: 20px; background: rgba(255,59,48,0.08); border: 1px solid rgba(255,59,48,0.25); border-radius: 8px; }
@@ -4742,76 +4725,27 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
     /* Supporting docs */
     .card { background: #293C46; border-radius: 12px; padding: 24px 28px; margin-bottom: 16px; }
     .card h3 { color: #fff; font-size: 15px; margin-bottom: 14px; }
-    .doc-row { padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; gap: 12px; }
-    .doc-row:last-child { border-bottom: none; padding-bottom: 0; }
-    .doc-icon { width: 36px; height: 36px; background: rgba(255,255,255,0.1); border-radius: 6px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 16px; }
-    .doc-title { font-weight: 600; color: #fff; font-size: 14px; }
-    .doc-desc { color: rgba(255,255,255,0.5); font-size: 12px; }
     /* Contact + footer */
     .contact-card { background: #293C46; border-radius: 12px; padding: 20px 28px; margin-bottom: 16px; text-align: center; }
     .contact-card p { color: rgba(255,255,255,0.6); font-size: 14px; margin-bottom: 8px; }
     .contact-card a { color: #F15A29; font-weight: 600; text-decoration: none; }
-    .footer { text-align: center; color: rgba(255,255,255,0.3); font-size: 12px; padding: 20px 0 32px; }
+    .footer { text-align: center; color: rgba(255,255,255,0.55); font-size: 12px; padding: 20px 0 32px; }
     /* Confirm overlay */
     .confirm-overlay { display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:1000;align-items:center;justify-content:center; }
     .confirm-overlay.active { display:flex; }
     .confirm-box { background:#293C46;border-radius:14px;padding:32px;max-width:400px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:#fff; }
     .confirm-box h3 { color:#fff;font-size:18px;margin-bottom:8px; }
     .confirm-box p { color:rgba(255,255,255,0.65);font-size:14px;margin-bottom:20px; }
-    /* Mobile fallback */
-    .pdf-mobile { display: none; }
-    .pdf-mobile-card { background: #293C46; border-radius: 14px; padding: 32px 20px; margin: 20px 16px 0; }
-    .pdf-mobile-card .mob-brand { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: #F15A29; margin-bottom: 18px; }
-    .pdf-mobile-card .mob-ref { font-size: 13px; color: rgba(255,255,255,0.5); margin-bottom: 4px; }
-    .pdf-mobile-card .mob-client { font-size: 20px; font-weight: 700; color: #fff; margin-bottom: 6px; line-height: 1.25; }
-    .pdf-mobile-card .mob-price { font-size: 28px; font-weight: 800; color: #F15A29; margin-bottom: 2px; }
-    .pdf-mobile-card .mob-price-label { font-size: 12px; color: rgba(255,255,255,0.45); margin-bottom: 24px; }
-    .pdf-mobile-card .mob-divider { height: 1px; background: rgba(255,255,255,0.1); margin: 0 0 24px; }
-    .pdf-mobile-card .btn-mob-primary { display: block; width: 100%; padding: 15px; background: #F15A29; color: #fff; border: none; border-radius: 9px; font-size: 16px; font-weight: 700; text-align: center; text-decoration: none; cursor: pointer; font-family: inherit; }
-    .pdf-mobile-card .btn-mob-secondary { display: block; width: 100%; padding: 12px; background: transparent; color: rgba(255,255,255,0.55); border: 1px solid rgba(255,255,255,0.18); border-radius: 9px; font-size: 14px; font-weight: 500; text-align: center; text-decoration: none; margin-top: 10px; }
-    .pdf-mobile-card .mob-actions-sep { margin-top: 20px; padding-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
-    @media (max-width: 768px) {
-      .pdf-wrap { display: none !important; }
-      .pdf-mobile { display: block !important; }
-      .topbar { padding: 12px 16px; }
-      .container { padding: 16px 16px 40px; }
-    }
     ${options ? QUOTE_OPTIONS_CSS : ''}
     ${WEB_LOOK_CSS}
   </style>
 </head>
-<body class="sw-web">
+<body class="sw-web${saved?.bodyClass ? ` ${saved.bodyClass}` : ''}">
   ${look.backdrop}
-  <!-- Slim top bar: wordmark only -->
-  <div class="topbar">
-    <div class="topbar-brand">SecureWorks <span>Group</span></div>
-  </div>
+  ${look.header}
 
-  <!-- PDF presenter (desktop) -->
-  ${doc.pdf_url ? `
-  <div class="pdf-wrap">
-    <iframe src="${customerUrl(doc.pdf_url, CUSTOMER_HOST)}#view=Fit&toolbar=0" class="pdf-frame" title="Quote PDF"></iframe>
-  </div>` : '<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.4);">PDF not available</div>'}
-
-  <!-- Mobile fallback: premium branded card -->
-  ${doc.pdf_url ? `
-  <div class="pdf-mobile">
-    <div class="pdf-mobile-card">
-      <div class="mob-brand">SecureWorks Group</div>
-      ${mobQuoteRef ? `<div class="mob-ref">Quote ${mobQuoteRef}</div>` : ''}
-      ${mobClientName ? `<div class="mob-client">${mobClientName}</div>` : ''}
-      ${mobPriceStr ? `<div class="mob-price">${mobPriceStr}</div><div class="mob-price-label">inc GST</div>` : '<div style="margin-bottom:8px;"></div>'}
-      <div class="mob-divider"></div>
-      <a href="${CUSTOMER_HOST ? customerUrl(doc.pdf_url, CUSTOMER_HOST) : `https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(customerUrl(doc.pdf_url, CUSTOMER_HOST))}`}" target="_blank" class="btn-mob-primary">View Full Quote PDF</a>
-      <a href="${customerUrl(doc.pdf_url, CUSTOMER_HOST)}" download class="btn-mob-secondary">Download PDF</a>
-      ${!isAccepted && !isDeclined ? `
-      <div class="mob-actions-sep">
-        ${acceptingLine}
-        <button class="btn btn-accept" onclick="respondToQuote('accept')" style="margin-bottom:8px;">Accept Quote</button>
-        <button class="btn btn-decline" onclick="showDeclineForm()">Decline</button>
-      </div>` : statusHtml ? `<div class="mob-actions-sep">${statusHtml}</div>` : ''}
-    </div>
-  </div>` : ''}
+  <!-- The quote's own pages: the saved web page's (3a) or the PDF's drawn as pictures (3b); never a frame -->
+  ${quotePages}
 
   <!-- Actions + chrome -->
   <div class="container">
@@ -4964,6 +4898,9 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
 </body>
 </html>`
 }
+
+// The customer quote page as the view route builds it, for web_quote_test.ts and the picture generator (no network).
+export const _buildClientPageForTest = buildClientPage
 
 // ════════════════════════════════════════════════════════════
 // PER-RUN FENCING QUOTE PAGE (multi-neighbour)
