@@ -2,7 +2,9 @@
 -- a transaction that rolls back.
 
 -- 1. The switch is seeded off; the raises are service-only and append-only;
--- the read and the writer are service-role only; the guards are deferred.
+-- the read and the writer are service-role only. Ruling 17c: the refusal is
+-- ops-api's one work order cap guard, so this migration adds no labour guard
+-- of its own on trade invoices.
 DO $$
 BEGIN
   IF (SELECT enabled FROM public.feature_flags WHERE flag_name = 'job_labour_budget_v1') IS DISTINCT FROM false THEN
@@ -21,18 +23,19 @@ BEGIN
      OR has_function_privilege('anon', 'public.job_labour_cap_state(uuid)', 'EXECUTE')
      OR NOT has_function_privilege('service_role', 'public.job_labour_cap_state(uuid)', 'EXECUTE')
      OR has_function_privilege('authenticated', 'public.raise_job_labour_cap(uuid, uuid, uuid, text, uuid, numeric, text)', 'EXECUTE')
-     OR NOT has_function_privilege('service_role', 'public.raise_job_labour_cap(uuid, uuid, uuid, text, uuid, numeric, text)', 'EXECUTE')
-     OR has_function_privilege('authenticated', 'public.job_labour_cap_check_invoice(uuid)', 'EXECUTE') THEN
+     OR NOT has_function_privilege('service_role', 'public.raise_job_labour_cap(uuid, uuid, uuid, text, uuid, numeric, text)', 'EXECUTE') THEN
     RAISE EXCEPTION 'labour cap contract: the read and the writer must be service-role only';
   END IF;
-  IF (SELECT count(*) FROM pg_trigger
-       WHERE tgname IN ('job_labour_cap_guard_line', 'job_labour_cap_guard_invoice')
-         AND tgdeferrable AND tginitdeferred) <> 2 THEN
-    RAISE EXCEPTION 'labour cap contract: both guards must be deferred constraint triggers';
+  IF EXISTS (SELECT 1 FROM pg_trigger t
+              WHERE t.tgrelid IN ('public.trade_invoice_lines'::regclass, 'public.trade_invoices'::regclass)
+                AND t.tgname LIKE 'job_labour_cap%')
+     OR to_regprocedure('public.job_labour_cap_check_invoice(uuid)') IS NOT NULL THEN
+    RAISE EXCEPTION 'labour cap contract: a second labour refusal path was added on trade invoices';
   END IF;
 END $$;
 
--- 2. The cap, its raises and the guard.
+-- 2. The limit and its raises. The database refuses no trade invoice line for
+-- it (that is the ops-api guard's, counted its own way).
 BEGIN;
 INSERT INTO public.jobs (id, org_id, status, type, job_number)
 VALUES ('00000000-0000-0000-0000-00000000c401', '00000000-0000-0000-0000-000000000001', 'accepted', 'fencing', 'ZZTEST-C401'),
@@ -59,7 +62,6 @@ VALUES ('00000000-0000-0000-0000-00000000c431', '00000000-0000-0000-0000-0000000
         repeat('b', 64), 'fence', true, 0,
         '{"version":"budget.v1","labour":{"pay":"group_work_order","amount_ex_gst":100,"hourly":null,"work_order_amount_ex_gst":100}}'::jsonb);
 UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_labour_budget_v1';
-SET CONSTRAINTS job_labour_cap_guard_line, job_labour_cap_guard_invoice IMMEDIATE;
 
 DO $$
 DECLARE
@@ -69,39 +71,26 @@ DECLARE
   b1     uuid := '00000000-0000-0000-0000-00000000c431';
   st     jsonb;
   r      jsonb;
-  refused boolean;
 BEGIN
   st := public.job_labour_cap_state(job);
-  IF st->>'state' <> 'capped' OR (st->>'cap_ex_gst')::numeric <> 800 OR (st->>'billed_ex_gst')::numeric <> 0 THEN
-    RAISE EXCEPTION 'labour cap contract: the cap was not read from the budget: %', st;
+  IF st->>'state' <> 'capped' OR (st->>'cap_ex_gst')::numeric <> 800
+     OR (st->>'rate_ex_gst')::numeric <> 80 OR (st->>'max_hours')::numeric <> 10
+     OR st ? 'billed_ex_gst' OR st ? 'remaining_ex_gst' THEN
+    RAISE EXCEPTION 'labour cap contract: the limit was not read from the budget alone: %', st;
   END IF;
   IF public.job_labour_cap_state(grp)->>'state' <> 'not_capped' THEN
     RAISE EXCEPTION 'labour cap contract: a group-pay job read as capped';
   END IF;
 
-  -- A submitted invoice within the maximum is accepted.
+  -- No database refusal: a line past the limit is written (the ops-api
+  -- guard refuses it before any write, at every door).
   INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subtotal_ex, gst_on, gst, total_inc, super_rate, super_amount, gross_earned, net_pay)
   VALUES ('00000000-0000-0000-0000-00000000c451', '00000000-0000-0000-0000-000000000001', trade, '2026-11-09', 'pending_acknowledgment',
-          600, false, 0, 600, 0.12, 72, 600, 564);
+          900, false, 0, 900, 0.12, 108, 900, 846);
   INSERT INTO public.trade_invoice_lines (id, trade_invoice_id, job_id, line_type, description, line_total_ex, line_date)
-  VALUES ('00000000-0000-0000-0000-00000000c461', '00000000-0000-0000-0000-00000000c451', job, 'labour', 'Fence build', 600, '2026-11-10');
-  IF (public.job_labour_cap_state(job)->>'billed_ex_gst')::numeric <> 600 THEN
-    RAISE EXCEPTION 'labour cap contract: billed labour was not counted';
-  END IF;
-
-  -- A draft that would take the job past it is refused, from any trade.
-  INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subtotal_ex, gst_on, gst, total_inc, super_rate, super_amount, gross_earned, net_pay)
-  VALUES ('00000000-0000-0000-0000-00000000c452', '00000000-0000-0000-0000-000000000001', trade, '2026-11-16', 'draft',
-          300, false, 0, 300, 0.12, 36, 300, 282);
-  refused := false;
-  BEGIN
-    INSERT INTO public.trade_invoice_lines (id, trade_invoice_id, job_id, line_type, description, line_total_ex, line_date)
-    VALUES ('00000000-0000-0000-0000-00000000c462', '00000000-0000-0000-0000-00000000c452', job, 'labour', 'More hours', 300, '2026-11-17');
-  EXCEPTION WHEN check_violation THEN
-    refused := SQLERRM = 'job_labour_cap_exceeded';
-  END;
-  IF NOT refused THEN
-    RAISE EXCEPTION 'labour cap contract: labour past the maximum was not refused';
+  VALUES ('00000000-0000-0000-0000-00000000c461', '00000000-0000-0000-0000-00000000c451', job, 'labour', 'Fence build', 900, '2026-11-10');
+  IF (public.job_labour_cap_state(job)->>'cap_ex_gst')::numeric <> 800 THEN
+    RAISE EXCEPTION 'labour cap contract: billed labour moved the limit';
   END IF;
 
   -- Someone who is not an approver cannot raise it.
@@ -129,7 +118,8 @@ BEGIN
   -- The approver raises it; who, when, why and how much are recorded.
   r := public.raise_job_labour_cap(job, b1, '00000000-0000-0000-0000-00000000c4b1', ' approver@example.test ',
                                    '00000000-0000-0000-0000-000000000001', 100, '  Rock in the post holes  ');
-  IF r->>'authority' <> 'approver_list' OR (r->'cap'->>'cap_ex_gst')::numeric <> 900 THEN
+  IF r->>'authority' <> 'approver_list' OR (r->'cap'->>'cap_ex_gst')::numeric <> 900
+     OR (r->'cap'->>'raised_ex_gst')::numeric <> 100 THEN
     RAISE EXCEPTION 'labour cap contract: the raise did not lift the cap: %', r;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM public.job_labour_cap_raises
@@ -138,8 +128,6 @@ BEGIN
                     AND raised_by_email = 'approver@example.test' AND raised_at IS NOT NULL) THEN
     RAISE EXCEPTION 'labour cap contract: the raise was not recorded in full';
   END IF;
-  INSERT INTO public.trade_invoice_lines (id, trade_invoice_id, job_id, line_type, description, line_total_ex, line_date)
-  VALUES ('00000000-0000-0000-0000-00000000c462', '00000000-0000-0000-0000-00000000c452', job, 'labour', 'More hours', 300, '2026-11-17');
 
   -- A raise is never changed or deleted.
   BEGIN
@@ -148,10 +136,11 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
 
-  -- Group pay is never capped by this rule.
-  INSERT INTO public.trade_invoice_lines (id, trade_invoice_id, job_id, line_type, description, line_total_ex, line_date)
-  VALUES ('00000000-0000-0000-0000-00000000c463', '00000000-0000-0000-0000-00000000c451', grp, 'labour', 'Group job', 5000, '2026-11-10');
-  DELETE FROM public.trade_invoice_lines WHERE id = '00000000-0000-0000-0000-00000000c463';
+  BEGIN
+    DELETE FROM public.job_labour_cap_raises WHERE job_id = job;
+    RAISE EXCEPTION 'labour cap contract: a raise was deleted';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
 
   -- A newer budget version starts again from its own maximum (100, no raise).
   INSERT INTO public.job_budgets (id, job_id, scope_revision_id, version, pricing_hash, trade, complete, gap_count, budget)
@@ -161,47 +150,17 @@ BEGIN
     RAISE EXCEPTION 'labour cap contract: a raise on an older budget carried to the newer one';
   END IF;
 
-  -- Already-billed work moving on, or a line only lowered, is never refused.
-  UPDATE public.trade_invoices SET status = 'approved' WHERE id = '00000000-0000-0000-0000-00000000c451';
-  UPDATE public.trade_invoice_lines SET line_total_ex = 550 WHERE id = '00000000-0000-0000-0000-00000000c461';
-
-  -- But a draft moving into billing past the cap is.
-  refused := false;
-  BEGIN
-    UPDATE public.trade_invoices SET status = 'pending_acknowledgment' WHERE id = '00000000-0000-0000-0000-00000000c452';
-  EXCEPTION WHEN check_violation THEN
-    refused := SQLERRM = 'job_labour_cap_exceeded';
-  END;
-  IF NOT refused THEN
-    RAISE EXCEPTION 'labour cap contract: a draft entered billing past the cap';
-  END IF;
-
-  -- With the switch off nothing is refused.
-  UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'job_labour_budget_v1';
-  UPDATE public.trade_invoices SET status = 'pending_acknowledgment' WHERE id = '00000000-0000-0000-0000-00000000c452';
-  UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_labour_budget_v1';
 END $$;
 
--- A line that is gone again before commit (a replaced draft) is not checked.
-SET CONSTRAINTS job_labour_cap_guard_line, job_labour_cap_guard_invoice DEFERRED;
-INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subtotal_ex, gst_on, gst, total_inc, super_rate, super_amount, gross_earned, net_pay)
-VALUES ('00000000-0000-0000-0000-00000000c453', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000c4a1',
-        '2026-11-23', 'draft', 50, false, 0, 50, 0.12, 6, 50, 47);
-INSERT INTO public.trade_invoice_lines (id, trade_invoice_id, job_id, line_type, description, line_total_ex, line_date)
-VALUES ('00000000-0000-0000-0000-00000000c464', '00000000-0000-0000-0000-00000000c453', '00000000-0000-0000-0000-00000000c401',
-        'labour', 'Replaced', 50, '2026-11-24');
-DELETE FROM public.trade_invoice_lines WHERE id = '00000000-0000-0000-0000-00000000c464';
-SET CONSTRAINTS job_labour_cap_guard_line, job_labour_cap_guard_invoice IMMEDIATE;
 ROLLBACK;
 
 -- 3. Crew options the customer took are labour on top of the hourly maximum,
--- and a cap that cannot be read lets no labour through (absent hourly, {},
--- each absent property, an absent labour amount, an amount under the maximum).
+-- and a maximum that cannot be read is never a limit (absent hourly, {}, each
+-- absent property, an absent labour amount, an amount under the maximum):
+-- the state says capped_unreadable with a zero cap, and the ops-api guard
+-- refuses such a job as unreadable (503), never lets labour through.
 BEGIN;
-INSERT INTO public.users (id, org_id, name)
-VALUES ('00000000-0000-0000-0000-00000000c5a1', '00000000-0000-0000-0000-000000000001', 'ZZTEST trade');
 UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_labour_budget_v1';
-SET CONSTRAINTS job_labour_cap_guard_line, job_labour_cap_guard_invoice IMMEDIATE;
 
 DO $$
 DECLARE
@@ -221,15 +180,11 @@ DECLARE
   i      int;
   job    uuid;
   rev    uuid;
-  inv    uuid;
   st     jsonb;
-  refused boolean;
-  code   text;
 BEGIN
   FOR i IN 1 .. array_length(cases, 1) LOOP
     job := ('00000000-0000-0000-0000-00000000c9' || lpad(to_hex(i), 2, '0'))::uuid;
     rev := ('00000000-0000-0000-0000-00000000ca' || lpad(to_hex(i), 2, '0'))::uuid;
-    inv := ('00000000-0000-0000-0000-00000000cb' || lpad(to_hex(i), 2, '0'))::uuid;
     INSERT INTO public.jobs (id, org_id, status, type, job_number)
     VALUES (job, '00000000-0000-0000-0000-000000000001', 'accepted', 'fencing', 'ZZTEST-C5' || i);
     INSERT INTO public.scope_revisions (id, job_id, revision_number, status, scope_canonical_text, pricing_canonical_text, scope_hash, pricing_hash)
@@ -239,9 +194,6 @@ BEGIN
     VALUES (gen_random_uuid(), job, rev, 1, repeat('d', 64), 'fence', true, 0,
             jsonb_build_object('version', 'budget.v1', 'labour', cases[i][2]::jsonb));
     st := public.job_labour_cap_state(job);
-    INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subtotal_ex, gst_on, gst, total_inc, super_rate, super_amount, gross_earned, net_pay)
-    VALUES (inv, '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000c5a1', '2026-11-09', 'pending_acknowledgment',
-            3000, false, 0, 3000, 0.12, 360, 3000, 2820);
 
     IF cases[i][1] = 'options' THEN
       -- 70 x 40 = 2800, plus a 250 crew option: the crew may bill 3050.
@@ -249,33 +201,10 @@ BEGIN
          OR (st->>'crew_options_ex_gst')::numeric <> 250 OR (st->>'cap_ex_gst')::numeric <> 3050 THEN
         RAISE EXCEPTION 'labour cap contract: a taken crew option is not inside the cap: %', st;
       END IF;
-      INSERT INTO public.trade_invoice_lines (id, trade_invoice_id, job_id, line_type, description, line_total_ex, line_date)
-      VALUES (gen_random_uuid(), inv, job, 'labour', 'Build and the crew option', 3050, '2026-11-10');
-      refused := false;
-      BEGIN
-        INSERT INTO public.trade_invoice_lines (id, trade_invoice_id, job_id, line_type, description, line_total_ex, line_date)
-        VALUES (gen_random_uuid(), inv, job, 'labour', 'One more', 0.01, '2026-11-11');
-      EXCEPTION WHEN check_violation THEN
-        refused := SQLERRM = 'job_labour_cap_exceeded';
-      END;
-      IF NOT refused THEN
-        RAISE EXCEPTION 'labour cap contract: labour past the maximum plus options was not refused';
-      END IF;
     ELSE
       IF st->>'state' <> 'capped_unreadable' OR jsonb_typeof(st->'cap_ex_gst') <> 'number'
-         OR (st->>'cap_ex_gst')::numeric <> 0 OR (st->>'remaining_ex_gst')::numeric <> 0 THEN
+         OR (st->>'cap_ex_gst')::numeric <> 0 THEN
         RAISE EXCEPTION 'labour cap contract: % did not read as unreadable with a zero cap: %', cases[i][1], st;
-      END IF;
-      refused := false;
-      BEGIN
-        INSERT INTO public.trade_invoice_lines (id, trade_invoice_id, job_id, line_type, description, line_total_ex, line_date)
-        VALUES (gen_random_uuid(), inv, job, 'labour', 'Any labour', 1, '2026-11-10');
-      EXCEPTION WHEN check_violation THEN
-        code := SQLERRM;
-        refused := code IN ('job_labour_cap_exceeded', 'job_labour_cap_unreadable');
-      END;
-      IF NOT refused THEN
-        RAISE EXCEPTION 'labour cap contract: % let labour through on an unreadable cap', cases[i][1];
       END IF;
     END IF;
   END LOOP;

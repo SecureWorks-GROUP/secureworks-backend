@@ -2,14 +2,26 @@
 // Ruling 17 step 4 (backend half): how the crew is paid comes from the job
 // budget, and a job paid hourly up to a maximum holds every trade to it.
 //
-// The database owns the cap (20261114030000_job_labour_cap.sql): the one read
-// is job_labour_cap_state(job), the guard refuses trade invoice labour past it
-// at commit (job_labour_cap_exceeded), and raise_job_labour_cap is the only
-// writer of a raise (an approver owner_approval_authority already names). This
-// module is the ops-api side: the switch, the pay mode the invoice mode reads,
-// the staff read and raise doors, and the trade-facing refusal.
+// Ruling 17c (16 Nov 2026): one labour cap per job, through one guard. The
+// refusal is the live work order cap's (_assertWithinWorkOrderTotal,
+// work_order_total_cap.ts): same doors, same count, same codes. This module
+// only supplies what that guard needs for an hourly job: which jobs are paid
+// hourly up to a maximum, and each one's limit, read from the database's one
+// read job_labour_cap_state (20261114030000_job_labour_cap.sql): the sealed
+// maximum (plus any crew option the customer took) plus the approver's
+// raises. raise_job_labour_cap is the only writer of a raise (an approver
+// owner_approval_authority already names). Also here: the switch, the pay
+// mode the invoice mode reads and the staff read and raise doors.
 //
 // Contract: docs/job-budget-v1.md, "Labour: pay mode and the hourly cap (step 4)".
+
+/** What is already billed on each job, by the guard's one count
+ *  (readBilledOnJobs, work_order_total_cap.ts; passed in by index.ts, which
+ *  keeps this module free of an import cycle through the work order fill). */
+export type ReadBilledOnJobs = (
+  client: any,
+  jobIds: readonly string[],
+) => Promise<ReadonlyMap<string, number>>;
 
 export const JOB_LABOUR_BUDGET_FLAG = "job_labour_budget_v1";
 
@@ -27,16 +39,22 @@ export class JobLabourCapError extends Error {
   }
 }
 
-/** The switch. Missing, unreadable or anything but true is off. */
+export class JobLabourPayReadError extends Error {}
+
+/** The switch. A missing row, or anything but true, is off. A read that
+ *  fails is never off: it throws JobLabourPayReadError, so a cap is never
+ *  dropped on a fault. */
 export async function readJobLabourBudgetOn(client: any): Promise<boolean> {
+  let res: any;
   try {
-    const { data, error } = await client.from("feature_flags").select("enabled")
-      .eq("flag_name", JOB_LABOUR_BUDGET_FLAG).limit(1);
-    if (error) return false;
-    return data?.[0]?.enabled === true;
+    // flag_name is the table's key, so this is one row or none.
+    res = await client.from("feature_flags").select("enabled")
+      .eq("flag_name", JOB_LABOUR_BUDGET_FLAG);
   } catch {
-    return false;
+    throw new JobLabourPayReadError("the labour budget switch");
   }
+  if (res?.error) throw new JobLabourPayReadError("the labour budget switch");
+  return res?.data?.[0]?.enabled === true;
 }
 
 /** The pay mode a stored budget names, or null. Pure. */
@@ -55,12 +73,11 @@ export function budgetAgreedLabour(budget: unknown): number | null {
     : null;
 }
 
-export class JobLabourPayReadError extends Error {}
-
 /**
  * The jobs whose newest stored budget pays the crew hourly up to a maximum.
  * Empty while the switch is off. Throws JobLabourPayReadError when the
- * budgets cannot be read, so a job is never invoiced past its cap on a fault.
+ * switch or the budgets cannot be read, so a job is never invoiced past its
+ * cap on a fault.
  */
 export async function readHourlyCappedJobs(
   client: any,
@@ -103,8 +120,8 @@ export type NewestJobBudgetLabour =
  *  "unreadable" on any read fault: the caller holds rather than guesses. */
 export async function readNewestJobBudgetLabour(client: any, jobId: string): Promise<NewestJobBudgetLabour> {
   if (!UUID_RE.test(String(jobId))) return { state: "none" };
-  if (!(await readJobLabourBudgetOn(client))) return { state: "off" };
   try {
+    if (!(await readJobLabourBudgetOn(client))) return { state: "off" };
     const { data, error } = await client.from("job_budgets")
       .select("id, scope_revision_id, version, labour:budget->labour")
       .eq("job_id", jobId)
@@ -127,14 +144,71 @@ export async function readNewestJobBudgetLabour(client: any, jobId: string): Pro
   }
 }
 
-/** The job's cap as the database reads it (job_labour_cap_state). Staff only:
- *  it carries the maximum and what was billed. */
-export async function readJobLabourCap(client: any, jobId: string): Promise<any> {
+/** Pure. The limit a capped state carries, or null when it is not a capped
+ *  state with a whole, non-negative cap. */
+export function hourlyLimitFromState(state: unknown): number | null {
+  const s = state as any;
+  if (!s || typeof s !== "object" || s.state !== "capped") return null;
+  const cap = s.cap_ex_gst;
+  return typeof cap === "number" && Number.isFinite(cap) && cap >= 0
+    ? Math.round(cap * 100) / 100
+    : null;
+}
+
+/**
+ * Ruling 17c: the limit of every job among `jobIds` paid hourly up to a
+ * maximum (absent for any other job), for the one cap guard. Throws
+ * JobLabourPayReadError when the switch, the budgets or a job's state cannot
+ * be read, and when a capped job's maximum cannot be read
+ * (capped_unreadable): the guard refuses, never lets labour through.
+ */
+export async function readHourlyLabourLimits(
+  client: any,
+  jobIds: readonly string[],
+): Promise<Map<string, number>> {
+  const capped = [...await readHourlyCappedJobs(client, jobIds)];
+  const limits = new Map<string, number>();
+  const states = await Promise.all(capped.map(async (jobId) => {
+    try {
+      const { data, error } = await client.rpc("job_labour_cap_state", { p_job: jobId });
+      return error ? null : data;
+    } catch {
+      return null;
+    }
+  }));
+  capped.forEach((jobId, i) => {
+    const limit = hourlyLimitFromState(states[i]);
+    if (limit === null) throw new JobLabourPayReadError("a job's labour maximum");
+    limits.set(jobId, limit);
+  });
+  return limits;
+}
+
+/** The job's cap for the office: the database's limit read
+ *  (job_labour_cap_state) and what is already billed on the job by the one
+ *  count the guard refuses by (readBilledOnJobs). Staff only. */
+export async function readJobLabourCap(
+  client: any,
+  jobId: string,
+  readBilled: ReadBilledOnJobs,
+): Promise<any> {
+  const unreadable = () =>
+    new JobLabourCapError(503, "labour_cap_unreadable", "The job's labour maximum could not be read. Try again in a minute.");
   const { data, error } = await client.rpc("job_labour_cap_state", { p_job: jobId });
-  if (error || !data || typeof data !== "object") {
-    throw new JobLabourCapError(503, "labour_cap_unreadable", "The job's labour maximum could not be read. Try again in a minute.");
+  if (error || !data || typeof data !== "object") throw unreadable();
+  if (data.state !== "capped" && data.state !== "capped_unreadable") return data;
+  let billed: number;
+  try {
+    billed = (await readBilled(client, [jobId])).get(jobId) ?? 0;
+  } catch {
+    throw unreadable();
   }
-  return data;
+  const cap = typeof data.cap_ex_gst === "number" ? data.cap_ex_gst : 0;
+  return {
+    ...data,
+    billed_ex_gst: billed,
+    remaining_ex_gst: Math.round((cap - billed) * 100) / 100,
+  };
 }
 
 const RAISE_REFUSALS: Array<[string, number, string, string]> = [
@@ -189,32 +263,6 @@ export async function raiseJobLabourCapAction(
   return data;
 }
 
-export const JOB_LABOUR_CAP_EXCEEDED = "job_labour_cap_exceeded";
-/** The guard's refusal when a capped job's maximum cannot be read: nothing
- *  is let through on a guess. */
-export const JOB_LABOUR_CAP_UNREADABLE = "job_labour_cap_unreadable";
-
-export const JOB_LABOUR_CAP_UNREADABLE_TRADE_MESSAGE =
-  "The labour maximum on a job on this invoice could not be read, so nothing was saved. Ask the office to check that job's labour budget.";
-
-export const JOB_LABOUR_CAP_TRADE_MESSAGE =
-  "A job on this invoice has reached the most labour that can be charged to it. Ask the office to raise it before you invoice more on that job. Nothing was saved.";
-
-/** The trade-facing refusal when the database's guard stops an invoice. It
- *  names no figure: the maximum is the office's. null for any other error. */
-export function jobLabourCapRefusal(error: unknown): { status: 409; code: string; message: string } | null {
-  const text = String((error as any)?.message || error || "");
-  if (text.includes(JOB_LABOUR_CAP_UNREADABLE)) {
-    return { status: 409, code: JOB_LABOUR_CAP_UNREADABLE, message: JOB_LABOUR_CAP_UNREADABLE_TRADE_MESSAGE };
-  }
-  if (!text.includes(JOB_LABOUR_CAP_EXCEEDED)) return null;
-  return {
-    status: 409,
-    code: JOB_LABOUR_CAP_EXCEEDED,
-    message: JOB_LABOUR_CAP_TRADE_MESSAGE,
-  };
-}
-
 /**
  * The staff doors. GET job_labour_cap?job_id= reads a job's cap (staff in the
  * job's company, or the server key). POST raise_job_labour_cap records a
@@ -227,6 +275,7 @@ export async function jobLabourCapAction(
   method: string,
   input: any,
   ctx: { staff: boolean; signedIn: boolean; orgId: string | null; userId: string | null; email: string | null },
+  readBilled: ReadBilledOnJobs,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const refuse = (status: number, code: string, error: string) => ({ status, body: { ok: false, code, error } });
   try {
@@ -239,7 +288,7 @@ export async function jobLabourCapAction(
         .eq("id", jobId).eq("org_id", ctx.orgId).maybeSingle();
       if (error) return refuse(503, "labour_cap_unreadable", "The job's labour maximum could not be read. Try again in a minute.");
       if (!job) return refuse(404, "job_not_found", "That job was not found.");
-      return { status: 200, body: { ok: true, cap: await readJobLabourCap(client, jobId) } };
+      return { status: 200, body: { ok: true, cap: await readJobLabourCap(client, jobId, readBilled) } };
     }
     if (method !== "POST") return refuse(405, "method_not_allowed", "Use POST.");
     if (!ctx.signedIn || !ctx.userId) {

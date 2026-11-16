@@ -2,21 +2,22 @@
 // Ruling 17 step 4: how the crew is paid comes from the job budget, and a job
 // paid hourly up to a maximum holds every trade to it
 // (docs/job-budget-v1.md, "Labour: pay mode and the hourly cap (step 4)").
+// Ruling 17c: the refusal is the one work order cap guard's; its hourly cases
+// are in work_order_total_cap_test.ts.
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   budgetAgreedLabour,
   budgetLabourPay,
+  hourlyLimitFromState,
   JOB_LABOUR_BUDGET_FLAG,
-  JOB_LABOUR_CAP_EXCEEDED,
-  JOB_LABOUR_CAP_UNREADABLE,
   jobLabourCapAction,
-  jobLabourCapRefusal,
   JobLabourPayReadError,
   raiseJobLabourCapAction,
   readHourlyCappedJobs,
+  readHourlyLabourLimits,
+  readNewestJobBudgetLabour,
 } from "./job_labour_cap.ts";
 import { decideTradeInvoiceMode, loadTradeInvoiceJobModes, TradeInvoiceModeReadError } from "./trade_invoice_mode.ts";
-import { tradeInvoiceRefusal } from "./trade_invoice_refusal.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
 const JOB_A = "11111111-1111-4111-8111-11111111111a";
@@ -77,14 +78,14 @@ class Fake {
   fail = new Set<string>();
   reads: string[] = [];
   rpcs: Array<{ fn: string; args: any }> = [];
-  rpcAnswer: { data: any; error: any } = { data: null, error: null };
+  rpcAnswer: { data: any; error: any } | ((args: any) => { data: any; error: any }) = { data: null, error: null };
   constructor(public tables: Record<string, any[]>) {}
   from(t: string) {
     return new Q(this, t);
   }
   rpc(fn: string, args: any) {
     this.rpcs.push({ fn, args });
-    return Promise.resolve(this.rpcAnswer);
+    return Promise.resolve(typeof this.rpcAnswer === "function" ? this.rpcAnswer(args) : this.rpcAnswer);
   }
 }
 
@@ -117,13 +118,19 @@ Deno.test("pay read: the switch off reads no budget; on, the newest version deci
   assertEquals([...(await readHourlyCappedJobs(on, [JOB_A, JOB_B]))], [JOB_A]);
 });
 
-Deno.test("pay read: an unreadable budget throws, never reads as no cap; an unreadable switch is off", async () => {
+Deno.test("pay read: an unreadable budget or switch throws, never reads as no cap; a missing switch is off", async () => {
   const broken = new Fake({ feature_flags: switchOn, job_budgets: [] });
   broken.fail.add("job_budgets");
   await assertRejects(() => readHourlyCappedJobs(broken, [JOB_A]), JobLabourPayReadError);
   const noSwitch = new Fake({ job_budgets: [payRow(JOB_A, 1, "hourly_capped")] });
   noSwitch.fail.add("feature_flags");
-  assertEquals((await readHourlyCappedJobs(noSwitch, [JOB_A])).size, 0);
+  await assertRejects(() => readHourlyCappedJobs(noSwitch, [JOB_A]), JobLabourPayReadError);
+  const missing = new Fake({ feature_flags: [], job_budgets: [payRow(JOB_A, 1, "hourly_capped")] });
+  assertEquals((await readHourlyCappedJobs(missing, [JOB_A])).size, 0);
+  assert(!missing.reads.includes("job_budgets"));
+  // The work order fill holds the draft on an unreadable switch, never reads it as off.
+  assertEquals((await readNewestJobBudgetLabour(noSwitch, JOB_A)).state, "unreadable");
+  assertEquals((await readNewestJobBudgetLabour(missing, JOB_A)).state, "off");
 });
 
 Deno.test("loader: an hourly-capped fencing job is invoiced by the hour; an unreadable budget fails the read", async () => {
@@ -160,23 +167,56 @@ Deno.test("budget readers: pay and work order amount, nothing invented", () => {
   assertEquals(budgetAgreedLabour({ labour: { work_order_amount_ex_gst: -1 } }), null);
 });
 
-Deno.test("refusal: the cap is a 409 with no figure, on the trade doors and anywhere else", () => {
-  const raw = { message: `job_labour_cap_exceeded`, code: "23514", details: JOB_A };
-  const r = jobLabourCapRefusal(raw);
-  assertEquals(r?.status, 409);
-  assertEquals(r?.code, JOB_LABOUR_CAP_EXCEEDED);
-  assert(!/\d/.test(String(r?.message)));
-  const trade = tradeInvoiceRefusal(new Error("Failed to persist weekly/hourly draft invoice: job_labour_cap_exceeded"));
-  assertEquals([trade.status, trade.body.code], [409, JOB_LABOUR_CAP_EXCEEDED]);
-  assertEquals(jobLabourCapRefusal(new Error("something else")), null);
+Deno.test("limits: each hourly job's limit is the database's one read; anything else throws, never no limit", async () => {
+  const capped = (cap: unknown, state = "capped") => ({ data: { state, cap_ex_gst: cap }, error: null });
+  assertEquals(hourlyLimitFromState({ state: "capped", cap_ex_gst: 3050 }), 3050);
+  assertEquals(hourlyLimitFromState({ state: "capped_unreadable", cap_ex_gst: 0 }), null);
+  assertEquals(hourlyLimitFromState({ state: "capped", cap_ex_gst: "800" }), null);
+  assertEquals(hourlyLimitFromState({ state: "capped", cap_ex_gst: -1 }), null);
+  assertEquals(hourlyLimitFromState(null), null);
+
+  const tables = () => ({
+    feature_flags: switchOn,
+    job_budgets: [payRow(JOB_A, 1, "hourly_capped"), payRow(JOB_B, 1, "group_work_order")],
+  });
+  const db = new Fake(tables());
+  db.rpcAnswer = (args) => args.p_job === JOB_A ? capped(900) : capped(1);
+  const limits = await readHourlyLabourLimits(db, [JOB_A, JOB_B]);
+  assertEquals([...limits], [[JOB_A, 900]], "only the hourly job, at its read limit");
+  assertEquals(db.rpcs.map((r) => [r.fn, r.args.p_job]), [["job_labour_cap_state", JOB_A]]);
+
+  for (
+    const answer of [
+      capped(0, "capped_unreadable"),
+      capped(null),
+      { data: { state: "not_capped" }, error: null },
+      { data: null, error: { message: "boom" } },
+    ]
+  ) {
+    const bad = new Fake(tables());
+    bad.rpcAnswer = answer;
+    await assertRejects(() => readHourlyLabourLimits(bad, [JOB_A, JOB_B]), JobLabourPayReadError, undefined, JSON.stringify(answer));
+  }
+  const off = new Fake({ ...tables(), feature_flags: [] });
+  assertEquals((await readHourlyLabourLimits(off, [JOB_A])).size, 0);
+  assertEquals(off.rpcs.length, 0);
 });
 
-Deno.test("refusal: an unreadable cap is its own 409, never read as no cap", () => {
-  const r = jobLabourCapRefusal({ message: "job_labour_cap_unreadable", code: "23514", details: JOB_A });
-  assertEquals([r?.status, r?.code], [409, JOB_LABOUR_CAP_UNREADABLE]);
-  assert(!/\d/.test(String(r?.message)));
-  const trade = tradeInvoiceRefusal(new Error("Failed to persist weekly/hourly draft invoice: job_labour_cap_unreadable"));
-  assertEquals([trade.status, trade.body.code], [409, JOB_LABOUR_CAP_UNREADABLE]);
+Deno.test("one refusal path: no database labour guard, no second refusal code; the one guard reads the hourly limit", async () => {
+  const read = (rel: string) => Deno.readTextFile(new URL(rel, import.meta.url));
+  const migration = await read("../../migrations/20261114030000_job_labour_cap.sql");
+  for (const gone of ["CREATE CONSTRAINT TRIGGER", "job_labour_cap_check_invoice", "job_labour_cap_exceeded", "job_labour_cap_unreadable", "billed_ex_gst"]) {
+    assert(!migration.includes(gone), `the migration still carries ${gone}`);
+  }
+  const index = await read("./index.ts");
+  for (const gone of ["jobLabourCapRefusal", "job_labour_cap_exceeded"]) {
+    assert(!index.includes(gone), `index.ts still carries ${gone}`);
+  }
+  const at = index.indexOf("export async function _assertWithinWorkOrderTotal(");
+  const guard = index.slice(at, index.indexOf("\nexport async function ", at + 10));
+  assert(guard.includes("readHourlyCappedJobs(client, jobIds)"), "the guard finds the hourly jobs");
+  assert(guard.includes("readHourlyLabourLimits(client, jobIds)"), "the guard reads their limits");
+  assert(guard.includes("'work_order_cap_unavailable'"), "an unreadable limit is the guard's 503");
 });
 
 Deno.test("raise: a signed-in person, a whole-cent amount and a reason, before the database is asked", async () => {
@@ -223,20 +263,28 @@ Deno.test("raise: each database refusal keeps its own code; anything else is a p
       orgId: ORG,
       userId: APPROVER,
       email: null,
-    });
+    }, () => Promise.reject(new Error("no billed read on a raise")));
     assertEquals([out.status, out.body.code], [status, code], message);
   }
 });
 
 Deno.test("doors: the read is staff in the job's company; the raise needs a signed-in person", async () => {
   const db = new Fake({ jobs: [{ id: JOB_A, org_id: ORG }] });
-  db.rpcAnswer = { data: { state: "capped", cap_ex_gst: 1 }, error: null };
+  db.rpcAnswer = { data: { state: "capped", cap_ex_gst: 900 }, error: null };
   const staff = { staff: true, signedIn: true, orgId: ORG, userId: APPROVER, email: null };
-  assertEquals((await jobLabourCapAction(db, "job_labour_cap", "GET", { job_id: JOB_A }, { ...staff, staff: false })).status, 403);
-  assertEquals((await jobLabourCapAction(db, "job_labour_cap", "GET", { job_id: JOB_A }, { ...staff, orgId: "00000000-0000-0000-0000-000000000009" })).status, 404);
-  const read = await jobLabourCapAction(db, "job_labour_cap", "GET", { job_id: JOB_A }, staff);
+  const billed = async (_c: any, ids: readonly string[]) => new Map(ids.map((id) => [id, 650.5] as [string, number]));
+  const get = (ctx: typeof staff, readBilled = billed) => jobLabourCapAction(db, "job_labour_cap", "GET", { job_id: JOB_A }, ctx, readBilled);
+  assertEquals((await get({ ...staff, staff: false })).status, 403);
+  assertEquals((await get({ ...staff, orgId: "00000000-0000-0000-0000-000000000009" })).status, 404);
+  const read = await get(staff);
   assertEquals([read.status, (read.body.cap as any).state], [200, "capped"]);
-  const key = await jobLabourCapAction(db, "raise_job_labour_cap", "POST", { job_id: JOB_A }, { ...staff, signedIn: false, userId: null });
+  // Billed is the guard's own count, so the office sees what the doors refuse by.
+  assertEquals([(read.body.cap as any).billed_ex_gst, (read.body.cap as any).remaining_ex_gst], [650.5, 249.5]);
+  const failed = await get(staff, async () => {
+    throw new Error("x");
+  });
+  assertEquals([failed.status, failed.body.code], [503, "labour_cap_unreadable"]);
+  const key = await jobLabourCapAction(db, "raise_job_labour_cap", "POST", { job_id: JOB_A }, { ...staff, signedIn: false, userId: null }, billed);
   assertEquals([key.status, key.body.code], [403, "named_person_required"]);
-  assertEquals((await jobLabourCapAction(db, "raise_job_labour_cap", "GET", {}, staff)).status, 405);
+  assertEquals((await jobLabourCapAction(db, "raise_job_labour_cap", "GET", {}, staff, billed)).status, 405);
 });

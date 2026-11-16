@@ -1,7 +1,12 @@
 -- Ruling 17 step 4 (backend half): a job paid hourly up to a maximum holds
--- every trade to it. Trade invoice labour on such a job is refused past the
--- maximum unless the work order approver raises it, and every raise records
--- who, when, why and how much.
+-- every trade to it, unless the work order approver raises it, and every
+-- raise records who, when, why and how much.
+--
+-- Ruling 17c (16 Nov 2026): one labour cap per job, through one guard. The
+-- refusal is the live work order cap's (_assertWithinWorkOrderTotal in
+-- ops-api, work_order_total_cap.ts): same doors, same count, same codes. This
+-- migration adds no guard of its own; it holds the hourly maximum's limit
+-- and its raises, which that guard reads.
 --
 -- Contract: docs/job-budget-v1.md, section "Labour: pay mode and the hourly
 -- cap (step 4)".
@@ -10,27 +15,18 @@
 --   1. job_labour_cap_raises: the approver's raises, append-only. Each names
 --      the stored budget it raises (a new budget version starts again from its
 --      own maximum).
---   2. job_labour_cap_state(job): the one read of a job's cap. The job's
+--   2. job_labour_cap_state(job): the one read of a job's limit. The job's
 --      newest stored budget (job_budgets) says how the crew is paid; on
---      'hourly_capped' the cap is labour.hourly.max_ex_gst plus the raises,
---      and what counts against it is every labour-lane charge resolved to the
---      job (v_trade_charge_resolved, the repo's one lane and job rule) on a
---      billed invoice (job_work_order_billed_invoice_statuses()).
---   3. The guard: deferred constraint triggers on trade_invoice_lines and
---      trade_invoices. At commit, an invoice carrying labour on a capped job
---      is refused (job_labour_cap_exceeded, 23514) when the job's billed
---      labour plus that invoice's own labour (its draft included) is over the
---      cap. A per-job transaction lock makes two invoices for one job take
---      turns, so two trades cannot both slip under it at once. A line edit
---      that only lowers a line is never refused.
---   4. raise_job_labour_cap(...): the only writer of a raise. Only an approver
+--      'hourly_capped' the limit is the budget's labour (the sealed hours
+--      times the sealed rate, plus any crew option the customer took) plus
+--      the raises. What counts against it is counted by the guard, not here.
+--   3. raise_job_labour_cap(...): the only writer of a raise. Only an approver
 --      the database already names (owner_approval_authority; the list is not
 --      touched here) in the job's company, against the job's current budget,
 --      when that budget pays hourly.
---   5. feature_flags.job_labour_budget_v1, seeded OFF. While it is off (or
---      missing or unreadable) the guard does nothing, and ops-api reads no
---      pay mode from the budget: invoicing and the work order fill run
---      exactly as before.
+--   4. feature_flags.job_labour_budget_v1, seeded OFF. While it is off (or
+--      missing) ops-api reads no pay mode from the budget: invoicing, the
+--      cap and the work order fill run exactly as before.
 --
 -- Rollback: supabase/rollbacks/20261114030000_job_labour_cap_down.sql.
 
@@ -119,7 +115,6 @@ DECLARE
   v_labour   numeric;
   v_valid    boolean;
   v_raised   numeric;
-  v_billed   numeric;
   v_cap      numeric;
 BEGIN
   SELECT jb.id, jb.version, jb.scope_revision_id, jb.budget
@@ -153,8 +148,9 @@ BEGIN
     v_labour := (b.budget #>> '{labour,amount_ex_gst}')::numeric;
     v_valid := COALESCE(v_max >= 0 AND v_rate > 0 AND v_hours > 0 AND v_labour >= v_max, false);
   END IF;
-  -- A stored maximum that cannot be read caps the job at nothing: no labour
-  -- is let through on a guess (only an approver's raise lets labour in).
+  -- A stored maximum that cannot be read is never a limit: the state says
+  -- capped_unreadable with a zero cap, and the ops-api guard refuses such a
+  -- job as unreadable (503), never lets labour through on a guess.
   IF v_valid IS NOT TRUE THEN
     v_valid := false;
     v_rate := NULL; v_hours := NULL; v_max := 0; v_labour := 0;
@@ -162,12 +158,6 @@ BEGIN
   SELECT COALESCE(sum(r.amount_ex_gst), 0) INTO v_raised
     FROM public.job_labour_cap_raises r
    WHERE r.job_id = p_job AND r.budget_id = b.id;
-  SELECT COALESCE(sum(v.line_total_ex), 0) INTO v_billed
-    FROM public.v_trade_charge_resolved v
-   WHERE v.resolved_job_id = p_job
-     AND v.cost_lane = 'labour'
-     AND NOT v.is_probable_test_line
-     AND v.invoice_status = ANY (public.job_work_order_billed_invoice_statuses());
   v_cap := round(v_labour + v_raised, 2);
   RETURN jsonb_build_object(
     'state', CASE WHEN v_valid THEN 'capped' ELSE 'capped_unreadable' END,
@@ -181,9 +171,7 @@ BEGIN
     'max_ex_gst', round(v_max, 2),
     'crew_options_ex_gst', round(v_labour - v_max, 2),
     'raised_ex_gst', round(v_raised, 2),
-    'cap_ex_gst', v_cap,
-    'billed_ex_gst', round(v_billed, 2),
-    'remaining_ex_gst', round(v_cap - v_billed, 2));
+    'cap_ex_gst', v_cap);
 END
 $fn$;
 
@@ -192,139 +180,7 @@ GRANT EXECUTE ON FUNCTION public.job_labour_cap_state(uuid) TO service_role;
 REVOKE ALL ON FUNCTION public.job_labour_budget_on() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.job_labour_budget_on() TO service_role;
 
--- ── 4. The guard ────────────────────────────────────────────────────────────
-
--- Checks one invoice: for each capped job it carries labour on, the job's
--- billed labour plus this invoice's own must stay within the cap.
-CREATE OR REPLACE FUNCTION public.job_labour_cap_check_invoice(p_invoice uuid)
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $fn$
-DECLARE
-  v_status text;
-  v_job    uuid;
-  v_state  jsonb;
-  v_mine   numeric;
-  v_total  numeric;
-BEGIN
-  IF NOT public.job_labour_budget_on() THEN
-    RETURN;
-  END IF;
-  SELECT ti.status INTO v_status FROM public.trade_invoices ti WHERE ti.id = p_invoice;
-  IF NOT FOUND OR v_status = 'ops-reject' THEN
-    RETURN;
-  END IF;
-  FOR v_job IN
-    SELECT DISTINCT v.resolved_job_id
-      FROM public.v_trade_charge_resolved v
-     WHERE v.trade_invoice_id = p_invoice
-       AND v.cost_lane = 'labour'
-       AND NOT v.is_probable_test_line
-       AND v.resolved_job_id IS NOT NULL
-     ORDER BY v.resolved_job_id
-  LOOP
-    IF (SELECT (jb.budget #>> '{labour,pay}') FROM public.job_budgets jb
-         WHERE jb.job_id = v_job ORDER BY jb.version DESC LIMIT 1) IS DISTINCT FROM 'hourly_capped' THEN
-      CONTINUE;
-    END IF;
-    -- One invoice per job at a time, so each sees the other's committed lines.
-    PERFORM pg_advisory_xact_lock(hashtextextended('job_labour_cap:' || v_job::text, 0));
-    SELECT COALESCE(sum(v.line_total_ex), 0) INTO v_mine
-      FROM public.v_trade_charge_resolved v
-     WHERE v.trade_invoice_id = p_invoice
-       AND v.resolved_job_id = v_job
-       AND v.cost_lane = 'labour'
-       AND NOT v.is_probable_test_line;
-    IF v_mine <= 0 THEN
-      CONTINUE;
-    END IF;
-    v_state := public.job_labour_cap_state(v_job);
-    -- Refuses on its own when the cap is missing or not a number: never a
-    -- NULL comparison that lets the line through.
-    IF jsonb_typeof(v_state->'cap_ex_gst') IS DISTINCT FROM 'number' THEN
-      RAISE EXCEPTION 'job_labour_cap_unreadable'
-        USING ERRCODE = '23514', DETAIL = v_job::text;
-    END IF;
-    SELECT COALESCE(sum(v.line_total_ex), 0) INTO v_total
-      FROM public.v_trade_charge_resolved v
-     WHERE v.resolved_job_id = v_job
-       AND v.cost_lane = 'labour'
-       AND NOT v.is_probable_test_line
-       AND (v.invoice_status = ANY (public.job_work_order_billed_invoice_statuses())
-            OR v.trade_invoice_id = p_invoice);
-    IF (v_total > (v_state->>'cap_ex_gst')::numeric + 0.004) IS NOT FALSE THEN
-      RAISE EXCEPTION 'job_labour_cap_exceeded'
-        USING ERRCODE = '23514', DETAIL = v_job::text;
-    END IF;
-  END LOOP;
-END
-$fn$;
-
-REVOKE ALL ON FUNCTION public.job_labour_cap_check_invoice(uuid) FROM PUBLIC, anon, authenticated;
-
-CREATE OR REPLACE FUNCTION public.job_labour_cap_guard_line()
-RETURNS trigger
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $fn$
-BEGIN
-  IF NOT public.job_labour_budget_on() THEN
-    RETURN NULL;
-  END IF;
-  -- Only lowering a line never needs the check.
-  IF TG_OP = 'UPDATE'
-     AND NEW.trade_invoice_id IS NOT DISTINCT FROM OLD.trade_invoice_id
-     AND NEW.job_id IS NOT DISTINCT FROM OLD.job_id
-     AND NEW.job_number IS NOT DISTINCT FROM OLD.job_number
-     AND NEW.description IS NOT DISTINCT FROM OLD.description
-     AND NEW.line_type IS NOT DISTINCT FROM OLD.line_type
-     AND COALESCE(NEW.line_total_ex, 0) <= COALESCE(OLD.line_total_ex, 0) THEN
-    RETURN NULL;
-  END IF;
-  -- The line may have gone again before commit (a replaced draft).
-  IF NOT EXISTS (SELECT 1 FROM public.trade_invoice_lines l WHERE l.id = NEW.id) THEN
-    RETURN NULL;
-  END IF;
-  PERFORM public.job_labour_cap_check_invoice(NEW.trade_invoice_id);
-  RETURN NULL;
-END
-$fn$;
-
-CREATE OR REPLACE FUNCTION public.job_labour_cap_guard_invoice()
-RETURNS trigger
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $fn$
-BEGIN
-  -- Only a move INTO billing is checked: a billed invoice moving on (approved
-  -- to pushed or paid, the Xero mirror) is already counted and never refused,
-  -- even when a newer budget lowered the cap since.
-  IF NEW.status IS DISTINCT FROM OLD.status
-     AND NEW.status = ANY (public.job_work_order_billed_invoice_statuses())
-     AND NOT (COALESCE(OLD.status, '') = ANY (public.job_work_order_billed_invoice_statuses())) THEN
-    PERFORM public.job_labour_cap_check_invoice(NEW.id);
-  END IF;
-  RETURN NULL;
-END
-$fn$;
-
-DROP TRIGGER IF EXISTS job_labour_cap_guard_line ON public.trade_invoice_lines;
-CREATE CONSTRAINT TRIGGER job_labour_cap_guard_line
-  AFTER INSERT OR UPDATE ON public.trade_invoice_lines
-  DEFERRABLE INITIALLY DEFERRED
-  FOR EACH ROW EXECUTE FUNCTION public.job_labour_cap_guard_line();
-
-DROP TRIGGER IF EXISTS job_labour_cap_guard_invoice ON public.trade_invoices;
-CREATE CONSTRAINT TRIGGER job_labour_cap_guard_invoice
-  AFTER UPDATE ON public.trade_invoices
-  DEFERRABLE INITIALLY DEFERRED
-  FOR EACH ROW EXECUTE FUNCTION public.job_labour_cap_guard_invoice();
-
--- ── 5. The only writer of a raise ───────────────────────────────────────────
+-- ── 4. The only writer of a raise ───────────────────────────────────────────
 
 CREATE OR REPLACE FUNCTION public.raise_job_labour_cap(
   p_job uuid,

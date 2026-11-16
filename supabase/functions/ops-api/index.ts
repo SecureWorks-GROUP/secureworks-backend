@@ -2,7 +2,7 @@
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
 import { setCouncilRequired } from './council_mark.ts'
-import { jobLabourCapRefusal } from './job_labour_cap.ts'
+import { JobLabourPayReadError, readHourlyCappedJobs, readHourlyLabourLimits } from './job_labour_cap.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
 import { SelfAllocationRefusal, selfAllocateForInvoice } from './trade_self_allocation.ts'
@@ -17,6 +17,7 @@ import {
 } from './trade_invoice_mode.ts'
 import {
   checkWorkOrderTotalCap,
+  readBilledOnJobs,
   withWorkOrderCaps,
   WorkOrderTotalCapReadError,
   type WorkOrderTotalCapRefusal,
@@ -9807,8 +9808,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (url.searchParams.get('kind') === 'job') {
           // Each approved job work order also carries `cap`: the cap the invoice
           // doors refuse by (work_order_total_cap.ts), for the office's list.
+          // A job paid hourly up to a sealed maximum shows that limit (ruling 17c).
           return json(await runJobWorkOrder(async () =>
-            withWorkOrderCaps(client, await listJobWorkOrders(client, url.searchParams))
+            withWorkOrderCaps(client, await listJobWorkOrders(client, url.searchParams), {
+              hourlyLimits: (jobIds) => readHourlyLabourLimits(client, jobIds),
+            })
           ))
         }
         return json(await listWorkOrders(client, url.searchParams))
@@ -10638,8 +10642,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         })
         return json(result.body, result.status)
       }
-      // Ruling 17 step 4: a job paid hourly up to a maximum. The cap is the
-      // database's (20261114030000_job_labour_cap.sql); job_labour_cap.ts.
+      // Ruling 17 step 4: a job paid hourly up to a maximum. Its limit is the
+      // database's read (20261114030000_job_labour_cap.sql); the refusal is
+      // the one work order cap guard's (ruling 17c); job_labour_cap.ts.
       case 'job_labour_cap':
       case 'raise_job_labour_cap': {
         const { jobLabourCapAction } = await import('./job_labour_cap.ts')
@@ -10655,6 +10660,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             userId: authMode === 'jwt' ? authUser?.id || null : null,
             email: authMode === 'jwt' ? authUser?.email || null : null,
           },
+          readBilledOnJobs,
         )
         return json(result.body, result.status)
       }
@@ -16638,9 +16644,6 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       return json({ success: false, error: err.message, code: err.code, reasons: err.reasons }, err.status)
     }
     console.error('[ops-api] ERROR:', err)
-    // Ruling 17 step 4: the labour cap's refusal is a plain 409 on any door.
-    const labourCap = jobLabourCapRefusal(err)
-    if (labourCap) return json({ ok: false, code: labourCap.code, error: labourCap.message }, labourCap.status)
     // A trade invoice door never shows the trade a raw database or server
     // sentence: a guard refusal is a plain 409, anything else a plain 500.
     if (auditAction && TRADE_INVOICE_ROUTE_ACTIONS.has(auditAction)) {
@@ -17939,7 +17942,10 @@ export async function _persistWorkOrderInvoice(
 // No trade bills more than a work order allows, in total (owner, 15 Nov
 // 2026): every door that saves or changes a trade line on a job calls this
 // before it writes (work_order_total_cap.ts). Over: 409 and nothing saved.
-// Unreadable: 503, never read as "nothing billed".
+// Unreadable: 503, never read as "nothing billed". Ruling 17c: a job paid
+// hourly up to the maximum its job budget seals is capped here too, at that
+// maximum plus the approver's raises (job_labour_cap.ts); there is no other
+// labour cap refusal.
 export async function _assertWithinWorkOrderTotal(
   client: any,
   tradeUser: { id: string; orgId: string },
@@ -17949,7 +17955,7 @@ export async function _assertWithinWorkOrderTotal(
 ): Promise<void> {
   const capFailed = (where: string) => {
     console.error('[ops-api] work order cap unreadable:', where)
-    const message = 'This was not saved. What is already billed on its work order could not be checked. Try again in a minute.'
+    const message = 'This was not saved. What is already billed on its work order or labour maximum could not be checked. Try again in a minute.'
     return new ApiError(message, 503, {
       ok: false, success: false, saved: false,
       code: 'work_order_cap_unavailable', error: message, userMessage: message,
@@ -17963,12 +17969,24 @@ export async function _assertWithinWorkOrderTotal(
       force,
       loadModes: async (jobIds) => {
         // Only a job with an approved job work order carrying its agreed
-        // labour can be capped, so a week of hourly jobs reads nothing more.
+        // labour, or one whose job budget pays hourly up to a maximum (ruling
+        // 17c, only while job_labour_budget_v1 is on), can be capped, so a
+        // week of other hourly jobs reads nothing more.
         const { data: approved, error } = await client.from('work_orders')
           .select('job_id').eq('kind', 'job').eq('status', 'approved')
           .not('agreed_labour_ex', 'is', null).in('job_id', jobIds)
         if (error) throw new WorkOrderTotalCapReadError()
-        const withWorkOrder: string[] = [...new Set<string>((approved || []).map((r: any) => String(r.job_id)))]
+        let hourlyCapped: Set<string>
+        try {
+          hourlyCapped = await readHourlyCappedJobs(client, jobIds)
+        } catch (e) {
+          if (e instanceof JobLabourPayReadError) throw new WorkOrderTotalCapReadError()
+          throw e
+        }
+        const withWorkOrder: string[] = [...new Set<string>([
+          ...(approved || []).map((r: any) => String(r.job_id)),
+          ...hourlyCapped,
+        ])]
         if (withWorkOrder.length === 0) return []
         try {
           return (await loadTradeInvoiceJobModes(client, {
@@ -17980,6 +17998,14 @@ export async function _assertWithinWorkOrderTotal(
           })).jobs
         } catch (e) {
           if (e instanceof TradeInvoiceModeReadError) throw new WorkOrderTotalCapReadError()
+          throw e
+        }
+      },
+      loadHourlyLimits: async (jobIds) => {
+        try {
+          return await readHourlyLabourLimits(client, jobIds)
+        } catch (e) {
+          if (e instanceof JobLabourPayReadError) throw new WorkOrderTotalCapReadError()
           throw e
         }
       },

@@ -5,12 +5,8 @@ BEGIN
   IF to_regclass('public.job_labour_cap_raises') IS NOT NULL
      OR to_regprocedure('public.job_labour_cap_state(uuid)') IS NOT NULL
      OR to_regprocedure('public.raise_job_labour_cap(uuid, uuid, uuid, text, uuid, numeric, text)') IS NOT NULL
-     OR to_regprocedure('public.job_labour_cap_check_invoice(uuid)') IS NOT NULL
      OR to_regprocedure('public.job_labour_budget_on()') IS NOT NULL THEN
     RAISE EXCEPTION 'rollback contract: a labour cap object is still there';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname IN ('job_labour_cap_guard_line', 'job_labour_cap_guard_invoice')) THEN
-    RAISE EXCEPTION 'rollback contract: a labour cap guard is still there';
   END IF;
   IF EXISTS (SELECT 1 FROM public.feature_flags WHERE flag_name = 'job_labour_budget_v1') THEN
     RAISE EXCEPTION 'rollback contract: the switch row is still there';

@@ -222,9 +222,10 @@ cap, the trigger, the writer and the reads and keeps every row.
 Ruling 17 sections 4 and 5. The budget's `labour.pay` says how the crew is
 paid: `group_work_order` (the default: one agreed amount) or `hourly_capped`
 (a rate and maximum hours, `labour.hourly`). Everything below runs only while
-`feature_flags.job_labour_budget_v1` is on (seeded off; missing or unreadable
-is off). While it is off, invoicing and the work order fill are exactly as
-before.
+`feature_flags.job_labour_budget_v1` is on (seeded off; a missing row is off,
+and a switch that cannot be read is never off: the cap refuses 503 and the
+work order fill holds). While it is off, invoicing, the cap and the work
+order fill are exactly as before.
 
 - **What the budget must say.** On `hourly_capped`, `hourly.max_ex_gst` is
   `rate_ex_gst x max_hours` to the cent and the tool's own labour lines add
@@ -247,25 +248,31 @@ before.
   invoiced by the hour (`invoice_mode` `hourly`, reason `hourly_capped`),
   after a live group work order only (`trade_invoice_mode.ts`). An unreadable
   budget fails the mode read; it never reads as "no cap".
-- **The cap.** `job_labour_cap_state(job)` is the one read: the budget's
-  labour amount (the maximum plus taken crew options, `crew_options_ex_gst`)
-  plus the approver's raises on that budget, against every labour-lane charge
-  resolved to the job (`v_trade_charge_resolved`) on a billed invoice. A
-  deferred guard on `trade_invoice_lines` and `trade_invoices` refuses, at
-  commit, an invoice whose labour on a capped job would take that job past
-  its cap (`job_labour_cap_exceeded`). The trade's own draft counts; other
-  trades' drafts do not. A per-job lock makes two invoices take turns. A line
-  only lowered, and a billed invoice moving on (approved, pushed, paid), are
-  never refused. A maximum the database cannot read (no `hourly`, `{}`, any
-  property missing or not a number, or a labour amount below the maximum)
-  caps the job at nothing (`capped_unreadable`, cap 0): only an approver's
-  raise lets labour in. The guard also refuses on its own a cap it cannot
-  read at all (`job_labour_cap_unreadable`), never a comparison with nothing.
-  The cap is in dollars, not hours: hours times each trade's own rate is what
-  is charged to the job.
-- **The refusal.** Any door answers 409 `job_labour_cap_exceeded` (or
-  `job_labour_cap_unreadable`) with no figure (the maximum is the office's):
-  "Ask the office".
+- **The cap (ruling 17c).** A job has one labour cap check, the live work
+  order cap's: `_assertWithinWorkOrderTotal` (`work_order_total_cap.ts`) at
+  `generate_trade_invoice`, `submit_work_order_invoice` and a lead's
+  `review_crew_charge` adjust, before anything is written. There is no
+  second refusal path: no database guard and no second code. On a
+  work-order job the limit stays its agreed labour plus approved customer
+  variations (the fill above puts the budget's labour into
+  `agreed_labour_ex`). On an `hourly_capped` job the limit is
+  `job_labour_cap_state(job)`'s `cap_ex_gst`: the budget's labour (the
+  sealed `max_hours` times the sealed `rate_ex_gst`, plus any crew option the
+  customer took, `crew_options_ex_gst`) plus the approver's raises on that
+  budget. The count is the work order cap's for both: every line on a
+  billed invoice except commission (deductions come off), plus this
+  invoice's. The cap is in dollars: a trade's own rate on a job above the
+  sealed rate never raises it; the job stops at the maximum until the
+  approver raises it.
+- **The refusal.** Over: 409 `work_order_total_over_agreed`, nothing saved.
+  On an hourly job the job entry carries `limit: "hourly_maximum"` and
+  `hourly_maximum_ex`, and the message names the hourly maximum and the most
+  this invoice may still bill (never another trade's figure). A maximum that
+  cannot be read (no `hourly`, `{}`, any property missing or not a number, a
+  labour amount below the maximum: `capped_unreadable`), or any failed read,
+  is 503 `work_order_cap_unavailable`, never let through. The work order
+  cap's known limits (two invoices at the same moment can both pass; the
+  remainder lets a trade work out what others billed) apply unchanged.
 - **Raising it.** `POST ops-api?action=raise_job_labour_cap`
   `{ job_id, budget_id, amount_ex_gst, reason }`, signed in only.
   `raise_job_labour_cap` checks the caller with `owner_approval_authority`
@@ -278,8 +285,11 @@ before.
 - **Reading it.** `GET ops-api?action=job_labour_cap&job_id=` (staff in the
   job's company): `state` (`no_budget`, `not_capped`, `capped`,
   `capped_unreadable`), `rate_ex_gst`, `max_hours`, `max_ex_gst`,
-  `raised_ex_gst`, `cap_ex_gst`, `billed_ex_gst`, `remaining_ex_gst`. Never
-  shown to a trade.
+  `crew_options_ex_gst`, `raised_ex_gst`, `cap_ex_gst`, and on a capped job
+  `billed_ex_gst` and `remaining_ex_gst` by the guard's own count. The office
+  work order list (`list_work_orders` `kind=job`) shows an hourly job's row
+  with that limit (`cap.limit: "hourly_maximum"`). Never shown to a trade
+  beyond the refusal.
 
 Open for the director: whether the crew is paid for fence removal (17a T3)
 is the tool's labour lines; this step caps whatever labour the budget names.
@@ -293,12 +303,13 @@ is the tool's labour lines; this step caps whatever labour the budget names.
   (`fixtures/native-budgets.json`), money to two decimals, the strip.
 - `_shared/job_budget/record_job_budget_test.ts`: the acceptance writer.
 - `ops-api/job_budget_strip_test.ts`: every read in the table above.
-- `ops-api/job_labour_cap_test.ts`, the `R17 step 4` cases in
-  `ops-api/job_work_order_quote_fill_test.ts`: step 4's mode, doors, refusal
-  and fill.
+- `ops-api/job_labour_cap_test.ts`, the `hourly:` cases in
+  `ops-api/work_order_total_cap_test.ts`, the `R17 step 4` cases in
+  `ops-api/job_work_order_quote_fill_test.ts`: step 4's mode, limit read,
+  doors, the one guard and the fill.
 - `supabase/tests/migration-contracts/20261114030000_job_labour_cap/`: the
-  cap, raises, the guard (refused, raised, lowered, moving on, a replaced
-  draft, switch off), append-only; break and rollback proofs.
+  limit (crew options, every unreadable shape), raises, append-only, no
+  database guard on trade invoices; break and rollback proofs.
 - `supabase/tests/migration-contracts/20261113190000_job_budgets/`: privileges,
   the writer, replay, conflict, revision and decimal refusals, write-once, the
   view and the refused state; break and rollback proofs.
@@ -311,8 +322,8 @@ applied). The rollback (`supabase/rollbacks/20261113190000_job_budgets_down.sql`
 drops the writer, the view and the guard and keeps every stored budget.
 
 Step 4: apply `20261114030000_job_labour_cap.sql` before the matching
-`ops-api` (its two doors call its functions). It changes nothing until
-`job_labour_budget_v1` is turned on. Its rollback refuses once any raise is
+`ops-api` (its two doors and the cap guard call its functions). It changes
+nothing until `job_labour_budget_v1` is turned on. Its rollback refuses once any raise is
 recorded; switch the flag off instead.
 
 ## Step 5: Job Profit's first expected source
