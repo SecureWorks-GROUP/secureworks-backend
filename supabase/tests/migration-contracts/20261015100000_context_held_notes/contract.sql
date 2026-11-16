@@ -101,6 +101,10 @@ BEGIN;
 -- (rested notes, 20261115130000) sets aside notes by their age, so the off answers are
 -- recorded without it: the earlier bodies below never rest a note, and this case is about
 -- the held-notes switch, not the clock.
+SELECT to_regprocedure('public.context_job_story_closed_paid(jsonb)') IS NOT NULL AS finished_notes_live \gset
+\if :finished_notes_live
+\ir ../../../rollbacks/20261116060000_context_story_finished_notes_down.sql
+\endif
 SELECT to_regprocedure('public.context_job_story_rest(jsonb,jsonb,timestamptz)') IS NOT NULL AS rested_notes_live \gset
 \if :rested_notes_live
 \ir ../../../rollbacks/20261115130000_context_story_rested_notes_down.sql
@@ -133,6 +137,11 @@ BEGIN
 END $c$;
 SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
 \if :placement_freshness_live
+-- (finished notes, 20261116060000) replaced the story since: its down goes first
+SELECT to_regprocedure('public.context_job_story_closed_paid(jsonb)') IS NOT NULL AS finished_notes_live \gset
+\if :finished_notes_live
+\ir ../../../rollbacks/20261116060000_context_story_finished_notes_down.sql
+\endif
 -- (rested notes, 20261115130000) replaced the story since: its down goes first
 SELECT to_regprocedure('public.context_job_story_rest(jsonb,jsonb,timestamptz)') IS NOT NULL AS rested_notes_live \gset
 \if :rested_notes_live
@@ -172,6 +181,10 @@ BEGIN;
 \ir fixtures.sql
 -- (rested notes, 20261115130000) would set these October notes aside by age; this case is about
 -- the held marker, so it runs without that step (its own contract checks a rested note keeps the mark).
+SELECT to_regprocedure('public.context_job_story_closed_paid(jsonb)') IS NOT NULL AS finished_notes_live \gset
+\if :finished_notes_live
+\ir ../../../rollbacks/20261116060000_context_story_finished_notes_down.sql
+\endif
 SELECT to_regprocedure('public.context_job_story_rest(jsonb,jsonb,timestamptz)') IS NOT NULL AS rested_notes_live \gset
 \if :rested_notes_live
 \ir ../../../rollbacks/20261115130000_context_story_rested_notes_down.sql
@@ -302,6 +315,11 @@ BEGIN;
 -- exact surface for its idempotence test only; ROLLBACK restores the full stack.
 SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
 \if :placement_freshness_live
+-- (finished notes, 20261116060000) replaced the story since: its down goes first
+SELECT to_regprocedure('public.context_job_story_closed_paid(jsonb)') IS NOT NULL AS finished_notes_live \gset
+\if :finished_notes_live
+\ir ../../../rollbacks/20261116060000_context_story_finished_notes_down.sql
+\endif
 -- (rested notes, 20261115130000) replaced the story since: its down goes first
 SELECT to_regprocedure('public.context_job_story_rest(jsonb,jsonb,timestamptz)') IS NOT NULL AS rested_notes_live \gset
 \if :rested_notes_live
