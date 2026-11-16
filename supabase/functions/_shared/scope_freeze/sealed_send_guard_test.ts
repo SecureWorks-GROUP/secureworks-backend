@@ -134,7 +134,7 @@ const goodWorld = async (): Promise<World> => ({
 
 Deno.test("switch on, /send: no named revision is refused with the ruling K words", async () => {
   const db = fakeDb({ flag: true, newest: REV });
-  const g = await judgeSealedSend(db.sb, { path: "send", job_id: JOB, job_type: "fencing", sealed: legacy, document: {} });
+  const g = await judgeSealedSend(db.sb, { path: "send", job_id: JOB, job_type: "fencing", sealed: legacy, document: {} }, { storageBaseUrl: STORAGE });
   assert(g.kind === "miss");
   assertEquals(g.switch_on, true);
   assertEquals(g.reason, "no_named_revision");
@@ -153,7 +153,7 @@ Deno.test("switch on: a named revision whose frozen pricing is not sealed is ref
   for (const s of [sealed(false), sealed("true"), sealed(null), noRevision]) {
     const g = await judgeSealedSend(fakeDb({ flag: true, newest: REV }).sb, {
       path: "send", job_id: JOB, job_type: "patio", sealed: s, document: { scope_revision_id: REV },
-    });
+    }, { storageBaseUrl: STORAGE });
     assert(g.kind === "miss" && g.reason === "revision_not_sealed" && g.switch_on);
     assertEquals(g.named_scope_revision_id, REV);
   }
@@ -162,11 +162,11 @@ Deno.test("switch on: a named revision whose frozen pricing is not sealed is ref
 Deno.test("switch on: a sealed revision that is not the newest frozen one is refused", async () => {
   const g = await judgeSealedSend(fakeDb({ flag: true, newest: OLDER }).sb, {
     path: "send", job_id: JOB, job_type: "fencing", sealed: sealed(), document: { scope_revision_id: REV },
-  });
+  }, { storageBaseUrl: STORAGE });
   assert(g.kind === "miss" && g.reason === "revision_not_newest" && g.status === 409);
   const none = await judgeSealedSend(fakeDb({ flag: true, newest: null }).sb, {
     path: "send", job_id: JOB, job_type: "fencing", sealed: sealed(), document: { scope_revision_id: REV },
-  });
+  }, { storageBaseUrl: STORAGE });
   assert(none.kind === "miss" && none.reason === "revision_not_newest");
 });
 
@@ -174,11 +174,11 @@ Deno.test("switch on, /send: a document with no recorded revision, or another re
   const w = await goodWorld();
   const unrecorded = await judgeSealedSend(fakeDb(w).sb, {
     path: "send", job_id: JOB, job_type: "fencing", sealed: sealed(), document: { scope_revision_id: null },
-  });
+  }, { storageBaseUrl: STORAGE });
   assert(unrecorded.kind === "miss" && unrecorded.reason === "document_revision_unrecorded");
   const other = await judgeSealedSend(fakeDb(w).sb, {
     path: "send", job_id: JOB, job_type: "fencing", sealed: sealed(), document: { scope_revision_id: OLDER },
-  });
+  }, { storageBaseUrl: STORAGE });
   assert(other.kind === "miss" && other.reason === "document_revision_mismatch");
 });
 
@@ -205,7 +205,7 @@ Deno.test("switch on, /send-runs: a run PDF off our own storage is refused and n
 Deno.test("switch on: a read that fails refuses with 503, nothing sent", async () => {
   const newest = await judgeSealedSend(fakeDb({ flag: true, newest: "error" }).sb, {
     path: "send", job_id: JOB, job_type: "fencing", sealed: sealed(), document: { scope_revision_id: REV },
-  });
+  }, { storageBaseUrl: STORAGE });
   assert(newest.kind === "miss" && newest.reason === "check_unreadable" && newest.status === 503);
   assertEquals(newest.body.code, "sealed_revision_check_failed");
   const w = await goodWorld();
@@ -228,7 +228,7 @@ Deno.test("switch off (missing, false or unreadable): the same misses, marked sw
   for (const flag of ["missing", false, "error"] as const) {
     const g = await judgeSealedSend(fakeDb({ flag, newest: REV }).sb, {
       path: "send", job_id: JOB, job_type: "fencing", sealed: legacy, document: {},
-    });
+    }, { storageBaseUrl: STORAGE });
     assert(g.kind === "miss" && g.reason === "no_named_revision");
     assertEquals(g.switch_on, false, `flag ${flag} reads as off`);
   }
@@ -236,7 +236,7 @@ Deno.test("switch off (missing, false or unreadable): the same misses, marked sw
 
 Deno.test("a miss is recorded with ids, codes and the calling page only", async () => {
   const db = fakeDb({ flag: false, newest: REV });
-  const g = await judgeSealedSend(db.sb, { path: "send", job_id: JOB, job_type: "fencing", sealed: legacy, document: {} });
+  const g = await judgeSealedSend(db.sb, { path: "send", job_id: JOB, job_type: "fencing", sealed: legacy, document: {} }, { storageBaseUrl: STORAGE });
   assert(g.kind === "miss");
   const req = new Request("https://fn.example/send-quote/send", {
     method: "POST",
@@ -268,7 +268,7 @@ Deno.test("a miss is recorded with ids, codes and the calling page only", async 
 
 Deno.test("a miss row that cannot be written never throws", async () => {
   const db = fakeDb({ flag: false, insertError: true });
-  const g = await judgeSealedSend(db.sb, { path: "send", job_id: JOB, job_type: "fencing", sealed: legacy, document: {} });
+  const g = await judgeSealedSend(db.sb, { path: "send", job_id: JOB, job_type: "fencing", sealed: legacy, document: {} }, { storageBaseUrl: STORAGE });
   assert(g.kind === "miss");
   const ok = await recordSealedSendMiss(db.sb, g, {
     job_id: JOB, path: "send", document_id: null, sender_mode: "api_key", sender_user_id: null,
@@ -298,7 +298,7 @@ Deno.test("sealed newest revision with its own PDF passes, switch on and off, an
     assertEquals(runs.verified_run_pdfs!.get("B")?.bytes, BYTES_B, "run B carries run B's checked bytes");
     const noRunPdfs = await judgeSealedSend(fakeDb(w).sb, {
       path: "send-runs", job_id: JOB, job_type: "fencing", sealed: sealed(),
-    });
+    }, { storageBaseUrl: STORAGE });
     assert(noRunPdfs.kind === "pass" && noRunPdfs.switch_on === flag && noRunPdfs.verified_run_pdfs?.size === 0);
   }
 });
@@ -421,13 +421,13 @@ Deno.test("linking a document to its copy only moves the address the guard check
 Deno.test("other job types and an already-refused source read nothing", async () => {
   for (const job_type of ["makesafe", "repair", "miscellaneous", null, undefined]) {
     const db = fakeDb({ flag: true });
-    const g = await judgeSealedSend(db.sb, { path: "send", job_id: JOB, job_type, sealed: legacy, document: {} });
+    const g = await judgeSealedSend(db.sb, { path: "send", job_id: JOB, job_type, sealed: legacy, document: {} }, { storageBaseUrl: STORAGE });
     assertEquals(g, { kind: "not_judged" });
     assertEquals(db.reads, []);
   }
   const db = fakeDb({ flag: true });
   assertEquals(
-    await judgeSealedSend(db.sb, { path: "send", job_id: JOB, job_type: "fencing", sealed: refused }),
+    await judgeSealedSend(db.sb, { path: "send", job_id: JOB, job_type: "fencing", sealed: refused }, { storageBaseUrl: STORAGE }),
     { kind: "not_judged" },
   );
   assertEquals(db.reads, []);
@@ -476,4 +476,19 @@ Deno.test("binding a document writes only its scope_revision_id", async () => {
     { table: "job_documents", patch: { scope_revision_id: REV }, id: "doc-1" },
     { table: "job_documents", patch: { scope_revision_id: null }, id: "doc-2" },
   ]);
+});
+
+Deno.test("/send: the storage base decides; a valid quote passes with it, and an empty base fetches nothing and refuses", async () => {
+  const input = {
+    path: "send" as const, job_id: JOB, job_type: "fencing", sealed: sealed(),
+    document: { scope_revision_id: REV, pdf_url: PDF_A },
+  };
+  fetches.length = 0;
+  const ok = await judgeSealedSend(fakeDb(await goodWorld()).sb, input, { fetchImpl: fakeFetch, storageBaseUrl: STORAGE });
+  assert(ok.kind === "pass" && ok.switch_on === true && ok.verified_pdf?.sha256 === await sha(BYTES_A));
+  assertEquals(fetches.length, 1, "the one PDF is read once");
+  fetches.length = 0;
+  const empty = await judgeSealedSend(fakeDb(await goodWorld()).sb, input, { fetchImpl: fakeFetch, storageBaseUrl: "" });
+  assert(empty.kind === "miss" && empty.reason === "document_pdf_not_from_revision");
+  assertEquals(fetches, []);
 });

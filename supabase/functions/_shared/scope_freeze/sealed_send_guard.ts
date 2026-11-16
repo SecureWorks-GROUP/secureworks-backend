@@ -189,7 +189,9 @@ export async function judgeSealedSend(
     /** /send-runs: the run PDFs the caller names, by run label. */
     run_pdfs?: unknown;
   },
-  deps: { fetchImpl?: typeof fetch; storageBaseUrl?: string; pdfTimeoutMs?: number } = {},
+  // The project URL whose public storage the PDFs must sit on. Required: a
+  // caller that leaves it out would refuse every PDF (money14, 1450).
+  deps: { storageBaseUrl: string; fetchImpl?: typeof fetch; pdfTimeoutMs?: number },
 ): Promise<SealedSendGuard> {
   if (typeof input.job_type !== "string" || !SEALED_SEND_GUARDED_TYPES.has(input.job_type)) {
     return { kind: "not_judged" };

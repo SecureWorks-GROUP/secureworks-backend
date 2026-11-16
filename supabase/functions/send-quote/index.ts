@@ -994,7 +994,7 @@ serve(async (req: Request) => {
       // and sent as today while it is off (sealed_send_guard.ts).
       const sealedGuard = await judgeSealedSend(sb, {
         path: 'send', job_id: doc.job_id, job_type: doc.jobs?.type, sealed: sealedSource, document: doc,
-      })
+      }, { storageBaseUrl: SUPABASE_URL })
       const sealedGuardRecord = {
         job_id: doc.job_id, path: 'send' as const, document_id,
         sender_mode: sendAuthMode, sender_user_id: sendAuthUser?.id ?? null,

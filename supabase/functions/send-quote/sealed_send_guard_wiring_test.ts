@@ -111,3 +111,13 @@ Deno.test("ghl-proxy never issues an upload address over a pinned copy", async (
   assertEquals((proxy.match(/createSignedUploadUrl\(existingPdfPath/g) || []).length, 1);
   assertEquals((proxy.match(/createSignedUploadUrl\(cPdfPath/g) || []).length, 1);
 });
+
+Deno.test("every guard call passes this project's storage base (money14: /send left it out and refused every PDF)", () => {
+  // Each call, from its opening to the first line that ends it.
+  const calls = src.split("judgeSealedSend(sb, {").slice(1).map((rest) => rest.slice(0, rest.indexOf(")\n") + 1));
+  assertEquals(calls.length, 2, "/send and /send-runs");
+  for (const call of calls) {
+    assert(call.endsWith("}, { storageBaseUrl: SUPABASE_URL })"), call);
+  }
+  assert(src.includes("const SUPABASE_URL = Deno.env.get('SUPABASE_URL')"));
+});
