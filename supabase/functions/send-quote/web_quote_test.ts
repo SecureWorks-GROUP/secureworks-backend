@@ -6,6 +6,9 @@
 // Run: deno test --allow-read --allow-env supabase/functions/send-quote/web_quote_test.ts (no network: fetch is stubbed).
 import { assert, assertEquals } from 'https://deno.land/std@0.208.0/assert/mod.ts'
 import {
+  ACCEPT_HELD_WORDS,
+  ACCEPT_SETTLE_MS,
+  acceptHeldScript,
   BACKDROP_DATA_URI,
   cutSavedWebPages,
   LOGO_SVG,
@@ -424,4 +427,125 @@ Deno.test('next steps: the acceptance page works where only its own script may r
   assertEquals(page.match(/\son[a-z]+\s*=\s*["']/gi) ?? [], [], 'no inline handler')
   assert(!/javascript:/i.test(page))
   for (const ev of ["area.addEventListener('click'", "area.addEventListener('dragover'", "area.addEventListener('dragleave'", "area.addEventListener('drop'", "input.addEventListener('change'"]) assert(page.includes(ev), ev)
+})
+
+// ── Director 18:59 (scope-engine-v2 PR 1295, money14's recheck): an Accept reply lost, cut off or a server fault ──
+// The client page's own script, run against a stand-in page and send-quote on a clock its waits move. After such a reply
+// the page never offers Accept again in that visit, whatever the state reads; "Check again" only reads; no failure words.
+type Post = Response | 'lost' | 'pending' | 'cut'
+const FENCE_TOKEN = '0f3c2a1b-zztest'
+const clientScript = (type = 'fencing') => {
+  const d = { id: 'zz-doc', share_token: FENCE_TOKEN, quote_number: 'ZZQ-0959', pdf_url: null, accepted_at: null, declined_at: null, jobs: { type, client_name: 'ZZTEST' }, data_snapshot_json: {} }
+  const page: string = buildClientPage(d, FENCE_TOKEN, null, null, null, null)
+  return { page, code: [...page.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((s) => s.includes('respondToQuote'))! }
+}
+async function visit(o: { state: () => string | null; post: (s: { now: number; commitAt: number | null }) => Post; again?: boolean; later?: number; check?: boolean; type?: string; fault?: (c: string) => string }) {
+  const real = clientScript(o.type).code
+  const code = o.fault ? o.fault(real) : real
+  if (o.fault && code === real) throw new Error('planted fault did not apply')
+  const s = { now: 0, commitAt: null as number | null, committed: false, posts: 0, reads: 0, reloads: 0, alerts: [] as string[], said: [] as string[], written: null as string | null }
+  const ids: Record<string, any> = {}
+  const mk = (tag: string): any => {
+    const e: any = { tag, children: [] as any[], style: {}, attrs: {} as Record<string, string>, hidden: false, disabled: false, on: {} as Record<string, () => void>, _t: '',
+      appendChild(c: any) { this.children.push(c); if (c.id) ids[c.id] = c; for (const k of c.children) if (k.id) ids[k.id] = k; return c },
+      setAttribute(k: string, v: string) { this.attrs[k] = v }, addEventListener(k: string, f: () => void) { this.on[k] = f }, remove() { if (this.id) delete ids[this.id] } }
+    Object.defineProperty(e, 'textContent', { get() { return e._t }, set(v: string) { e._t = v; if (e.id === 'swHeldText') s.said.push(v) } })
+    return e
+  }
+  const accepts = [mk('button'), mk('button')]
+  const document: any = {
+    body: mk('body'), head: mk('head'),
+    getElementById: (id: string) => ids[id] ?? null,
+    createElement: (tag: string) => mk(tag),
+    querySelectorAll: (q: string) => (q === '.btn-accept,.sw-web-accept' ? accepts : []),
+    querySelector: () => null,
+    open() { s.written = '' }, write(h: string) { s.written += h }, close() {},
+  }
+  document.body.appendChild = function (c: any) { if (c.id) ids[c.id] = c; for (const k of c.children) if (k.id) ids[k.id] = k; return c }
+  const fetchStub = (url: string, init?: { method?: string }) => {
+    if (init?.method === 'POST') {
+      s.posts++
+      const r = o.post(s)
+      if (r === 'lost') return Promise.reject(new TypeError('Failed to fetch'))
+      if (r === 'pending') { s.commitAt = s.now + ACCEPT_SETTLE_MS + 2000; return Promise.reject(new TypeError('Failed to fetch')) }
+      if (r === 'cut') { s.committed = true; return Promise.resolve({ ok: true, status: 200, headers: new Headers({ 'content-type': 'text/html' }), text: () => Promise.reject(new TypeError('network error')) }) }
+      return Promise.resolve(r)
+    }
+    s.reads++
+    if (url !== `https://quote.secureworksgroup.app/q/view?token=${FENCE_TOKEN}&state=1` && !url.endsWith(`view?token=${FENCE_TOKEN}&state=1`)) throw new Error('unexpected read ' + url)
+    const st = o.state()
+    const taken = s.committed || (s.commitAt !== null && s.now >= s.commitAt)
+    return Promise.resolve(new Response(JSON.stringify({ state: st === null ? undefined : (taken && st === 'open' ? 'accepted' : st) }), { status: st === null ? 503 : 200 }))
+  }
+  const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 1)) }
+  const run = new Function('document', 'fetch', 'alert', 'confirm', 'setTimeout', 'location', 'window', code + ';return { respondToQuote: respondToQuote };')
+  const page = run(document, fetchStub, (m: string) => { s.alerts.push(m) }, () => true, (f: () => void, ms: number) => { s.now += ms; setTimeout(f, 0) }, { reload() { s.reloads++ } }, { location: { reload() { s.reloads++ } } })
+  await page.respondToQuote('accept_confirmed'); await settle()
+  const afterRead = { said: ids.swHeldText?.textContent ?? null, offered: accepts.some((a) => !a.disabled || !a.hidden), check: !!ids.swHeldCheck && !ids.swHeldCheck.hidden }
+  if (o.again) { await page.respondToQuote('accept'); await page.respondToQuote('accept_confirmed'); await settle() }
+  if (o.later) s.now += o.later
+  if (o.check && ids.swHeldCheck) { ids.swHeldCheck.on.click(); await settle() }
+  return { s, accepts, ids, afterRead }
+}
+const FAILURE = /did not|not reach|try again|failed|went wrong|unsuccessful/i
+const held = (phone: string) => ACCEPT_HELD_WORDS.held + ' ' + ACCEPT_HELD_WORDS.callUs.replace('{phone}', phone)
+const FAULTS: Record<string, (c: string) => string> = {
+  'the reviewed behaviour: a lost reply alerts a failure and Accept stays on offer': (c) => c.replace("if (action === 'accept') { swHoldAccept(); return; }", ''),
+  'Accept offered again when the read shows open': (c) => c.replace('swHeldSay(SW_HELD.held+" "+SW_HELD.callUs.split("{phone}").join(SW_PHONE));', 'swHeld=false;document.querySelectorAll(".btn-accept,.sw-web-accept").forEach(function(x){x.disabled=false;x.hidden=false;});'),
+  'a second press sends again': (c) => c.replace("if ((action === 'accept' || action === 'accept_confirmed') && swAcceptHeld()) return;", ''),
+  '"Check again" sends the acceptance again': (c) => c.replace('if(!b.disabled)swHeldLook();', 'fetch("zz-accept",{method:"POST"}).catch(function(){});swHeldLook();'),
+  'a server fault alerts a failure': (c) => c.replace("} else if (action === 'accept' && res.status >= 500) {\n          swHoldAccept();\n        }", '}'),
+}
+async function caught(o: Parameters<typeof visit>[0], pass: (r: Awaited<ReturnType<typeof visit>>) => boolean, faults: string[]) {
+  const r = await visit(o)
+  assert(pass(r), JSON.stringify({ posts: r.s.posts, reads: r.s.reads, reloads: r.s.reloads, alerts: r.s.alerts, said: r.s.said, afterRead: r.afterRead }))
+  for (const f of faults) assert(!pass(await visit({ ...o, fault: FAULTS[f] })), 'planted fault not caught: ' + f)
+}
+const noFailure = (r: Awaited<ReturnType<typeof visit>>) => !r.s.alerts.length && !r.s.said.some((x) => FAILURE.test(x))
+const neverOffered = (r: Awaited<ReturnType<typeof visit>>) => r.accepts.every((a) => a.disabled && a.hidden)
+
+Deno.test('accept held: the words are the director\'s (18:59), the same as the scoping tools\' web quote, no long dashes', () => {
+  assertEquals(ACCEPT_HELD_WORDS.held, 'We are checking your acceptance. Please do not press Accept again.')
+  assertEquals(ACCEPT_HELD_WORDS.callUs, 'If this is still here in a few minutes, call us on {phone} and we will confirm it for you.')
+  assert(!/—/.test(JSON.stringify(ACCEPT_HELD_WORDS)))
+  assert(acceptHeldScript({ stateUrl: 'x</script>', phone: '1' }).includes('x\\u003c/script>'), 'its values cannot end the script')
+})
+Deno.test('accept held: money14\'s delayed acceptance (taken after the wait): open read, Accept never offered, the fence phone; a second press sends nothing; Check again later shows it accepted; one POST, no failure words', async () => {
+  await caught({ state: () => 'open', post: () => 'pending', again: true, later: 3000, check: true },
+    (r) => r.s.posts === 1 && r.afterRead.said === held('0489 267 772') && !r.afterRead.offered && r.afterRead.check && r.s.reloads === 1 && noFailure(r) && neverOffered(r),
+    ['the reviewed behaviour: a lost reply alerts a failure and Accept stays on offer', 'Accept offered again when the read shows open', 'a second press sends again', '"Check again" sends the acceptance again'])
+})
+Deno.test('accept held: a lost reply with nothing taken: the state reads open, Accept is still never offered again in this visit', async () => {
+  await caught({ state: () => 'open', post: () => 'lost', again: true, type: 'patio' },
+    (r) => r.s.posts === 1 && neverOffered(r) && r.afterRead.said === held('0489 267 771') && noFailure(r),
+    ['the reviewed behaviour: a lost reply alerts a failure and Accept stays on offer', 'Accept offered again when the read shows open', 'a second press sends again'])
+})
+Deno.test('accept held: a server fault (5xx) is an outcome not known: no failure alert, Accept off, held', async () => {
+  await caught({ state: () => 'open', post: () => new Response('<html><body>zz</body></html>', { status: 502, headers: { 'content-type': 'text/html' } }) },
+    (r) => r.s.posts === 1 && neverOffered(r) && r.afterRead.said === held('0489 267 772') && noFailure(r) && r.s.written === null,
+    ['a server fault alerts a failure'])
+})
+Deno.test('accept held: a success reply cut off part way: held, then the read shows accepted and the link\'s page loads again', async () => {
+  const r = await visit({ state: () => 'open', post: () => 'cut' })
+  assert(r.s.written === null && r.s.reloads === 1 && r.s.said[0] === ACCEPT_HELD_WORDS.held && noFailure(r))
+})
+Deno.test('accept held: a state that cannot be read keeps held and the call-us line; Check again only reads', async () => {
+  await caught({ state: () => null, post: () => 'lost', check: true },
+    (r) => r.s.posts === 1 && r.s.reads === 2 && neverOffered(r) && r.ids.swHeldText.textContent === held('0489 267 772') && r.s.reloads === 0,
+    ['"Check again" sends the acceptance again'])
+})
+Deno.test('accept held: a quote no longer open says so; a refusal (4xx) is still send-quote\'s own answer', async () => {
+  let r = await visit({ state: () => 'gone', post: () => 'lost' })
+  assert(r.ids.swHeldText.textContent === ACCEPT_HELD_WORDS.gone && r.ids.swHeldCheck.hidden && neverOffered(r))
+  r = await visit({ state: () => 'open', post: () => new Response(JSON.stringify({ error: 'Tick the options again' }), { status: 400, headers: { 'content-type': 'application/json' } }) })
+  assert(r.s.alerts[0] === 'Tick the options again' && !r.ids.swHeld, 'a 4xx refusal is shown as send-quote words it, and is not held')
+})
+Deno.test('accept held: send-quote\'s acceptance page (2xx HTML) is still shown in place', async () => {
+  const r = await visit({ state: () => 'open', post: () => new Response('<html><body>Next steps</body></html>', { status: 200, headers: { 'content-type': 'text/html' } }) })
+  assert(r.s.written === '<html><body>Next steps</body></html>' && !r.ids.swHeld)
+})
+Deno.test('accept held: the page keeps nothing between visits, so a fresh load of the link offers Accept as normal', () => {
+  const { page, code } = clientScript()
+  assert(!/localStorage|sessionStorage|document\.cookie|indexedDB/.test(code))
+  assert(page.includes('class="sw-web-accept"') && page.includes(".sw-held{"), 'the bar Accept is there on load, and the held box has its look')
 })

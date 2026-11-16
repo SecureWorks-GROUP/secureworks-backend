@@ -63,6 +63,51 @@ export async function quoteLinkStateAnswer(
   }
 }
 
+/**
+ * After an Accept reply whose outcome is not known (lost, cut off, or a server fault), director 18:59 on scope-engine-v2
+ * PR 1295, the same rule as ruling 18 B: the page never offers Accept again in that visit and never tells it as a
+ * failure. The same words as the scoping tools' web quote (shared/quote/web.js STATE_WORDS). `{phone}` is the trade's.
+ */
+export const ACCEPT_HELD_WORDS = Object.freeze({
+  held: 'We are checking your acceptance. Please do not press Accept again.',
+  callUs: 'If this is still here in a few minutes, call us on {phone} and we will confirm it for you.',
+  gone: 'This quote is no longer open to accept. Please use the newest link we sent you.',
+  check: 'Check again',
+})
+/** How long the page waits before its first read of the quote's state after such a reply (a read, never a resend). */
+export const ACCEPT_SETTLE_MS = 4000
+
+/**
+ * send-quote's own quote page's script for that case: `swHoldAccept()` takes every Accept off the page for this visit,
+ * says `held` with "Check again" (which only reads `stateUrl`, view?token=&state=1), and reads once by itself after
+ * ACCEPT_SETTLE_MS. Accepted or declined: the link's own page is loaded again, as the customer sees it on any visit.
+ * No longer open: says so. Still open, or not readable: `held` stays and `callUs` is added. `swAcceptHeld()` is true
+ * from then on, so a press of Accept does nothing. Nothing is kept: a fresh load of the link is as normal.
+ */
+export function acceptHeldScript(o: { stateUrl: string; phone: string }): string {
+  const J = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c')
+  return 'var SW_HELD=' + J(ACCEPT_HELD_WORDS) + ',SW_STATE_URL=' + J(o.stateUrl) + ',SW_PHONE=' + J(o.phone) + ',SW_SETTLE=' + ACCEPT_SETTLE_MS + ',swHeld=false;'
+    + 'function swAcceptHeld(){return swHeld;}'
+    + 'function swHeldSay(t){var p=document.getElementById("swHeldText");if(p)p.textContent=t;}'
+    + 'function swHeldLook(){var b=document.getElementById("swHeldCheck");if(b)b.disabled=true;'
+    + 'return fetch(SW_STATE_URL,{cache:"no-store",headers:{Accept:"application/json"}}).then(function(r){return r.ok?r.json():null;}).catch(function(){return null;})'
+    + '.then(function(j){if(b)b.disabled=false;var s=j&&typeof j.state==="string"?j.state:null;'
+    + 'if(s==="accepted"||s==="declined"){location.reload();return;}'
+    + 'if(s==="gone"){swHeldSay(SW_HELD.gone);if(b)b.hidden=true;return;}'
+    + 'swHeldSay(SW_HELD.held+" "+SW_HELD.callUs.split("{phone}").join(SW_PHONE));});}'
+    + 'function swHoldAccept(){if(swHeld)return;swHeld=true;var po=document.getElementById("processingOverlay");if(po)po.remove();'
+    + 'document.querySelectorAll(".btn-accept,.sw-web-accept").forEach(function(x){x.disabled=true;x.hidden=true;x.style.display="none";});'
+    + 'var box=document.createElement("div");box.id="swHeld";box.className="sw-held";box.setAttribute("role","status");box.setAttribute("aria-live","polite");'
+    + 'var p=document.createElement("p");p.id="swHeldText";box.appendChild(p);'
+    + 'var b=document.createElement("button");b.type="button";b.id="swHeldCheck";b.className="sw-web-ghost";b.textContent=SW_HELD.check;b.addEventListener("click",function(){if(!b.disabled)swHeldLook();});box.appendChild(b);'
+    + 'document.body.appendChild(box);swHeldSay(SW_HELD.held);setTimeout(swHeldLook,SW_SETTLE);}'
+}
+/** The held box's look: the bar's glass and orange edge, above the bar. */
+export const ACCEPT_HELD_CSS = '.sw-held{position:fixed;left:50%;transform:translateX(-50%);bottom:96px;z-index:10000;max-width:calc(100% - 32px);width:440px;box-sizing:border-box;'
+  + 'background:rgba(16,33,49,.92);border:1px solid rgba(255,255,255,.16);border-left:4px solid #F15A29;border-radius:6px;padding:14px 16px;color:#fff;'
+  + 'font-family:"Plus Jakarta Sans",system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.45;box-shadow:0 18px 40px rgba(8,16,22,.45)}'
+  + '.sw-held p{margin:0 0 10px}.sw-held button[hidden]{display:none}'
+
 export const WEB_BAR_WORDS = Object.freeze({ ready: 'Ready to get started?', pdf: 'Download PDF', accept: 'Accept quote' })
 
 /** The words of the clean card shown when the PDF's pages cannot be drawn (or there is no PDF). */

@@ -176,7 +176,7 @@ import {
   type SendQuoteAuthUser,
 } from './quote_send_auth.ts'
 import { ghlEmailNoteRequest, ghlMoveStageOutcome, quoteAcceptedStageId, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
-import { pdfPagesHtml, quoteLinkStateAnswer, readSavedWebPages, savedPagesHtml, type SavedWebPages, webLook, webPageSaved, WEB_LOOK_CSS } from './web_quote.ts'
+import { pdfPagesHtml, quoteLinkStateAnswer, readSavedWebPages, savedPagesHtml, type SavedWebPages, webLook, webPageSaved, WEB_LOOK_CSS, ACCEPT_HELD_CSS, acceptHeldScript } from './web_quote.ts'
 import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailHeading, quoteEmailProjectWords, quoteEmailSubject } from './division_routing.ts'
 import {
   customer3dLink,
@@ -4855,6 +4855,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
     .btn { display: inline-block; padding: 13px 32px; border-radius: 8px; font-size: 15px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; text-align: center; width: 100%; margin-bottom: 8px; font-family: inherit; }
     /* Ruling 19 addendum A: Accept in the bar's orange, Decline a quiet ghost, both square-cornered like the bar's. */
     .btn-accept { background: linear-gradient(180deg,#FF6A3A 0%,#F15A29 58%,#E5501F 100%); color: #fff; text-transform: uppercase; font-weight: 800; letter-spacing: 1px; border-radius: 2px; }
+    ${ACCEPT_HELD_CSS}
     .btn-decline { background: transparent; color: rgba(255,255,255,.75); border: 1px solid rgba(255,255,255,.28); border-radius: 2px; }
     .accept-sentence { color: #fff; font-size: 15px; font-weight: 600; line-height: 1.45; margin-bottom: 14px; }
     .btn:hover { opacity: 0.88; }
@@ -4964,6 +4965,9 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
         '</div></div>';
       document.body.appendChild(overlay);
     }
+    // Director 18:59 (scope-engine-v2 PR 1295): an Accept reply lost, cut off or a server fault is an outcome not known:
+    // never told as a failure, and Accept is never offered again in this visit (web_quote.ts acceptHeldScript).
+    ${acceptHeldScript({ stateUrl: PAGE_SEND_QUOTE_BASE + 'view?token=' + token + '&state=1', phone: getDivisionPhone(doc.jobs?.type) })}
     function doAccept() { respondToQuote('accept_confirmed'); }
     // Ruling 14: the ticked options and their figures, when the quote offers any.
     function acceptConfirmOptionsLine() {
@@ -4977,6 +4981,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
     }
 
     async function respondToQuote(action, declineData) {
+      if ((action === 'accept' || action === 'accept_confirmed') && swAcceptHeld()) return;
       if (action === 'accept') {
         showAcceptConfirm(); return;
       }
@@ -5014,13 +5019,17 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
         });
         if (res.ok) {
           if (action === 'accept') {
-            var html = await res.text();
+            var html;
+            try { html = await res.text(); } catch (cut) { html = null; }
+            if (!html || !/<html|<body/i.test(html)) { swHoldAccept(); return; }
             document.open();
             document.write(html);
             document.close();
           } else {
             window.location.reload();
           }
+        } else if (action === 'accept' && res.status >= 500) {
+          swHoldAccept();
         } else {
           var po = document.getElementById('processingOverlay'); if (po) po.remove();
           var ct = res.headers.get('content-type') || '';
@@ -5032,6 +5041,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
           }
         }
       } catch(e) {
+        if (action === 'accept') { swHoldAccept(); return; }
         var po = document.getElementById('processingOverlay'); if (po) po.remove();
         alert('Failed to send response. Please try again.');
       }
