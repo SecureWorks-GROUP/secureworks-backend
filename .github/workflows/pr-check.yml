@@ -415,6 +415,7 @@ jobs:
             supabase/functions/ops-api/restoration_workflow_store_test.ts \
             supabase/functions/ops-api/restoration_send_test.ts \
             supabase/functions/ops-api/restoration_stage_test.ts \
+            supabase/functions/ops-api/restoration_report_render_test.ts \
             supabase/functions/ops-api/restoration_work_order_test.ts \
             supabase/functions/ops-api/ses_owner_directed_approval_test.ts \
             supabase/functions/ops-api/makesafe_pdf_declared_type_test.ts \
@@ -617,6 +618,7 @@ jobs:
             supabase/functions/xero-sync/project_job_link_test.ts \
             supabase/functions/xero-sync/bill_prematch_test.ts \
             supabase/functions/xero-sync/materials_ingest_test.ts \
+            supabase/functions/xero-sync/bank_transactions_test.ts \
             supabase/functions/ops-api/materials_recon_test.ts \
             supabase/functions/ops-api/job_profit_test.ts \
             supabase/functions/ops-api/job_dispatch_orders_test.ts \

@@ -123,7 +123,8 @@ DO $policy$
 DECLARE pol jsonb := public.context_scorecard_run_policy();
 BEGIN
  IF pol->>'cron_job' IS DISTINCT FROM 'context-scorecard-hourly' OR pol->>'schedule' IS DISTINCT FROM '40 * * * *'
-    OR pol->>'statement_timeout' IS DISTINCT FROM '60s' OR pol->>'lock_timeout' IS DISTINCT FROM '10s'
+    -- 60 s as this migration set it; 110 s once 20261115090000_context_scorecard_hourly_timeout is applied.
+    OR NOT (pol->>'statement_timeout' IN ('60s', '110s')) OR pol->>'lock_timeout' IS DISTINCT FROM '10s'
     OR pol->>'command' IS DISTINCT FROM format('SET statement_timeout = %L; SET lock_timeout = %L; SELECT public.context_scorecard_record_run(%L)',
          pol->>'statement_timeout', pol->>'lock_timeout', 'cron')
     OR (pol->>'late_after_minutes')::integer <> 75 OR (pol->>'window_hours')::integer <> 24
