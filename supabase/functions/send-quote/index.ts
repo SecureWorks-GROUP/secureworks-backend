@@ -4981,12 +4981,19 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
         'Total ' + f.total + ', deposit ' + f.deposit + '.</p>';
     }
 
+    // One acceptance in flight at a time (money14's review of 1449): set in the same tick as the confirmed press, before
+    // the request leaves, so a double tap, a double click or Enter and a click send exactly one. Only a refusal (4xx,
+    // send-quote's answer to this attempt) frees it; an outcome not known keeps it and holds (swHoldAccept).
+    var swAccepting = false;
+    function swAcceptButtons(off) {
+      document.querySelectorAll('.btn-accept,.sw-web-accept').forEach(function (x) { x.disabled = off; });
+    }
     async function respondToQuote(action, declineData) {
-      if ((action === 'accept' || action === 'accept_confirmed') && swAcceptHeld()) return;
+      if ((action === 'accept' || action === 'accept_confirmed') && (swAccepting || swAcceptHeld())) return;
       if (action === 'accept') {
         showAcceptConfirm(); return;
       }
-      if (action === 'accept_confirmed') action = 'accept';
+      if (action === 'accept_confirmed') { action = 'accept'; swAccepting = true; swAcceptButtons(true); }
 
       // Show processing overlay for accept
       if (action === 'accept') {
@@ -5033,6 +5040,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
           swHoldAccept();
         } else {
           var po = document.getElementById('processingOverlay'); if (po) po.remove();
+          if (action === 'accept') { swAccepting = false; swAcceptButtons(false); }
           var ct = res.headers.get('content-type') || '';
           if (ct.includes('application/json')) {
             var data = await res.json();
