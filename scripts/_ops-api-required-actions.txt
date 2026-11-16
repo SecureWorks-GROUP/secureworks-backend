@@ -208,6 +208,16 @@ dispatch_v2_set_date_mode            # probe=source-only
 #    Source-only: never fired at production by a smoke run. ──
 dispatch_v2_outlook_catch_up         # probe=source-only
 
+# ── Ops screen Dispatch tab v2: Book install from the Install row
+#    (docs/dispatch-v2-board-contract.md, section 3h). The read and four staff
+#    presses. Source-only: Book, Confirm (texts the crew), Move and Remove
+#    change real bookings, so a smoke run never fires them at production. ──
+dispatch_v2_install                  # probe=source-only
+dispatch_v2_install_book             # probe=source-only
+dispatch_v2_install_confirm          # probe=source-only
+dispatch_v2_install_move             # probe=source-only
+dispatch_v2_install_remove           # probe=source-only
+
 # ── Sales-action write surfaces JARVIS depends on ──
 update_job_status
 log_business_event
