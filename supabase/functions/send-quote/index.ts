@@ -53,6 +53,14 @@ import {
   unapprovedSendKeyForDocument,
 } from '../_shared/scope_freeze/owner_price_approval.ts'
 import {
+  judgeSealedSend,
+  linkDocumentsToSealedCopy,
+  pinSealedQuotePdf,
+  recordSealedSendMiss,
+  sealedCopyFailed,
+  sealedSendCaller,
+} from '../_shared/scope_freeze/sealed_send_guard.ts'
+import {
   currentQuoteForParty,
   QUOTE_PARTY_DOCUMENT_COLUMNS,
   quoteRunAcceptanceDecision,
@@ -168,7 +176,8 @@ import {
   type SendQuoteAuthUser,
 } from './quote_send_auth.ts'
 import { ghlEmailNoteRequest, ghlMoveStageOutcome, quoteAcceptedStageId, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
-import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailHeading, quoteEmailProjectWords, quoteEmailSubject } from './division_routing.ts'
+import { pdfPagesHtml, quoteLinkStateAnswer, readSavedWebPages, savedPagesHtml, type SavedWebPages, webLook, webPageSaved, WEB_LOOK_CSS, ACCEPT_HELD_CSS, acceptHeldScript } from './web_quote.ts'
+import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailHeading, quoteEmailProjectWords, quoteEmailSubject, quotePhone, quotePhoneHref } from './division_routing.ts'
 import {
   customer3dLink,
   customer3dPageUrl,
@@ -213,8 +222,9 @@ const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 
 // Reply-to and division copy (getClientReplyTo, getDivisionInbox): ./division_routing.ts
 
-// ── Division phone (Marnin ruling 2026-06-12): fencing client-facing → 0489 267 772.
-// 0489 267 771 is the admin line — patio + general templates keep 771 as the default. ──
+// ── Division phone for the invoice email only (Marnin ruling 2026-06-12): fencing 0489 267 772, others the admin
+// line 0489 267 771. The quote page, its messages and the quote email read quotePhone (division_routing.ts; the
+// director, 16 Nov 2026: patio 0489 267 774). ──
 function getDivisionPhone(jobType: string | null | undefined): string {
   return jobType === 'fencing' ? '0489 267 772' : '0489 267 771'
 }
@@ -980,9 +990,36 @@ serve(async (req: Request) => {
         const gateErr = quotePricingGateError(doc.jobs?.pricing_json)
         if (gateErr) return jsonResponse({ error: gateErr }, 400, corsHeaders)
       }
+      // Ruling 18 K2: a fence or patio quote goes only from its sealed, newest
+      // revision, as the document prepared for it. Read now, judged after the
+      // claim, before any email: refused while the switch is on, recorded
+      // and sent as today while it is off (sealed_send_guard.ts).
+      const sealedGuard = await judgeSealedSend(sb, {
+        path: 'send', job_id: doc.job_id, job_type: doc.jobs?.type, sealed: sealedSource, document: doc,
+      }, { storageBaseUrl: SUPABASE_URL })
+      const sealedGuardRecord = {
+        job_id: doc.job_id, path: 'send' as const, document_id,
+        sender_mode: sendAuthMode, sender_user_id: sendAuthUser?.id ?? null,
+        // Which fields the caller sent (names only, never values): tells the
+        // old fence page from the Scope Engine.
+        caller: sealedSendCaller(req, Object.fromEntries(Object.entries({
+          document_id, client_email: providedEmail, client_name: providedName, message, cc_emails,
+          subject: customSubject, attachment_paths, scoper_name, supersede_prior, source_scope_revision_id,
+        }).filter(([, v]) => v !== undefined))),
+      }
       // TK-S28: the owner-approved price on the named saved revision, read now
       // and judged with the sealed revision after the claim, before any email.
       const ownerPrice = await ownerPriceGate(sb, doc.job_id, sealedSource)
+
+      // Ruling 18 G (4): the web page is kept on the quote only when it is confirmed uploaded. The scoping tool
+      // uploads it after the PDF and before this call; one that is not there is cleared, so no customer link
+      // (the view redirect, the options list) points at a page that was never saved, and the customer sees this
+      // function's own quote page instead.
+      if (doc.html_url && !(await webPageSaved(doc.html_url))) {
+        const { error: clearErr } = await sb.from('job_documents').update({ html_url: null }).eq('id', doc.id)
+        if (clearErr) console.log('[send-quote] web page not saved; html_url not cleared:', clearErr.message)
+        else doc.html_url = null
+      }
 
       // Resolve name: use provided, fall back to job_contact, then job-level
       const client_name = providedName || doc.job_contacts?.client_name || doc.jobs?.client_name || 'there'
@@ -1056,6 +1093,34 @@ serve(async (req: Request) => {
         return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
           || jsonResponse(sealedSource.body, sealedSource.status, corsHeaders)
       }
+      if (sealedGuard.kind === 'miss' && sealedGuard.switch_on) {
+        console.log('[send-quote] sealed send refused', JSON.stringify({
+          document_id, job_id: doc.job_id, code: sealedGuard.body.code, reason: sealedGuard.reason,
+        }))
+        await recordSealedSendMiss(sb, sealedGuard, sealedGuardRecord)
+        const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+          || jsonResponse(sealedGuard.body, sealedGuard.status, corsHeaders)
+      }
+      // Switch on and passed: the customer link moves to a content-addressed
+      // copy of the exact bytes the guard checked, so a PDF uploaded over the
+      // document's address afterwards never reaches the customer. A copy that
+      // cannot be made, or a document whose PDF address moved since the check,
+      // refuses: nothing is sent.
+      if (sealedGuard.kind === 'pass' && sealedGuard.switch_on && sealedGuard.verified_pdf) {
+        const pinned = await pinSealedQuotePdf(sb, doc.job_id, sealedGuard.verified_pdf)
+        const linked = pinned.ok &&
+          await linkDocumentsToSealedCopy(sb, [document_id], pinned.url, String(doc.pdf_url))
+        if (!pinned.ok || !linked) {
+          const failed = sealedCopyFailed(sealedSource.kind === 'sealed' ? sealedSource.revision_id : null)
+          console.log('[send-quote] sealed copy not made', JSON.stringify({ document_id, job_id: doc.job_id }))
+          await recordSealedSendMiss(sb, failed, sealedGuardRecord)
+          const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
+          return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+            || jsonResponse(failed.body, failed.status, corsHeaders)
+        }
+        doc.pdf_url = pinned.url
+      }
       if (ownerPrice.kind === 'refused') {
         console.log('[send-quote] owner price approval refused', JSON.stringify({
           document_id, job_id: doc.job_id, code: ownerPrice.body.code,
@@ -1090,6 +1155,11 @@ serve(async (req: Request) => {
           job_id: doc.job_id, path: 'send', document_id,
           scope_revision_id: ownerPrice.scope_revision_id,
         })
+      }
+      // Switch off: a send the sealed-send guard would refuse goes exactly as
+      // today, recorded first (best effort, never stops it).
+      if (sealedGuard.kind === 'miss' && !sealedGuard.switch_on) {
+        await recordSealedSendMiss(sb, sealedGuard, sealedGuardRecord)
       }
       {
         // Customer 3D view: a third button only when the sealed revision this
@@ -1633,6 +1703,16 @@ serve(async (req: Request) => {
     // ── CLIENT VIEWS QUOTE ──
     if (path === 'view' && req.method === 'GET') {
       const token = url.searchParams.get('token')
+      // The saved web page's state read (web_quote.ts quoteLinkStateAnswer): before any view is counted, a read only.
+      if (url.searchParams.get('state') === '1') {
+        const answer = await quoteLinkStateAnswer(token, (t) => sb.from('job_documents')
+          .select('accepted_at, declined_at, superseded_at')
+          .eq('share_token', t)
+          .eq('sent_to_client', true)
+          .eq('type', 'quote')
+          .maybeSingle())
+        return jsonResponse(answer.body, answer.status, { ...corsHeaders, 'Cache-Control': 'no-store' })
+      }
       if (!token) return await htmlResponse(errorPage('Invalid link'))
 
       // Try job_documents first
@@ -1866,17 +1946,7 @@ serve(async (req: Request) => {
         // absent on a significant portion of sent quotes. Verify the object exists before
         // redirecting; if missing, timed-out, or errored, fall through to the reliable
         // server-render so the client never lands on a blank 404 viewer page.
-        let htmlExists = false
-        try {
-          const ac = new AbortController()
-          const t = setTimeout(() => ac.abort(), 2500)
-          const head = await fetch(doc.html_url, { method: 'HEAD', signal: ac.signal })
-          clearTimeout(t)
-          htmlExists = head.ok
-        } catch (_e) {
-          htmlExists = false  // missing / network error / timeout -> safe fallback
-        }
-        if (htmlExists) {
+        if (await webPageSaved(doc.html_url)) {
           return Response.redirect(customerViewerUrl(QUOTE_VIEWER_BASE, doc.html_url, CUSTOMER_HOST), 302)
         }
         // Object missing — fall through to the reliable server-rendered client page below
@@ -1887,7 +1957,10 @@ serve(async (req: Request) => {
       const acceptWords = !doc.accepted_at && !doc.declined_at
         ? await readAcceptSentence(sb, { id: doc.id, run_label: doc.run_label ?? sourceRunLabel, job_contact_id: doc.job_contact_id ?? null })
         : null
-      return await htmlResponse(buildClientPage(doc, token, heroUrl, viewOptions, acceptWords))
+      // Ruling 19 addendum A (3a): a quote with options shows its saved web page's own printed pages inline, read
+      // from this project's job-pdfs storage (4 s). Not there, slow or unsafe: the PDF's pages drawn as pictures (3b).
+      const savedPages = viewOptions && doc.html_url ? await readSavedWebPages(doc.html_url, SUPABASE_URL) : null
+      return await htmlResponse(buildClientPage(doc, token, heroUrl, viewOptions, acceptWords, savedPages))
     }
 
     // ── VARIATION ACCEPT/DECLINE ──
@@ -3166,9 +3239,11 @@ serve(async (req: Request) => {
       let ownerPriceRuns: OwnerPriceGate
       // No type annotation: send_runs_request_test runs this prelude as plain JS.
       let runsSealedRevisionId = null
+      let runsSealedSource = null
       let approvedRunPdfs: Map<string, Uint8Array> = new Map()
       {
         const sealedRuns = sealedSendSource(await sourceScopeRevisionReadRuns, job.id)
+        runsSealedSource = sealedRuns
         if (sealedRuns.kind === 'sealed') runsSealedRevisionId = sealedRuns.revision_id
         if (sealedRuns.kind === 'refused') {
           console.log('[send-quote] send-runs sealed revision refused', JSON.stringify({
@@ -3228,6 +3303,50 @@ serve(async (req: Request) => {
       }
 
       try {
+      // Ruling 18 K2: a fence or patio bundle goes only from its sealed,
+      // newest revision, with run PDFs recorded on it. Judged under the job
+      // claim, before any document is made or emailed: refused while the
+      // switch is on (the finally below releases the claim), recorded and
+      // sent as today while it is off (sealed_send_guard.ts).
+      // Switch on and passed: each checked run PDF, pinned at its content
+      // address. The run documents link to the copies and the email attaches
+      // the checked bytes, never the caller's URL (null while the switch is off).
+      let sealedRunPdfs: Map<string, { bytes: Uint8Array, url: string }> | null = null
+      {
+        const sealedGuardRuns = await judgeSealedSend(sb, {
+          path: 'send-runs', job_id: job.id, job_type: job.type, sealed: runsSealedSource, run_pdfs,
+        }, { storageBaseUrl: SUPABASE_URL })
+        if (sealedGuardRuns.kind === 'miss') {
+          await recordSealedSendMiss(sb, sealedGuardRuns, {
+            job_id: job.id, path: 'send-runs', document_id: null,
+            sender_mode: sendAuthMode, sender_user_id: sendAuthUser?.id ?? null,
+            caller: sealedSendCaller(req, requestBody),
+          })
+          if (sealedGuardRuns.switch_on) {
+            console.log('[send-quote] send-runs sealed send refused', JSON.stringify({
+              job_id: job.id, code: sealedGuardRuns.body.code, reason: sealedGuardRuns.reason,
+            }))
+            return jsonResponse(sealedGuardRuns.body, sealedGuardRuns.status, corsHeaders)
+          }
+        }
+        if (sealedGuardRuns.kind === 'pass' && sealedGuardRuns.switch_on && sealedGuardRuns.verified_run_pdfs) {
+          sealedRunPdfs = new Map()
+          for (const [label, pdf] of sealedGuardRuns.verified_run_pdfs) {
+            const pinned = await pinSealedQuotePdf(sb, job.id, pdf)
+            if (!pinned.ok) {
+              const failed = sealedCopyFailed(runsSealedRevisionId)
+              await recordSealedSendMiss(sb, failed, {
+                job_id: job.id, path: 'send-runs', document_id: null,
+                sender_mode: sendAuthMode, sender_user_id: sendAuthUser?.id ?? null,
+                caller: sealedSendCaller(req, requestBody),
+              })
+              console.log('[send-quote] send-runs sealed copy not made', JSON.stringify({ job_id: job.id }))
+              return jsonResponse(failed.body, failed.status, corsHeaders)
+            }
+            sealedRunPdfs.set(label, { bytes: pdf.bytes, url: pinned.url })
+          }
+        }
+      }
       const { data: existingQuoteRows, error: existingQuoteError } = await sb.from('job_documents')
         .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, created_at, version, send_claimed_at, share_token, quote_number, superseded_at, accepted_at, data_snapshot_json')
         .eq('job_id', job.id)
@@ -3327,7 +3446,7 @@ serve(async (req: Request) => {
         const neighbour = run.neighbour_id ? contacts.find((c: any) => !c.is_primary && c.assigned_runs?.includes?.(run.run_label)) : null
 
         // Client document for this run
-        const runPdfUrl = run_pdfs?.[run.run_label] || null
+        const runPdfUrl = sealedRunPdfs?.get(run.run_label)?.url || run_pdfs?.[run.run_label] || null
         const clientKey = { runLabel: normaliseQuoteRunLabel(run.run_label) || '', jobContactId: primaryContact.id || null }
         const clientResolution = resolveSendRunDocument(existingQuoteDocs, clientKey)
         let clientDoc: any = null
@@ -3484,6 +3603,30 @@ serve(async (req: Request) => {
         }
       }
 
+      // Switch on: every run document about to be emailed links to its run's
+      // pinned copy, including one reused from an earlier attempt that still
+      // links to an older upload. A row that cannot be written refuses.
+      if (sealedRunPdfs) {
+        const idsByUrl = new Map<string, string[]>()
+        for (const recipient of Object.values(emailsByRecipient)) {
+          recipient.docs.forEach((d: any, i: number) => {
+            const url = sealedRunPdfs?.get(recipient.runs[i]?.run_label)?.url
+            if (url && typeof d?.id === 'string') idsByUrl.set(url, [...(idsByUrl.get(url) || []), d.id])
+          })
+        }
+        for (const [url, ids] of idsByUrl) {
+          if (!await linkDocumentsToSealedCopy(sb, [...new Set(ids)], url)) {
+            const failed = sealedCopyFailed(runsSealedRevisionId)
+            await recordSealedSendMiss(sb, failed, {
+              job_id: job.id, path: 'send-runs', document_id: null,
+              sender_mode: sendAuthMode, sender_user_id: sendAuthUser?.id ?? null,
+              caller: sealedSendCaller(req, requestBody),
+            })
+            return await abortAfterDocumentClaimRelease(false, jsonResponse(failed.body, failed.status, corsHeaders))
+          }
+        }
+      }
+
       // Documents already published on an earlier call with no owner price
       // decision: move a record a failure left claimed to sent. Never resends.
       if (ownerPriceRuns.kind === 'legacy_unapproved') {
@@ -3503,7 +3646,8 @@ serve(async (req: Request) => {
       // summary + neighbour flag + first-client-doc reference that the
       // post-flip recordReleasedQuoteRevision call needs.
       const firstClientDocForRev = createdDocs[0] || publishedExistingDocs[0] || null
-      const anyRunPdfUrl = (run_pdfs && Object.values(run_pdfs).find((u): u is string => typeof u === 'string' && u.length > 0)) || ''
+      const anyRunPdfUrl = (sealedRunPdfs && [...sealedRunPdfs.values()][0]?.url) ||
+        (run_pdfs && Object.values(run_pdfs).find((u): u is string => typeof u === 'string' && u.length > 0)) || ''
       const runsScopeSummary = runs.map((r: any) => ({
         run_label: String(r.run_label),
         run_name: r.run_name ? String(r.run_name) : null,
@@ -3545,9 +3689,11 @@ serve(async (req: Request) => {
             for (const run of recipient.runs) {
               const pdfUrl = run_pdfs[run.run_label || '']
               const filename = `Quote_${job.job_number || 'SWF'}_${run.run_label || 'RUN'}.pdf`
-              if (ownerPriceRuns.kind === 'approved') {
-                // Only the bytes checked against the approved revision.
-                const checkedBytes = approvedRunPdfs.get(run.run_label || '')
+              if (ownerPriceRuns.kind === 'approved' || sealedRunPdfs) {
+                // Only bytes checked against the revision (owner approval, or
+                // the sealed-send guard with its switch on); never the URL.
+                const checkedBytes = approvedRunPdfs.get(run.run_label || '') ||
+                  sealedRunPdfs?.get(run.run_label || '')?.bytes
                 if (checkedBytes) {
                   attachments.push({ content: quotePdfBase64(checkedBytes), filename })
                 }
@@ -4640,7 +4786,7 @@ export function buildQuoteEmail(opts: {
       <p style="color:#293C46;font-size:14px;font-weight:600;margin:0;">
         ${opts.scoperName}<br>
         <span style="font-weight:400;color:#4C6A7C;">SecureWorks Group</span><br>
-        <a href="${getDivisionPhoneHref(opts.projectType)}" style="color:#F15A29;text-decoration:none;">Call us</a> &nbsp;|&nbsp;
+        <a href="${quotePhoneHref(opts.projectType)}" style="color:#F15A29;text-decoration:none;">Call us</a> &nbsp;|&nbsp;
         <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;text-decoration:none;">Email</a>
       </p>
     </td></tr>
@@ -4669,25 +4815,27 @@ export function buildQuoteEmail(opts: {
 // CLIENT-FACING QUOTE PAGE
 // ════════════════════════════════════════════════════════════
 
-function buildClientPage(doc: any, token: string, heroUrl: string | null = null, options: QuoteOptionsOffer | null = null, acceptWords: AcceptSentenceRead | null = null): string {
+function buildClientPage(doc: any, token: string, heroUrl: string | null = null, options: QuoteOptionsOffer | null = null, acceptWords: AcceptSentenceRead | null = null, saved: SavedWebPages | null = null): string {
   // heroUrl retained in signature for backwards compat but not rendered — PDF has its own cover
   const isAccepted = !!doc.accepted_at
   const isDeclined = !!doc.declined_at
   // Ruling 11 item 8: empty unless the released quote sealed the sentence.
   const acceptingLine = acceptSentenceHtml(acceptWords)
-
-  // Mobile card display fields — omit gracefully if absent
-  const mobQuoteRef = doc.quote_number || ''
-  const mobClientName = doc.job_contacts?.client_name || doc.jobs?.client_name || ''
-  const mobSnapshot = doc.data_snapshot_json || {}
-  const mobPriceRaw = mobSnapshot.totalIncGST || mobSnapshot.total || null
-  const mobPriceStr = mobPriceRaw ? '$' + Number(mobPriceRaw).toLocaleString('en-AU', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) : ''
+  // Ruling 19 addendum A: the one look (the gum-tree photo under the blue wash, the white logo, the glass bar) and no
+  // PDF in a frame: the saved web page's own pages inline (3a, a quote with options), else the PDF's pages drawn as
+  // pictures (3b). The same bar on every case; its Accept is the page's own confirm (and its ticked options).
+  const pdfAddress = doc.pdf_url ? customerUrl(doc.pdf_url, CUSTOMER_HOST) : null
+  const look = webLook({
+    pdf: pdfAddress,
+    accept: !isAccepted && !isDeclined ? "respondToQuote('accept')" : null,
+  })
+  const quotePages = saved ? savedPagesHtml(saved) : pdfPagesHtml(pdfAddress)
 
   let statusHtml = ''
   if (isAccepted) {
-    statusHtml = '<div style="background:rgba(52,199,89,0.15);color:#34C759;padding:14px 20px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:20px;font-size:15px;">Quote Accepted. Thank you! We\'ll be in touch shortly.</div>'
+    statusHtml = '<div class="sw-status" style="color:#fff;border-left:4px solid #F15A29;padding:14px 20px;text-align:center;font-weight:600;margin-bottom:20px;font-size:15px;">Quote Accepted. Thank you! We\'ll be in touch shortly.</div>'
   } else if (isDeclined) {
-    statusHtml = '<div style="background:rgba(255,59,48,0.15);color:#FF6B60;padding:14px 20px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:20px;font-size:15px;">Quote Declined</div>'
+    statusHtml = '<div class="sw-status" style="color:rgba(255,255,255,.85);padding:14px 20px;text-align:center;font-weight:600;margin-bottom:20px;font-size:15px;">Quote Declined</div>'
   }
 
   return `<!DOCTYPE html>
@@ -4696,34 +4844,21 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Your Quote - SecureWorks Group</title>
+  ${saved ? saved.head : ''}
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #1E2A30; color: #fff; min-height: 100vh; }
-    /* ── Top bar ── */
-    .topbar { background: #293C46; padding: 14px 28px; display: flex; align-items: center; border-bottom: 3px solid #F15A29; }
-    .topbar-brand { color: #fff; font-size: 18px; font-weight: 700; letter-spacing: 0.3px; }
-    .topbar-brand span { color: rgba(255,255,255,0.5); font-weight: 400; }
-    /* ── PDF presenter ── */
-    .pdf-wrap { display: flex; justify-content: center; padding: 28px 24px 0; }
-    .pdf-frame { width: 100%; max-width: 880px; height: 86vh; min-height: 640px; border: none; border-radius: 10px; box-shadow: 0 8px 48px rgba(0,0,0,0.55); background: #2a3840; display: block; }
-    @media (min-width: 1440px) {
-      .pdf-wrap { padding: 36px 60px 0; }
-      .pdf-frame { max-width: 1040px; height: 84vh; }
-    }
-    @media (max-width: 1024px) and (min-width: 769px) {
-      .pdf-wrap { padding: 20px 16px 0; }
-      .pdf-frame { max-width: 100%; height: 82vh; min-height: 560px; }
-    }
-    /* ── Actions / chrome below PDF ── */
+    /* ── Actions / chrome below the quote's pages ── */
     .container { max-width: 960px; margin: 0 auto; padding: 20px 20px 40px; }
     /* Status banner */
     /* ── Accept / Decline ── */
     .actions-card { background: #293C46; border-radius: 12px; padding: 24px 28px; margin-bottom: 16px; }
     .btn { display: inline-block; padding: 13px 32px; border-radius: 8px; font-size: 15px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; text-align: center; width: 100%; margin-bottom: 8px; font-family: inherit; }
-    .btn-accept { background: #34C759; color: #fff; }
-    .btn-decline { background: transparent; color: #FF6B60; border: 1px solid #FF6B60; }
+    /* Ruling 19 addendum A: Accept in the bar's orange, Decline a quiet ghost, both square-cornered like the bar's. */
+    .btn-accept { background: linear-gradient(180deg,#FF6A3A 0%,#F15A29 58%,#E5501F 100%); color: #fff; text-transform: uppercase; font-weight: 800; letter-spacing: 1px; border-radius: 2px; }
+    ${ACCEPT_HELD_CSS}
+    .btn-decline { background: transparent; color: rgba(255,255,255,.75); border: 1px solid rgba(255,255,255,.28); border-radius: 2px; }
     .accept-sentence { color: #fff; font-size: 15px; font-weight: 600; line-height: 1.45; margin-bottom: 14px; }
-    .btn-view-pdf { background: #F15A29; color: #fff; display: inline-block; width: auto; padding: 13px 40px; }
     .btn:hover { opacity: 0.88; }
     /* Decline form */
     .decline-form { margin-top: 16px; padding: 20px; background: rgba(255,59,48,0.08); border: 1px solid rgba(255,59,48,0.25); border-radius: 8px; }
@@ -4734,79 +4869,33 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
     /* Supporting docs */
     .card { background: #293C46; border-radius: 12px; padding: 24px 28px; margin-bottom: 16px; }
     .card h3 { color: #fff; font-size: 15px; margin-bottom: 14px; }
-    .doc-row { padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; gap: 12px; }
-    .doc-row:last-child { border-bottom: none; padding-bottom: 0; }
-    .doc-icon { width: 36px; height: 36px; background: rgba(255,255,255,0.1); border-radius: 6px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 16px; }
-    .doc-title { font-weight: 600; color: #fff; font-size: 14px; }
-    .doc-desc { color: rgba(255,255,255,0.5); font-size: 12px; }
     /* Contact + footer */
     .contact-card { background: #293C46; border-radius: 12px; padding: 20px 28px; margin-bottom: 16px; text-align: center; }
     .contact-card p { color: rgba(255,255,255,0.6); font-size: 14px; margin-bottom: 8px; }
     .contact-card a { color: #F15A29; font-weight: 600; text-decoration: none; }
-    .footer { text-align: center; color: rgba(255,255,255,0.3); font-size: 12px; padding: 20px 0 32px; }
+    .footer { text-align: center; color: rgba(255,255,255,0.55); font-size: 12px; padding: 20px 0 32px; }
     /* Confirm overlay */
     .confirm-overlay { display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:1000;align-items:center;justify-content:center; }
     .confirm-overlay.active { display:flex; }
     .confirm-box { background:#293C46;border-radius:14px;padding:32px;max-width:400px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:#fff; }
     .confirm-box h3 { color:#fff;font-size:18px;margin-bottom:8px; }
     .confirm-box p { color:rgba(255,255,255,0.65);font-size:14px;margin-bottom:20px; }
-    /* Mobile fallback */
-    .pdf-mobile { display: none; }
-    .pdf-mobile-card { background: #293C46; border-radius: 14px; padding: 32px 20px; margin: 20px 16px 0; }
-    .pdf-mobile-card .mob-brand { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: #F15A29; margin-bottom: 18px; }
-    .pdf-mobile-card .mob-ref { font-size: 13px; color: rgba(255,255,255,0.5); margin-bottom: 4px; }
-    .pdf-mobile-card .mob-client { font-size: 20px; font-weight: 700; color: #fff; margin-bottom: 6px; line-height: 1.25; }
-    .pdf-mobile-card .mob-price { font-size: 28px; font-weight: 800; color: #F15A29; margin-bottom: 2px; }
-    .pdf-mobile-card .mob-price-label { font-size: 12px; color: rgba(255,255,255,0.45); margin-bottom: 24px; }
-    .pdf-mobile-card .mob-divider { height: 1px; background: rgba(255,255,255,0.1); margin: 0 0 24px; }
-    .pdf-mobile-card .btn-mob-primary { display: block; width: 100%; padding: 15px; background: #F15A29; color: #fff; border: none; border-radius: 9px; font-size: 16px; font-weight: 700; text-align: center; text-decoration: none; cursor: pointer; font-family: inherit; }
-    .pdf-mobile-card .btn-mob-secondary { display: block; width: 100%; padding: 12px; background: transparent; color: rgba(255,255,255,0.55); border: 1px solid rgba(255,255,255,0.18); border-radius: 9px; font-size: 14px; font-weight: 500; text-align: center; text-decoration: none; margin-top: 10px; }
-    .pdf-mobile-card .mob-actions-sep { margin-top: 20px; padding-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
-    @media (max-width: 768px) {
-      .pdf-wrap { display: none !important; }
-      .pdf-mobile { display: block !important; }
-      .topbar { padding: 12px 16px; }
-      .container { padding: 16px 16px 40px; }
-    }
     ${options ? QUOTE_OPTIONS_CSS : ''}
+    ${WEB_LOOK_CSS}
   </style>
 </head>
-<body>
-  <!-- Slim top bar: wordmark only -->
-  <div class="topbar">
-    <div class="topbar-brand">SecureWorks <span>Group</span></div>
-  </div>
+<body class="sw-web${saved?.bodyClass ? ` ${saved.bodyClass}` : ''}">
+  ${look.backdrop}
+  ${look.header}
 
-  <!-- PDF presenter (desktop) -->
-  ${doc.pdf_url ? `
-  <div class="pdf-wrap">
-    <iframe src="${customerUrl(doc.pdf_url, CUSTOMER_HOST)}#view=Fit&toolbar=0" class="pdf-frame" title="Quote PDF"></iframe>
-  </div>` : '<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.4);">PDF not available</div>'}
+  <!-- An accepted or declined quote says so first, above its pages, on a phone's first screen -->
+  ${statusHtml ? `<div class="container sw-status-top" style="padding-bottom:0">${statusHtml}</div>` : ''}
 
-  <!-- Mobile fallback: premium branded card -->
-  ${doc.pdf_url ? `
-  <div class="pdf-mobile">
-    <div class="pdf-mobile-card">
-      <div class="mob-brand">SecureWorks Group</div>
-      ${mobQuoteRef ? `<div class="mob-ref">Quote ${mobQuoteRef}</div>` : ''}
-      ${mobClientName ? `<div class="mob-client">${mobClientName}</div>` : ''}
-      ${mobPriceStr ? `<div class="mob-price">${mobPriceStr}</div><div class="mob-price-label">inc GST</div>` : '<div style="margin-bottom:8px;"></div>'}
-      <div class="mob-divider"></div>
-      <a href="${CUSTOMER_HOST ? customerUrl(doc.pdf_url, CUSTOMER_HOST) : `https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(customerUrl(doc.pdf_url, CUSTOMER_HOST))}`}" target="_blank" class="btn-mob-primary">View Full Quote PDF</a>
-      <a href="${customerUrl(doc.pdf_url, CUSTOMER_HOST)}" download class="btn-mob-secondary">Download PDF</a>
-      ${!isAccepted && !isDeclined ? `
-      <div class="mob-actions-sep">
-        ${acceptingLine}
-        <button class="btn btn-accept" onclick="respondToQuote('accept')" style="margin-bottom:8px;">Accept Quote</button>
-        <button class="btn btn-decline" onclick="showDeclineForm()">Decline</button>
-      </div>` : statusHtml ? `<div class="mob-actions-sep">${statusHtml}</div>` : ''}
-    </div>
-  </div>` : ''}
+  <!-- The quote's own pages: the saved web page's (3a) or the PDF's drawn as pictures (3b); never a frame -->
+  ${quotePages}
 
   <!-- Actions + chrome -->
   <div class="container">
-    ${statusHtml}
-
     ${!isAccepted && !isDeclined && options ? buildQuoteOptionsCard(options) : ''}
 
     ${!isAccepted && !isDeclined ? `
@@ -4839,7 +4928,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
 
     <div class="contact-card">
       <p>Questions about your quote?</p>
-      <a href="${getDivisionPhoneHref(doc.jobs?.type)}">Call Us</a> &nbsp;|&nbsp;
+      <a href="${quotePhoneHref(doc.jobs?.type)}">Call Us</a> &nbsp;|&nbsp;
       <a href="mailto:admin@secureworkswa.com.au">Email</a>
     </div>
 
@@ -4848,6 +4937,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
       This quote is valid for 30 days from the date of issue.
     </div>
   </div>
+  ${look.bar}
 
   <script>
     function showDeclineForm() {
@@ -4868,15 +4958,18 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
       overlay.className = 'confirm-overlay active';
       overlay.innerHTML = '<div class="confirm-box">' +
         '<div style="font-size:36px;margin-bottom:12px">&#9989;</div>' +
-        '<h3 style="color:#293C46;font-size:18px;margin-bottom:8px">Accept this quote?</h3>' +
-        '<p style="color:#4C6A7C;font-size:14px;margin-bottom:20px">This confirms your agreement to the terms and conditions included.</p>' +
+        '<h3 style="color:#fff;font-size:18px;margin-bottom:8px">Accept this quote?</h3>' +
+        '<p style="color:rgba(255,255,255,.75);font-size:14px;margin-bottom:20px">This confirms your agreement to the terms and conditions included.</p>' +
         acceptConfirmOptionsLine() +
         '<div style="display:flex;gap:8px">' +
-        '<button onclick="this.closest(\\'.confirm-overlay\\').remove()" style="flex:1;padding:12px;border:1px solid #ddd;border-radius:8px;background:#fff;font-size:15px;cursor:pointer;font-family:inherit">Cancel</button>' +
-        '<button onclick="this.closest(\\'.confirm-overlay\\').remove();doAccept()" style="flex:1;padding:12px;border:none;border-radius:8px;background:#34C759;color:#fff;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit">Yes, Accept</button>' +
+        '<button onclick="this.closest(\\'.confirm-overlay\\').remove()" style="flex:1;padding:12px;border:1px solid rgba(255,255,255,.28);border-radius:2px;background:transparent;color:rgba(255,255,255,.75);font-size:15px;cursor:pointer;font-family:inherit">Cancel</button>' +
+        '<button onclick="this.closest(\\'.confirm-overlay\\').remove();doAccept()" style="flex:1;padding:12px;border:none;border-radius:2px;background:linear-gradient(180deg,#FF6A3A 0%,#F15A29 58%,#E5501F 100%);color:#fff;font-size:14px;font-weight:800;letter-spacing:1px;text-transform:uppercase;cursor:pointer;font-family:inherit">Yes, Accept</button>' +
         '</div></div>';
       document.body.appendChild(overlay);
     }
+    // Director 18:59 (scope-engine-v2 PR 1295): an Accept reply lost, cut off or a server fault is an outcome not known:
+    // never told as a failure, and Accept is never offered again in this visit (web_quote.ts acceptHeldScript).
+    ${acceptHeldScript({ stateUrl: PAGE_SEND_QUOTE_BASE + 'view?token=' + token + '&state=1', phone: quotePhone(doc.jobs?.type) })}
     function doAccept() { respondToQuote('accept_confirmed'); }
     // Ruling 14: the ticked options and their figures, when the quote offers any.
     function acceptConfirmOptionsLine() {
@@ -4884,16 +4977,24 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
       var f = currentOptionFigures();
       if (!f) return '';
       var n = tickedOptionIds().length;
-      return '<p style="color:#293C46;font-size:14px;margin-bottom:20px">' +
+      return '<p style="color:rgba(255,255,255,.85);font-size:14px;margin-bottom:20px">' +
         (n ? (n === 1 ? '1 option added. ' : n + ' options added. ') : 'No options added. ') +
         'Total ' + f.total + ', deposit ' + f.deposit + '.</p>';
     }
 
+    // One acceptance in flight at a time (money14's review of 1449): set in the same tick as the confirmed press, before
+    // the request leaves, so a double tap, a double click or Enter and a click send exactly one. Only a refusal (4xx,
+    // send-quote's answer to this attempt) frees it; an outcome not known keeps it and holds (swHoldAccept).
+    var swAccepting = false;
+    function swAcceptButtons(off) {
+      document.querySelectorAll('.btn-accept,.sw-web-accept').forEach(function (x) { x.disabled = off; });
+    }
     async function respondToQuote(action, declineData) {
+      if ((action === 'accept' || action === 'accept_confirmed') && (swAccepting || swAcceptHeld())) return;
       if (action === 'accept') {
         showAcceptConfirm(); return;
       }
-      if (action === 'accept_confirmed') action = 'accept';
+      if (action === 'accept_confirmed') { action = 'accept'; swAccepting = true; swAcceptButtons(true); }
 
       // Show processing overlay for accept
       if (action === 'accept') {
@@ -4927,15 +5028,20 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
         });
         if (res.ok) {
           if (action === 'accept') {
-            var html = await res.text();
+            var html;
+            try { html = await res.text(); } catch (cut) { html = null; }
+            if (!html || !/<html|<body/i.test(html)) { swHoldAccept(); return; }
             document.open();
             document.write(html);
             document.close();
           } else {
             window.location.reload();
           }
+        } else if (action === 'accept' && res.status >= 500) {
+          swHoldAccept();
         } else {
           var po = document.getElementById('processingOverlay'); if (po) po.remove();
+          if (action === 'accept') { swAccepting = false; swAcceptButtons(false); }
           var ct = res.headers.get('content-type') || '';
           if (ct.includes('application/json')) {
             var data = await res.json();
@@ -4945,6 +5051,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
           }
         }
       } catch(e) {
+        if (action === 'accept') { swHoldAccept(); return; }
         var po = document.getElementById('processingOverlay'); if (po) po.remove();
         alert('Failed to send response. Please try again.');
       }
@@ -4953,6 +5060,9 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
 </body>
 </html>`
 }
+
+// The customer quote page as the view route builds it, for web_quote_test.ts and the picture generator (no network).
+export const _buildClientPageForTest = buildClientPage
 
 // ════════════════════════════════════════════════════════════
 // PER-RUN FENCING QUOTE PAGE (multi-neighbour)
@@ -5151,7 +5261,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
     <div class="card no-print" style="text-align:center;">
       <p style="color:#4C6A7C;font-size:14px;">Questions about your quote?</p>
       <p style="margin-top:8px;">
-        <a href="${getDivisionPhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
+        <a href="${quotePhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
         <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a>
       </p>
     </div>
@@ -5232,7 +5342,7 @@ export function buildRunAcceptedPage(job: any, run: any, acceptorName: string, o
   </div>
   <div class="card" style="text-align:center;">
     <p style="color:#4C6A7C;font-size:14px;">Questions?</p>
-    <p style="margin-top:8px;"><a href="${getDivisionPhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp; <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a></p>
+    <p style="margin-top:8px;"><a href="${quotePhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp; <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a></p>
   </div>
   <div class="footer">SecureWorks Group Pty Ltd | ABN 64 689 223 416</div>
 </div></body></html>`
@@ -5294,7 +5404,7 @@ function buildWaitingPage(job: any, run: any, acceptorName: string, runLabel: st
   <div class="card" style="text-align:center;">
     <p style="color:#4C6A7C;font-size:14px;">Questions about your fencing project?</p>
     <p style="margin-top:8px;">
-      <a href="${getDivisionPhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call ${getDivisionPhone(job?.type)}</a> &nbsp;|&nbsp;
+      <a href="${quotePhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call ${quotePhone(job?.type)}</a> &nbsp;|&nbsp;
       <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email Us</a>
     </p>
   </div>
@@ -5375,7 +5485,7 @@ function buildMultiOptionPage(docs: any[], job: any, activeToken: string): strin
   ${optionCards}
   <div class="card" style="text-align:center;">
     <p style="color:rgba(255,255,255,0.6);font-size:14px;">Questions? We're here to help.</p>
-    <p style="margin-top:8px;"><a href="${getDivisionPhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp; <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a></p>
+    <p style="margin-top:8px;"><a href="${quotePhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp; <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a></p>
   </div>
   <div class="footer">SecureWorks Group Pty Ltd | ABN 64 689 223 416</div>
 </div>
@@ -5774,11 +5884,11 @@ export function buildNextStepsPage(opts: {
         <h3 style="color:#293C46;font-size:16px;margin-top:8px;">Speed things up - send us your house plans now</h3>
         <p style="color:#4C6A7C;font-size:13px;margin-top:4px;">We need your original house plans (showing the house footprint) to start the engineering and council process.</p>
       </div>
-      <div id="planUploadArea" style="border:2px dashed #D4DEE4;border-radius:8px;padding:24px;text-align:center;cursor:pointer;transition:border-color 0.2s" onclick="document.getElementById('planFileInput').click()" ondragover="event.preventDefault();this.style.borderColor='#F15A29'" ondragleave="this.style.borderColor='#D4DEE4'" ondrop="event.preventDefault();this.style.borderColor='#D4DEE4';handlePlanDrop(event)">
+      <div id="planUploadArea" style="border:2px dashed #D4DEE4;border-radius:8px;padding:24px;text-align:center;cursor:pointer;transition:border-color 0.2s">
         <div style="font-size:18px;margin-bottom:4px;">📎</div>
         <div style="font-size:14px;font-weight:600;color:#293C46;">Drag files here or tap to upload</div>
         <div style="font-size:12px;color:#999;margin-top:4px;">Accepted: PDF, JPG, PNG (max 20MB)</div>
-        <input type="file" id="planFileInput" accept=".pdf,.jpg,.jpeg,.png" multiple style="display:none" onchange="handlePlanUpload(this.files)">
+        <input type="file" id="planFileInput" accept=".pdf,.jpg,.jpeg,.png" multiple style="display:none">
       </div>
       <div id="planUploadStatus" style="display:none;text-align:center;padding:16px;">
         <div style="font-size:24px;margin-bottom:8px;">✅</div>
@@ -5791,6 +5901,17 @@ export function buildNextStepsPage(opts: {
       </div>
     </div>
     <script>
+      // The plan upload's listeners live here, not in inline handlers, so the page also works where only its own script
+      // may run (the saved web quote shows this page in place under its script policy, scope-engine-v2 PR 1295).
+      (function () {
+        var area = document.getElementById('planUploadArea'), input = document.getElementById('planFileInput');
+        if (!area || !input) return;
+        area.addEventListener('click', function (e) { if (e.target !== input) input.click(); });
+        area.addEventListener('dragover', function (e) { e.preventDefault(); area.style.borderColor = '#F15A29'; });
+        area.addEventListener('dragleave', function () { area.style.borderColor = '#D4DEE4'; });
+        area.addEventListener('drop', function (e) { e.preventDefault(); area.style.borderColor = '#D4DEE4'; handlePlanDrop(e); });
+        input.addEventListener('change', function () { handlePlanUpload(input.files); });
+      })();
       async function handlePlanUpload(files) {
         if (!files || files.length === 0) return;
         var area = document.getElementById('planUploadArea');
@@ -5837,7 +5958,7 @@ export function buildNextStepsPage(opts: {
     <div class="card contact-card">
       <p style="color:#4C6A7C;font-size:14px;">Questions? We're here to help.</p>
       <p style="margin-top:8px;">
-        <a href="${getDivisionPhoneHref(opts.projectType)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
+        <a href="${quotePhoneHref(opts.projectType)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
         <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a>
       </p>
     </div>

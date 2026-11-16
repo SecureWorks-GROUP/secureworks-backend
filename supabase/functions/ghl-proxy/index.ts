@@ -131,6 +131,12 @@ import {
   ghlCalendarPersonEventsAction,
 } from './calendar_events.ts'
 import { createCalendarAppointmentAction } from './calendar_appointment.ts'
+import {
+  bindQuoteDocumentRevision,
+  isSealedQuoteCopyPath,
+  quoteDocumentRevisionToRecord,
+} from '../_shared/scope_freeze/sealed_send_guard.ts'
+import { namedScopeRevisionAbsent } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
 import { releaseCalendarAppointmentAction, releaseLedger } from './calendar_appointment_release.ts'
 import { parseSalesBookingCaptainEmails } from '../_shared/booking_approval_gate.ts'
 import { appointmentLedger, bookingApprovalReader, bookingExecutionReader } from './calendar_appointment_ledger.ts'
@@ -3534,7 +3540,7 @@ serve(async (req: Request) => {
     // then uploads the PDF, then calls send-quote/send.
     if (action === 'prepare_quote' && req.method === 'POST') {
       const body = await req.json()
-      const { jobId, fileName, supportingDocs } = body
+      const { jobId, fileName, supportingDocs, source_scope_revision_id } = body
       if (!jobId) return json({ error: 'jobId required' }, 400)
 
       const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -3542,6 +3548,16 @@ serve(async (req: Request) => {
       if (!jobAccess.ok) return jobAccess.response
       const orgId = verifiedJobStorageOrgId(jobAccess.job)
       if (!orgId) return json({ error: 'Job org_id is required for quote path', code: 'job_org_missing' }, 500)
+
+      // Ruling 18 K2: the sealed revision the producer will render this PDF
+      // from, recorded on the document so send-quote can tell the PDF is that
+      // revision's own. Never refuses the prepare; a caller that names none
+      // gets exactly today's answer.
+      const namesRevision = !namedScopeRevisionAbsent(source_scope_revision_id)
+      const revisionRecord = namesRevision
+        ? await quoteDocumentRevisionToRecord(sb, jobId, source_scope_revision_id)
+        : null
+      const recordedRevisionId = revisionRecord?.scope_revision_id ?? null
 
       // ── Idempotent reuse-or-create ──
       // Before creating a new draft row, check for an existing live-unsent
@@ -3602,8 +3618,14 @@ serve(async (req: Request) => {
         // Re-issue signed upload URLs for the EXISTING storage paths so the
         // client can overwrite the previously uploaded (or never-uploaded) file.
         const bucketPublicBase = `${SUPABASE_URL}/storage/v1/object/public/job-pdfs/`
-        const existingPdfPath = reusableDraft.pdf_url?.startsWith(bucketPublicBase)
+        const reusedPdfPath = reusableDraft.pdf_url?.startsWith(bucketPublicBase)
           ? reusableDraft.pdf_url.slice(bucketPublicBase.length)
+          : null
+        // A pinned sealed copy (sealed_send_guard.ts) never gets an upload
+        // address: a draft linking to one gets its ordinary path back.
+        const reusePinnedCopy = isSealedQuoteCopyPath(reusedPdfPath)
+        const existingPdfPath = reusedPdfPath && !reusePinnedCopy
+          ? reusedPdfPath
           : `${orgId}/${jobId}/quote_v${reusableDraft.version}_${(fileName || 'quote').replace(/[^a-zA-Z0-9._-]/g, '_')}`
         const existingHtmlPath = reusableDraft.html_url?.startsWith(bucketPublicBase)
           ? reusableDraft.html_url.slice(bucketPublicBase.length)
@@ -3629,8 +3651,16 @@ serve(async (req: Request) => {
 
         const { data: reusePdfUrlData } = sb.storage.from('job-pdfs').getPublicUrl(existingPdfPath)
         const { data: reuseHtmlUrlData } = sb.storage.from('job-pdfs').getPublicUrl(existingHtmlPath)
+        if (reusePinnedCopy) {
+          const { error: relinkErr } = await sb.from('job_documents')
+            .update({ pdf_url: reusePdfUrlData.publicUrl }).eq('id', reusableDraft.id)
+          if (relinkErr) return json({ error: relinkErr.message }, 500)
+        }
 
         console.log(`[ghl-proxy] Quote reused: job=${jobId} v${reusableDraft.version} doc=${reusableDraft.id} quote#=${reuseQuoteNumber}`)
+        // The PDF about to be uploaded over this draft is this prepare's: record
+        // its revision, or clear an older one (sealed_send_guard.ts).
+        const reuseRecorded = await bindQuoteDocumentRevision(sb, reusableDraft.id, recordedRevisionId)
 
         return json({
           documentId: reusableDraft.id,
@@ -3643,6 +3673,7 @@ serve(async (req: Request) => {
           htmlUploadUrl: reuseHtmlUploadData.signedUrl,
           htmlPublicUrl: reuseHtmlUrlData.publicUrl,
           htmlPath: existingHtmlPath,
+          ...(namesRevision ? { scopeRevisionRecorded: recordedRevisionId !== null && reuseRecorded } : {}),
         })
       }
 
@@ -3748,8 +3779,12 @@ serve(async (req: Request) => {
             }
 
             const bucketPublicBase = `${SUPABASE_URL}/storage/v1/object/public/job-pdfs/`
-            const cPdfPath = concurrent.pdf_url?.startsWith(bucketPublicBase)
+            const cReusedPdfPath = concurrent.pdf_url?.startsWith(bucketPublicBase)
               ? concurrent.pdf_url.slice(bucketPublicBase.length)
+              : null
+            const cPinnedCopy = isSealedQuoteCopyPath(cReusedPdfPath)
+            const cPdfPath = cReusedPdfPath && !cPinnedCopy
+              ? cReusedPdfPath
               : `${orgId}/${jobId}/quote_v${concurrent.version}_${safeName}`
             const cHtmlPath = concurrent.html_url?.startsWith(bucketPublicBase)
               ? concurrent.html_url.slice(bucketPublicBase.length)
@@ -3765,8 +3800,14 @@ serve(async (req: Request) => {
 
             const { data: cPdfUrlData } = sb.storage.from('job-pdfs').getPublicUrl(cPdfPath)
             const { data: cHtmlUrlData } = sb.storage.from('job-pdfs').getPublicUrl(cHtmlPath)
+            if (cPinnedCopy) {
+              const { error: cRelinkErr } = await sb.from('job_documents')
+                .update({ pdf_url: cPdfUrlData.publicUrl }).eq('id', concurrent.id)
+              if (cRelinkErr) return json({ error: cRelinkErr.message }, 500)
+            }
 
             console.log(`[ghl-proxy] Quote reused (concurrent): job=${jobId} v${concurrent.version} doc=${concurrent.id} quote#=${concurrentQuoteNumber}`)
+            const concurrentRecorded = await bindQuoteDocumentRevision(sb, concurrent.id, recordedRevisionId)
             return json({
               documentId: concurrent.id,
               shareToken: concurrent.share_token,
@@ -3778,6 +3819,7 @@ serve(async (req: Request) => {
               htmlUploadUrl: cHtmlUploadData.signedUrl,
               htmlPublicUrl: cHtmlUrlData.publicUrl,
               htmlPath: cHtmlPath,
+              ...(namesRevision ? { scopeRevisionRecorded: recordedRevisionId !== null && concurrentRecorded } : {}),
             })
           }
         }
@@ -3793,6 +3835,11 @@ serve(async (req: Request) => {
       }
 
       console.log(`[ghl-proxy] Quote prepared: job=${jobId} v${version} doc=${docRecord.id} quote#=${quoteNumber}`)
+      // A new row starts with no revision; record one only when named, as its
+      // own write, so the insert is exactly today's.
+      const insertRecorded = recordedRevisionId !== null
+        ? await bindQuoteDocumentRevision(sb, docRecord.id, recordedRevisionId)
+        : false
 
       return json({
         documentId: docRecord.id,
@@ -3805,13 +3852,14 @@ serve(async (req: Request) => {
         htmlUploadUrl: htmlUploadData.signedUrl,
         htmlPublicUrl: htmlUrlData.publicUrl,
         htmlPath,
+        ...(namesRevision ? { scopeRevisionRecorded: insertRecorded } : {}),
       })
     }
 
     // ── Prepare Neighbour Quotes — multi-contact fencing jobs ──
     if (action === 'prepare_neighbour_quotes' && req.method === 'POST') {
       const body = await req.json()
-      const { jobId, contacts, fileName, supportingDocs } = body
+      const { jobId, contacts, fileName, supportingDocs, source_scope_revision_id } = body
       // contacts: [{ name, email, phone, share_percentage?, portion_ex_gst?, assigned_runs?, contact_type }]
       if (!jobId) return json({ error: 'jobId required' }, 400)
       if (!contacts || !Array.isArray(contacts) || contacts.length < 2) {
@@ -3827,6 +3875,13 @@ serve(async (req: Request) => {
 
       const pricing = typeof job.pricing_json === 'string' ? JSON.parse(job.pricing_json || '{}') : (job.pricing_json || {})
       const totalExGST = pricing.totalExGST || 0
+
+      // Ruling 18 K2: the sealed revision these PDFs are rendered from, recorded
+      // on each new document (sealed_send_guard.ts). Never refuses the prepare.
+      const neighbourNamesRevision = !namedScopeRevisionAbsent(source_scope_revision_id)
+      const neighbourRevisionId = neighbourNamesRevision
+        ? (await quoteDocumentRevisionToRecord(sb, jobId, source_scope_revision_id)).scope_revision_id
+        : null
 
       // Detect per-run method: if any contact has portion_ex_gst, use it directly
       const usePerRunMethod = contacts.some((c: any) => c.portion_ex_gst != null)
@@ -3982,6 +4037,9 @@ serve(async (req: Request) => {
             prepared_contacts: results,
           }, 500)
         }
+        const neighbourRecorded = neighbourRevisionId !== null && docRecord?.id
+          ? await bindQuoteDocumentRevision(sb, docRecord.id, neighbourRevisionId)
+          : false
 
         results.push({
           contact_label: label,
@@ -3995,6 +4053,7 @@ serve(async (req: Request) => {
           quote_number: quoteNumber,
           upload_url: uploadData?.signedUrl || null,
           public_url: urlData?.publicUrl || '',
+          ...(neighbourNamesRevision ? { scope_revision_recorded: neighbourRecorded } : {}),
         })
       }
 
