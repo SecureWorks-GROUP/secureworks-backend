@@ -1232,6 +1232,11 @@ ops-api|supabase/migrations/20261112090000_trade_invoice_commission_super_base.s
 xero-sync|supabase/migrations/20261112090000_trade_invoice_commission_super_base.sql|column|trade_invoices.super_base_ex
 ops-api|supabase/migrations/20261112140000_makesafe_company_restoration_recipients.sql|column|makesafe_companies.restoration_recipients
 ops-api|supabase/migrations/20261112190000_makesafe_company_restoration_cc.sql|column|makesafe_companies.restoration_cc
+ops-api|supabase/migrations/20261114020000_dispatch_line_budget_cost.sql|column|job_material_lines.budget_id
+ops-api|supabase/migrations/20261114020000_dispatch_line_budget_cost.sql|column|job_material_lines.budget_line_key
+ops-api|supabase/migrations/20261114020000_dispatch_line_budget_cost.sql|column|job_material_lines.cost_reason_id
+ops-api|supabase/migrations/20261114020000_dispatch_line_budget_cost.sql|table|dispatch_line_cost_reasons
+ops-api|supabase/migrations/20261114020000_dispatch_line_budget_cost.sql|column|dispatch_supplier_order_emails.order_cost
 # xero-sync writes each bank transaction's lines and the chart of accounts into
 # their own service-role-only tables; ops-api's xero_tieout asks the spend and
 # revenue read beside the bills tie-out.
@@ -1247,3 +1252,8 @@ ops-api|supabase/migrations/20261115143000_job_cost_close.sql|function|job_cost_
 # Trade pay-run check (trade-pay-check-v1): ops-api's trade_pay_run_check door
 # calls the SQL read, so ops-api must not deploy ahead of the migration.
 ops-api|supabase/migrations/20261116011500_trade_pay_run_check.sql|function|trade_pay_run_check
+# Ruling 18 K2 sealed-send guard: send-quote records misses and reads the
+# document's revision; ghl-proxy records it at prepare.
+send-quote|supabase/migrations/20261116114500_quote_send_sealed_revision_guard.sql|table|quote_send_sealed_revision_misses
+send-quote|supabase/migrations/20261116114500_quote_send_sealed_revision_guard.sql|column|job_documents.scope_revision_id
+ghl-proxy|supabase/migrations/20261116114500_quote_send_sealed_revision_guard.sql|column|job_documents.scope_revision_id
