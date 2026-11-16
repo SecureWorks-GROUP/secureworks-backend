@@ -53,6 +53,11 @@ import {
   unapprovedSendKeyForDocument,
 } from '../_shared/scope_freeze/owner_price_approval.ts'
 import {
+  judgeSealedSend,
+  recordSealedSendMiss,
+  sealedSendCaller,
+} from '../_shared/scope_freeze/sealed_send_guard.ts'
+import {
   currentQuoteForParty,
   QUOTE_PARTY_DOCUMENT_COLUMNS,
   quoteRunAcceptanceDecision,
@@ -980,6 +985,23 @@ serve(async (req: Request) => {
         const gateErr = quotePricingGateError(doc.jobs?.pricing_json)
         if (gateErr) return jsonResponse({ error: gateErr }, 400, corsHeaders)
       }
+      // Ruling 18 K2: a fence or patio quote goes only from its sealed, newest
+      // revision, as the document prepared for it. Read now, judged after the
+      // claim, before any email: refused while the switch is on, recorded
+      // and sent as today while it is off (sealed_send_guard.ts).
+      const sealedGuard = await judgeSealedSend(sb, {
+        path: 'send', job_id: doc.job_id, job_type: doc.jobs?.type, sealed: sealedSource, document: doc,
+      })
+      const sealedGuardRecord = {
+        job_id: doc.job_id, path: 'send' as const, document_id,
+        sender_mode: sendAuthMode, sender_user_id: sendAuthUser?.id ?? null,
+        // Which fields the caller sent (names only, never values): tells the
+        // old fence page from the Scope Engine.
+        caller: sealedSendCaller(req, Object.fromEntries(Object.entries({
+          document_id, client_email: providedEmail, client_name: providedName, message, cc_emails,
+          subject: customSubject, attachment_paths, scoper_name, supersede_prior, source_scope_revision_id,
+        }).filter(([, v]) => v !== undefined))),
+      }
       // TK-S28: the owner-approved price on the named saved revision, read now
       // and judged with the sealed revision after the claim, before any email.
       const ownerPrice = await ownerPriceGate(sb, doc.job_id, sealedSource)
@@ -1056,6 +1078,15 @@ serve(async (req: Request) => {
         return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
           || jsonResponse(sealedSource.body, sealedSource.status, corsHeaders)
       }
+      if (sealedGuard.kind === 'miss' && sealedGuard.switch_on) {
+        console.log('[send-quote] sealed send refused', JSON.stringify({
+          document_id, job_id: doc.job_id, code: sealedGuard.body.code, reason: sealedGuard.reason,
+        }))
+        await recordSealedSendMiss(sb, sealedGuard, sealedGuardRecord)
+        const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
+        return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+          || jsonResponse(sealedGuard.body, sealedGuard.status, corsHeaders)
+      }
       if (ownerPrice.kind === 'refused') {
         console.log('[send-quote] owner price approval refused', JSON.stringify({
           document_id, job_id: doc.job_id, code: ownerPrice.body.code,
@@ -1090,6 +1121,11 @@ serve(async (req: Request) => {
           job_id: doc.job_id, path: 'send', document_id,
           scope_revision_id: ownerPrice.scope_revision_id,
         })
+      }
+      // Switch off: a send the sealed-send guard would refuse goes exactly as
+      // today, recorded first (best effort, never stops it).
+      if (sealedGuard.kind === 'miss' && !sealedGuard.switch_on) {
+        await recordSealedSendMiss(sb, sealedGuard, sealedGuardRecord)
       }
       {
         // Customer 3D view: a third button only when the sealed revision this
@@ -3166,9 +3202,11 @@ serve(async (req: Request) => {
       let ownerPriceRuns: OwnerPriceGate
       // No type annotation: send_runs_request_test runs this prelude as plain JS.
       let runsSealedRevisionId = null
+      let runsSealedSource = null
       let approvedRunPdfs: Map<string, Uint8Array> = new Map()
       {
         const sealedRuns = sealedSendSource(await sourceScopeRevisionReadRuns, job.id)
+        runsSealedSource = sealedRuns
         if (sealedRuns.kind === 'sealed') runsSealedRevisionId = sealedRuns.revision_id
         if (sealedRuns.kind === 'refused') {
           console.log('[send-quote] send-runs sealed revision refused', JSON.stringify({
@@ -3228,6 +3266,29 @@ serve(async (req: Request) => {
       }
 
       try {
+      // Ruling 18 K2: a fence or patio bundle goes only from its sealed,
+      // newest revision, with run PDFs recorded on it. Judged under the job
+      // claim, before any document is made or emailed: refused while the
+      // switch is on (the finally below releases the claim), recorded and
+      // sent as today while it is off (sealed_send_guard.ts).
+      {
+        const sealedGuardRuns = await judgeSealedSend(sb, {
+          path: 'send-runs', job_id: job.id, job_type: job.type, sealed: runsSealedSource, run_pdfs,
+        }, { storageBaseUrl: SUPABASE_URL })
+        if (sealedGuardRuns.kind === 'miss') {
+          await recordSealedSendMiss(sb, sealedGuardRuns, {
+            job_id: job.id, path: 'send-runs', document_id: null,
+            sender_mode: sendAuthMode, sender_user_id: sendAuthUser?.id ?? null,
+            caller: sealedSendCaller(req, requestBody),
+          })
+          if (sealedGuardRuns.switch_on) {
+            console.log('[send-quote] send-runs sealed send refused', JSON.stringify({
+              job_id: job.id, code: sealedGuardRuns.body.code, reason: sealedGuardRuns.reason,
+            }))
+            return jsonResponse(sealedGuardRuns.body, sealedGuardRuns.status, corsHeaders)
+          }
+        }
+      }
       const { data: existingQuoteRows, error: existingQuoteError } = await sb.from('job_documents')
         .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, created_at, version, send_claimed_at, share_token, quote_number, superseded_at, accepted_at, data_snapshot_json')
         .eq('job_id', job.id)
