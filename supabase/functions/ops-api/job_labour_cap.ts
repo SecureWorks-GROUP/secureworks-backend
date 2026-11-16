@@ -76,8 +76,9 @@ export function budgetAgreedLabour(budget: unknown): number | null {
 /**
  * The jobs whose newest stored budget pays the crew hourly up to a maximum.
  * Empty while the switch is off. Throws JobLabourPayReadError when the
- * switch or the budgets cannot be read, so a job is never invoiced past its
- * cap on a fault.
+ * switch or the budgets cannot be read, whether the read returns an error or
+ * throws, so a job is never invoiced past its cap on a fault and the guard
+ * answers 503, never a bare error.
  */
 export async function readHourlyCappedJobs(
   client: any,
@@ -89,10 +90,16 @@ export async function readHourlyCappedJobs(
   if (!(await readJobLabourBudgetOn(client))) return capped;
   for (let i = 0; i < ids.length; i += 50) {
     const part = ids.slice(i, i + 50);
-    const { data, error } = await client.from("job_budgets")
-      .select("job_id, version, pay:budget->labour->>pay")
-      .in("job_id", part);
-    if (error) throw new JobLabourPayReadError("the job budgets");
+    let res: any;
+    try {
+      res = await client.from("job_budgets")
+        .select("job_id, version, pay:budget->labour->>pay")
+        .in("job_id", part);
+    } catch {
+      throw new JobLabourPayReadError("the job budgets");
+    }
+    if (!res || res.error) throw new JobLabourPayReadError("the job budgets");
+    const data = res.data;
     const newest = new Map<string, { version: number; pay: unknown }>();
     for (const row of data || []) {
       const jobId = String(row?.job_id || "");
@@ -194,8 +201,14 @@ export async function readJobLabourCap(
 ): Promise<any> {
   const unreadable = () =>
     new JobLabourCapError(503, "labour_cap_unreadable", "The job's labour maximum could not be read. Try again in a minute.");
-  const { data, error } = await client.rpc("job_labour_cap_state", { p_job: jobId });
-  if (error || !data || typeof data !== "object") throw unreadable();
+  let res: any;
+  try {
+    res = await client.rpc("job_labour_cap_state", { p_job: jobId });
+  } catch {
+    throw unreadable();
+  }
+  const data = res?.data;
+  if (!res || res.error || !data || typeof data !== "object") throw unreadable();
   if (data.state !== "capped" && data.state !== "capped_unreadable") return data;
   let billed: number;
   try {

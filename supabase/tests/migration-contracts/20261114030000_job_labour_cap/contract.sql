@@ -156,26 +156,35 @@ ROLLBACK;
 
 -- 3. Crew options the customer took are labour on top of the hourly maximum,
 -- and a maximum that cannot be read is never a limit (absent hourly, {}, each
--- absent property, an absent labour amount, an amount under the maximum):
--- the state says capped_unreadable with a zero cap, and the ops-api guard
--- refuses such a job as unreadable (503), never lets labour through.
+-- absent property, an absent labour amount, an amount under the maximum, a
+-- maximum that is not rate x hours to the cent, a figure past the cent): the
+-- state says capped_unreadable with a zero cap and names the budget check's
+-- code, and the ops-api guard refuses such a job as unreadable (503), never
+-- lets labour through and never picks one of two figures that disagree.
 BEGIN;
 UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_labour_budget_v1';
 
 DO $$
 DECLARE
   cases  text[][] := ARRAY[
-    -- name, labour json
-    ['options',      '{"pay":"hourly_capped","amount_ex_gst":3050,"hourly":{"rate_ex_gst":70,"max_hours":40,"max_ex_gst":2800},"work_order_amount_ex_gst":3050}'],
-    ['no_hourly',    '{"pay":"hourly_capped","amount_ex_gst":800,"work_order_amount_ex_gst":800}'],
-    ['null_hourly',  '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":null,"work_order_amount_ex_gst":800}'],
-    ['empty_hourly', '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{},"work_order_amount_ex_gst":800}'],
-    ['no_rate',      '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{"max_hours":10,"max_ex_gst":800},"work_order_amount_ex_gst":800}'],
-    ['no_hours',     '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{"rate_ex_gst":80,"max_ex_gst":800},"work_order_amount_ex_gst":800}'],
-    ['no_max',       '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{"rate_ex_gst":80,"max_hours":10},"work_order_amount_ex_gst":800}'],
-    ['text_max',     '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{"rate_ex_gst":80,"max_hours":10,"max_ex_gst":"800"},"work_order_amount_ex_gst":800}'],
-    ['no_amount',    '{"pay":"hourly_capped","hourly":{"rate_ex_gst":80,"max_hours":10,"max_ex_gst":800},"work_order_amount_ex_gst":800}'],
-    ['under_max',    '{"pay":"hourly_capped","amount_ex_gst":700,"hourly":{"rate_ex_gst":80,"max_hours":10,"max_ex_gst":800},"work_order_amount_ex_gst":700}']
+    -- name, expected unreadable_reason, labour json
+    ['options', '',      '{"pay":"hourly_capped","amount_ex_gst":3050,"hourly":{"rate_ex_gst":70,"max_hours":40,"max_ex_gst":2800},"work_order_amount_ex_gst":3050}'],
+    ['no_hourly', 'labour_hourly_invalid',    '{"pay":"hourly_capped","amount_ex_gst":800,"work_order_amount_ex_gst":800}'],
+    ['null_hourly', 'labour_hourly_invalid',  '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":null,"work_order_amount_ex_gst":800}'],
+    ['empty_hourly', 'labour_hourly_invalid', '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{},"work_order_amount_ex_gst":800}'],
+    ['no_rate', 'labour_hourly_invalid',      '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{"max_hours":10,"max_ex_gst":800},"work_order_amount_ex_gst":800}'],
+    ['no_hours', 'labour_hourly_invalid',     '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{"rate_ex_gst":80,"max_ex_gst":800},"work_order_amount_ex_gst":800}'],
+    ['no_max', 'labour_hourly_invalid',       '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{"rate_ex_gst":80,"max_hours":10},"work_order_amount_ex_gst":800}'],
+    ['text_max', 'labour_hourly_invalid',     '{"pay":"hourly_capped","amount_ex_gst":800,"hourly":{"rate_ex_gst":80,"max_hours":10,"max_ex_gst":"800"},"work_order_amount_ex_gst":800}'],
+    ['no_amount', 'labour_hourly_invalid',    '{"pay":"hourly_capped","hourly":{"rate_ex_gst":80,"max_hours":10,"max_ex_gst":800},"work_order_amount_ex_gst":800}'],
+    ['under_max', 'labour_hourly_mismatch',    '{"pay":"hourly_capped","amount_ex_gst":700,"hourly":{"rate_ex_gst":80,"max_hours":10,"max_ex_gst":800},"work_order_amount_ex_gst":700}'],
+    -- An older writer's record: 70 x 4 is 280, but the maximum says 2800.
+    ['rate_x_hours', 'labour_hourly_mismatch', '{"pay":"hourly_capped","amount_ex_gst":2800,"hourly":{"rate_ex_gst":70,"max_hours":4,"max_ex_gst":2800},"work_order_amount_ex_gst":2800}'],
+    ['one_cent_off', 'labour_hourly_mismatch', '{"pay":"hourly_capped","amount_ex_gst":800.01,"hourly":{"rate_ex_gst":80,"max_hours":10,"max_ex_gst":800.01},"work_order_amount_ex_gst":800.01}'],
+    ['part_cent',    'labour_hourly_invalid',  '{"pay":"hourly_capped","amount_ex_gst":800.005,"hourly":{"rate_ex_gst":80.0005,"max_hours":10,"max_ex_gst":800.005},"work_order_amount_ex_gst":800.005}'],
+    ['zero_rate',    'labour_hourly_invalid',  '{"pay":"hourly_capped","amount_ex_gst":0,"hourly":{"rate_ex_gst":0,"max_hours":10,"max_ex_gst":0},"work_order_amount_ex_gst":0}'],
+    -- Rate and hours to the cent: 72.5 x 7.25 = 525.625, stored as 525.63.
+    ['cents_ok',     '', '{"pay":"hourly_capped","amount_ex_gst":525.63,"hourly":{"rate_ex_gst":72.5,"max_hours":7.25,"max_ex_gst":525.63},"work_order_amount_ex_gst":525.63}']
   ];
   i      int;
   job    uuid;
@@ -192,19 +201,26 @@ BEGIN
             encode(sha256(convert_to('{}', 'UTF8')), 'hex'), encode(sha256(convert_to('{"p":' || i || '}', 'UTF8')), 'hex'));
     INSERT INTO public.job_budgets (id, job_id, scope_revision_id, version, pricing_hash, trade, complete, gap_count, budget)
     VALUES (gen_random_uuid(), job, rev, 1, repeat('d', 64), 'fence', true, 0,
-            jsonb_build_object('version', 'budget.v1', 'labour', cases[i][2]::jsonb));
+            jsonb_build_object('version', 'budget.v1', 'labour', cases[i][3]::jsonb));
     st := public.job_labour_cap_state(job);
 
     IF cases[i][1] = 'options' THEN
       -- 70 x 40 = 2800, plus a 250 crew option: the crew may bill 3050.
       IF st->>'state' <> 'capped' OR (st->>'max_ex_gst')::numeric <> 2800
-         OR (st->>'crew_options_ex_gst')::numeric <> 250 OR (st->>'cap_ex_gst')::numeric <> 3050 THEN
+         OR (st->>'crew_options_ex_gst')::numeric <> 250 OR (st->>'cap_ex_gst')::numeric <> 3050
+         OR jsonb_typeof(st->'unreadable_reason') <> 'null' THEN
         RAISE EXCEPTION 'labour cap contract: a taken crew option is not inside the cap: %', st;
+      END IF;
+    ELSIF cases[i][1] = 'cents_ok' THEN
+      IF st->>'state' <> 'capped' OR (st->>'cap_ex_gst')::numeric <> 525.63
+         OR jsonb_typeof(st->'unreadable_reason') <> 'null' THEN
+        RAISE EXCEPTION 'labour cap contract: a maximum of rate x hours to the cent did not read as capped: %', st;
       END IF;
     ELSE
       IF st->>'state' <> 'capped_unreadable' OR jsonb_typeof(st->'cap_ex_gst') <> 'number'
-         OR (st->>'cap_ex_gst')::numeric <> 0 THEN
-        RAISE EXCEPTION 'labour cap contract: % did not read as unreadable with a zero cap: %', cases[i][1], st;
+         OR (st->>'cap_ex_gst')::numeric <> 0 OR (st->>'max_ex_gst')::numeric <> 0
+         OR st->>'unreadable_reason' IS DISTINCT FROM cases[i][2] THEN
+        RAISE EXCEPTION 'labour cap contract: % did not read as unreadable (%) with a zero cap: %', cases[i][1], cases[i][2], st;
       END IF;
     END IF;
   END LOOP;

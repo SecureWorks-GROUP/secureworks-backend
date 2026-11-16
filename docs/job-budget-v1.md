@@ -268,9 +268,15 @@ order fill are exactly as before.
   On an hourly job the job entry carries `limit: "hourly_maximum"` and
   `hourly_maximum_ex`, and the message names the hourly maximum and the most
   this invoice may still bill (never another trade's figure). A maximum that
-  cannot be read (no `hourly`, `{}`, any property missing or not a number, a
-  labour amount below the maximum: `capped_unreadable`), or any failed read,
-  is 503 `work_order_cap_unavailable`, never let through. The work order
+  cannot be read is `capped_unreadable` with a zero limit and the budget
+  check's code in `unreadable_reason`: `labour_hourly_invalid` (no `hourly`,
+  `{}`, any property missing or not a number, a rate or hours not above zero,
+  a figure past the cent) or `labour_hourly_mismatch` (the maximum is not
+  rate x hours to the cent, or the labour amount is below the maximum; a
+  budget stored by an older writer is read by today's rules, and neither of
+  two figures that disagree is picked). That, or any failed read (returned
+  as an error or thrown), is 503 `work_order_cap_unavailable`, never let
+  through. The work order
   cap's known limits (two invoices at the same moment can both pass; the
   remainder lets a trade work out what others billed) apply unchanged.
 - **Raising it.** `POST ops-api?action=raise_job_labour_cap`
@@ -284,7 +290,7 @@ order fill are exactly as before.
   `budget_changed`, `not_hourly`, `amount_invalid`, `reason_invalid`.
 - **Reading it.** `GET ops-api?action=job_labour_cap&job_id=` (staff in the
   job's company): `state` (`no_budget`, `not_capped`, `capped`,
-  `capped_unreadable`), `rate_ex_gst`, `max_hours`, `max_ex_gst`,
+  `capped_unreadable`, with `unreadable_reason`), `rate_ex_gst`, `max_hours`, `max_ex_gst`,
   `crew_options_ex_gst`, `raised_ex_gst`, `cap_ex_gst`, and on a capped job
   `billed_ex_gst` and `remaining_ex_gst` by the guard's own count. The office
   work order list (`list_work_orders` `kind=job`) shows an hourly job's row

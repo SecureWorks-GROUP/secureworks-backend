@@ -3,8 +3,11 @@
 // paid hourly up to a maximum holds every trade to it
 // (docs/job-budget-v1.md, "Labour: pay mode and the hourly cap (step 4)").
 // Ruling 17c: the refusal is the one work order cap guard's; its hourly cases
-// are in work_order_total_cap_test.ts.
+// are in work_order_total_cap_test.ts. The last cases here drive the guard
+// itself (_assertWithinWorkOrderTotal, index.ts) on an in-memory client.
+import "./trade_app_visibility_rules_test_env.ts";
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { _assertWithinWorkOrderTotal, ApiError } from "./index.ts";
 import {
   budgetAgreedLabour,
   budgetLabourPay,
@@ -26,8 +29,9 @@ const BUDGET = "22222222-2222-4222-8222-222222222222";
 const TRADE = "33333333-3333-4333-8333-333333333333";
 const APPROVER = "44444444-4444-4444-8444-444444444444";
 
-// A small PostgREST stand-in: eq / in / order / limit / maybeSingle, a table
-// that can be made to fail, and an rpc hook.
+// A small PostgREST stand-in: eq / in / not / order / limit / range /
+// maybeSingle, a table that can be made to return an error (fail) or to throw
+// (throwOn, a rejected read), and an rpc hook that can throw too.
 class Q {
   private f: Array<(r: any) => boolean> = [];
   private lim: number | null = null;
@@ -53,6 +57,12 @@ class Q {
     this.lim = n;
     return this;
   }
+  not() {
+    return this;
+  }
+  range() {
+    return this;
+  }
   maybeSingle() {
     this.one = true;
     return this;
@@ -62,6 +72,7 @@ class Q {
   }
   private async run() {
     this.db.reads.push(this.table);
+    if (this.db.throwOn.has(this.table)) throw new TypeError("fetch failed");
     if (this.db.fail.has(this.table)) return { data: null, error: { message: "boom" } };
     let rows = (this.db.tables[this.table] || []).filter((r) => this.f.every((g) => g(r)));
     if (this.sort) {
@@ -76,6 +87,8 @@ class Q {
 
 class Fake {
   fail = new Set<string>();
+  throwOn = new Set<string>();
+  rpcThrows = false;
   reads: string[] = [];
   rpcs: Array<{ fn: string; args: any }> = [];
   rpcAnswer: { data: any; error: any } | ((args: any) => { data: any; error: any }) = { data: null, error: null };
@@ -85,6 +98,7 @@ class Fake {
   }
   rpc(fn: string, args: any) {
     this.rpcs.push({ fn, args });
+    if (this.rpcThrows) return Promise.reject(new TypeError("fetch failed"));
     return Promise.resolve(typeof this.rpcAnswer === "function" ? this.rpcAnswer(args) : this.rpcAnswer);
   }
 }
@@ -125,6 +139,15 @@ Deno.test("pay read: an unreadable budget or switch throws, never reads as no ca
   const noSwitch = new Fake({ job_budgets: [payRow(JOB_A, 1, "hourly_capped")] });
   noSwitch.fail.add("feature_flags");
   await assertRejects(() => readHourlyCappedJobs(noSwitch, [JOB_A]), JobLabourPayReadError);
+  // A read that throws (a rejected promise) is the same fault as one that
+  // returns an error: JobLabourPayReadError, never a bare error.
+  const thrown = new Fake({ feature_flags: switchOn, job_budgets: [payRow(JOB_A, 1, "hourly_capped")] });
+  thrown.throwOn.add("job_budgets");
+  await assertRejects(() => readHourlyCappedJobs(thrown, [JOB_A]), JobLabourPayReadError);
+  const thrownSwitch = new Fake({ feature_flags: switchOn, job_budgets: [payRow(JOB_A, 1, "hourly_capped")] });
+  thrownSwitch.throwOn.add("feature_flags");
+  await assertRejects(() => readHourlyCappedJobs(thrownSwitch, [JOB_A]), JobLabourPayReadError);
+  assertEquals((await readNewestJobBudgetLabour(thrown, JOB_A)).state, "unreadable");
   const missing = new Fake({ feature_flags: [], job_budgets: [payRow(JOB_A, 1, "hourly_capped")] });
   assertEquals((await readHourlyCappedJobs(missing, [JOB_A])).size, 0);
   assert(!missing.reads.includes("job_budgets"));
@@ -284,7 +307,72 @@ Deno.test("doors: the read is staff in the job's company; the raise needs a sign
     throw new Error("x");
   });
   assertEquals([failed.status, failed.body.code], [503, "labour_cap_unreadable"]);
+  // A limit read that throws, or returns an error, is the same 503.
+  db.rpcThrows = true;
+  const rejected = await get(staff);
+  assertEquals([rejected.status, rejected.body.code], [503, "labour_cap_unreadable"]);
+  db.rpcThrows = false;
+  db.rpcAnswer = { data: null, error: { message: "boom" } };
+  const errored = await get(staff);
+  assertEquals([errored.status, errored.body.code], [503, "labour_cap_unreadable"]);
+  // A maximum that cannot be read is named in the read, with its reason.
+  db.rpcAnswer = { data: { state: "capped_unreadable", unreadable_reason: "labour_hourly_mismatch", cap_ex_gst: 0 }, error: null };
+  const named = await get(staff);
+  assertEquals(
+    [named.status, (named.body.cap as any).state, (named.body.cap as any).unreadable_reason],
+    [200, "capped_unreadable", "labour_hourly_mismatch"],
+  );
+  db.rpcAnswer = { data: { state: "capped", cap_ex_gst: 900 }, error: null };
   const key = await jobLabourCapAction(db, "raise_job_labour_cap", "POST", { job_id: JOB_A }, { ...staff, signedIn: false, userId: null }, billed);
   assertEquals([key.status, key.body.code], [403, "named_person_required"]);
   assertEquals((await jobLabourCapAction(db, "raise_job_labour_cap", "GET", {}, staff, billed)).status, 405);
+});
+
+// ── The guard itself (_assertWithinWorkOrderTotal, index.ts) ──────────────────
+// One hourly-capped fencing job with a 900 limit and nothing billed yet. Every
+// fault in reading the switch, the budgets or the limit, whether returned as an
+// error or thrown, is the one 503 work_order_cap_unavailable; a limit the
+// database names unreadable (rate x hours not the maximum) is the same 503.
+
+const guardTables = () => ({
+  users: [{ id: TRADE, org_id: ORG, invoice_type: null, managed_verticals: [], invoice_any_job: false }],
+  jobs: [{ id: JOB_A, org_id: ORG, type: "fencing", metadata: {}, created_by: null, job_number: "ZZTEST-1" }],
+  group_work_orders: [],
+  work_orders: [],
+  feature_flags: switchOn,
+  job_budgets: [payRow(JOB_A, 1, "hourly_capped")],
+  trade_invoice_lines: [],
+});
+const labourLine = (ex: number) => [{ job_id: JOB_A, line_type: "labour", line_total_ex: ex }];
+const guard = (db: Fake, ex: number) => _assertWithinWorkOrderTotal(db, { id: TRADE, orgId: ORG }, labourLine(ex));
+const guardDb = (edit: (db: Fake) => void = () => {}) => {
+  const db = new Fake(guardTables());
+  db.rpcAnswer = { data: { state: "capped", unreadable_reason: null, cap_ex_gst: 900 }, error: null };
+  edit(db);
+  return db;
+};
+
+Deno.test("guard: an hourly job within its limit passes; one cent over is the work order cap's 409 naming the hourly maximum", async () => {
+  await guard(guardDb(), 900);
+  const err: any = await assertRejects(() => guard(guardDb(), 900.01), ApiError);
+  assertEquals([err.status, err.body?.code, err.body?.jobs?.[0]?.limit], [409, "work_order_total_over_agreed", "hourly_maximum"]);
+});
+
+Deno.test("guard: a budget, switch or limit read that fails, returned or thrown, is 503 work_order_cap_unavailable", async () => {
+  const unreadable = (reason: string) => ({ data: { state: "capped_unreadable", unreadable_reason: reason, cap_ex_gst: 0 }, error: null });
+  const cases: Array<[string, (db: Fake) => void]> = [
+    ["budget read returns an error", (db) => db.fail.add("job_budgets")],
+    ["budget read throws", (db) => db.throwOn.add("job_budgets")],
+    ["switch read returns an error", (db) => db.fail.add("feature_flags")],
+    ["switch read throws", (db) => db.throwOn.add("feature_flags")],
+    ["limit read returns an error", (db) => (db.rpcAnswer = { data: null, error: { message: "boom" } })],
+    ["limit read throws", (db) => (db.rpcThrows = true)],
+    ["rate x hours is not the maximum", (db) => (db.rpcAnswer = unreadable("labour_hourly_mismatch"))],
+    ["an hourly field missing", (db) => (db.rpcAnswer = unreadable("labour_hourly_invalid"))],
+  ];
+  for (const [label, edit] of cases) {
+    // A small line, well inside any limit: only the fault can refuse it.
+    const err: any = await assertRejects(() => guard(guardDb(edit), 1), ApiError, undefined, label);
+    assertEquals([err.status, err.body?.code], [503, "work_order_cap_unavailable"], label);
+  }
 });

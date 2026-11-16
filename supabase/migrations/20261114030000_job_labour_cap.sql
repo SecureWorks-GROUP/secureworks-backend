@@ -114,6 +114,7 @@ DECLARE
   v_max      numeric;
   v_labour   numeric;
   v_valid    boolean;
+  v_reason   text;
   v_raised   numeric;
   v_cap      numeric;
 BEGIN
@@ -139,20 +140,35 @@ BEGIN
              AND COALESCE(jsonb_typeof(v_hourly->'max_hours') = 'number', false)
              AND COALESCE(jsonb_typeof(v_hourly->'max_ex_gst') = 'number', false)
              AND COALESCE(jsonb_typeof(b.budget #> '{labour,amount_ex_gst}') = 'number', false);
-  IF v_valid THEN
+  IF v_valid IS NOT TRUE THEN
+    v_reason := 'labour_hourly_invalid';
+  ELSE
     v_rate := (v_hourly->>'rate_ex_gst')::numeric;
     v_hours := (v_hourly->>'max_hours')::numeric;
     v_max := (v_hourly->>'max_ex_gst')::numeric;
     -- The labour the crew may bill: the hourly maximum plus every crew option
     -- the customer took (budget.v1 labour.amount_ex_gst, checked at storing).
     v_labour := (b.budget #>> '{labour,amount_ex_gst}')::numeric;
-    v_valid := COALESCE(v_max >= 0 AND v_rate > 0 AND v_hours > 0 AND v_labour >= v_max, false);
+    -- The budget check's own rules (budget_v1.ts, labour.hourly), so a budget
+    -- stored before a rule or by an older writer is read by today's rules:
+    -- rate above zero, hours above zero, every figure to the cent (hours to
+    -- two decimals) and the maximum exactly rate x hours, to the cent. The
+    -- labour amount is never below the maximum. A record that breaks one of
+    -- them holds two numbers that disagree; neither is picked.
+    IF NOT (v_rate > 0 AND v_hours > 0 AND v_max >= 0)
+       OR v_rate <> round(v_rate, 2) OR v_hours <> round(v_hours, 2)
+       OR v_max <> round(v_max, 2) OR v_labour <> round(v_labour, 2) THEN
+      v_reason := 'labour_hourly_invalid';
+    ELSIF v_max <> round(v_rate * v_hours, 2) OR v_labour < v_max THEN
+      v_reason := 'labour_hourly_mismatch';
+    END IF;
   END IF;
+  v_valid := v_reason IS NULL;
   -- A stored maximum that cannot be read is never a limit: the state says
-  -- capped_unreadable with a zero cap, and the ops-api guard refuses such a
-  -- job as unreadable (503), never lets labour through on a guess.
-  IF v_valid IS NOT TRUE THEN
-    v_valid := false;
+  -- capped_unreadable with a zero cap and names why (unreadable_reason, the
+  -- budget check's code), and the ops-api guard refuses such a job as
+  -- unreadable (503), never lets labour through on a guess.
+  IF NOT v_valid THEN
     v_rate := NULL; v_hours := NULL; v_max := 0; v_labour := 0;
   END IF;
   SELECT COALESCE(sum(r.amount_ex_gst), 0) INTO v_raised
@@ -161,6 +177,7 @@ BEGIN
   v_cap := round(v_labour + v_raised, 2);
   RETURN jsonb_build_object(
     'state', CASE WHEN v_valid THEN 'capped' ELSE 'capped_unreadable' END,
+    'unreadable_reason', v_reason,
     'switch_on', public.job_labour_budget_on(),
     'pay', v_pay,
     'budget_id', b.id,
