@@ -41,11 +41,11 @@ export const PDF_READY_WORDS = Object.freeze({ title: 'Your quote is ready to do
 
 /** The one look's exact values (q0/look.md; the same values as scope-engine shared/quote/web.js LOOK). */
 export const LOOK = Object.freeze({
-  base: '#22323b',
-  wash: 'linear-gradient(180deg,rgba(41,60,70,.58) 0%,rgba(30,46,56,.70) 55%,rgba(22,36,43,.82) 100%)',
+  base: '#12202c',
+  wash: 'linear-gradient(180deg,rgba(22,44,64,.60) 0%,rgba(16,33,49,.72) 55%,rgba(10,22,34,.84) 100%)',
   photo: 'blur(2px) brightness(.92) saturate(1.05)',
   card: '0 24px 70px rgba(8,16,22,.55),0 0 0 1px rgba(255,255,255,.06)',
-  glass: 'rgba(30,46,56,.72)',
+  glass: 'rgba(16,33,49,.74)',
 })
 
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
@@ -289,7 +289,7 @@ export function pdfPagesHtml(pdf: string | null): string {
       var chain=Promise.resolve();
       for(var i=1;i<=doc.numPages;i++){(function(n){chain=chain.then(function(){return doc.getPage(n).then(function(page){
         if(done)return;
-        var w=Math.min(box.clientWidth||794,794),one=page.getViewport({scale:1}),dpr=Math.min(window.devicePixelRatio||1,3);
+        var w=Math.min(box.clientWidth||794,794),one=page.getViewport({scale:1}),dpr=Math.max(2,Math.min(window.devicePixelRatio||1,3));
         var vp=page.getViewport({scale:w/one.width*dpr});
         var c=document.createElement('canvas');c.width=Math.floor(vp.width);c.height=Math.floor(vp.height);
         c.setAttribute('role','img');c.setAttribute('aria-label','Quote page '+n);
