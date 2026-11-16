@@ -1252,3 +1252,8 @@ ops-api|supabase/migrations/20261115143000_job_cost_close.sql|function|job_cost_
 # Trade pay-run check (trade-pay-check-v1): ops-api's trade_pay_run_check door
 # calls the SQL read, so ops-api must not deploy ahead of the migration.
 ops-api|supabase/migrations/20261116011500_trade_pay_run_check.sql|function|trade_pay_run_check
+# Ruling 18 K2 sealed-send guard: send-quote records misses and reads the
+# document's revision; ghl-proxy records it at prepare.
+send-quote|supabase/migrations/20261116114500_quote_send_sealed_revision_guard.sql|table|quote_send_sealed_revision_misses
+send-quote|supabase/migrations/20261116114500_quote_send_sealed_revision_guard.sql|column|job_documents.scope_revision_id
+ghl-proxy|supabase/migrations/20261116114500_quote_send_sealed_revision_guard.sql|column|job_documents.scope_revision_id
