@@ -133,6 +133,7 @@ import {
 import { createCalendarAppointmentAction } from './calendar_appointment.ts'
 import {
   bindQuoteDocumentRevision,
+  isSealedQuoteCopyPath,
   quoteDocumentRevisionToRecord,
 } from '../_shared/scope_freeze/sealed_send_guard.ts'
 import { namedScopeRevisionAbsent } from '../_shared/scope_freeze/quote_scope_revision_link.ts'
@@ -3617,8 +3618,14 @@ serve(async (req: Request) => {
         // Re-issue signed upload URLs for the EXISTING storage paths so the
         // client can overwrite the previously uploaded (or never-uploaded) file.
         const bucketPublicBase = `${SUPABASE_URL}/storage/v1/object/public/job-pdfs/`
-        const existingPdfPath = reusableDraft.pdf_url?.startsWith(bucketPublicBase)
+        const reusedPdfPath = reusableDraft.pdf_url?.startsWith(bucketPublicBase)
           ? reusableDraft.pdf_url.slice(bucketPublicBase.length)
+          : null
+        // A pinned sealed copy (sealed_send_guard.ts) never gets an upload
+        // address: a draft linking to one gets its ordinary path back.
+        const reusePinnedCopy = isSealedQuoteCopyPath(reusedPdfPath)
+        const existingPdfPath = reusedPdfPath && !reusePinnedCopy
+          ? reusedPdfPath
           : `${orgId}/${jobId}/quote_v${reusableDraft.version}_${(fileName || 'quote').replace(/[^a-zA-Z0-9._-]/g, '_')}`
         const existingHtmlPath = reusableDraft.html_url?.startsWith(bucketPublicBase)
           ? reusableDraft.html_url.slice(bucketPublicBase.length)
@@ -3644,6 +3651,11 @@ serve(async (req: Request) => {
 
         const { data: reusePdfUrlData } = sb.storage.from('job-pdfs').getPublicUrl(existingPdfPath)
         const { data: reuseHtmlUrlData } = sb.storage.from('job-pdfs').getPublicUrl(existingHtmlPath)
+        if (reusePinnedCopy) {
+          const { error: relinkErr } = await sb.from('job_documents')
+            .update({ pdf_url: reusePdfUrlData.publicUrl }).eq('id', reusableDraft.id)
+          if (relinkErr) return json({ error: relinkErr.message }, 500)
+        }
 
         console.log(`[ghl-proxy] Quote reused: job=${jobId} v${reusableDraft.version} doc=${reusableDraft.id} quote#=${reuseQuoteNumber}`)
         // The PDF about to be uploaded over this draft is this prepare's: record
@@ -3767,8 +3779,12 @@ serve(async (req: Request) => {
             }
 
             const bucketPublicBase = `${SUPABASE_URL}/storage/v1/object/public/job-pdfs/`
-            const cPdfPath = concurrent.pdf_url?.startsWith(bucketPublicBase)
+            const cReusedPdfPath = concurrent.pdf_url?.startsWith(bucketPublicBase)
               ? concurrent.pdf_url.slice(bucketPublicBase.length)
+              : null
+            const cPinnedCopy = isSealedQuoteCopyPath(cReusedPdfPath)
+            const cPdfPath = cReusedPdfPath && !cPinnedCopy
+              ? cReusedPdfPath
               : `${orgId}/${jobId}/quote_v${concurrent.version}_${safeName}`
             const cHtmlPath = concurrent.html_url?.startsWith(bucketPublicBase)
               ? concurrent.html_url.slice(bucketPublicBase.length)
@@ -3784,6 +3800,11 @@ serve(async (req: Request) => {
 
             const { data: cPdfUrlData } = sb.storage.from('job-pdfs').getPublicUrl(cPdfPath)
             const { data: cHtmlUrlData } = sb.storage.from('job-pdfs').getPublicUrl(cHtmlPath)
+            if (cPinnedCopy) {
+              const { error: cRelinkErr } = await sb.from('job_documents')
+                .update({ pdf_url: cPdfUrlData.publicUrl }).eq('id', concurrent.id)
+              if (cRelinkErr) return json({ error: cRelinkErr.message }, 500)
+            }
 
             console.log(`[ghl-proxy] Quote reused (concurrent): job=${jobId} v${concurrent.version} doc=${concurrent.id} quote#=${concurrentQuoteNumber}`)
             const concurrentRecorded = await bindQuoteDocumentRevision(sb, concurrent.id, recordedRevisionId)

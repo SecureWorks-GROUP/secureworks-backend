@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS public.quote_send_sealed_revision_misses (
     'revision_not_newest',
     'document_revision_unrecorded',
     'document_revision_mismatch',
+    'document_pdf_not_from_revision',
     'run_pdf_not_from_revision',
     'check_unreadable'
   )),
@@ -89,5 +90,5 @@ REVOKE ALL ON FUNCTION public.quote_send_sealed_revision_misses_append_only() FR
 INSERT INTO public.feature_flags (flag_name, enabled, description)
 VALUES (
   'quote_send_sealed_revision_required_v1', false,
-  'Ruling 18 K2. When on, send-quote refuses a fence or patio send (/send and /send-runs) that names no sealed revision, names one whose frozen pricing is not sealed, names one that is not the job''s newest frozen revision, or whose PDF is not that revision''s own (the document''s recorded revision, or a run PDF not recorded on the revision); nothing is sent and the scoper is told to open the Scope Engine, seal and save, then send. Off (as seeded): every send goes as before and each one it would refuse is recorded in quote_send_sealed_revision_misses. Turning it on stops every send from the old fence page copy (before 4 Nov). The owner says when.')
+  'Ruling 18 K2. When on, send-quote refuses a fence or patio send (/send and /send-runs) that names no sealed revision, names one whose frozen pricing is not sealed, names one that is not the job''s newest frozen revision, or whose PDF is not that revision''s own (the document must record the revision, and every PDF sent must hash to a quote PDF recorded on the revision); nothing is sent and the scoper is told to open the Scope Engine, seal and save, then send. On, the customer gets only the checked bytes: a content-addressed copy under job-pdfs/sealed-quotes/ that the document links to, and run PDFs attached as bytes. Off (as seeded): every send goes as before and each one it would refuse is recorded in quote_send_sealed_revision_misses. Turning it on stops every send from the old fence page copy (before 4 Nov). The owner says when.')
 ON CONFLICT (flag_name) DO NOTHING;

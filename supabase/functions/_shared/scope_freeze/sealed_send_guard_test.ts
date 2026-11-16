@@ -3,8 +3,11 @@
 import { assert, assertEquals } from "https://deno.land/std@0.208.0/assert/mod.ts";
 import {
   bindQuoteDocumentRevision,
+  isSealedQuoteCopyPath,
   judgeSealedSend,
+  linkDocumentsToSealedCopy,
   onOwnStorage,
+  pinSealedQuotePdf,
   quoteDocumentRevisionToRecord,
   recordSealedSendMiss,
   SEALED_REVISION_REQUIRED_WORDS,
@@ -276,23 +279,141 @@ Deno.test("a miss row that cannot be written never throws", async () => {
 
 // ── a sealed newest revision with its own PDF sends in both modes ──
 
-Deno.test("sealed newest revision with its own PDF passes, switch on and off", async () => {
+Deno.test("sealed newest revision with its own PDF passes, switch on and off, and hands back the checked bytes", async () => {
   for (const flag of [true, false]) {
     const w = await goodWorld();
     w.flag = flag;
     const send = await judgeSealedSend(fakeDb(w).sb, {
-      path: "send", job_id: JOB, job_type: "fencing", sealed: sealed(), document: { scope_revision_id: REV },
-    });
-    assertEquals(send, { kind: "pass", switch_on: flag });
+      path: "send", job_id: JOB, job_type: "fencing", sealed: sealed(),
+      document: { scope_revision_id: REV, pdf_url: PDF_A },
+    }, { fetchImpl: fakeFetch, storageBaseUrl: STORAGE });
+    assert(send.kind === "pass" && send.switch_on === flag);
+    assertEquals(send.verified_pdf?.sha256, await sha(BYTES_A));
+    assertEquals(send.verified_pdf?.bytes, BYTES_A);
     const runs = await judgeSealedSend(fakeDb(w).sb, {
       path: "send-runs", job_id: JOB, job_type: "patio", sealed: sealed(), run_pdfs: { A: PDF_A, B: PDF_B },
     }, { fetchImpl: fakeFetch, storageBaseUrl: STORAGE });
-    assertEquals(runs, { kind: "pass", switch_on: flag });
+    assert(runs.kind === "pass" && runs.switch_on === flag);
+    assertEquals([...runs.verified_run_pdfs!.keys()], ["A", "B"]);
+    assertEquals(runs.verified_run_pdfs!.get("B")?.bytes, BYTES_B, "run B carries run B's checked bytes");
     const noRunPdfs = await judgeSealedSend(fakeDb(w).sb, {
       path: "send-runs", job_id: JOB, job_type: "fencing", sealed: sealed(),
     });
-    assertEquals(noRunPdfs, { kind: "pass", switch_on: flag });
+    assert(noRunPdfs.kind === "pass" && noRunPdfs.switch_on === flag && noRunPdfs.verified_run_pdfs?.size === 0);
   }
+});
+
+Deno.test("switch on, /send: a matching label is not enough; the linked PDF must be one the revision recorded", async () => {
+  const w = await goodWorld();
+  w.recordedPdfs = [await sha(BYTES_A)];
+  // The document says it was prepared for the revision, but PDF B was
+  // uploaded over its address (an overwritten or reused upload).
+  const overwritten = await judgeSealedSend(fakeDb(w).sb, {
+    path: "send", job_id: JOB, job_type: "fencing", sealed: sealed(),
+    document: { scope_revision_id: REV, pdf_url: PDF_B },
+  }, { fetchImpl: fakeFetch, storageBaseUrl: STORAGE });
+  assert(overwritten.kind === "miss" && overwritten.reason === "document_pdf_not_from_revision");
+  assertEquals(overwritten.status, 409);
+  assertEquals(overwritten.body.code, "sealed_revision_required");
+  // Nothing recorded on the revision yet: no PDF can be shown to be its own.
+  const w2 = await goodWorld();
+  w2.recordedPdfs = [];
+  const nothingRecorded = await judgeSealedSend(fakeDb(w2).sb, {
+    path: "send", job_id: JOB, job_type: "fencing", sealed: sealed(),
+    document: { scope_revision_id: REV, pdf_url: PDF_A },
+  }, { fetchImpl: fakeFetch, storageBaseUrl: STORAGE });
+  assert(nothingRecorded.kind === "miss" && nothingRecorded.reason === "document_pdf_not_from_revision");
+  fetches.length = 0;
+  for (const pdf_url of [null, "https://elsewhere.example/storage/v1/object/public/job-pdfs/a.pdf"]) {
+    const off = await judgeSealedSend(fakeDb(await goodWorld()).sb, {
+      path: "send", job_id: JOB, job_type: "fencing", sealed: sealed(), document: { scope_revision_id: REV, pdf_url },
+    }, { fetchImpl: fakeFetch, storageBaseUrl: STORAGE });
+    assert(off.kind === "miss" && off.reason === "document_pdf_not_from_revision");
+  }
+  assertEquals(fetches, [], "no address outside our storage is fetched");
+  const w3 = await goodWorld();
+  w3.recordedPdfs = "error";
+  const unreadable = await judgeSealedSend(fakeDb(w3).sb, {
+    path: "send", job_id: JOB, job_type: "fencing", sealed: sealed(), document: { scope_revision_id: REV, pdf_url: PDF_A },
+  }, { fetchImpl: fakeFetch, storageBaseUrl: STORAGE });
+  assert(unreadable.kind === "miss" && unreadable.reason === "check_unreadable" && unreadable.status === 503);
+});
+
+// ── switch on: the customer gets only the checked bytes ──
+
+function fakeStorage(existing: Map<string, Uint8Array>, uploadError = false) {
+  const uploads: Array<{ path: string; upsert: unknown }> = [];
+  const sb = {
+    storage: {
+      from(bucket: string) {
+        assertEquals(bucket, "job-pdfs");
+        return {
+          upload(path: string, bytes: Uint8Array, opts: any) {
+            uploads.push({ path, upsert: opts?.upsert });
+            if (uploadError || existing.has(path)) return Promise.resolve({ error: { statusCode: "409" } });
+            existing.set(path, bytes);
+            return Promise.resolve({ error: null });
+          },
+          getPublicUrl(path: string) {
+            return { data: { publicUrl: `${STORAGE}/storage/v1/object/public/job-pdfs/${path}` } };
+          },
+        };
+      },
+    },
+  };
+  const read = ((url: string) => {
+    const path = url.split("/job-pdfs/")[1];
+    const bytes = existing.get(path);
+    return Promise.resolve(bytes ? new Response(bytes as BodyInit) : new Response("", { status: 404 }));
+  }) as unknown as typeof fetch;
+  return { sb, uploads, read };
+}
+
+Deno.test("pinning stores the checked bytes once, at their content address, never overwriting", async () => {
+  const shaA = await sha(BYTES_A);
+  const store = fakeStorage(new Map());
+  const first = await pinSealedQuotePdf(store.sb, JOB, { sha256: shaA, bytes: BYTES_A }, store.read);
+  assert(first.ok);
+  assertEquals(first.url, `${STORAGE}/storage/v1/object/public/job-pdfs/sealed-quotes/${JOB}/${shaA}.pdf`);
+  assertEquals(store.uploads, [{ path: `sealed-quotes/${JOB}/${shaA}.pdf`, upsert: false }]);
+  assert(isSealedQuoteCopyPath(`sealed-quotes/${JOB}/${shaA}.pdf`));
+  // A retry finds the same bytes already there: accepted.
+  const again = await pinSealedQuotePdf(store.sb, JOB, { sha256: shaA, bytes: BYTES_A }, store.read);
+  assert(again.ok && again.url === first.url);
+  // Something else sits at the address: refused.
+  const tampered = fakeStorage(new Map([[`sealed-quotes/${JOB}/${shaA}.pdf`, BYTES_B]]));
+  assertEquals((await pinSealedQuotePdf(tampered.sb, JOB, { sha256: shaA, bytes: BYTES_A }, tampered.read)).ok, false);
+  // An upload that fails and leaves nothing: refused.
+  const broken = fakeStorage(new Map(), true);
+  assertEquals((await pinSealedQuotePdf(broken.sb, JOB, { sha256: shaA, bytes: BYTES_A }, broken.read)).ok, false);
+  // Bytes that do not hash to the claimed digest: refused before any write.
+  const lie = fakeStorage(new Map());
+  assertEquals((await pinSealedQuotePdf(lie.sb, JOB, { sha256: shaA, bytes: BYTES_B }, lie.read)).ok, false);
+  assertEquals(lie.uploads, []);
+});
+
+Deno.test("linking a document to its copy only moves the address the guard checked", async () => {
+  const calls: any[] = [];
+  const sb = (rows: number, error: unknown = null) => ({
+    from(table: string) {
+      const call: any = { table, filters: [] as any[] };
+      calls.push(call);
+      const q: any = {
+        update(patch: any) { call.patch = patch; return q; },
+        in(col: string, v: unknown) { call.filters.push(["in", col, v]); return q; },
+        eq(col: string, v: unknown) { call.filters.push(["eq", col, v]); return q; },
+        select() { return Promise.resolve({ data: error ? null : Array.from({ length: rows }, () => ({})), error }); },
+      };
+      return q;
+    },
+  });
+  assert(await linkDocumentsToSealedCopy(sb(1), ["d1"], "https://copy", PDF_A));
+  assertEquals(calls[0].patch, { pdf_url: "https://copy" });
+  assertEquals(calls[0].filters, [["in", "id", ["d1"]], ["eq", "pdf_url", PDF_A]]);
+  assertEquals(await linkDocumentsToSealedCopy(sb(0), ["d1"], "https://copy", PDF_A), false, "the address moved since the check");
+  assertEquals(await linkDocumentsToSealedCopy(sb(1), ["d1", "d2"], "https://copy"), false, "every row or none counts");
+  assertEquals(await linkDocumentsToSealedCopy(sb(0, { code: "x" }), ["d1"], "https://copy"), false);
+  assert(await linkDocumentsToSealedCopy(sb(0), [], "https://copy"));
 });
 
 // ── what is never judged ──

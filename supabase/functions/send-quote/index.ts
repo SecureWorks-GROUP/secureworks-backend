@@ -54,7 +54,10 @@ import {
 } from '../_shared/scope_freeze/owner_price_approval.ts'
 import {
   judgeSealedSend,
+  linkDocumentsToSealedCopy,
+  pinSealedQuotePdf,
   recordSealedSendMiss,
+  sealedCopyFailed,
   sealedSendCaller,
 } from '../_shared/scope_freeze/sealed_send_guard.ts'
 import {
@@ -1086,6 +1089,25 @@ serve(async (req: Request) => {
         const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
         return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
           || jsonResponse(sealedGuard.body, sealedGuard.status, corsHeaders)
+      }
+      // Switch on and passed: the customer link moves to a content-addressed
+      // copy of the exact bytes the guard checked, so a PDF uploaded over the
+      // document's address afterwards never reaches the customer. A copy that
+      // cannot be made, or a document whose PDF address moved since the check,
+      // refuses: nothing is sent.
+      if (sealedGuard.kind === 'pass' && sealedGuard.switch_on && sealedGuard.verified_pdf) {
+        const pinned = await pinSealedQuotePdf(sb, doc.job_id, sealedGuard.verified_pdf)
+        const linked = pinned.ok &&
+          await linkDocumentsToSealedCopy(sb, [document_id], pinned.url, String(doc.pdf_url))
+        if (!pinned.ok || !linked) {
+          const failed = sealedCopyFailed(sealedSource.kind === 'sealed' ? sealedSource.revision_id : null)
+          console.log('[send-quote] sealed copy not made', JSON.stringify({ document_id, job_id: doc.job_id }))
+          await recordSealedSendMiss(sb, failed, sealedGuardRecord)
+          const released = await revertQuoteDocumentSendClaim(sb, document_id, claimed.token, 'pre_send')
+          return claimReleaseFailureResponse(released, corsHeaders, 'Failed to release quote send claim')
+            || jsonResponse(failed.body, failed.status, corsHeaders)
+        }
+        doc.pdf_url = pinned.url
       }
       if (ownerPrice.kind === 'refused') {
         console.log('[send-quote] owner price approval refused', JSON.stringify({
@@ -3271,6 +3293,10 @@ serve(async (req: Request) => {
       // claim, before any document is made or emailed: refused while the
       // switch is on (the finally below releases the claim), recorded and
       // sent as today while it is off (sealed_send_guard.ts).
+      // Switch on and passed: each checked run PDF, pinned at its content
+      // address. The run documents link to the copies and the email attaches
+      // the checked bytes, never the caller's URL (null while the switch is off).
+      let sealedRunPdfs: Map<string, { bytes: Uint8Array, url: string }> | null = null
       {
         const sealedGuardRuns = await judgeSealedSend(sb, {
           path: 'send-runs', job_id: job.id, job_type: job.type, sealed: runsSealedSource, run_pdfs,
@@ -3286,6 +3312,23 @@ serve(async (req: Request) => {
               job_id: job.id, code: sealedGuardRuns.body.code, reason: sealedGuardRuns.reason,
             }))
             return jsonResponse(sealedGuardRuns.body, sealedGuardRuns.status, corsHeaders)
+          }
+        }
+        if (sealedGuardRuns.kind === 'pass' && sealedGuardRuns.switch_on && sealedGuardRuns.verified_run_pdfs) {
+          sealedRunPdfs = new Map()
+          for (const [label, pdf] of sealedGuardRuns.verified_run_pdfs) {
+            const pinned = await pinSealedQuotePdf(sb, job.id, pdf)
+            if (!pinned.ok) {
+              const failed = sealedCopyFailed(runsSealedRevisionId)
+              await recordSealedSendMiss(sb, failed, {
+                job_id: job.id, path: 'send-runs', document_id: null,
+                sender_mode: sendAuthMode, sender_user_id: sendAuthUser?.id ?? null,
+                caller: sealedSendCaller(req, requestBody),
+              })
+              console.log('[send-quote] send-runs sealed copy not made', JSON.stringify({ job_id: job.id }))
+              return jsonResponse(failed.body, failed.status, corsHeaders)
+            }
+            sealedRunPdfs.set(label, { bytes: pdf.bytes, url: pinned.url })
           }
         }
       }
@@ -3388,7 +3431,7 @@ serve(async (req: Request) => {
         const neighbour = run.neighbour_id ? contacts.find((c: any) => !c.is_primary && c.assigned_runs?.includes?.(run.run_label)) : null
 
         // Client document for this run
-        const runPdfUrl = run_pdfs?.[run.run_label] || null
+        const runPdfUrl = sealedRunPdfs?.get(run.run_label)?.url || run_pdfs?.[run.run_label] || null
         const clientKey = { runLabel: normaliseQuoteRunLabel(run.run_label) || '', jobContactId: primaryContact.id || null }
         const clientResolution = resolveSendRunDocument(existingQuoteDocs, clientKey)
         let clientDoc: any = null
@@ -3545,6 +3588,30 @@ serve(async (req: Request) => {
         }
       }
 
+      // Switch on: every run document about to be emailed links to its run's
+      // pinned copy, including one reused from an earlier attempt that still
+      // links to an older upload. A row that cannot be written refuses.
+      if (sealedRunPdfs) {
+        const idsByUrl = new Map<string, string[]>()
+        for (const recipient of Object.values(emailsByRecipient)) {
+          recipient.docs.forEach((d: any, i: number) => {
+            const url = sealedRunPdfs?.get(recipient.runs[i]?.run_label)?.url
+            if (url && typeof d?.id === 'string') idsByUrl.set(url, [...(idsByUrl.get(url) || []), d.id])
+          })
+        }
+        for (const [url, ids] of idsByUrl) {
+          if (!await linkDocumentsToSealedCopy(sb, [...new Set(ids)], url)) {
+            const failed = sealedCopyFailed(runsSealedRevisionId)
+            await recordSealedSendMiss(sb, failed, {
+              job_id: job.id, path: 'send-runs', document_id: null,
+              sender_mode: sendAuthMode, sender_user_id: sendAuthUser?.id ?? null,
+              caller: sealedSendCaller(req, requestBody),
+            })
+            return await abortAfterDocumentClaimRelease(false, jsonResponse(failed.body, failed.status, corsHeaders))
+          }
+        }
+      }
+
       // Documents already published on an earlier call with no owner price
       // decision: move a record a failure left claimed to sent. Never resends.
       if (ownerPriceRuns.kind === 'legacy_unapproved') {
@@ -3564,7 +3631,8 @@ serve(async (req: Request) => {
       // summary + neighbour flag + first-client-doc reference that the
       // post-flip recordReleasedQuoteRevision call needs.
       const firstClientDocForRev = createdDocs[0] || publishedExistingDocs[0] || null
-      const anyRunPdfUrl = (run_pdfs && Object.values(run_pdfs).find((u): u is string => typeof u === 'string' && u.length > 0)) || ''
+      const anyRunPdfUrl = (sealedRunPdfs && [...sealedRunPdfs.values()][0]?.url) ||
+        (run_pdfs && Object.values(run_pdfs).find((u): u is string => typeof u === 'string' && u.length > 0)) || ''
       const runsScopeSummary = runs.map((r: any) => ({
         run_label: String(r.run_label),
         run_name: r.run_name ? String(r.run_name) : null,
@@ -3606,9 +3674,11 @@ serve(async (req: Request) => {
             for (const run of recipient.runs) {
               const pdfUrl = run_pdfs[run.run_label || '']
               const filename = `Quote_${job.job_number || 'SWF'}_${run.run_label || 'RUN'}.pdf`
-              if (ownerPriceRuns.kind === 'approved') {
-                // Only the bytes checked against the approved revision.
-                const checkedBytes = approvedRunPdfs.get(run.run_label || '')
+              if (ownerPriceRuns.kind === 'approved' || sealedRunPdfs) {
+                // Only bytes checked against the revision (owner approval, or
+                // the sealed-send guard with its switch on); never the URL.
+                const checkedBytes = approvedRunPdfs.get(run.run_label || '') ||
+                  sealedRunPdfs?.get(run.run_label || '')?.bytes
                 if (checkedBytes) {
                   attachments.push({ content: quotePdfBase64(checkedBytes), filename })
                 }

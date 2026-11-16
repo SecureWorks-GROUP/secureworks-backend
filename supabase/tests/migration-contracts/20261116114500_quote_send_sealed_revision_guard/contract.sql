@@ -35,21 +35,24 @@ END;
 $$;
 ROLLBACK;
 
-BEGIN;
-INSERT INTO public.jobs (id) VALUES ('00000000-0000-4000-8000-000000000001'), ('00000000-0000-4000-8000-000000000002');
-INSERT INTO public.scope_revisions (id, job_id, revision_number, scope_hash, pricing_hash, status)
-VALUES ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-000000000001', 1, repeat('a', 64), repeat('b', 64), 'frozen');
-INSERT INTO public.job_documents (id, job_id, type, scope_revision_id)
-VALUES ('00000000-0000-4000-8000-0000000000d1', '00000000-0000-4000-8000-000000000001', 'quote', '00000000-0000-4000-8000-0000000000a1');
+-- The document's revision is a real foreign key to scope_revisions that
+-- refuses deleting a revision a document names. Read from the catalogue, so
+-- the case holds on the minimal setup and on the full migration chain alike.
 DO $$
 BEGIN
-  BEGIN
-    INSERT INTO public.job_documents (job_id, type, scope_revision_id)
-    VALUES ('00000000-0000-4000-8000-000000000001', 'quote', '00000000-0000-4000-8000-0000000000ff');
-    RAISE EXCEPTION 'contract: a document named a revision that does not exist';
-  EXCEPTION WHEN foreign_key_violation THEN NULL;
-  END;
+  ASSERT EXISTS (
+    SELECT 1 FROM pg_constraint c
+    JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+    WHERE c.conrelid = 'public.job_documents'::regclass AND c.contype = 'f'
+      AND c.confrelid = 'public.scope_revisions'::regclass
+      AND a.attname = 'scope_revision_id' AND c.confdeltype = 'r'
+  ), 'job_documents.scope_revision_id references scope_revisions, ON DELETE RESTRICT';
+END;
+$$;
 
+BEGIN;
+DO $$
+BEGIN
   INSERT INTO public.quote_send_sealed_revision_misses
     (job_id, path, document_id, named_scope_revision_id, reason, switch_on, sender_mode, sender_user_id,
      caller_origin, caller_referer, body_keys)
@@ -93,7 +96,10 @@ BEGIN
     RAISE EXCEPTION 'contract: an unknown path was stored';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
-  ASSERT (SELECT count(*) FROM public.quote_send_sealed_revision_misses) = 1, 'one miss row kept';
+  INSERT INTO public.quote_send_sealed_revision_misses (job_id, path, reason, switch_on, sender_mode)
+  VALUES ('00000000-0000-4000-8000-000000000001', 'send', 'document_pdf_not_from_revision', true, 'api_key');
+  ASSERT (SELECT count(*) FROM public.quote_send_sealed_revision_misses
+    WHERE job_id = '00000000-0000-4000-8000-000000000001') = 2, 'two miss rows kept';
 END;
 $$;
 ROLLBACK;
