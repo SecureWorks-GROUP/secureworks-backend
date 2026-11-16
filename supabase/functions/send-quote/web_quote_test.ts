@@ -355,6 +355,21 @@ Deno.test('3c: the bar: Ready to get started?, Download PDF, Accept through the 
   assert(accepted.includes('Quote Accepted. Thank you!') && accepted.includes('>Download PDF</a>') && !accepted.includes('class="sw-web-accept"'))
 })
 
+Deno.test('an accepted or declined quote says so above its pages, not after them; no Accept either way', () => {
+  const at = '2026-11-16T00:00:00Z'
+  for (const [d, words] of [[{ accepted_at: at }, 'Quote Accepted. Thank you!'], [{ declined_at: at }, 'Quote Declined']] as const) {
+    for (const saved of [null, cutSavedWebPages(savedPage(PATIO_PAGES))]) {
+      const page = build(doc(d), null, saved)
+      const body = page.slice(page.indexOf('<body'))
+      const note = body.indexOf(words), pages = saved ? body.indexOf('<main data-sw-web-pages>') : body.indexOf('class="sw-pdf-ready"')
+      assert(note > 0 && pages > 0 && note < pages, `${words}: the note comes before the quote's pages (${saved ? 'saved page' : 'PDF pages'})`)
+      assertEquals(body.split(words).length - 1, 1, 'the note once')
+      assert(!body.includes('class="btn btn-accept"') && !body.includes('class="sw-web-accept"'), 'no Accept on an accepted or declined quote')
+    }
+  }
+  assert(!build(doc(), null, null).includes('sw-status-top'), 'an open quote has no note')
+})
+
 Deno.test('A4: the cards under the quote wear the one look: orange Accept, ghost Decline, glass cards, no Apple green', () => {
   const GRAD = 'linear-gradient(180deg,#FF6A3A 0%,#F15A29 58%,#E5501F 100%)'
   const cases = [

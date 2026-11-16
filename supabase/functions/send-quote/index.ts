@@ -4888,13 +4888,14 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
   ${look.backdrop}
   ${look.header}
 
+  <!-- An accepted or declined quote says so first, above its pages, on a phone's first screen -->
+  ${statusHtml ? `<div class="container sw-status-top" style="padding-bottom:0">${statusHtml}</div>` : ''}
+
   <!-- The quote's own pages: the saved web page's (3a) or the PDF's drawn as pictures (3b); never a frame -->
   ${quotePages}
 
   <!-- Actions + chrome -->
   <div class="container">
-    ${statusHtml}
-
     ${!isAccepted && !isDeclined && options ? buildQuoteOptionsCard(options) : ''}
 
     ${!isAccepted && !isDeclined ? `
