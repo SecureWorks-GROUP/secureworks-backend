@@ -30,6 +30,8 @@ SELECT to_regprocedure('public.context_job_story_rest(jsonb,jsonb,timestamptz)')
 -- Unwind the current metadata/review successor before testing an earlier body.
 SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
 \if :has_offjob_placement_successor
+-- (card speed, 20261116090000) replaced the story meta since: its down goes first (a no-op on the older body)
+\ir ../../../rollbacks/20261116090000_context_story_card_speed_down.sql
 \ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
 \endif
 \ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
