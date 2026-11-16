@@ -1,0 +1,1693 @@
+{
+ "about": "A patio revision as the paired Scope Engine PR seals it (review fixture, 16 Nov, synthetic ZZTEST job, catalogue figures): its budget.v1 and order.v1 exactly as sealed. Two lines the reader must not misread: six SolarSpan lengths sealed at 216.27 with a shown unit cost of 36.05 (rounded), and bagged concrete counted in bags on the order row and in each on the budget line (the tool now seals bag on both).",
+ "budget": {
+  "version": "budget.v1",
+  "trade": "patio",
+  "job": {
+   "scope_revision_id": null,
+   "local_revision_id": null,
+   "revision_n": 1,
+   "sell_ex_gst": 2606.82,
+   "gst": 260.68,
+   "total_inc_gst": 2867.5,
+   "scoped_by": {
+    "staff_id": "00000000-0000-4000-8000-0000000000a1",
+    "name": "ZZTEST checker"
+   },
+   "salesperson": {
+    "staff_id": "00000000-0000-4000-8000-0000000000a1",
+    "name": "ZZTEST checker"
+   }
+  },
+  "materials": {
+   "priced_by_line": true,
+   "lines": [
+    {
+     "key": "patio:SL-ae32dfda743e952c",
+     "line_id": "SL-ae32dfda743e952c",
+     "supplier_key": "bd-metals",
+     "supplier": {
+      "id": "bd-metals",
+      "name": "B&D Metals",
+      "code": null
+     },
+     "kind": "item",
+     "description": "100\u00d750\u00d72 RHS",
+     "quantity": 1,
+     "unit": "length",
+     "cut": null,
+     "unit_cost_ex_gst": 7,
+     "line_cost_ex_gst": 7,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-1adef0739ac2cfaa",
+     "line_id": "SL-1adef0739ac2cfaa",
+     "supplier_key": "bd-metals",
+     "supplier": {
+      "id": "bd-metals",
+      "name": "B&D Metals",
+      "code": null
+     },
+     "kind": "item",
+     "description": "150\u00d750\u00d72 RHS",
+     "quantity": 2,
+     "unit": "length",
+     "cut": null,
+     "unit_cost_ex_gst": 4,
+     "line_cost_ex_gst": 8,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-960b8f314bbd83cb",
+     "line_id": "SL-960b8f314bbd83cb",
+     "supplier_key": "bd-metals",
+     "supplier": {
+      "id": "bd-metals",
+      "name": "B&D Metals",
+      "code": null
+     },
+     "kind": "item",
+     "description": "90\u00d790\u00d72 SHS",
+     "quantity": 1,
+     "unit": "length",
+     "cut": null,
+     "unit_cost_ex_gst": 6,
+     "line_cost_ex_gst": 6,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-960b8f314bbd83cb#2",
+     "line_id": "SL-960b8f314bbd83cb",
+     "supplier_key": "bd-metals",
+     "supplier": {
+      "id": "bd-metals",
+      "name": "B&D Metals",
+      "code": null
+     },
+     "kind": "item",
+     "description": "90\u00d790\u00d72 SHS",
+     "quantity": 1,
+     "unit": "length",
+     "cut": null,
+     "unit_cost_ex_gst": 6,
+     "line_cost_ex_gst": 6,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-28f63ccd9594f698",
+     "line_id": "SL-28f63ccd9594f698",
+     "supplier_key": "bd-metals",
+     "supplier": {
+      "id": "bd-metals",
+      "name": "B&D Metals",
+      "code": null
+     },
+     "kind": "item",
+     "description": "3PL cap (past engineering set)",
+     "quantity": 6,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 8,
+     "line_cost_ex_gst": 48,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:bought-b-d-metals-freight/bought-evidence",
+     "line_id": null,
+     "supplier_key": "bd-metals",
+     "supplier": {
+      "id": "bd-metals",
+      "name": "B&D Metals",
+      "code": null
+     },
+     "kind": "delivery",
+     "description": "Freight",
+     "quantity": 1,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 8,
+     "line_cost_ex_gst": 8,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-3b619c57ce3ed5b3",
+     "line_id": "SL-3b619c57ce3ed5b3",
+     "supplier_key": "bondor",
+     "supplier": {
+      "id": "bondor",
+      "name": "Bondor",
+      "code": null
+     },
+     "kind": "item",
+     "description": "S/SPAN SURFMIST / SURFMIST 75MM, Smooth ceiling",
+     "quantity": 6,
+     "unit": "length",
+     "cut": null,
+     "unit_cost_ex_gst": 36.05,
+     "line_cost_ex_gst": 216.27,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:bought-bondor-transbon1/bought-evidence",
+     "line_id": null,
+     "supplier_key": "bondor",
+     "supplier": {
+      "id": "bondor",
+      "name": "Bondor",
+      "code": null
+     },
+     "kind": "delivery",
+     "description": "TRANSPORT BONDOR - HIAB",
+     "quantity": 1,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 7,
+     "line_cost_ex_gst": 7,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-52bc826a5ed189db#bag",
+     "line_id": "SL-52bc826a5ed189db",
+     "supplier_key": "bunnings",
+     "supplier": {
+      "id": "bunnings",
+      "name": "Bunnings",
+      "code": null
+     },
+     "kind": "item",
+     "description": "CONCRETE KWIKSET WESTBUILD 20KG DMKW20: for 3 pad footings 600 x 600 x 650, 26 bags a footing (Westbuild's post guide: 110 x 20 kg bags make 1.0 m3)",
+     "quantity": 78,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 4,
+     "line_cost_ex_gst": 312,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-770b246ec459342e",
+     "line_id": "SL-770b246ec459342e",
+     "supplier_key": "cmi",
+     "supplier": {
+      "id": "cmi",
+      "name": "CMI (Combined Metal Industries)",
+      "code": null
+     },
+     "kind": "item",
+     "description": "CUSTOM L RISER 700H x 200W: CMI riser elbow SW-120-R, 100 \u00d7 50 \u00d7 2.0 RHS, 700 \u00d7 300 outside (leg by arm), mitred at 45\u00b0 and welded at the elbow, both ends open; cut on site to 587 leg \u00d7 165 arm",
+     "quantity": 4,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 8,
+     "line_cost_ex_gst": 32,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:bought-cmi-delstdz1/bought-evidence",
+     "line_id": null,
+     "supplier_key": "cmi",
+     "supplier": {
+      "id": "cmi",
+      "name": "CMI (Combined Metal Industries)",
+      "code": null
+     },
+     "kind": "delivery",
+     "description": "DELIVERY- STANDARD ZONE 1",
+     "quantity": 1,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 9,
+     "line_cost_ex_gst": 9,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-3af7913262685871",
+     "line_id": "SL-3af7913262685871",
+     "supplier_key": "hi-precision-engineering",
+     "supplier": {
+      "id": "hi-precision-engineering",
+      "name": "Hi-Precision Engineering",
+      "code": null
+     },
+     "kind": "item",
+     "description": "Internal bracket 100 x 50 (patio)",
+     "quantity": 4,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 7,
+     "line_cost_ex_gst": 28,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-67a1e25a0b676bb9",
+     "line_id": "SL-67a1e25a0b676bb9",
+     "supplier_key": "hi-precision-engineering",
+     "supplier": {
+      "id": "hi-precision-engineering",
+      "name": "Hi-Precision Engineering",
+      "code": null
+     },
+     "kind": "item",
+     "description": "Rafter bracket 600 mm, M10",
+     "quantity": 6,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 6,
+     "line_cost_ex_gst": 36,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-b95ba5da358132c1",
+     "line_id": "SL-b95ba5da358132c1",
+     "supplier_key": "metroll",
+     "supplier": {
+      "id": "metroll",
+      "name": "Metroll",
+      "code": null
+     },
+     "kind": "item",
+     "description": "Square downpipe 95 x 45 x 1800mm",
+     "quantity": 4,
+     "unit": "length",
+     "cut": null,
+     "unit_cost_ex_gst": 3,
+     "line_cost_ex_gst": 12,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-0fd63e7c6b2cadc9",
+     "line_id": "SL-0fd63e7c6b2cadc9",
+     "supplier_key": "metroll",
+     "supplier": {
+      "id": "metroll",
+      "name": "Metroll",
+      "code": null
+     },
+     "kind": "item",
+     "description": "MONUMENT DOWNPIPE STRAP 95x45 (STRAP95/45MT)",
+     "quantity": 4,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 5,
+     "line_cost_ex_gst": 20,
+     "in_total": true,
+     "cost_from": "typed",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-66071a4267bedac6",
+     "line_id": "SL-66071a4267bedac6",
+     "supplier_key": "metroll",
+     "supplier": {
+      "id": "metroll",
+      "name": "Metroll",
+      "code": null
+     },
+     "kind": "item",
+     "description": "Patioline gutter; family-level match in one Metroll bill line.",
+     "quantity": 1,
+     "unit": "length",
+     "cut": null,
+     "unit_cost_ex_gst": 24,
+     "line_cost_ex_gst": 24,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-4686584e818f4fe8",
+     "line_id": "SL-4686584e818f4fe8",
+     "supplier_key": "metroll",
+     "supplier": {
+      "id": "metroll",
+      "name": "Metroll",
+      "code": null
+     },
+     "kind": "item",
+     "description": "ZINCALUME DOWNPIPE OUTLET 95 x 45",
+     "quantity": 2,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 8,
+     "line_cost_ex_gst": 16,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-58063d222873ea9a",
+     "line_id": "SL-58063d222873ea9a",
+     "supplier_key": "metroll",
+     "supplier": {
+      "id": "metroll",
+      "name": "Metroll",
+      "code": null
+     },
+     "kind": "item",
+     "description": "Metroll Patioline stop end, left hand (also fits Quickfix)",
+     "quantity": 1,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 9,
+     "line_cost_ex_gst": 9,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-ebdfd9019a7e6d83",
+     "line_id": "SL-ebdfd9019a7e6d83",
+     "supplier_key": "metroll",
+     "supplier": {
+      "id": "metroll",
+      "name": "Metroll",
+      "code": null
+     },
+     "kind": "item",
+     "description": "Metroll Patioline stop end, right hand (also fits Quickfix)",
+     "quantity": 1,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 3,
+     "line_cost_ex_gst": 3,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-f4cd2a0b459f8470",
+     "line_id": "SL-f4cd2a0b459f8470",
+     "supplier_key": "metroll",
+     "supplier": {
+      "id": "metroll",
+      "name": "Metroll",
+      "code": null
+     },
+     "kind": "item",
+     "description": "UNIVERSAL CLIP, the Metroll gutter clip for Patioline and Quickfix",
+     "quantity": 6,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 4,
+     "line_cost_ex_gst": 24,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-138be3232a6329ec",
+     "line_id": "SL-138be3232a6329ec",
+     "supplier_key": "metroll",
+     "supplier": {
+      "id": "metroll",
+      "name": "Metroll",
+      "code": null
+     },
+     "kind": "item",
+     "description": "Flashing folded to order from 0.55 COLORBOND, 646 girth, 6 bends",
+     "quantity": 8.3,
+     "unit": "m",
+     "cut": null,
+     "unit_cost_ex_gst": 3,
+     "line_cost_ex_gst": 24.9,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-d5f35b5e680621fb",
+     "line_id": "SL-d5f35b5e680621fb",
+     "supplier_key": "metroll",
+     "supplier": {
+      "id": "metroll",
+      "name": "Metroll",
+      "code": null
+     },
+     "kind": "item",
+     "description": "Flashing folded to order from 0.55 COLORBOND, 240 girth, 5 bends",
+     "quantity": 6,
+     "unit": "m",
+     "cut": null,
+     "unit_cost_ex_gst": 9,
+     "line_cost_ex_gst": 54,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-04935c246d8c518b",
+     "line_id": "SL-04935c246d8c518b",
+     "supplier_key": "metroll",
+     "supplier": {
+      "id": "metroll",
+      "name": "Metroll",
+      "code": null
+     },
+     "kind": "item",
+     "description": "Flashing allowance",
+     "quantity": 6.1,
+     "unit": "m",
+     "cut": null,
+     "unit_cost_ex_gst": 3,
+     "line_cost_ex_gst": 18.3,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:SL-a110e7e817c4be68",
+     "line_id": "SL-a110e7e817c4be68",
+     "supplier_key": "metroll",
+     "supplier": {
+      "id": "metroll",
+      "name": "Metroll",
+      "code": null
+     },
+     "kind": "item",
+     "description": "Flashing folded to order from 0.55 COLORBOND, 115 girth, 1 bend",
+     "quantity": 6.2,
+     "unit": "m",
+     "cut": null,
+     "unit_cost_ex_gst": 5,
+     "line_cost_ex_gst": 31,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:bought-metroll-delivery-charge/bought-evidence",
+     "line_id": null,
+     "supplier_key": "metroll",
+     "supplier": {
+      "id": "metroll",
+      "name": "Metroll",
+      "code": null
+     },
+     "kind": "delivery",
+     "description": "DELIVERY CHARGE",
+     "quantity": 1,
+     "unit": "each",
+     "cut": null,
+     "unit_cost_ex_gst": 4,
+     "line_cost_ex_gst": 4,
+     "in_total": true,
+     "cost_from": "supplier_price",
+     "note_to_supplier": null
+    },
+    {
+     "key": "patio:fixings-allowance",
+     "line_id": null,
+     "supplier_key": "none",
+     "supplier": {
+      "id": null,
+      "name": null,
+      "code": null
+     },
+     "kind": "item",
+     "description": "Fixings allowance (standard)",
+     "quantity": 1,
+     "unit": "job",
+     "cut": null,
+     "unit_cost_ex_gst": 100,
+     "line_cost_ex_gst": 100,
+     "in_total": true,
+     "cost_from": "allowance",
+     "note_to_supplier": null
+    }
+   ],
+   "by_supplier": [
+    {
+     "key": "bd-metals",
+     "supplier": {
+      "id": "bd-metals",
+      "name": "B&D Metals"
+     },
+     "lines_ex_gst": 75,
+     "surcharge_ex_gst": 0,
+     "delivery_ex_gst": 8,
+     "total_ex_gst": 83
+    },
+    {
+     "key": "bondor",
+     "supplier": {
+      "id": "bondor",
+      "name": "Bondor"
+     },
+     "lines_ex_gst": 216.27,
+     "surcharge_ex_gst": 0,
+     "delivery_ex_gst": 7,
+     "total_ex_gst": 223.27
+    },
+    {
+     "key": "bunnings",
+     "supplier": {
+      "id": "bunnings",
+      "name": "Bunnings"
+     },
+     "lines_ex_gst": 312,
+     "surcharge_ex_gst": 0,
+     "delivery_ex_gst": 0,
+     "total_ex_gst": 312
+    },
+    {
+     "key": "cmi",
+     "supplier": {
+      "id": "cmi",
+      "name": "CMI (Combined Metal Industries)"
+     },
+     "lines_ex_gst": 32,
+     "surcharge_ex_gst": 0.62,
+     "delivery_ex_gst": 9,
+     "total_ex_gst": 41.62
+    },
+    {
+     "key": "hi-precision-engineering",
+     "supplier": {
+      "id": "hi-precision-engineering",
+      "name": "Hi-Precision Engineering"
+     },
+     "lines_ex_gst": 64,
+     "surcharge_ex_gst": 0,
+     "delivery_ex_gst": 0,
+     "total_ex_gst": 64
+    },
+    {
+     "key": "metroll",
+     "supplier": {
+      "id": "metroll",
+      "name": "Metroll"
+     },
+     "lines_ex_gst": 236.2,
+     "surcharge_ex_gst": 0,
+     "delivery_ex_gst": 4,
+     "total_ex_gst": 240.2
+    },
+    {
+     "key": "none",
+     "supplier": {
+      "id": null,
+      "name": "No supplier order"
+     },
+     "lines_ex_gst": 100,
+     "surcharge_ex_gst": 0,
+     "delivery_ex_gst": 0,
+     "total_ex_gst": 100
+    }
+   ],
+   "total_ex_gst": 1064.09
+  },
+  "labour": {
+   "pay": "group_work_order",
+   "amount_ex_gst": 400,
+   "hourly": null,
+   "lines": [
+    {
+     "key": "labour:crew",
+     "task": "Build the patio: footings, posts, frame, roof, gutter and flashings",
+     "people": null,
+     "days": null,
+     "day_rate_ex_gst": null,
+     "amount_ex_gst": 400,
+     "in_total": true
+    }
+   ],
+   "work_order_amount_ex_gst": 400
+  },
+  "other": [
+   {
+    "lane": "buffer",
+    "lines": [
+     {
+      "key": "buffer",
+      "description": "Job buffer",
+      "quantity": 1,
+      "unit": "job",
+      "cost_ex_gst": 100,
+      "in_total": true,
+      "paid_to": "office",
+      "supplier": null
+     }
+    ],
+    "total_ex_gst": 100
+   }
+  ],
+  "commission": {
+   "salesperson": {
+    "staff_id": "00000000-0000-4000-8000-0000000000a1",
+    "name": "ZZTEST checker"
+   },
+   "rule_id": "patio_gross_profit_rate",
+   "pct": 8,
+   "basis": "gross_profit",
+   "amount_ex_gst": 83.42
+  },
+  "totals": {
+   "cost_before_commission_ex_gst": 1564.09,
+   "gross_profit_ex_gst": 1042.73,
+   "gross_profit_pct": 40,
+   "commission_ex_gst": 83.42,
+   "profit_after_commission_ex_gst": 959.31,
+   "profit_after_commission_pct": 36.8
+  },
+  "complete": true,
+  "gaps": []
+ },
+ "order": {
+  "version": "order.v1",
+  "rows": [
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-ae32dfda743e952c",
+    "scope_line_id": "SL-ae32dfda743e952c",
+    "kind": "item",
+    "supplier": {
+     "id": "bd-metals",
+     "name": "B&D Metals"
+    },
+    "supplier_code": null,
+    "description": "100\u00d750\u00d72 RHS",
+    "detail": null,
+    "quantity": 1,
+    "unit": "length",
+    "quantity_words": "1 length",
+    "stock_length_mm": 6500,
+    "stock_to_confirm": false,
+    "cuts": [
+     {
+      "length_mm": 6000,
+      "qty": 1
+     }
+    ],
+    "profile": "RHS",
+    "colour": "Surfmist",
+    "finish": null,
+    "gauge_mm": 2,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-1adef0739ac2cfaa",
+    "scope_line_id": "SL-1adef0739ac2cfaa",
+    "kind": "item",
+    "supplier": {
+     "id": "bd-metals",
+     "name": "B&D Metals"
+    },
+    "supplier_code": null,
+    "description": "150\u00d750\u00d72 RHS",
+    "detail": null,
+    "quantity": 2,
+    "unit": "length",
+    "quantity_words": "2 lengths",
+    "stock_length_mm": 6500,
+    "stock_to_confirm": false,
+    "cuts": [
+     {
+      "length_mm": 6000,
+      "qty": 2
+     }
+    ],
+    "profile": "RHS",
+    "colour": "Surfmist",
+    "finish": null,
+    "gauge_mm": 2,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-960b8f314bbd83cb",
+    "scope_line_id": "SL-960b8f314bbd83cb",
+    "kind": "item",
+    "supplier": {
+     "id": "bd-metals",
+     "name": "B&D Metals"
+    },
+    "supplier_code": null,
+    "description": "90\u00d790\u00d72 SHS",
+    "detail": null,
+    "quantity": 1,
+    "unit": "length",
+    "quantity_words": "1 length",
+    "stock_length_mm": 8000,
+    "stock_to_confirm": false,
+    "cuts": [
+     {
+      "length_mm": 3350,
+      "qty": 2
+     }
+    ],
+    "profile": "SHS",
+    "colour": "Surfmist",
+    "finish": null,
+    "gauge_mm": 2,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-960b8f314bbd83cb#2",
+    "scope_line_id": "SL-960b8f314bbd83cb",
+    "kind": "item",
+    "supplier": {
+     "id": "bd-metals",
+     "name": "B&D Metals"
+    },
+    "supplier_code": null,
+    "description": "90\u00d790\u00d72 SHS",
+    "detail": null,
+    "quantity": 1,
+    "unit": "length",
+    "quantity_words": "1 length",
+    "stock_length_mm": 4100,
+    "stock_to_confirm": false,
+    "cuts": [
+     {
+      "length_mm": 3350,
+      "qty": 1
+     }
+    ],
+    "profile": "SHS",
+    "colour": "Surfmist",
+    "finish": null,
+    "gauge_mm": 2,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-28f63ccd9594f698",
+    "scope_line_id": "SL-28f63ccd9594f698",
+    "kind": "item",
+    "supplier": {
+     "id": "bd-metals",
+     "name": "B&D Metals"
+    },
+    "supplier_code": null,
+    "description": "3PL cap",
+    "detail": null,
+    "quantity": 6,
+    "unit": "each",
+    "quantity_words": "6",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": "fabricated:cap:3pl",
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:bought-b-d-metals-freight/bought-evidence",
+    "scope_line_id": null,
+    "kind": "delivery",
+    "supplier": {
+     "id": "bd-metals",
+     "name": "B&D Metals"
+    },
+    "supplier_code": null,
+    "description": "Freight",
+    "detail": null,
+    "quantity": 1,
+    "unit": "each",
+    "quantity_words": "1",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-3b619c57ce3ed5b3",
+    "scope_line_id": "SL-3b619c57ce3ed5b3",
+    "kind": "item",
+    "supplier": {
+     "id": "bondor",
+     "name": "Bondor"
+    },
+    "supplier_code": "SSW075SM",
+    "description": "S/SPAN 75MM, Smooth ceiling",
+    "detail": null,
+    "quantity": 6,
+    "unit": "length",
+    "quantity_words": "6 lengths",
+    "stock_length_mm": 4005,
+    "stock_to_confirm": false,
+    "cuts": [
+     {
+      "length_mm": 4005,
+      "qty": 6
+     }
+    ],
+    "profile": "SolarSpan insulated roof panel",
+    "colour": "Surfmist",
+    "finish": null,
+    "gauge_mm": 0.42,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:bought-bondor-transbon1/bought-evidence",
+    "scope_line_id": null,
+    "kind": "delivery",
+    "supplier": {
+     "id": "bondor",
+     "name": "Bondor"
+    },
+    "supplier_code": "TRANSBON1",
+    "description": "TRANSPORT BONDOR - HIAB",
+    "detail": null,
+    "quantity": 1,
+    "unit": "each",
+    "quantity_words": "1",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-52bc826a5ed189db#bag",
+    "scope_line_id": "SL-52bc826a5ed189db",
+    "kind": "item",
+    "supplier": {
+     "id": "bunnings",
+     "name": "Bunnings"
+    },
+    "supplier_code": "DMKW20",
+    "description": "CONCRETE KWIKSET WESTBUILD 20KG DMKW20: for 3 pad footings 600 x 600 x 650, 26 bags a footing (Westbuild's post guide: 110 x 20 kg bags make 1.0 m3)",
+    "detail": null,
+    "quantity": 78,
+    "unit": "bag",
+    "quantity_words": "78 x 20 kg bags",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": "concrete:rapid-set:bagged",
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-770b246ec459342e",
+    "scope_line_id": "SL-770b246ec459342e",
+    "kind": "item",
+    "supplier": {
+     "id": "cmi",
+     "name": "CMI (Combined Metal Industries)"
+    },
+    "supplier_code": "F-02584",
+    "description": "CUSTOM L RISER 700H x 200W: CMI riser elbow SW-120-R, 100 \u00d7 50 \u00d7 2.0 RHS, 700 \u00d7 300 outside (leg by arm), mitred at 45\u00b0 and welded at the elbow, both ends open. Made to drawing R1 below",
+    "detail": null,
+    "quantity": 4,
+    "unit": "each",
+    "quantity_words": "4",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": "fabricated:l-riser:cmi-sw-120-r",
+    "colour": "Surfmist",
+    "finish": null,
+    "gauge_mm": 2,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:bought-cmi-delstdz1/bought-evidence",
+    "scope_line_id": null,
+    "kind": "delivery",
+    "supplier": {
+     "id": "cmi",
+     "name": "CMI (Combined Metal Industries)"
+    },
+    "supplier_code": "DELSTDZ1",
+    "description": "DELIVERY- STANDARD ZONE 1",
+    "detail": null,
+    "quantity": 1,
+    "unit": "each",
+    "quantity_words": "1",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-3af7913262685871",
+    "scope_line_id": "SL-3af7913262685871",
+    "kind": "item",
+    "supplier": {
+     "id": "hi-precision-engineering",
+     "name": "Hi-Precision Engineering"
+    },
+    "supplier_code": null,
+    "description": "Internal bracket 100 x 50 (patio)",
+    "detail": null,
+    "quantity": 4,
+    "unit": "each",
+    "quantity_words": "4",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": "fabricated:internal-bracket:s2003:100x50",
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-67a1e25a0b676bb9",
+    "scope_line_id": "SL-67a1e25a0b676bb9",
+    "kind": "item",
+    "supplier": {
+     "id": "hi-precision-engineering",
+     "name": "Hi-Precision Engineering"
+    },
+    "supplier_code": null,
+    "description": "Rafter bracket 600 mm, M10",
+    "detail": null,
+    "quantity": 6,
+    "unit": "each",
+    "quantity_words": "6",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": "fabricated:rafter-bracket:s2003:600x50x5",
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-b95ba5da358132c1",
+    "scope_line_id": "SL-b95ba5da358132c1",
+    "kind": "item",
+    "supplier": {
+     "id": "metroll",
+     "name": "Metroll"
+    },
+    "supplier_code": null,
+    "description": "Square downpipe 95 x 45 x 1800mm",
+    "detail": null,
+    "quantity": 4,
+    "unit": "length",
+    "quantity_words": "4 lengths",
+    "stock_length_mm": 1800,
+    "stock_to_confirm": false,
+    "cuts": [
+     {
+      "length_mm": 1800,
+      "qty": 4
+     }
+    ],
+    "profile": "Square downpipe",
+    "colour": "Monument",
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-0fd63e7c6b2cadc9",
+    "scope_line_id": "SL-0fd63e7c6b2cadc9",
+    "kind": "item",
+    "supplier": {
+     "id": "metroll",
+     "name": "Metroll"
+    },
+    "supplier_code": null,
+    "description": "DOWNPIPE STRAP 95x45 (STRAP95/45MT)",
+    "detail": null,
+    "quantity": 4,
+    "unit": "each",
+    "quantity_words": "4",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": "95x45",
+    "colour": "Monument",
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-66071a4267bedac6",
+    "scope_line_id": "SL-66071a4267bedac6",
+    "kind": "item",
+    "supplier": {
+     "id": "metroll",
+     "name": "Metroll"
+    },
+    "supplier_code": null,
+    "description": "Patioline gutter",
+    "detail": null,
+    "quantity": 1,
+    "unit": "length",
+    "quantity_words": "1 length",
+    "stock_length_mm": 6000,
+    "stock_to_confirm": false,
+    "cuts": [
+     {
+      "length_mm": 6000,
+      "qty": 1
+     }
+    ],
+    "profile": "{\"nominalDimensionsMm\":\"125 x 120 x 61\",\"profile\":\"patio gutter\"}",
+    "colour": "Monument",
+    "finish": null,
+    "gauge_mm": 0.4,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-4686584e818f4fe8",
+    "scope_line_id": "SL-4686584e818f4fe8",
+    "kind": "item",
+    "supplier": {
+     "id": "metroll",
+     "name": "Metroll"
+    },
+    "supplier_code": "DPO9545ZA",
+    "description": "ZINCALUME DOWNPIPE OUTLET 95 x 45",
+    "detail": null,
+    "quantity": 2,
+    "unit": "each",
+    "quantity_words": "2",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": "rainwater-accessory:gutter-outlet:95x45",
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-58063d222873ea9a",
+    "scope_line_id": "SL-58063d222873ea9a",
+    "kind": "item",
+    "supplier": {
+     "id": "metroll",
+     "name": "Metroll"
+    },
+    "supplier_code": null,
+    "description": "Metroll Patioline stop end, left hand (also fits Quickfix)",
+    "detail": null,
+    "quantity": 1,
+    "unit": "each",
+    "quantity_words": "1",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": "Patioline (named on the document)",
+    "colour": "Monument",
+    "finish": "Monument",
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-ebdfd9019a7e6d83",
+    "scope_line_id": "SL-ebdfd9019a7e6d83",
+    "kind": "item",
+    "supplier": {
+     "id": "metroll",
+     "name": "Metroll"
+    },
+    "supplier_code": null,
+    "description": "Metroll Patioline stop end, right hand (also fits Quickfix)",
+    "detail": null,
+    "quantity": 1,
+    "unit": "each",
+    "quantity_words": "1",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": "Patioline (named on the document)",
+    "colour": "Monument",
+    "finish": "Monument",
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-f4cd2a0b459f8470",
+    "scope_line_id": "SL-f4cd2a0b459f8470",
+    "kind": "item",
+    "supplier": {
+     "id": "metroll",
+     "name": "Metroll"
+    },
+    "supplier_code": "UC",
+    "description": "UNIVERSAL CLIP, the Metroll gutter clip for Patioline and Quickfix",
+    "detail": null,
+    "quantity": 6,
+    "unit": "each",
+    "quantity_words": "6",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": "rainwater-accessory:gutter-clip:metroll-universal",
+    "colour": null,
+    "finish": "ZINCALUME",
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-138be3232a6329ec",
+    "scope_line_id": "SL-138be3232a6329ec",
+    "kind": "item",
+    "supplier": {
+     "id": "metroll",
+     "name": "Metroll"
+    },
+    "supplier_code": null,
+    "description": "Flashing folded to order from 0.55 COLORBOND, 646 girth, 6 bends",
+    "detail": null,
+    "quantity": 8.3,
+    "unit": "m",
+    "quantity_words": "8.3 m",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [
+     {
+      "length_mm": 4150,
+      "qty": 2
+     }
+    ],
+    "profile": "flashing-profile:bondor-side-barge-75",
+    "colour": "Monument",
+    "finish": null,
+    "gauge_mm": 0.55,
+    "girth_mm": 646,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-d5f35b5e680621fb",
+    "scope_line_id": "SL-d5f35b5e680621fb",
+    "kind": "item",
+    "supplier": {
+     "id": "metroll",
+     "name": "Metroll"
+    },
+    "supplier_code": null,
+    "description": "Flashing folded to order from 0.55 COLORBOND, 240 girth, 5 bends",
+    "detail": null,
+    "quantity": 6,
+    "unit": "m",
+    "quantity_words": "6 m",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [
+     {
+      "length_mm": 6000,
+      "qty": 1
+     }
+    ],
+    "profile": "flashing-profile:bondor-fascia-gutter-end-75-200",
+    "colour": "Monument",
+    "finish": null,
+    "gauge_mm": 0.55,
+    "girth_mm": 240,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-04935c246d8c518b",
+    "scope_line_id": "SL-04935c246d8c518b",
+    "kind": "item",
+    "supplier": {
+     "id": "metroll",
+     "name": "Metroll"
+    },
+    "supplier_code": null,
+    "description": "Flashing allowance: 1.0 mm receiver channel, suits 50 to 200 mm panel, girth 320",
+    "detail": null,
+    "quantity": 6.1,
+    "unit": "m",
+    "quantity_words": "6.1 m",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [
+     {
+      "length_mm": 3050,
+      "qty": 2
+     }
+    ],
+    "profile": "flashing-profile:bondor-receiver-channel",
+    "colour": "Monument",
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": 320,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:SL-a110e7e817c4be68",
+    "scope_line_id": "SL-a110e7e817c4be68",
+    "kind": "item",
+    "supplier": {
+     "id": "metroll",
+     "name": "Metroll"
+    },
+    "supplier_code": null,
+    "description": "Flashing folded to order from 0.55 COLORBOND, 115 girth, 1 bend",
+    "detail": null,
+    "quantity": 6.2,
+    "unit": "m",
+    "quantity_words": "6.2 m",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [
+     {
+      "length_mm": 3100,
+      "qty": 2
+     }
+    ],
+    "profile": "flashing-profile:bondor-apron",
+    "colour": "Monument",
+    "finish": null,
+    "gauge_mm": 0.55,
+    "girth_mm": 115,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:bought-metroll-delivery-charge/bought-evidence",
+    "scope_line_id": null,
+    "kind": "delivery",
+    "supplier": {
+     "id": "metroll",
+     "name": "Metroll"
+    },
+    "supplier_code": null,
+    "description": "DELIVERY CHARGE",
+    "detail": null,
+    "quantity": 1,
+    "unit": "each",
+    "quantity_words": "1",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "line"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:fixing:material-19",
+    "scope_line_id": "SL-d3b84d30dcdffd7c",
+    "kind": "item",
+    "supplier": null,
+    "supplier_code": null,
+    "description": "12-14 \u00d7 20 mm hex head roofing tek with seal",
+    "detail": null,
+    "quantity": 12,
+    "unit": "each",
+    "quantity_words": "12",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "allowance"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:fixing:material-25",
+    "scope_line_id": "SL-44cb8dddec057be3",
+    "kind": "item",
+    "supplier": null,
+    "supplier_code": null,
+    "description": "Class 4 14-14 hex head self-drilling screw, 150 mm",
+    "detail": null,
+    "quantity": 48,
+    "unit": "each",
+    "quantity_words": "48",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "allowance"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:fixing:material-22",
+    "scope_line_id": "SL-ca157bca51c0fba1",
+    "kind": "item",
+    "supplier": null,
+    "supplier_code": null,
+    "description": "3.2 mm aluminium blind rivet",
+    "detail": null,
+    "quantity": 84,
+    "unit": "each",
+    "quantity_words": "84",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "allowance"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:fixing:material-24",
+    "scope_line_id": "SL-6341c77ca11ddece",
+    "kind": "item",
+    "supplier": null,
+    "supplier_code": null,
+    "description": "Blind rivet, 4 mm diameter",
+    "detail": null,
+    "quantity": 22,
+    "unit": "each",
+    "quantity_words": "22",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "allowance"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:fixing:material-18",
+    "scope_line_id": "SL-e2a4b254d795dea4",
+    "kind": "item",
+    "supplier": null,
+    "supplier_code": null,
+    "description": "10-16 \u00d7 16 mm Tek screw",
+    "detail": null,
+    "quantity": 11,
+    "unit": "each",
+    "quantity_words": "11",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "allowance"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:fixing:material-20",
+    "scope_line_id": "SL-3f2b23bf08d72842",
+    "kind": "item",
+    "supplier": null,
+    "supplier_code": null,
+    "description": "12-14 \u00d7 20 mm hex head tek screw, steel to steel",
+    "detail": null,
+    "quantity": 44,
+    "unit": "each",
+    "quantity_words": "44",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "allowance"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:fixing:material-21",
+    "scope_line_id": "SL-d388d08347b5b9bc",
+    "kind": "item",
+    "supplier": null,
+    "supplier_code": null,
+    "description": "14-20 \u00d7 22 mm hex head metal tek",
+    "detail": null,
+    "quantity": 16,
+    "unit": "each",
+    "quantity_words": "16",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "allowance"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:fixing:material-27",
+    "scope_line_id": "SL-489e23c38e321937",
+    "kind": "item",
+    "supplier": null,
+    "supplier_code": null,
+    "description": "M10 bolt, a washer under its head and one under its nut",
+    "detail": null,
+    "quantity": 18,
+    "unit": "each",
+    "quantity_words": "18",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "allowance"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:fixing:material-28",
+    "scope_line_id": "SL-131fd7aefb16c898",
+    "kind": "item",
+    "supplier": null,
+    "supplier_code": null,
+    "description": "M10 flat washer",
+    "detail": null,
+    "quantity": 36,
+    "unit": "each",
+    "quantity_words": "36",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "allowance"
+   },
+   {
+    "cut": null,
+    "variant": null,
+    "option_id": null,
+    "id": "patio:fixing:material-29",
+    "scope_line_id": "SL-323c077a16ac7bd3",
+    "kind": "item",
+    "supplier": null,
+    "supplier_code": null,
+    "description": "M10 hex nut",
+    "detail": null,
+    "quantity": 18,
+    "unit": "each",
+    "quantity_words": "18",
+    "stock_length_mm": null,
+    "stock_to_confirm": false,
+    "cuts": [],
+    "profile": null,
+    "colour": null,
+    "finish": null,
+    "gauge_mm": null,
+    "girth_mm": null,
+    "note_to_supplier": null,
+    "cost_by": "allowance"
+   }
+  ]
+ }
+}
