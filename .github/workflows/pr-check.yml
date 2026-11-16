@@ -332,6 +332,19 @@ jobs:
             supabase/functions/send-quote/index_test.ts \
             supabase/functions/ops-api/quick_quote_test.ts
 
+      # Customer quote links on our own address (CUSTOMER_PUBLIC_HOST): unset is
+      # byte-identical to today, set has no supabase, GitHub or pages.dev link;
+      # the quote-proxy worker's allow-list and its agreement with the backend.
+      - name: Test customer quote links and the quote-proxy worker
+        run: |
+          deno test --allow-env --allow-read \
+            supabase/functions/_shared/customer_public_host_test.ts \
+            supabase/functions/send-quote/customer_links_guard_test.ts \
+            cloudflare/quote-proxy/test/worker_test.js \
+            cloudflare/quote-proxy/test/roundtrip_test.ts
+          deno test --no-check --allow-env --allow-read \
+            supabase/functions/send-quote/customer_model_test.ts
+
       # The owner approves the price (with the exact quote PDFs it covers) and
       # the work order before either counts (20261109040000). The Quick Quote
       # file runs the real handler to the provider with every I/O faked.

@@ -178,6 +178,15 @@ import {
   scopeRevisionHasCustomerModel,
   stampRunDocumentsRelease,
 } from './customer_model.ts'
+import {
+  customerPageSendQuoteBase,
+  customerPaymentConfirmPostUrl,
+  customerPublicHost,
+  customerPublicHostInvalid,
+  customerSendQuoteUrl,
+  customerUrl,
+  customerViewerUrl,
+} from '../_shared/customer_public_host.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -189,6 +198,13 @@ const BASE_URL = Deno.env.get('PUBLIC_URL') || SUPABASE_URL
 const QUOTE_VIEWER_BASE = Deno.env.get('QUOTE_VIEWER_URL') || 'https://secureworks-website.pages.dev/quote.html'
 // The hosted customer 3D page (customer_model.ts); its origin is the only one allowed to read send-quote/model.
 const CUSTOMER_3D_PAGE_URL = customer3dPageUrl(Deno.env.get('CUSTOMER_3D_PAGE_URL'))
+// Customer links on our own address (_shared/customer_public_host.ts). Unset: today's addresses exactly.
+const CUSTOMER_HOST = customerPublicHost(Deno.env.get('CUSTOMER_PUBLIC_HOST'))
+if (customerPublicHostInvalid(Deno.env.get('CUSTOMER_PUBLIC_HOST'))) {
+  console.error('[send-quote] CUSTOMER_PUBLIC_HOST is not a bare https origin; customer links keep today\'s addresses')
+}
+// What customer pages' own scripts call send-quote on.
+const PAGE_SEND_QUOTE_BASE = customerPageSendQuoteBase(CUSTOMER_HOST)
 const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
 let _xeroAppKey: Promise<string> | null = null
@@ -850,7 +866,7 @@ serve(async (req: Request) => {
   // only from the hosted 3D page (customer_model.ts). Before the shared
   // OPTIONS answer, which allows every origin.
   if (path === 'model') {
-    return await handleCustomerModelRequest(req, createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY), CUSTOMER_3D_PAGE_URL)
+    return await handleCustomerModelRequest(req, createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY), CUSTOMER_3D_PAGE_URL, CUSTOMER_HOST)
   }
 
   if (req.method === 'OPTIONS') {
@@ -972,7 +988,7 @@ serve(async (req: Request) => {
       const client_name = providedName || doc.job_contacts?.client_name || doc.jobs?.client_name || 'there'
 
       // Build client view URL
-      const viewUrl = `${BASE_URL}/functions/v1/send-quote/view?token=${doc.share_token}`
+      const viewUrl = `${customerSendQuoteUrl(CUSTOMER_HOST, BASE_URL, 'view')}?token=${doc.share_token}`
 
       // ── Cap 0 quote_revision precompute (Job Release Packet V1) ──
       // Per Codex stop-gate review (task-molbo0d5-4v6crc) we record the
@@ -1080,14 +1096,14 @@ serve(async (req: Request) => {
         // send releases has a saved customer model (customer_model.ts).
         const model3dUrl = sealedSource.kind === 'sealed' && doc.share_token &&
             await scopeRevisionHasCustomerModel(sb, sealedSource.revision_id)
-          ? customer3dLink(CUSTOMER_3D_PAGE_URL, doc.share_token)
+          ? customer3dLink(CUSTOMER_3D_PAGE_URL, doc.share_token, CUSTOMER_HOST, customerModelWhat(doc.jobs?.type))
           : null
         const emailHtml = buildQuoteEmail({
           clientName: client_name,
           viewUrl,
           model3dUrl,
           model3dWhat: customerModelWhat(doc.jobs?.type),
-          pdfUrl: doc.pdf_url,
+          pdfUrl: customerUrl(doc.pdf_url, CUSTOMER_HOST),
           projectType: doc.jobs?.type || 'project',
           suburb: doc.jobs?.site_suburb || '',
           customMessage: message || '',
@@ -1683,7 +1699,7 @@ serve(async (req: Request) => {
             return await htmlResponse(quoteViewRetryPage())
           }
           const liveDoc = currentQuoteForParty(liveDocs || [], supDoc)
-          const currentUrl = liveDoc?.share_token ? `${url.origin}${url.pathname}?token=${liveDoc.share_token}` : null
+          const currentUrl = liveDoc?.share_token ? `${currentQuoteViewBase(url)}?token=${liveDoc.share_token}` : null
           return await htmlResponse(supersededQuotePage(quotePartyGreetingName(supDoc as any), currentUrl))
         }
 
@@ -1726,7 +1742,7 @@ serve(async (req: Request) => {
         const viewDecision = quoteViewDecision(doc, siblings || [])
         if (viewDecision.kind === 'forward') {
           const currentUrl = viewDecision.current.share_token
-            ? `${url.origin}${url.pathname}?token=${viewDecision.current.share_token}`
+            ? `${currentQuoteViewBase(url)}?token=${viewDecision.current.share_token}`
             : null
           return await htmlResponse(supersededQuotePage(quotePartyGreetingName(doc as any), currentUrl))
         }
@@ -1861,7 +1877,7 @@ serve(async (req: Request) => {
           htmlExists = false  // missing / network error / timeout -> safe fallback
         }
         if (htmlExists) {
-          return Response.redirect(`${QUOTE_VIEWER_BASE}?src=${encodeURIComponent(doc.html_url)}`, 302)
+          return Response.redirect(customerViewerUrl(QUOTE_VIEWER_BASE, doc.html_url, CUSTOMER_HOST), 302)
         }
         // Object missing — fall through to the reliable server-rendered client page below
       }
@@ -3497,7 +3513,7 @@ serve(async (req: Request) => {
       const anyNeighbourBound = runs.some((r: any) => !!r.neighbour_id)
 
       // Send emails grouped by recipient
-      const viewBaseUrl = `${SUPABASE_URL}/functions/v1/send-quote/view`
+      const viewBaseUrl = customerSendQuoteUrl(CUSTOMER_HOST, SUPABASE_URL, 'view')
       // Customer 3D view: a third button only when the sealed revision this
       // send releases has a saved customer model (customer_model.ts).
       const runsHasModel = await scopeRevisionHasCustomerModel(sb, runsSealedRevisionId)
@@ -3519,7 +3535,7 @@ serve(async (req: Request) => {
           suburb: job.site_suburb || '',
           runCount: recipient.runs.length,
           runLinks,
-          model3dUrl: model3dToken ? customer3dLink(CUSTOMER_3D_PAGE_URL, model3dToken) : null,
+          model3dUrl: model3dToken ? customer3dLink(CUSTOMER_3D_PAGE_URL, model3dToken, CUSTOMER_HOST, 'fence') : null,
         })
 
         try {
@@ -4128,7 +4144,7 @@ serve(async (req: Request) => {
 
       // Build payment-confirmed URL (for "I've paid" button)
       const paymentConfirmedUrl = share_token
-        ? `${BASE_URL}/functions/v1/send-quote/payment-confirmed?token=${share_token}`
+        ? `${customerSendQuoteUrl(CUSTOMER_HOST, BASE_URL, 'payment-confirmed')}?token=${share_token}`
         : ''
 
       const emailSubject = `Deposit Invoice ${invoice_number || ''} - SecureWorks Group`.trim()
@@ -4501,6 +4517,12 @@ function claimReleaseFailureResponse(
   return jsonResponse({ error: message }, 500, corsHeaders)
 }
 
+// The superseded page's link to the party's current quote: today the address
+// this request came in on; on our host when CUSTOMER_PUBLIC_HOST is set.
+function currentQuoteViewBase(url: URL): string {
+  return CUSTOMER_HOST ? `${CUSTOMER_HOST}/q/view` : `${url.origin}${url.pathname}`
+}
+
 async function htmlResponse(html: string) {
   // Supabase edge runtime forces text/plain on GET text/html responses (CSP sandbox).
   // Workaround: store HTML in public bucket, redirect to a viewer page that fetches it.
@@ -4513,7 +4535,7 @@ async function htmlResponse(html: string) {
     upsert: true,
   })
   const { data: urlData } = sb.storage.from('quote-views').getPublicUrl(fileName)
-  const viewerUrl = `${QUOTE_VIEWER_BASE}?src=${encodeURIComponent(urlData.publicUrl)}`
+  const viewerUrl = customerViewerUrl(QUOTE_VIEWER_BASE, urlData.publicUrl, CUSTOMER_HOST)
   return Response.redirect(viewerUrl, 302)
 }
 
@@ -4758,7 +4780,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
   <!-- PDF presenter (desktop) -->
   ${doc.pdf_url ? `
   <div class="pdf-wrap">
-    <iframe src="${doc.pdf_url}#view=Fit&toolbar=0" class="pdf-frame" title="Quote PDF"></iframe>
+    <iframe src="${customerUrl(doc.pdf_url, CUSTOMER_HOST)}#view=Fit&toolbar=0" class="pdf-frame" title="Quote PDF"></iframe>
   </div>` : '<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.4);">PDF not available</div>'}
 
   <!-- Mobile fallback: premium branded card -->
@@ -4770,8 +4792,8 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
       ${mobClientName ? `<div class="mob-client">${mobClientName}</div>` : ''}
       ${mobPriceStr ? `<div class="mob-price">${mobPriceStr}</div><div class="mob-price-label">inc GST</div>` : '<div style="margin-bottom:8px;"></div>'}
       <div class="mob-divider"></div>
-      <a href="https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(doc.pdf_url)}" target="_blank" class="btn-mob-primary">View Full Quote PDF</a>
-      <a href="${doc.pdf_url}" download class="btn-mob-secondary">Download PDF</a>
+      <a href="https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(customerUrl(doc.pdf_url, CUSTOMER_HOST))}" target="_blank" class="btn-mob-primary">View Full Quote PDF</a>
+      <a href="${customerUrl(doc.pdf_url, CUSTOMER_HOST)}" download class="btn-mob-secondary">Download PDF</a>
       ${!isAccepted && !isDeclined ? `
       <div class="mob-actions-sep">
         ${acceptingLine}
@@ -4898,7 +4920,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
       }
 
       try {
-        var res = await fetch('https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/send-quote/' + action + '?token=${token}', {
+        var res = await fetch('${PAGE_SEND_QUOTE_BASE}' + action + '?token=${token}', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
@@ -5146,7 +5168,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
       if (action === 'decline') {
         var reason = prompt('Could you tell us why? (optional)');
         try {
-          var res = await fetch('https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/send-quote/' + action + '?token=${token}', {
+          var res = await fetch('${PAGE_SEND_QUOTE_BASE}' + action + '?token=${token}', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ reason: reason || '' })
           });
@@ -5156,7 +5178,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
         return;
       }
       try {
-        var res = await fetch('https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/send-quote/' + action + '?token=${token}', {
+        var res = await fetch('${PAGE_SEND_QUOTE_BASE}' + action + '?token=${token}', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
         });
         if (res.ok) {
@@ -5317,8 +5339,8 @@ function buildMultiOptionPage(docs: any[], job: any, activeToken: string): strin
       </div>
       <div style="display:flex;flex-direction:column;gap:8px;">
         ${d.html_url
-          ? `<a href="${QUOTE_VIEWER_BASE}?src=${encodeURIComponent(d.html_url)}" target="_blank" style="display:block;width:100%;padding:12px;text-align:center;background:#F15A29;color:#fff;border-radius:8px;text-decoration:none;font-size:15px;font-weight:600;box-sizing:border-box;">View Quote</a>`
-          : `<a href="${d.pdf_url ? d.pdf_url + '#view=Fit&toolbar=0' : '#'}" target="_blank" style="display:block;width:100%;padding:12px;text-align:center;background:#F15A29;color:#fff;border-radius:8px;text-decoration:none;font-size:15px;font-weight:600;box-sizing:border-box;">View PDF</a>`}
+          ? `<a href="${customerViewerUrl(QUOTE_VIEWER_BASE, d.html_url, CUSTOMER_HOST)}" target="_blank" style="display:block;width:100%;padding:12px;text-align:center;background:#F15A29;color:#fff;border-radius:8px;text-decoration:none;font-size:15px;font-weight:600;box-sizing:border-box;">View Quote</a>`
+          : `<a href="${d.pdf_url ? customerUrl(d.pdf_url, CUSTOMER_HOST) + '#view=Fit&toolbar=0' : '#'}" target="_blank" style="display:block;width:100%;padding:12px;text-align:center;background:#F15A29;color:#fff;border-radius:8px;text-decoration:none;font-size:15px;font-weight:600;box-sizing:border-box;">View PDF</a>`}
         ${!isAccepted && !isDeclined ? `<button onclick="respondToQuote('accept','${d.share_token}')" style="display:block;width:100%;padding:12px;background:#34C759;color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;">Accept This Option</button>` : ''}
       </div>
     </div>`
@@ -5361,7 +5383,7 @@ function buildMultiOptionPage(docs: any[], job: any, activeToken: string): strin
 async function respondToQuote(action, token) {
   if (!confirm('Accept this quote option? The other options will be superseded.')) return;
   try {
-    var res = await fetch('https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/send-quote/accept?token=' + token, {
+    var res = await fetch('${PAGE_SEND_QUOTE_BASE}accept?token=' + token, {
       method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}'
     });
     if (res.ok) {
@@ -5648,7 +5670,7 @@ export function buildNextStepsPage(opts: {
 
   // "I've paid" secondary button — links to payment-confirmed handler
   const paidButton = opts.shareToken
-    ? `<a href="${BASE_URL}/functions/v1/send-quote/payment-confirmed?token=${opts.shareToken}" class="btn btn-paid">I've made my payment - let SecureWorks Group know</a>`
+    ? `<a href="${customerSendQuoteUrl(CUSTOMER_HOST, BASE_URL, 'payment-confirmed')}?token=${opts.shareToken}" class="btn btn-paid">I've made my payment - let SecureWorks Group know</a>`
     : ''
 
   // Bank details section — only shown if configured
@@ -5781,7 +5803,7 @@ export function buildNextStepsPage(opts: {
             await new Promise(function(resolve, reject) {
               reader.onload = function() {
                 var base64 = reader.result.split(',')[1];
-                fetch('https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/send-quote/upload-plans', {
+                fetch('${PAGE_SEND_QUOTE_BASE}upload-plans', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
@@ -6030,7 +6052,7 @@ async function doUpload(files) {
       var b64 = await new Promise(function(res, rej) {
         var r = new FileReader(); r.onload = function() { res(r.result.split(',')[1]); }; r.onerror = rej; r.readAsDataURL(f);
       });
-      var resp = await fetch('https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/send-quote/upload-plans', {
+      var resp = await fetch('${PAGE_SEND_QUOTE_BASE}upload-plans', {
         method: 'POST', headers: {'Content-Type':'application/json'},
         body: JSON.stringify({token:'${token}',job_id:'${jobId}',filename:f.name,content_base64:b64,content_type:f.type})
       });
@@ -6045,7 +6067,7 @@ async function doUpload(files) {
 }
 
 function buildPaymentConfirmPromptPage(token: string): string {
-  const postUrl = `payment-confirmed?token=${encodeURIComponent(token)}`
+  const postUrl = customerPaymentConfirmPostUrl(CUSTOMER_HOST, token)
   return `<!DOCTYPE html>
 <html lang="en">
 <head>

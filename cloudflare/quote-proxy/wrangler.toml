@@ -1,0 +1,23 @@
+# quote-proxy: customer quote links on the company's own address.
+# Source and map: src/index.js. Tests: `node --test test/` or `deno test test/` (no network).
+# No account id and no secrets here: the account comes from whoever runs
+# `wrangler deploy` (or CLOUDFLARE_ACCOUNT_ID), and the worker needs no key.
+name = "quote-proxy"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+workers_dev = false
+
+# Custom domain on the secureworksgroup.app zone: a deploy creates the DNS record
+# and certificate itself. Moving to another domain is this one line plus
+# CUSTOMER_PUBLIC_HOST on the backend.
+[[routes]]
+pattern = "quote.secureworksgroup.app"
+custom_domain = true
+
+# Upstreams (public addresses, not secrets). The defaults in src/index.js match.
+[vars]
+SUPABASE_ORIGIN = "https://kevgrhcjxspbxgovpmfl.supabase.co"
+VIEWER_URL = "https://secureworks-website.pages.dev/quote"
+PATIO_3D_BASE = "https://marninms98-dotcom.github.io/patio/scope-engine/"
+FENCE_3D_BASE = "https://marninms98-dotcom.github.io/patio/scope-engine/"
+THREE_D_FILES = "quote-3d.html"
