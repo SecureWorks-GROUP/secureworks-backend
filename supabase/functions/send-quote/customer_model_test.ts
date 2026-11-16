@@ -488,3 +488,61 @@ Deno.test("migration not applied: no model row can exist, so the route is a plai
   assert(!email.includes("in 3D"))
   assertStringIncludes(email, "View Your Quote")
 })
+
+// ── CUSTOMER_PUBLIC_HOST (_shared/customer_public_host.ts) ──
+
+const PUBLIC_HOST = "https://quote.secureworksgroup.app"
+
+Deno.test("3D link on our host: unset is today's link; set is /3d/<patio|fence>/<page file> with the same token", () => {
+  for (const what of ["patio", "fence"] as const) {
+    assertEquals(customer3dLink(CUSTOMER_3D_PAGE_DEFAULT_URL, "abc", null, what), `${CUSTOMER_3D_PAGE_DEFAULT_URL}?token=abc`)
+    assertEquals(customer3dLink(CUSTOMER_3D_PAGE_DEFAULT_URL, "abc", PUBLIC_HOST, what), `${PUBLIC_HOST}/3d/${what}/quote-3d.html?token=abc`)
+  }
+  assertEquals(customer3dLink("https://secureworks-group.github.io/patio/quote-3d.html", "a b", null), "https://secureworks-group.github.io/patio/quote-3d.html?token=a+b")
+  assertEquals(customer3dLink("https://secureworks-group.github.io/patio/quote-3d.html", "a b", PUBLIC_HOST, "fence"), `${PUBLIC_HOST}/3d/fence/quote-3d.html?token=a+b`)
+})
+
+Deno.test("model route on our host: our origin is answered as well as the hosted page's; unset answers only the page's", async () => {
+  const { tables, files } = await world()
+  const ask = (origin: string | null, host: string | null, method = "GET") =>
+    handleCustomerModelRequest(
+      new Request(`https://x.supabase.co/functions/v1/send-quote/model?token=${TOKEN}`, { method, headers: origin ? { Origin: origin } : {} }),
+      fakeClient(tables, files),
+      CUSTOMER_3D_PAGE_DEFAULT_URL,
+      host,
+    )
+  const GH = "https://marninms98-dotcom.github.io"
+  for (const origin of [PUBLIC_HOST, GH, "https://evil.example", null]) {
+    assertEquals((await ask(origin, null)).headers.get("Access-Control-Allow-Origin"), GH, String(origin))
+  }
+  assertEquals((await ask(PUBLIC_HOST, PUBLIC_HOST)).headers.get("Access-Control-Allow-Origin"), PUBLIC_HOST)
+  assertEquals((await ask(PUBLIC_HOST, PUBLIC_HOST, "OPTIONS")).headers.get("Access-Control-Allow-Origin"), PUBLIC_HOST)
+  assertEquals((await ask(GH, PUBLIC_HOST)).headers.get("Access-Control-Allow-Origin"), GH)
+  assertEquals((await ask("https://evil.example", PUBLIC_HOST)).headers.get("Access-Control-Allow-Origin"), GH)
+  const ok = await ask(PUBLIC_HOST, PUBLIC_HOST)
+  assertEquals(ok.status, 200)
+  assertEquals(ok.headers.get("Vary"), "Origin")
+})
+
+Deno.test("quote emails with links built on our host carry no supabase, GitHub or pages.dev address", () => {
+  const html = buildQuoteEmail({
+    clientName: "Sam",
+    viewUrl: `${PUBLIC_HOST}/q/view?token=abc`,
+    model3dUrl: customer3dLink(CUSTOMER_3D_PAGE_DEFAULT_URL, "abc", PUBLIC_HOST, "patio"),
+    model3dWhat: "patio",
+    pdfUrl: `${PUBLIC_HOST}/files/job-pdfs/org/job/quote_v1.pdf`,
+    projectType: "patio",
+    suburb: "Baldivis",
+    customMessage: "",
+    scoperName: "Team",
+  })
+  assert(!/supabase\.co|github\.io|pages\.dev/.test(html))
+  assertStringIncludes(html, `${PUBLIC_HOST}/3d/patio/quote-3d.html?token=abc`)
+  const runs = buildRunsQuoteEmail({
+    recipientName: "Sam", message: "", suburb: "Baldivis", runCount: 1,
+    runLinks: `<a href="${PUBLIC_HOST}/q/view?token=r1">Run A</a>`,
+    model3dUrl: customer3dLink(CUSTOMER_3D_PAGE_DEFAULT_URL, "r1", PUBLIC_HOST, "fence"),
+  })
+  assert(!/supabase\.co|github\.io|pages\.dev/.test(runs))
+  assertStringIncludes(runs, `${PUBLIC_HOST}/3d/fence/quote-3d.html?token=r1`)
+})

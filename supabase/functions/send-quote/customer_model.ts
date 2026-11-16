@@ -47,11 +47,36 @@ export function customer3dPageOrigin(pageUrl: string): string {
   return new URL(pageUrl).origin
 }
 
-/** The customer's 3D link: the hosted page with the same token as View Your Quote. */
-export function customer3dLink(pageUrl: string, shareToken: string): string {
-  const u = new URL(pageUrl)
+/**
+ * The customer's 3D link: the hosted page with the same token as View Your Quote.
+ * With CUSTOMER_PUBLIC_HOST set (_shared/customer_public_host.ts) the same page
+ * is linked on our host, /3d/<patio|fence>/<page file>, served by the quote-proxy worker.
+ */
+export function customer3dLink(
+  pageUrl: string,
+  shareToken: string,
+  publicHost: string | null = null,
+  what: 'patio' | 'fence' = 'patio',
+): string {
+  const u = publicHost ? new URL(`${publicHost}/3d/${what}/${customer3dPageFile(pageUrl)}`) : new URL(pageUrl)
   u.searchParams.set('token', shareToken)
   return u.href
+}
+
+/** The 3D page's file name (quote-3d.html), the last part of its address. */
+export function customer3dPageFile(pageUrl: string): string {
+  return new URL(pageUrl).pathname.split('/').pop() || 'quote-3d.html'
+}
+
+/**
+ * The origin the model answer names: the request's own when it is the hosted
+ * page's or our public host's, else the hosted page's. Unset host: always the
+ * hosted page's, as before.
+ */
+export function customerModelAllowedOrigin(pageUrl: string, publicHost: string | null, requestOrigin: string | null): string {
+  const pageOrigin = customer3dPageOrigin(pageUrl)
+  if (publicHost && requestOrigin === publicHost) return publicHost
+  return pageOrigin
 }
 
 export function customerModelHeaders(origin: string): Record<string, string> {
@@ -378,8 +403,8 @@ export async function readCustomerModelForToken(sb: any, token: string | null | 
 }
 
 /** The whole model route: GET (and its preflight) with the restricted cross-site headers. */
-export async function handleCustomerModelRequest(req: Request, sb: any, pageUrl: string): Promise<Response> {
-  const headers = customerModelHeaders(customer3dPageOrigin(pageUrl))
+export async function handleCustomerModelRequest(req: Request, sb: any, pageUrl: string, publicHost: string | null = null): Promise<Response> {
+  const headers = customerModelHeaders(customerModelAllowedOrigin(pageUrl, publicHost, req.headers.get('Origin')))
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers })
   if (req.method !== 'GET') return new Response(JSON.stringify({ error: 'method_not_allowed' }), { status: 405, headers })
   const answer = await readCustomerModelForToken(sb, new URL(req.url).searchParams.get('token'))
