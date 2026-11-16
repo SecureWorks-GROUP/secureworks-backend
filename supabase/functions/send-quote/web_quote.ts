@@ -97,6 +97,8 @@ export function acceptHeldScript(o: { stateUrl: string; phone: string }): string
     + 'swHeldSay(SW_HELD.held+" "+SW_HELD.callUs.split("{phone}").join(SW_PHONE));});}'
     + 'function swHoldAccept(){if(swHeld)return;swHeld=true;var po=document.getElementById("processingOverlay");if(po)po.remove();'
     + 'document.querySelectorAll(".btn-accept,.sw-web-accept").forEach(function(x){x.disabled=true;x.hidden=true;x.style.display="none";});'
+    // The bar's "Ready to get started?" never stands beside the checking words (director 21:02).
+    + 'document.querySelectorAll(".sw-web-msg").forEach(function(x){x.hidden=true;x.style.display="none";});'
     + 'var box=document.createElement("div");box.id="swHeld";box.className="sw-held";box.setAttribute("role","status");box.setAttribute("aria-live","polite");'
     + 'var p=document.createElement("p");p.id="swHeldText";box.appendChild(p);'
     + 'var b=document.createElement("button");b.type="button";b.id="swHeldCheck";b.className="sw-web-ghost sw-held-check";b.textContent=SW_HELD.check;b.addEventListener("click",function(){if(!b.disabled)swHeldLook();});box.appendChild(b);'

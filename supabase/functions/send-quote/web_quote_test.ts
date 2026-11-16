@@ -29,7 +29,8 @@ import {
 import type { QuoteOptionsOffer } from './quote_options.ts'
 
 const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-const { _buildClientPageForTest: buildClientPage, buildNextStepsPage } = await import('./index.ts')
+const { _buildClientPageForTest: buildClientPage, buildNextStepsPage, buildQuoteEmail } = await import('./index.ts')
+const { quotePhone, QUOTE_PHONES } = await import('./division_routing.ts')
 
 const PROJECT = 'https://zzproject.supabase.co'
 const HTML = `${PROJECT}/storage/v1/object/public/job-pdfs/zz-org/zz-job/quote_v1_web.html`
@@ -453,11 +454,12 @@ async function visit(o: { state: () => string | null; post: (s: { now: number; c
     return e
   }
   const accepts = [mk('button'), mk('button')]
+  const msgs = [mk('span')]
   const document: any = {
     body: mk('body'), head: mk('head'),
     getElementById: (id: string) => ids[id] ?? null,
     createElement: (tag: string) => mk(tag),
-    querySelectorAll: (q: string) => (q === '.btn-accept,.sw-web-accept' ? accepts : []),
+    querySelectorAll: (q: string) => (q === '.btn-accept,.sw-web-accept' ? accepts : q === '.sw-web-msg' ? msgs : []),
     querySelector: () => null,
     open() { s.written = '' }, write(h: string) { s.written += h }, close() {},
   }
@@ -485,7 +487,7 @@ async function visit(o: { state: () => string | null; post: (s: { now: number; c
   if (o.again) { await page.respondToQuote('accept'); await page.respondToQuote('accept_confirmed'); await settle() }
   if (o.later) s.now += o.later
   if (o.check && ids.swHeldCheck) { ids.swHeldCheck.on.click(); await settle() }
-  return { s, accepts, ids, afterRead }
+  return { s, accepts, msgs, ids, afterRead }
 }
 const FAILURE = /did not|not reach|try again|failed|went wrong|unsuccessful/i
 const held = (phone: string) => ACCEPT_HELD_WORDS.held + ' ' + ACCEPT_HELD_WORDS.callUs.replace('{phone}', phone)
@@ -494,6 +496,7 @@ const FAULTS: Record<string, (c: string) => string> = {
   'Accept offered again when the read shows open': (c) => c.replace('swHeldSay(SW_HELD.held+" "+SW_HELD.callUs.split("{phone}").join(SW_PHONE));', 'swHeld=false;document.querySelectorAll(".btn-accept,.sw-web-accept").forEach(function(x){x.disabled=false;x.hidden=false;});'),
   'a second press sends again': (c) => c.replace("if ((action === 'accept' || action === 'accept_confirmed') && swAcceptHeld()) return;", ''),
   '"Check again" sends the acceptance again': (c) => c.replace('if(!b.disabled)swHeldLook();', 'fetch("zz-accept",{method:"POST"}).catch(function(){});swHeldLook();'),
+  'the bar still says "Ready to get started?" beside the checking words': (c) => c.replace('document.querySelectorAll(".sw-web-msg").forEach(function(x){x.hidden=true;x.style.display="none";});', ''),
   'a server fault alerts a failure': (c) => c.replace("} else if (action === 'accept' && res.status >= 500) {\n          swHoldAccept();\n        }", '}'),
 }
 async function caught(o: Parameters<typeof visit>[0], pass: (r: Awaited<ReturnType<typeof visit>>) => boolean, faults: string[]) {
@@ -502,7 +505,8 @@ async function caught(o: Parameters<typeof visit>[0], pass: (r: Awaited<ReturnTy
   for (const f of faults) assert(!pass(await visit({ ...o, fault: FAULTS[f] })), 'planted fault not caught: ' + f)
 }
 const noFailure = (r: Awaited<ReturnType<typeof visit>>) => !r.s.alerts.length && !r.s.said.some((x) => FAILURE.test(x))
-const neverOffered = (r: Awaited<ReturnType<typeof visit>>) => r.accepts.every((a) => a.disabled && a.hidden)
+// Accept off for the visit, and the bar's "Ready to get started?" gone beside the checking words (director 21:02).
+const neverOffered = (r: Awaited<ReturnType<typeof visit>>) => r.accepts.every((a) => a.disabled && a.hidden) && r.msgs.every((m) => m.hidden && m.style.display === 'none')
 
 Deno.test('accept held: the words are the director\'s (18:59), the same as the scoping tools\' web quote, no long dashes', () => {
   assertEquals(ACCEPT_HELD_WORDS.held, 'We are checking your acceptance. Please do not press Accept again.')
@@ -513,11 +517,11 @@ Deno.test('accept held: the words are the director\'s (18:59), the same as the s
 Deno.test('accept held: money14\'s delayed acceptance (taken after the wait): open read, Accept never offered, the fence phone; a second press sends nothing; Check again later shows it accepted; one POST, no failure words', async () => {
   await caught({ state: () => 'open', post: () => 'pending', again: true, later: 3000, check: true },
     (r) => r.s.posts === 1 && r.afterRead.said === held('0489 267 772') && !r.afterRead.offered && r.afterRead.check && r.s.reloads === 1 && noFailure(r) && neverOffered(r),
-    ['the reviewed behaviour: a lost reply alerts a failure and Accept stays on offer', 'Accept offered again when the read shows open', 'a second press sends again', '"Check again" sends the acceptance again'])
+    ['the reviewed behaviour: a lost reply alerts a failure and Accept stays on offer', 'Accept offered again when the read shows open', 'a second press sends again', '"Check again" sends the acceptance again', 'the bar still says "Ready to get started?" beside the checking words'])
 })
 Deno.test('accept held: a lost reply with nothing taken: the state reads open, Accept is still never offered again in this visit', async () => {
   await caught({ state: () => 'open', post: () => 'lost', again: true, type: 'patio' },
-    (r) => r.s.posts === 1 && neverOffered(r) && r.afterRead.said === held('0489 267 771') && noFailure(r),
+    (r) => r.s.posts === 1 && neverOffered(r) && r.afterRead.said === held('0489 267 774') && noFailure(r),
     ['the reviewed behaviour: a lost reply alerts a failure and Accept stays on offer', 'Accept offered again when the read shows open', 'a second press sends again'])
 })
 Deno.test('accept held: a server fault (5xx) is an outcome not known: no failure alert, Accept off, held', async () => {
@@ -550,3 +554,68 @@ Deno.test('accept held: the page keeps nothing between visits, so a fresh load o
   assert(page.includes('class="sw-web-accept"') && page.includes(".sw-held{"), 'the bar Accept is there on load, and the held box has its look')
   assert(page.includes('.sw-held .sw-held-check::before{content:none}') && acceptHeldScript({ stateUrl: 'x', phone: '1' }).includes('className="sw-web-ghost sw-held-check"'), '"Check again" has no download arrow')
 })
+
+// ── The line a customer calls about the quote (director 21:01) and zoom on a phone (director 21:02) ──
+
+const NUMBERS = /(?:\+?61\s?|0)489\s?267\s?(\d{3})/g
+const linesOn = (html: string) => [...new Set([...html.matchAll(NUMBERS)].map((m) => '0489 267 ' + m[1]))].sort()
+const quoteDocs = (type: string) => {
+  const d = doc({ jobs: { client_name: 'ZZTEST Scope Checker', type } })
+  return {
+    'quote page': build(d, null, null),
+    'quote page with options': build(d, OFFER, cutSavedWebPages(savedPage(PATIO_PAGES))),
+    'Accept checking box': acceptHeldScript({ stateUrl: 'x', phone: quotePhone(type) }),
+    'quote email': buildQuoteEmail({ clientName: 'ZZTEST', viewUrl: 'https://view.invalid', pdfUrl: '', projectType: type, suburb: 'Testville', customMessage: '', scoperName: 'ZZTEST' }) as string,
+    'acceptance page': buildNextStepsPage({ clientName: 'ZZTEST', projectType: type, address: 'ZZTEST 1 Test Lab Way', depositAmount: 100, depositDescription: 'ZZTEST deposit', paymentUrl: '', invoiceNumber: 'ZZ-INV-1', shareToken: 'zz', isPatio: type === 'patio', jobId: 'zz-job' }) as string,
+  }
+}
+Deno.test('quote phone: a patio customer reads 0489 267 774 and a fence customer 0489 267 772 on the quote page, its messages and the quote email, never two numbers for one trade', () => {
+  assertEquals(QUOTE_PHONES, { patio: '0489 267 774', fencing: '0489 267 772', other: '0489 267 771' })
+  for (const [type, want] of [['patio', '0489 267 774'], ['fencing', '0489 267 772']]) {
+    const seen = new Set<string>()
+    for (const [what, html] of Object.entries(quoteDocs(type))) {
+      const on = linesOn(html)
+      assert(on.length <= 1 && on.every((n) => n === want), `${type} ${what}: ${on.join(', ')}`)
+      on.forEach((n) => seen.add(n))
+    }
+    assertEquals([...seen], [want], `${type}: one number across the quote's pages`)
+  }
+})
+Deno.test('quote phone: read from one place: the quote pages and quote email name no number of their own and never the invoice email\'s division phone', () => {
+  const block = src.slice(src.indexOf('export function buildQuoteEmail('), src.indexOf('export function buildInvoiceEmail('))
+  assert(block.length > 10000 && block.includes('quotePhoneHref('), 'the quote block')
+  assert(!block.includes('getDivisionPhone'), 'no division phone in the quote block')
+  assertEquals(block.match(/(?:\+?61\s?|0)489\s?267\s?\d{3}/g) ?? [], [], 'no number written in the quote block')
+})
+
+/** What would stop a customer pinching or double-tapping to zoom: a viewport that fixes the scale, or a touch-action other than auto. */
+function zoomBlocked(html: string): string[] {
+  const why: string[] = []
+  const metas = [...html.matchAll(/<meta\b[^>]*name=["']viewport["'][^>]*>/gi)].map((m) => m[0])
+  if (metas.length !== 1) why.push(`${metas.length} viewport tags`)
+  for (const m of metas) {
+    const content = (/content=["']([^"']*)["']/i.exec(m)?.[1] ?? '').toLowerCase().replace(/\s+/g, '')
+    if (/user-scalable=(no|0)/.test(content)) why.push('user-scalable=no')
+    const max = /maximum-scale=([\d.]+)/.exec(content)
+    if (max && Number(max[1]) < 5) why.push('maximum-scale=' + max[1])
+  }
+  for (const m of html.matchAll(/touch-action\s*:\s*([a-z- ]+)/gi)) if (m[1].trim() !== 'auto') why.push('touch-action:' + m[1].trim())
+  if (/\.preventDefault\(\)[^;]*;?[^}]*(?:touchstart|gesturestart|dblclick)|(?:touchstart|gesturestart|dblclick)[^}]*preventDefault/i.test(html)) why.push('a touch handler that cancels zoom')
+  return why
+}
+Deno.test('zoom: on a phone the customer can pinch and double-tap to zoom every quote page (director 21:02)', () => {
+  for (const type of ['patio', 'fencing']) {
+    const pages = quoteDocs(type)
+    for (const what of ['quote page', 'quote page with options', 'acceptance page'] as const) assertEquals(zoomBlocked(pages[what]), [], `${type} ${what}`)
+    assertEquals(zoomBlocked(build(doc({ jobs: { client_name: 'ZZTEST', type }, html_url: null }), null, null)), [], `${type} quote page drawn from the PDF`)
+  }
+  assertEquals(zoomBlocked(WEB_LOOK_CSS + '<meta name="viewport" content="width=device-width">'), [], 'the look itself')
+  const page = quoteDocs('patio')['quote page']
+  for (const [fault, html] of [
+    ['user-scalable=no', page.replace(/(<meta name="viewport" content=")/, '$1user-scalable=no,')],
+    ['maximum-scale=1', page.replace(/(<meta name="viewport" content=")/, '$1maximum-scale=1,')],
+    ['touch-action:manipulation (no double-tap zoom)', page.replace('</style>', '.pg{touch-action:manipulation}</style>')],
+    ['touch-action:pan-x pan-y (no pinch)', page.replace('</style>', 'body{touch-action:pan-x pan-y}</style>')],
+  ]) assert(zoomBlocked(html).length > 0, 'the check catches ' + fault)
+})
+

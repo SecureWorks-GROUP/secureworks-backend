@@ -177,7 +177,7 @@ import {
 } from './quote_send_auth.ts'
 import { ghlEmailNoteRequest, ghlMoveStageOutcome, quoteAcceptedStageId, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
 import { pdfPagesHtml, quoteLinkStateAnswer, readSavedWebPages, savedPagesHtml, type SavedWebPages, webLook, webPageSaved, WEB_LOOK_CSS, ACCEPT_HELD_CSS, acceptHeldScript } from './web_quote.ts'
-import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailHeading, quoteEmailProjectWords, quoteEmailSubject } from './division_routing.ts'
+import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailHeading, quoteEmailProjectWords, quoteEmailSubject, quotePhone, quotePhoneHref } from './division_routing.ts'
 import {
   customer3dLink,
   customer3dPageUrl,
@@ -222,8 +222,9 @@ const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 
 // Reply-to and division copy (getClientReplyTo, getDivisionInbox): ./division_routing.ts
 
-// ── Division phone (Marnin ruling 2026-06-12): fencing client-facing → 0489 267 772.
-// 0489 267 771 is the admin line — patio + general templates keep 771 as the default. ──
+// ── Division phone for the invoice email only (Marnin ruling 2026-06-12): fencing 0489 267 772, others the admin
+// line 0489 267 771. The quote page, its messages and the quote email read quotePhone (division_routing.ts; the
+// director, 16 Nov 2026: patio 0489 267 774). ──
 function getDivisionPhone(jobType: string | null | undefined): string {
   return jobType === 'fencing' ? '0489 267 772' : '0489 267 771'
 }
@@ -4785,7 +4786,7 @@ export function buildQuoteEmail(opts: {
       <p style="color:#293C46;font-size:14px;font-weight:600;margin:0;">
         ${opts.scoperName}<br>
         <span style="font-weight:400;color:#4C6A7C;">SecureWorks Group</span><br>
-        <a href="${getDivisionPhoneHref(opts.projectType)}" style="color:#F15A29;text-decoration:none;">Call us</a> &nbsp;|&nbsp;
+        <a href="${quotePhoneHref(opts.projectType)}" style="color:#F15A29;text-decoration:none;">Call us</a> &nbsp;|&nbsp;
         <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;text-decoration:none;">Email</a>
       </p>
     </td></tr>
@@ -4926,7 +4927,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
 
     <div class="contact-card">
       <p>Questions about your quote?</p>
-      <a href="${getDivisionPhoneHref(doc.jobs?.type)}">Call Us</a> &nbsp;|&nbsp;
+      <a href="${quotePhoneHref(doc.jobs?.type)}">Call Us</a> &nbsp;|&nbsp;
       <a href="mailto:admin@secureworkswa.com.au">Email</a>
     </div>
 
@@ -4967,7 +4968,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
     }
     // Director 18:59 (scope-engine-v2 PR 1295): an Accept reply lost, cut off or a server fault is an outcome not known:
     // never told as a failure, and Accept is never offered again in this visit (web_quote.ts acceptHeldScript).
-    ${acceptHeldScript({ stateUrl: PAGE_SEND_QUOTE_BASE + 'view?token=' + token + '&state=1', phone: getDivisionPhone(doc.jobs?.type) })}
+    ${acceptHeldScript({ stateUrl: PAGE_SEND_QUOTE_BASE + 'view?token=' + token + '&state=1', phone: quotePhone(doc.jobs?.type) })}
     function doAccept() { respondToQuote('accept_confirmed'); }
     // Ruling 14: the ticked options and their figures, when the quote offers any.
     function acceptConfirmOptionsLine() {
@@ -5251,7 +5252,7 @@ function buildRunQuotePage(doc: any, token: string, run: any, job: any, viewerTy
     <div class="card no-print" style="text-align:center;">
       <p style="color:#4C6A7C;font-size:14px;">Questions about your quote?</p>
       <p style="margin-top:8px;">
-        <a href="${getDivisionPhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
+        <a href="${quotePhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
         <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a>
       </p>
     </div>
@@ -5332,7 +5333,7 @@ export function buildRunAcceptedPage(job: any, run: any, acceptorName: string, o
   </div>
   <div class="card" style="text-align:center;">
     <p style="color:#4C6A7C;font-size:14px;">Questions?</p>
-    <p style="margin-top:8px;"><a href="${getDivisionPhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp; <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a></p>
+    <p style="margin-top:8px;"><a href="${quotePhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp; <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a></p>
   </div>
   <div class="footer">SecureWorks Group Pty Ltd | ABN 64 689 223 416</div>
 </div></body></html>`
@@ -5394,7 +5395,7 @@ function buildWaitingPage(job: any, run: any, acceptorName: string, runLabel: st
   <div class="card" style="text-align:center;">
     <p style="color:#4C6A7C;font-size:14px;">Questions about your fencing project?</p>
     <p style="margin-top:8px;">
-      <a href="${getDivisionPhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call ${getDivisionPhone(job?.type)}</a> &nbsp;|&nbsp;
+      <a href="${quotePhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call ${quotePhone(job?.type)}</a> &nbsp;|&nbsp;
       <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email Us</a>
     </p>
   </div>
@@ -5475,7 +5476,7 @@ function buildMultiOptionPage(docs: any[], job: any, activeToken: string): strin
   ${optionCards}
   <div class="card" style="text-align:center;">
     <p style="color:rgba(255,255,255,0.6);font-size:14px;">Questions? We're here to help.</p>
-    <p style="margin-top:8px;"><a href="${getDivisionPhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp; <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a></p>
+    <p style="margin-top:8px;"><a href="${quotePhoneHref(job?.type)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp; <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a></p>
   </div>
   <div class="footer">SecureWorks Group Pty Ltd | ABN 64 689 223 416</div>
 </div>
@@ -5948,7 +5949,7 @@ export function buildNextStepsPage(opts: {
     <div class="card contact-card">
       <p style="color:#4C6A7C;font-size:14px;">Questions? We're here to help.</p>
       <p style="margin-top:8px;">
-        <a href="${getDivisionPhoneHref(opts.projectType)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
+        <a href="${quotePhoneHref(opts.projectType)}" style="color:#F15A29;font-weight:600;text-decoration:none;">Call Us</a> &nbsp;|&nbsp;
         <a href="mailto:admin@secureworkswa.com.au" style="color:#F15A29;font-weight:600;text-decoration:none;">Email</a>
       </p>
     </div>
