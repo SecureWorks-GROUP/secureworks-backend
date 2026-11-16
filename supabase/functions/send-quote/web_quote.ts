@@ -52,8 +52,9 @@ const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '
 
 // A page card: the saved web page's printed pages (patio .pg, fence .pgwrap) and the PDF's drawn pages.
 const PAGE_CARDS = 'body.sw-web [data-sw-web-pages] .pg,body.sw-web [data-sw-web-pages] .pgwrap,body.sw-web .sw-pdf-page'
-// send-quote's own cards under the pages (options, Accept and Decline, the decline reasons, supporting documents, contact).
-const OWN_CARDS = 'body.sw-web .actions-card,body.sw-web .card,body.sw-web .contact-card,body.sw-web .decline-form'
+// send-quote's own cards under the pages (options, Accept and Decline, the decline reasons, supporting documents, contact,
+// the accepted or declined line) and the accept confirm: glass in the bar's blue, 6 px corners, as wide as the pages.
+const OWN_CARDS = 'body.sw-web .actions-card,body.sw-web .card,body.sw-web .opt-card,body.sw-web .contact-card,body.sw-web .decline-form,body.sw-web .sw-status,body.sw-web .confirm-box'
 const GLASS_FILTER = '-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);'
 
 /** The look's style for send-quote's own quote page. Written after any saved quote's own style, so it wins. */
@@ -76,7 +77,8 @@ export const WEB_LOOK_CSS = [
   '.sw-pdf-ready-btn{display:inline-block;background:linear-gradient(180deg,#FF6A3A 0%,#F15A29 58%,#E5501F 100%);color:#fff;text-decoration:none;font-size:13px;font-weight:800;'
     + 'letter-spacing:1px;text-transform:uppercase;padding:14px 26px;border-radius:2px}',
   'body.sw-web .container{max-width:794px;padding:0 0 40px}',
-  `${OWN_CARDS}{background:${LOOK.glass};border-radius:4px;${GLASS_FILTER}border:1px solid rgba(255,255,255,.16);box-shadow:${LOOK.card}}`,
+  `${OWN_CARDS}{background:${LOOK.glass};border-radius:6px;${GLASS_FILTER}border:1px solid rgba(255,255,255,.16);box-shadow:${LOOK.card}}`,
+  'body.sw-web .container{margin:0 auto}body.sw-web .contact-card a{color:#F15A29}',
   '.sw-web-bar{position:fixed;left:0;right:0;bottom:0;z-index:900;padding:0 0 20px;pointer-events:none}',
   `.sw-web-bar-in{pointer-events:auto;margin:0 auto;width:max-content;max-width:calc(100% - 40px);display:flex;align-items:center;gap:14px;background:${LOOK.glass};`
     + `${GLASS_FILTER}border:1px solid rgba(255,255,255,.16);border-left:4px solid #F15A29;border-radius:6px;`

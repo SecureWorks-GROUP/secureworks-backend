@@ -4691,9 +4691,9 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
 
   let statusHtml = ''
   if (isAccepted) {
-    statusHtml = '<div style="background:rgba(52,199,89,0.15);color:#34C759;padding:14px 20px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:20px;font-size:15px;">Quote Accepted. Thank you! We\'ll be in touch shortly.</div>'
+    statusHtml = '<div class="sw-status" style="color:#fff;border-left:4px solid #F15A29;padding:14px 20px;text-align:center;font-weight:600;margin-bottom:20px;font-size:15px;">Quote Accepted. Thank you! We\'ll be in touch shortly.</div>'
   } else if (isDeclined) {
-    statusHtml = '<div style="background:rgba(255,59,48,0.15);color:#FF6B60;padding:14px 20px;border-radius:8px;text-align:center;font-weight:600;margin-bottom:20px;font-size:15px;">Quote Declined</div>'
+    statusHtml = '<div class="sw-status" style="color:rgba(255,255,255,.85);padding:14px 20px;text-align:center;font-weight:600;margin-bottom:20px;font-size:15px;">Quote Declined</div>'
   }
 
   return `<!DOCTYPE html>
@@ -4712,8 +4712,9 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
     /* ── Accept / Decline ── */
     .actions-card { background: #293C46; border-radius: 12px; padding: 24px 28px; margin-bottom: 16px; }
     .btn { display: inline-block; padding: 13px 32px; border-radius: 8px; font-size: 15px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; text-align: center; width: 100%; margin-bottom: 8px; font-family: inherit; }
-    .btn-accept { background: #34C759; color: #fff; }
-    .btn-decline { background: transparent; color: #FF6B60; border: 1px solid #FF6B60; }
+    /* Ruling 19 addendum A: Accept in the bar's orange, Decline a quiet ghost, both square-cornered like the bar's. */
+    .btn-accept { background: linear-gradient(180deg,#FF6A3A 0%,#F15A29 58%,#E5501F 100%); color: #fff; text-transform: uppercase; font-weight: 800; letter-spacing: 1px; border-radius: 2px; }
+    .btn-decline { background: transparent; color: rgba(255,255,255,.75); border: 1px solid rgba(255,255,255,.28); border-radius: 2px; }
     .accept-sentence { color: #fff; font-size: 15px; font-weight: 600; line-height: 1.45; margin-bottom: 14px; }
     .btn:hover { opacity: 0.88; }
     /* Decline form */
@@ -4813,12 +4814,12 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
       overlay.className = 'confirm-overlay active';
       overlay.innerHTML = '<div class="confirm-box">' +
         '<div style="font-size:36px;margin-bottom:12px">&#9989;</div>' +
-        '<h3 style="color:#293C46;font-size:18px;margin-bottom:8px">Accept this quote?</h3>' +
-        '<p style="color:#4C6A7C;font-size:14px;margin-bottom:20px">This confirms your agreement to the terms and conditions included.</p>' +
+        '<h3 style="color:#fff;font-size:18px;margin-bottom:8px">Accept this quote?</h3>' +
+        '<p style="color:rgba(255,255,255,.75);font-size:14px;margin-bottom:20px">This confirms your agreement to the terms and conditions included.</p>' +
         acceptConfirmOptionsLine() +
         '<div style="display:flex;gap:8px">' +
-        '<button onclick="this.closest(\\'.confirm-overlay\\').remove()" style="flex:1;padding:12px;border:1px solid #ddd;border-radius:8px;background:#fff;font-size:15px;cursor:pointer;font-family:inherit">Cancel</button>' +
-        '<button onclick="this.closest(\\'.confirm-overlay\\').remove();doAccept()" style="flex:1;padding:12px;border:none;border-radius:8px;background:#34C759;color:#fff;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit">Yes, Accept</button>' +
+        '<button onclick="this.closest(\\'.confirm-overlay\\').remove()" style="flex:1;padding:12px;border:1px solid rgba(255,255,255,.28);border-radius:2px;background:transparent;color:rgba(255,255,255,.75);font-size:15px;cursor:pointer;font-family:inherit">Cancel</button>' +
+        '<button onclick="this.closest(\\'.confirm-overlay\\').remove();doAccept()" style="flex:1;padding:12px;border:none;border-radius:2px;background:linear-gradient(180deg,#FF6A3A 0%,#F15A29 58%,#E5501F 100%);color:#fff;font-size:14px;font-weight:800;letter-spacing:1px;text-transform:uppercase;cursor:pointer;font-family:inherit">Yes, Accept</button>' +
         '</div></div>';
       document.body.appendChild(overlay);
     }
@@ -4829,7 +4830,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
       var f = currentOptionFigures();
       if (!f) return '';
       var n = tickedOptionIds().length;
-      return '<p style="color:#293C46;font-size:14px;margin-bottom:20px">' +
+      return '<p style="color:rgba(255,255,255,.85);font-size:14px;margin-bottom:20px">' +
         (n ? (n === 1 ? '1 option added. ' : n + ' options added. ') : 'No options added. ') +
         'Total ' + f.total + ', deposit ' + f.deposit + '.</p>';
     }

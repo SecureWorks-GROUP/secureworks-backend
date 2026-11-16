@@ -318,7 +318,8 @@ Deno.test('3b: a worker that does not match its hash, or does not answer, never 
   for (const o of [{}, { workerStatus: 404 }]) {
     const s = standIn(o)
     s.win.swPdfStart()
-    for (let i = 0; i < 5; i++) await flush()
+    // The digest runs off the main thread: wait for the outcome (up to 3 s), not a fixed number of turns.
+    for (let i = 0; i < 300 && s.ready.hidden; i++) await new Promise((r) => setTimeout(r, 10))
     assertEquals(s.calls.fetched, [PDFJS.worker])
     assertEquals(s.calls.blobs, 0, 'no blob made')
     assertEquals(s.calls.getDocument, 0, 'pdf.js not run')
@@ -345,6 +346,30 @@ Deno.test('3c: the bar: Ready to get started?, Download PDF, Accept through the 
   assertEquals(webLook({ pdf: null, accept: null }).bar, '')
   const accepted = build(doc({ accepted_at: '2026-11-16T00:00:00Z' }), null, null)
   assert(accepted.includes('Quote Accepted. Thank you!') && accepted.includes('>Download PDF</a>') && !accepted.includes('class="sw-web-accept"'))
+})
+
+Deno.test('A4: the cards under the quote wear the one look: orange Accept, ghost Decline, glass cards, no Apple green', () => {
+  const GRAD = 'linear-gradient(180deg,#FF6A3A 0%,#F15A29 58%,#E5501F 100%)'
+  const cases = [
+    build(doc(), OFFER, cutSavedWebPages(savedPage(PATIO_PAGES))),
+    build(doc(), OFFER, null),
+    build(doc({ html_url: null }), null, null),
+    build(doc({ accepted_at: '2026-11-16T00:00:00Z' }), null, null),
+    build(doc({ declined_at: '2026-11-16T00:00:00Z' }), null, null),
+  ]
+  for (const page of cases) {
+    assert(!/#34C759|52,\s*199,\s*89/i.test(page), 'no Apple green anywhere')
+    assert(!/#FF6B60/i.test(page), 'no red Decline')
+    assert(page.includes(`.btn-accept { background: ${GRAD}; color: #fff; text-transform: uppercase; font-weight: 800; letter-spacing: 1px; border-radius: 2px; }`))
+    assert(page.includes('.btn-decline { background: transparent; color: rgba(255,255,255,.75); border: 1px solid rgba(255,255,255,.28); border-radius: 2px; }'))
+    assert(page.includes('body.sw-web .actions-card,body.sw-web .card,body.sw-web .opt-card,body.sw-web .contact-card,body.sw-web .decline-form,body.sw-web .sw-status,body.sw-web .confirm-box{background:rgba(30,46,56,.72);border-radius:6px;-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border:1px solid rgba(255,255,255,.16);'))
+    assert(page.includes('body.sw-web .container{max-width:794px;padding:0 0 40px}'), 'as wide as the pages')
+    assert(page.includes('body.sw-web .contact-card a{color:#F15A29}'), 'Call Us and Email stay orange')
+  }
+  const open = cases[0]
+  assert(open.includes('<button class="btn btn-accept" onclick="respondToQuote(\'accept\')">Accept Quote</button>'), 'the accept button carries the gradient class')
+  assert(open.includes(`border-radius:2px;background:${GRAD};color:#fff;font-size:14px;font-weight:800;letter-spacing:1px;text-transform:uppercase;cursor:pointer;font-family:inherit">Yes, Accept</button>`), 'the confirm\'s Accept too')
+  assert(open.includes('.opt-row input { width: 20px; height: 20px; margin-top: 2px; accent-color: #F15A29;'), 'the option ticks in orange')
 })
 
 Deno.test('wiring: the view route reads the saved pages only for a quote with options, and passes them to the page', () => {
