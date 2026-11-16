@@ -1948,9 +1948,21 @@ serve(async (req: Request) => {
         staffAccept
           ? jsonResponse({ error: message, code }, status === 200 ? 409 : status, corsHeaders)
           : new Response(errorPage(message), { status, headers: acceptHtmlHeaders })
+      // The acceptance_read_failed code means nothing was written: every caller of
+      // retryAccept is a failed read before the first write of this route
+      // (accept_retry_code_test.ts pins each one), so a phone caller may try
+      // again. Never return it once the acceptance has been asked for.
       const retryAccept = () =>
         staffAccept
           ? jsonResponse({ error: 'The quote could not be read just now. Nothing was saved; try again.', code: 'acceptance_read_failed' }, 503, corsHeaders)
+          : new Response(quoteViewRetryPage(), { status: 503, headers: acceptHtmlHeaders })
+      // After the acceptance call: an error, a throw or an unreadable answer
+      // may follow a saved acceptance (a lost reply), so it is not known. The
+      // customer's page is unchanged (a retry of a saved acceptance reads
+      // Already accepted); a phone caller must check the quote before again.
+      const unknownAccept = () =>
+        staffAccept
+          ? jsonResponse({ error: 'It is not known whether this acceptance was saved. Check the quote before trying again.', code: 'acceptance_outcome_unknown' }, 503, corsHeaders)
           : new Response(quoteViewRetryPage(), { status: 503, headers: acceptHtmlHeaders })
 
       let token: string | null = null
@@ -2142,8 +2154,9 @@ serve(async (req: Request) => {
         // Options decide money, so the acceptance and its record are one
         // database transaction (accept_quote_document_with_options): the
         // document is claimed once, and never accepted without the record of
-        // which options, at what total and deposit. A failed write writes
-        // nothing, so the customer's retry completes the same selection.
+        // which options, at what total and deposit. A failed answer is not
+        // known (the call may have committed): never 'nothing was saved'. A
+        // retry is still safe, because the document is claimed once.
         const accepted = await acceptDocumentWithOptions(sb, doc.id, acceptedAt, optionAcceptanceRecord({
           jobId: doc.job_id,
           documentId: doc.id,
@@ -2154,8 +2167,8 @@ serve(async (req: Request) => {
           choice: optionPlan.choice,
         }))
         if (!accepted.ok) {
-          console.error('[accept] option acceptance not written; nothing accepted:', JSON.stringify({ document_id: doc.id, reason: accepted.reason }))
-          return retryAccept()
+          console.error('[accept] option acceptance answer not known:', JSON.stringify({ document_id: doc.id, reason: accepted.reason }))
+          return unknownAccept()
         }
         if (!accepted.claimed) return jsonResponse({ error: 'Already accepted' }, 400, corsHeaders)
       } else {

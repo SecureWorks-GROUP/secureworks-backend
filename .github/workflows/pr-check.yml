@@ -609,6 +609,7 @@ jobs:
             supabase/functions/send-quote/ghl_email_note_test.ts \
             supabase/functions/send-quote/quote_accepted_stage_test.ts \
             supabase/functions/send-quote/acceptance_invoice_outcome_test.ts \
+            supabase/functions/send-quote/accept_retry_code_test.ts \
             supabase/functions/send-quote/accept_page_invoice_words_test.ts \
             supabase/functions/send-quote/division_routing_test.ts \
             supabase/functions/send-quote/customer_address_words_test.ts \
