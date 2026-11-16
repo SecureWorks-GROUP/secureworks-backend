@@ -9,6 +9,8 @@ import {
   checkWorkOrderTotalCap,
   countsAgainstWorkOrder,
   incomingLabourByJob,
+  isHourlyCappedMode,
+  readBilledOnJobs,
   readWorkOrderCapFacts,
   withWorkOrderCaps,
   WorkOrderTotalCapReadError,
@@ -485,4 +487,241 @@ Deno.test("list: a failed read never reads as nothing billed", async () => {
   );
   assertEquals(out.cap_read, "failed");
   assertEquals(out.work_orders[0].cap, null);
+});
+
+// Ruling 17c: a job paid hourly up to the maximum its job budget seals is
+// capped by this same guard, counted the same way, with the same codes.
+const HOURLY = {
+  job_id: JOB,
+  invoice_mode: "hourly",
+  invoice_mode_reason: "hourly_capped",
+  work_order_agreed_ex: null,
+  job_work_order_id: null,
+};
+const limitsOf = (limit: number) => (ids: string[]) =>
+  Promise.resolve(new Map(ids.map((id) => [id, limit] as [string, number])));
+
+Deno.test("hourly: within the sealed maximum passes; one cent over is refused by the work order cap's code, naming the hourly maximum", async () => {
+  // 10 hours at $80 sealed = $800, plus a $100 raise = $900.
+  const client = fakeClient({
+    lines: [
+      line("1", "approved", "labour", 500),
+      line("2", "draft", "labour", 5000),
+      line("3", "approved", "commission", 999),
+    ],
+  });
+  const ok = await checkWorkOrderTotalCap(client, {
+    lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 400 }],
+    loadModes: () => Promise.resolve([HOURLY]),
+    loadHourlyLimits: limitsOf(900),
+    jobRefs: refs,
+  });
+  assertEquals(ok, null, "a draft and commission hold nothing");
+  const over = await checkWorkOrderTotalCap(client, {
+    lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 400.01 }],
+    loadModes: () => Promise.resolve([HOURLY]),
+    loadHourlyLimits: limitsOf(900),
+    jobRefs: refs,
+  });
+  assert(over);
+  assertEquals(over.code, "work_order_total_over_agreed");
+  assertEquals(over.jobs, [{
+    job: "SWF-1",
+    job_id: JOB,
+    most_this_invoice_ex: 400,
+    limit: "hourly_maximum",
+    hourly_maximum_ex: 900,
+  }]);
+  assertStringIncludes(over.message, "paid by the hour, and its work order pays the crew at most $900.00");
+  assertStringIncludes(over.message, "can bill at most $400.00 more");
+  assertStringIncludes(over.message, "A higher hourly rate does not raise");
+  assertEquals(
+    over.message.includes("500"),
+    false,
+    "never names what others billed",
+  );
+});
+
+Deno.test("hourly: a trade's own higher rate never raises the maximum; hours over at any rate are refused by dollars", async () => {
+  // Sealed 10 hours at $80 = $800; the trade bills 9 hours at $95 = $855.
+  const r = await checkWorkOrderTotalCap(fakeClient({ lines: [] }), {
+    lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 9 * 95 }],
+    loadModes: () => Promise.resolve([HOURLY]),
+    loadHourlyLimits: limitsOf(800),
+    jobRefs: refs,
+  });
+  assertEquals(r?.jobs[0].most_this_invoice_ex, 800);
+});
+
+Deno.test("hourly: counted like the work order cap; every line but commission, deductions off, a replaced line excluded", async () => {
+  const client = fakeClient({
+    lines: [
+      line("a", "pushed_to_xero", "labour", 600),
+      line("b", "approved", "travel", 100),
+      line("c", "approved", "crew_work_order_deduction", -50),
+      line("d", "ops-reject", "labour", 900),
+      line("e", "approved", "labour", 200),
+    ],
+  });
+  assertEquals(
+    (await readBilledOnJobs(client, [JOB], { excludeLineIds: ["e"] })).get(JOB),
+    650,
+  );
+  const adjust = await checkWorkOrderTotalCap(client, {
+    lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 250 }],
+    loadModes: () => Promise.resolve([HOURLY]),
+    loadHourlyLimits: limitsOf(900),
+    jobRefs: refs,
+    excludeLineIds: ["e"],
+  });
+  assertEquals(
+    adjust,
+    null,
+    "650 billed plus the changed line's 250 is the 900 maximum",
+  );
+  const raisedDeduction = await checkWorkOrderTotalCap(client, {
+    lines: [{
+      job_id: JOB,
+      line_type: "crew_work_order_deduction",
+      line_total_ex: 0,
+    }],
+    loadModes: () => Promise.resolve([HOURLY]),
+    loadHourlyLimits: limitsOf(650),
+    jobRefs: refs,
+    excludeLineIds: ["c"],
+    force: true,
+  });
+  assertEquals(raisedDeduction?.jobs[0].most_this_invoice_ex, 0);
+});
+
+Deno.test("hourly: an unreadable maximum or billed read refuses as unreadable, never lets labour through", async () => {
+  const lines = [{ job_id: JOB, line_type: "labour", line_total_ex: 1 }];
+  const base = {
+    lines,
+    loadModes: () => Promise.resolve([HOURLY]),
+    jobRefs: refs,
+  };
+  const client = fakeClient({ lines: [] });
+  await assertRejects(
+    () => checkWorkOrderTotalCap(client, base),
+    WorkOrderTotalCapReadError,
+    undefined,
+    "no limit reader",
+  );
+  await assertRejects(
+    () =>
+      checkWorkOrderTotalCap(client, {
+        ...base,
+        loadHourlyLimits: () => Promise.resolve(new Map()),
+      }),
+    WorkOrderTotalCapReadError,
+    undefined,
+    "a capped job with no limit",
+  );
+  for (const bad of [NaN, -1, Infinity]) {
+    await assertRejects(
+      () =>
+        checkWorkOrderTotalCap(client, {
+          ...base,
+          loadHourlyLimits: limitsOf(bad),
+        }),
+      WorkOrderTotalCapReadError,
+    );
+  }
+  await assertRejects(
+    () =>
+      checkWorkOrderTotalCap(client, {
+        ...base,
+        loadHourlyLimits: () =>
+          Promise.reject(new WorkOrderTotalCapReadError()),
+      }),
+    WorkOrderTotalCapReadError,
+  );
+  await assertRejects(
+    () =>
+      checkWorkOrderTotalCap(fakeClient({ fail: "trade_invoice_lines" }), {
+        ...base,
+        loadHourlyLimits: limitsOf(900),
+      }),
+    WorkOrderTotalCapReadError,
+  );
+});
+
+Deno.test("hourly: only the hourly_capped reason is capped; a plain hourly job reads no limit", async () => {
+  assert(isHourlyCappedMode(HOURLY));
+  assert(!isHourlyCappedMode({ ...HOURLY, invoice_mode_reason: "other_job" }));
+  assert(!isHourlyCappedMode({ ...HOURLY, invoice_mode: "work_order" }));
+  let asked = false;
+  const r = await checkWorkOrderTotalCap(fakeClient({ lines: [] }), {
+    lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 99999 }],
+    loadModes: () =>
+      Promise.resolve([{ ...HOURLY, invoice_mode_reason: "other_job" }]),
+    loadHourlyLimits: () => {
+      asked = true;
+      return Promise.resolve(new Map());
+    },
+    jobRefs: refs,
+  });
+  assertEquals([r, asked], [null, false]);
+});
+
+Deno.test("hourly: a work order job beside it keeps the work order's own limit and message", async () => {
+  const JOB2 = "00000000-0000-4000-8000-000000000002";
+  const client = fakeClient({ lines: [] });
+  const r = await checkWorkOrderTotalCap(client, {
+    lines: [
+      { job_id: JOB, line_type: "work order", line_total_ex: 2001 },
+      { job_id: JOB2, line_type: "labour", line_total_ex: 801 },
+    ],
+    loadModes: () => Promise.resolve([MODE, { ...HOURLY, job_id: JOB2 }]),
+    loadHourlyLimits: limitsOf(800),
+    jobRefs: () => Promise.resolve(new Map([[JOB, "SWF-1"], [JOB2, "SWF-2"]])),
+  });
+  assertEquals(r?.jobs, [
+    { job: "SWF-1", job_id: JOB, most_this_invoice_ex: 2000 },
+    {
+      job: "SWF-2",
+      job_id: JOB2,
+      most_this_invoice_ex: 800,
+      limit: "hourly_maximum",
+      hourly_maximum_ex: 800,
+    },
+  ]);
+  assertStringIncludes(
+    r!.message,
+    "Job SWF-1: this invoice can bill at most $2,000.00 on its work order.",
+  );
+  assertStringIncludes(r!.message, "Job SWF-2: it is paid by the hour");
+});
+
+Deno.test("list: an hourly job's row shows the limit the doors refuse by; a failed limit read fails the cap column", async () => {
+  const lines = [line("1", "approved", "labour", 300)];
+  const listing = () => ({
+    work_orders: [{
+      id: WO,
+      job_id: JOB,
+      status: "approved",
+      agreed_labour_ex: 1000,
+    }],
+  });
+  const out = await withWorkOrderCaps(fakeClient({ lines }), listing(), {
+    hourlyLimits: limitsOf(900),
+  });
+  assertEquals(out.work_orders[0].cap, {
+    allowed_ex: 900,
+    billed_ex: 300,
+    remaining_ex: 600,
+    billed_in_full: false,
+    over: false,
+    limit: "hourly_maximum",
+  });
+  const notHourly = await withWorkOrderCaps(fakeClient({ lines }), listing(), {
+    hourlyLimits: () => Promise.resolve(new Map()),
+  });
+  assertEquals(notHourly.work_orders[0].cap.allowed_ex, 1000);
+  assertEquals("limit" in notHourly.work_orders[0].cap, false);
+  const failed = await withWorkOrderCaps(fakeClient({ lines }), listing(), {
+    hourlyLimits: () => Promise.reject(new Error("x")),
+  });
+  assertEquals([failed.cap_read, failed.work_orders[0].cap], ["failed", null]);
 });

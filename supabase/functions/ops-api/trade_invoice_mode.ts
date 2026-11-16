@@ -41,6 +41,7 @@ import {
   extraLineType,
   tradeMayClaimCommission,
 } from "./trade_invoice_extra_job_authority.ts";
+import { JobLabourPayReadError, readHourlyCappedJobs } from "./job_labour_cap.ts";
 
 export type TradeInvoiceMode = "group_work_order" | "work_order" | "hourly";
 
@@ -50,6 +51,7 @@ export type TradeInvoiceModeReason =
   | "patio_job"
   | "fencing_job"
   | "restoration_work_order"
+  | "hourly_capped"
   | "other_job";
 
 export type TradeInvoiceModeDecision = {
@@ -74,12 +76,18 @@ export function decideTradeInvoiceMode(input: {
   jobVertical: string | null | undefined;
   /** A restoration job whose approved job work order has its agreed labour. */
   restorationWorkOrder?: boolean;
+  /** Ruling 17 step 4: the job's newest budget pays the crew hourly up to a
+   *  maximum (read only while job_labour_budget_v1 is on). */
+  hourlyCapped?: boolean;
 }): TradeInvoiceModeDecision {
   if (input.hasLiveGroupWorkOrder) {
     return {
       invoice_mode: "group_work_order",
       invoice_mode_reason: "live_group_work_order",
     };
+  }
+  if (input.hourlyCapped === true) {
+    return { invoice_mode: "hourly", invoice_mode_reason: "hourly_capped" };
   }
   if (input.restorationWorkOrder === true) {
     return { invoice_mode: "work_order", invoice_mode_reason: "restoration_work_order" };
@@ -199,6 +207,7 @@ export async function loadTradeInvoiceJobModes(
           tradeInvoiceType: user.invoice_type,
           jobVertical: vertical,
           restorationWorkOrder: restorationJobIds.includes(id) && agreedByJob.has(id),
+          hourlyCapped: hourlyCappedJobs.has(id),
         }),
         vertical,
       });
@@ -225,6 +234,17 @@ export async function loadTradeInvoiceJobModes(
       }
     }
   };
+  // Ruling 17 step 4: a job whose newest budget pays hourly up to a maximum
+  // is invoiced by the hour (the database holds it to the maximum). Empty
+  // while job_labour_budget_v1 is off; an unreadable budget never reads as
+  // "no budget".
+  let hourlyCappedJobs: Set<string>;
+  try {
+    hourlyCappedJobs = await readHourlyCappedJobs(client, ids.filter((id) => jobs.has(id)));
+  } catch (error) {
+    if (error instanceof JobLabourPayReadError) throw new TradeInvoiceModeReadError("the job budgets");
+    throw error;
+  }
   await readAgreed(restorationJobIds);
   decideAll();
   await readAgreed(

@@ -73,8 +73,10 @@ export type OptionAcceptance =
 /**
  * Marks the document accepted and writes its option record in one database
  * transaction. claimed false: someone else accepted it first (nothing written).
- * ok false: nothing written at all (the migration not applied included), so
- * the acceptance is NOT made and the customer retries the same selection.
+ * ok false: the answer did not say it was written. Once the call was made, an
+ * error, a throw or an unreadable answer may follow a commit (a lost reply),
+ * so the caller treats it as not known, never as nothing written. The
+ * document is claimed once, so a retry of a saved acceptance is refused.
  */
 export async function acceptDocumentWithOptions(
   sb: Sb,

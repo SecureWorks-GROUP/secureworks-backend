@@ -1082,6 +1082,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Dispatch lines carry cost from the job budget
                       # (dispatch_v2_store.ts, ruling 17 step 3).
                       ("20261114020000", "dispatch_line_budget_cost"),
+                      # Ruling 17 step 4: the hourly labour cap, its raises
+                      # and the switch (job_labour_cap.ts).
+                      ("20261114030000", "job_labour_cap"),
                       # TP-08 Xero tie-out: xero_tieout also calls
                       # xero_spend_revenue_monthly (xero_tieout.ts).
                       ("20261115110000", "xero_spend_revenue_tieout"),

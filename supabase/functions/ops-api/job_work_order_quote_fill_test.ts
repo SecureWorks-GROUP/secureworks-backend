@@ -22,6 +22,8 @@ import {
   tradeJobWorkOrderRead,
 } from "./job_work_orders.ts";
 import { tradeJobWorkOrderRedaction } from "./index.ts";
+import { patioBase } from "../_shared/job_budget/budget_examples.ts";
+import { budgetAddedUp } from "../_shared/job_budget/budget_v1.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
 const JOB = "11111111-1111-4111-8111-111111111111";
@@ -1912,4 +1914,79 @@ Deno.test("R14 a record on a superseded (re-quoted) document is not applied", as
   const wo = db.tables.work_orders[0];
   assert(!wo.scope_items.some((l: any) => l.line_key === "option:gate"), "the old quote's option is not on the work order");
   assert(wo.quote_filled_at, "stamped as with no options");
+});
+
+// ── Ruling 17 step 4: the agreed labour comes from the job budget ───────────
+
+function budgetRow(revisionId: string, amount: number | null, version = 1) {
+  // The row as the read's projection returns it (labour:budget->labour).
+  return {
+    id: crypto.randomUUID(),
+    job_id: JOB,
+    scope_revision_id: revisionId,
+    version,
+    labour: {
+      pay: "group_work_order",
+      amount_ex_gst: amount,
+      hourly: null,
+      work_order_amount_ex_gst: amount,
+    },
+  };
+}
+
+const LABOUR_SWITCH_ON = [{ flag_name: "job_labour_budget_v1", enabled: true }];
+
+Deno.test("R17 step 4: with the switch on, the agreed labour is the budget's work order amount for the accepted revision", async () => {
+  const db = baseDb({ feature_flags: LABOUR_SWITCH_ON, job_budgets: [budgetRow(REV_ACCEPTED, 912.4)] });
+  const p = await previewQuoteWorkOrderLines(db, JOB);
+  assertEquals(p.result.agreed_labour_ex, 912.4);
+  const r: any = await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
+  assertEquals(r.work_order.agreed_labour_ex, 912.4);
+});
+
+Deno.test("R17 step 4 (ruling 18 B): an hourly patio with a 250 crew removal fills the work order at 3050, the cap's figure", async () => {
+  const base = patioBase() as any;
+  base.labour.pay = "hourly_capped";
+  base.labour.hourly = { rate_ex_gst: 70, max_hours: 40, max_ex_gst: 2800 };
+  base.other.push({
+    lane: "removal",
+    lines: [{ key: "r1", description: "Remove old patio", quantity: 1, unit: "job", cost_ex_gst: 250, in_total: true, paid_to: "crew", supplier: null }],
+    total_ex_gst: 250,
+  });
+  const added = budgetAddedUp(base);
+  assert(added.ok);
+  const row = { ...budgetRow(REV_ACCEPTED, null), labour: (added.budget as any).labour };
+  const db = baseDb({ feature_flags: LABOUR_SWITCH_ON, job_budgets: [row] });
+  const p = await previewQuoteWorkOrderLines(db, JOB);
+  assertEquals(p.result.agreed_labour_ex, 3050);
+  const r: any = await readJobWorkOrder(db, { jobId: JOB, fillFromQuote: true });
+  assertEquals(r.work_order.agreed_labour_ex, 3050);
+});
+
+Deno.test("R17 step 4: the newest budget decides, and only when it is the accepted revision's", async () => {
+  const older = budgetRow(REV_ACCEPTED, 912.4, 1);
+  const newerOtherRevision = budgetRow(REV_NEWER, 1000, 2);
+  const db = baseDb({ feature_flags: LABOUR_SWITCH_ON, job_budgets: [older, newerOtherRevision] });
+  const p = await previewQuoteWorkOrderLines(db, JOB);
+  assertEquals(p.result.agreed_labour_ex, ACCEPTED_AGREED);
+});
+
+Deno.test("R17 step 4: with the switch off, a stored budget changes nothing", async () => {
+  const db = baseDb({ job_budgets: [budgetRow(REV_ACCEPTED, 912.4)] });
+  const p = await previewQuoteWorkOrderLines(db, JOB);
+  assertEquals(p.result.agreed_labour_ex, ACCEPTED_AGREED);
+  assert(!db.calls.includes("select:job_budgets"));
+});
+
+Deno.test("R17 step 4: an unreadable budget, or one with no amount, holds the draft for the approver", async () => {
+  const unreadable = baseDb({ feature_flags: LABOUR_SWITCH_ON, job_budgets: [budgetRow(REV_ACCEPTED, 912.4)] });
+  unreadable.failOn.add("select:job_budgets");
+  const a = await previewQuoteWorkOrderLines(unreadable, JOB);
+  assert(a.result.needs_review);
+  assert(a.result.lines.every((l: any) => l.flags.includes("job_budget_unreadable")));
+
+  const noAmount = baseDb({ feature_flags: LABOUR_SWITCH_ON, job_budgets: [budgetRow(REV_ACCEPTED, null)] });
+  const b = await previewQuoteWorkOrderLines(noAmount, JOB);
+  assert(b.result.needs_review);
+  assert(b.result.lines.every((l: any) => l.flags.includes("job_budget_labour_missing")));
 });

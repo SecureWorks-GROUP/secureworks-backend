@@ -360,7 +360,7 @@ Deno.test('R14 an option acceptance is claimed with its record in one call, and 
   const call = SRC.indexOf('const accepted = await acceptDocumentWithOptions(sb, doc.id, acceptedAt, optionAcceptanceRecord({', ACCEPT)
   assert(call > ACCEPT)
   const block = SRC.slice(call, call + 1200)
-  assert(block.includes('if (!accepted.ok) {') && block.includes('return retryAccept()'))
+  assert(block.includes('if (!accepted.ok) {') && block.includes('return unknownAccept()'), 'a failed answer is not known')
   assert(block.includes("if (!accepted.claimed) return jsonResponse({ error: 'Already accepted' }"))
   assert(!SRC.includes("'quote_options_record_failed'"), 'no accepted document is ever left without its record')
 })

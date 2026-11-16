@@ -23,6 +23,7 @@
 //   edited by hand is filled without the stamp and waits for the approver.
 
 import { acceptedRevisionForOrders } from "../_shared/expected_costs/accepted_quote_cost_source.ts";
+import { readNewestJobBudgetLabour } from "./job_labour_cap.ts";
 import {
   buildQuoteWorkOrderLines,
   FENCE_LABOUR_COST_ITEM_KEYS,
@@ -43,6 +44,10 @@ import {
 export const QUOTE_OPTION_LINE_MISSING_FLAG = "quote_option_labour_line_missing";
 /** The job's quote option record could not be read. */
 export const QUOTE_OPTIONS_UNREADABLE_FLAG = "quote_options_unreadable";
+/** Ruling 17 step 4: the job budget could not be read, or holds no work order
+ *  amount, so the agreed labour waits for the approver. */
+export const JOB_BUDGET_UNREADABLE_FLAG = "job_budget_unreadable";
+export const JOB_BUDGET_LABOUR_MISSING_FLAG = "job_budget_labour_missing";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -414,6 +419,23 @@ async function linesForJob(
       reviewFlags.push(QUOTE_OPTIONS_UNREADABLE_FLAG);
     } else if (options.state === "taken") {
       reviewFlags.push(...addTakenCrewOptions(result, options.options));
+    }
+  }
+  // Ruling 17 step 4: while job_labour_budget_v1 is on, the agreed labour is
+  // the job budget's work order amount (taken crew options already in it),
+  // read from the budget stored for this same accepted revision. A budget for
+  // another revision, or none, leaves the quote's figure; an unreadable one, or
+  // one with no amount, holds the draft for the approver.
+  if (pricing && quote.scope_revision_id) {
+    const budget = await readNewestJobBudgetLabour(client, String(job.id));
+    if (budget.state === "unreadable") {
+      reviewFlags.push(JOB_BUDGET_UNREADABLE_FLAG);
+    } else if (budget.state === "found" && budget.scope_revision_id === quote.scope_revision_id) {
+      if (budget.work_order_amount_ex_gst === null) {
+        reviewFlags.push(JOB_BUDGET_LABOUR_MISSING_FLAG);
+      } else {
+        result.agreed_labour_ex = budget.work_order_amount_ex_gst;
+      }
     }
   }
   if (reviewFlags.length > 0) result.needs_review = true;

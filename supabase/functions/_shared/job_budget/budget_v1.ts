@@ -343,6 +343,35 @@ function check(raw: unknown): CheckedBudget {
   if (labourAmount !== addAll(lines.filter((l) => l.lane === 'labour' && l.in_total).map((l) => l.cost_cents))) {
     return refuse('labour_amount_mismatch')
   }
+  // Ruling 17 step 4: hourly pay carries its maximum. The rate times the
+  // maximum hours is the maximum dollars, and the tool's own labour lines add
+  // up to it. A crew option the customer took (the options formula's labour
+  // line, key option:<id>) is labour on top: the labour amount, the work order
+  // and the cap are the maximum plus those options, and the rate and hours
+  // are never changed for them. An option whose cost is unknown leaves the
+  // labour amount unknown (a named gap), never a guess. Group pay carries none.
+  if (labour.pay === 'group_work_order') {
+    if (labour.hourly !== null && labour.hourly !== undefined) return refuse('labour_hourly_invalid')
+  } else {
+    const hourly = isRec(labour.hourly) ? labour.hourly : refuse('labour_hourly_invalid')
+    const rate = moneyCents(hourly.rate_ex_gst, 'labour.hourly.rate_ex_gst')
+    const maxHours = hourly.max_hours
+    const max = moneyCents(hourly.max_ex_gst, 'labour.hourly.max_ex_gst')
+    if (rate === null || rate <= 0 || max === null || typeof maxHours !== 'number' || !Number.isFinite(maxHours) ||
+        maxHours <= 0 || Math.abs(maxHours * 100 - Math.round(maxHours * 100)) > 1e-6) {
+      return refuse('labour_hourly_invalid')
+    }
+    const taken = Array.isArray(raw.taken_option_ids) ? (raw.taken_option_ids as string[]) : []
+    const labourLines = lines.filter((l) => l.lane === 'labour' && l.in_total)
+    const own = labourLines.filter((l) => l.option_id === null)
+    const options = labourLines.filter((l) => l.option_id !== null)
+    if (options.some((l) => !taken.includes(l.option_id as string))) return refuse('labour_hourly_mismatch')
+    if (max !== Math.round((rate * Math.round(maxHours * 100)) / 100) ||
+        addAll(own.map((l) => l.cost_cents)) !== max ||
+        labourAmount !== add(max, addAll(options.map((l) => l.cost_cents)))) {
+      return refuse('labour_hourly_mismatch')
+    }
+  }
   const crewOther = lines.filter((l) => l.lane !== 'materials' && l.lane !== 'labour' && l.in_total && l.paid_to === 'crew')
   const workOrder = moneyCents(labour.work_order_amount_ex_gst, 'labour.work_order_amount_ex_gst')
   if (workOrder !== addAll([labourAmount, ...crewOther.map((l) => l.cost_cents)])) return refuse('work_order_amount_mismatch')
