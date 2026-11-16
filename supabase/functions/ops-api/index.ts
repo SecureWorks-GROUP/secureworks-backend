@@ -1664,6 +1664,7 @@ import {
 import { captureTradeReportEvidence } from './trade_report_evidence.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { customerSiteLine } from '../_shared/customer_site_line.ts'
+import { customerPublicHost, customerVariationLink } from '../_shared/customer_public_host.ts'
 import { voidMirrorPatch } from './xero_void_mirror.ts'
 import { readAllOpenInvoices, sentToContactOf, summarizeOpenInvoices } from './invoice_read_truth.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
@@ -64250,7 +64251,8 @@ async function sendVariation(client: any, body: any) {
   if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY not configured')
 
   // Build variation email
-  const viewUrl = `https://secureworks-group.github.io/secureworks-ux/quote-viewer.html?token=${variation.share_token}&type=variation`
+  // Customer link on our own address when CUSTOMER_PUBLIC_HOST is set (_shared/customer_public_host.ts).
+  const viewUrl = customerVariationLink(customerPublicHost(Deno.env.get('CUSTOMER_PUBLIC_HOST')), variation.share_token)
 
   const html = `
     <div style="font-family: Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto;">
