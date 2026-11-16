@@ -3,32 +3,36 @@
 -- One shared read that says, for each supplier bill (Xero ACCPAY), which jobs the job context
 -- points to and why. The costing thread's Bills to place and the job story read the same answer.
 --
--- It names a job only on strong evidence:
---   job_number          our job number in the bill's own words (reference and line descriptions)
---   purchase_order      one of our purchase order numbers in the bill's words
---   dispatch_order_ref  a supplier order reference Dispatch linked to a job, in the bill's words
---   site_address        a job's site address in the bill's words (never one written after
---                       "Bill to" or "Billing address"), with the job's suburb named too or the
---                       address held by one job only
---   supplier_mail       the supplier's own mail carrying this bill's number, already placed on the job
--- A job is named only when it has more strong lanes than any other job. Weak evidence (orders to
--- that supplier, the supplier listed on a job's materials, the supplier's mail on a job without
--- this bill's number) is listed for the person who approves and never picks or breaks a tie.
+-- Strong evidence:
+--   job_number          our job number in the bill's own words (reference and line descriptions);
+--                       never our own sales invoice number
+--   purchase_order      one of our purchase order numbers as a whole token of the bill's words; a
+--                       number of digits only counts only on an order to this bill's supplier
+--   dispatch_order_ref  a supplier order reference Dispatch linked to a job, from this same supplier
+--   site_address        a job's street address in the bill's words (never one written after "Bill to"
+--                       or "Billing address") with the job's suburb named too
+--   supplier_mail       the supplier's own mail that says invoice and carries this bill's exact number
+--                       and no other of the supplier's bills, placed on the job by a reference
+-- A job is named only when it is the one job with any strong evidence; two jobs with strong
+-- evidence are listed as a conflict for the person who approves. Weak evidence (orders to that
+-- supplier, the supplier on a job's materials, the supplier's mail on a job without this bill's
+-- number) is listed and never names a job.
 --
 -- It never reads the answer: not the bill's own job field, tracking or project, not any AI or
 -- bookkeeping placement, not Job Profit. A holding job (metadata.do_not_schedule true) is never a
--- candidate. A draft, voided or deleted bill is never named. p_blind leaves out every lane that
+-- candidate. Only an AUTHORISED, SUBMITTED or PAID bill is named. p_blind leaves out every lane that
 -- reads the bill's own words (for measurement); the mail lane still reads the bill's number.
 --
--- Mail guards: a mail whose subject or body reads as a statement, remittance or payment advice is no
--- evidence; an attachment that does is no evidence. When any part of a mail carries another of the
--- supplier's bills (or another bill being checked in the same call), that part, the mail body and
--- the mail's own placement are no evidence, but another attachment carrying this bill alone still
--- counts on the attachment's own placement. This bill's own number is blanked out before looking
--- for other bills, so its own suffix never trips the guard. Bill numbers with fewer than five
--- significant digits (leading zeros never count) are too short to look for and are reported.
+-- Mail guards: the mail's time is its own (event_at) where known; free mail and invoicing platform
+-- domains never match by domain; a mail or attachment with statement, remittance or payment advice
+-- words is no evidence; when any part of a mail carries another of the supplier's bills (or another
+-- bill checked in the same call), that part, the mail body and the mail's own placement are no
+-- evidence, but another attachment carrying this bill alone still counts. When another of the
+-- supplier's bills reads as the same number (12345A beside 12345B) the mail lane is off for the bill.
+-- Bill numbers with fewer than five significant digits (leading zeros never count) are too short to
+-- look for and are reported.
 --
--- Nothing is written. Every number is in context_job_evidence_policy().
+-- Nothing is written. Every number and list is in context_job_evidence_policy().
 
 DO $guard$
 BEGIN
@@ -61,11 +65,15 @@ AS $$
   'order_days_before', 120,
   'order_days_after', 30,
   'sibling_bill_days', 365,
-  'skip_statuses', jsonb_build_array('DRAFT', 'VOIDED', 'DELETED'),
-  'free_mail_domains', jsonb_build_array(
+  'nameable_statuses', jsonb_build_array('AUTHORISED', 'SUBMITTED', 'PAID'),
+  'mail_placement_methods', jsonb_build_array('direct_job_id', 'ladder_ref', 'manual'),
+  'mail_placement_rules', jsonb_build_array('supplier_order_ref'),
+  'shared_mail_domains', jsonb_build_array(
     'gmail.com', 'googlemail.com', 'outlook.com', 'outlook.com.au', 'hotmail.com', 'hotmail.com.au',
     'live.com', 'live.com.au', 'yahoo.com', 'yahoo.com.au', 'icloud.com', 'me.com', 'bigpond.com',
-    'bigpond.net.au', 'iinet.net.au', 'westnet.com.au', 'optusnet.com.au', 'tpg.com.au'),
+    'bigpond.net.au', 'iinet.net.au', 'westnet.com.au', 'optusnet.com.au', 'tpg.com.au',
+    'xero.com', 'post.xero.com', 'myob.com', 'quickbooks.com', 'intuit.com', 'notification.intuit.com',
+    'reckon.com', 'secureworkswa.com.au'),
   'strong_lanes', jsonb_build_array('job_number', 'purchase_order', 'dispatch_order_ref', 'site_address', 'supplier_mail'),
   'weak_lanes', jsonb_build_array('order_to_supplier', 'supplier_on_job_materials', 'supplier_mail_without_number')
  );
@@ -142,8 +150,11 @@ WITH pol AS (
 ), asked AS (
  SELECT DISTINCT unnest(p_bill_ids) AS id
 ), b AS (
- SELECT x.xero_invoice_id AS id, x.invoice_number, upper(coalesce(x.status, '')) AS status,
+ SELECT x.xero_invoice_id AS id, x.invoice_number, upper(btrim(coalesce(x.status, ''))) AS status,
+        upper(regexp_replace(coalesce(x.invoice_number, ''), '[[:space:]]+', '', 'g')) AS raw_number,
         x.xero_contact_id, lower(btrim(coalesce(x.contact_name, ''))) AS contact,
+        regexp_replace(regexp_replace(regexp_replace(lower(coalesce(x.contact_name, '')), '&', ' ', 'g'),
+          '\m(pty|ltd|limited|proprietary|the|co|company|group)\M', ' ', 'g'), '[^a-z0-9]', '', 'g') AS contact_key,
         coalesce(x.invoice_date, x.created_at::date) AS bill_date,
         public.context_job_evidence_number_key(x.invoice_number) AS nkey,
         coalesce(x.reference, '') || E'\n' || coalesce((
@@ -159,14 +170,17 @@ WITH pol AS (
  FROM public.jobs j
  WHERE lower(coalesce(j.metadata->>'do_not_schedule', '')) <> 'true'
 ), sup AS (
- SELECT DISTINCT b.id AS bill, s.id AS supplier_id, s.email
+ SELECT DISTINCT b.id AS bill, s.id AS supplier_id, s.email,
+        regexp_replace(regexp_replace(regexp_replace(lower(coalesce(s.name, '')), '&', ' ', 'g'),
+          '\m(pty|ltd|limited|proprietary|the|co|company|group)\M', ' ', 'g'), '[^a-z0-9]', '', 'g') AS name_key
  FROM b JOIN public.suppliers s
    ON (b.xero_contact_id IS NOT NULL AND s.xero_contact_id = b.xero_contact_id)
    OR (b.contact <> '' AND lower(btrim(s.name)) = b.contact)
 ), sup_mail AS (
- SELECT DISTINCT sup.bill, public.context_email_key(e) AS key, lower(split_part(btrim(e), '@', 2)) AS domain
+ SELECT DISTINCT sup.bill, public.context_email_key(e) AS key,
+        split_part(public.context_email_key(e), '@', 2) AS domain
  FROM sup CROSS JOIN LATERAL regexp_split_to_table(coalesce(sup.email, ''), '[;,[:space:]]+') AS e
- WHERE e LIKE '%@%'
+ WHERE e LIKE '%@%' AND public.context_email_key(e) IS NOT NULL
 ), sib_num AS (
  -- The supplier's other bills, and the other bills asked about in this call.
  SELECT DISTINCT b.id AS bill, o.invoice_number
@@ -180,32 +194,51 @@ WITH pol AS (
  UNION
  SELECT b.id, b2.invoice_number FROM b JOIN b b2 ON b2.id <> b.id
 ), sib_key AS (
- SELECT DISTINCT k.bill, k.nkey, split_part(k.nkey, '-', 1) AS core
- FROM (SELECT n.bill, public.context_job_evidence_number_key(n.invoice_number) AS nkey FROM sib_num n) k
- JOIN b ON b.id = k.bill
- WHERE k.nkey IS NOT NULL AND k.nkey IS DISTINCT FROM b.nkey
+ SELECT DISTINCT k.bill, k.nkey, split_part(k.nkey, '-', 1) AS core, k.raw_number
+ FROM (SELECT n.bill, public.context_job_evidence_number_key(n.invoice_number) AS nkey,
+              upper(regexp_replace(coalesce(n.invoice_number, ''), '[[:space:]]+', '', 'g')) AS raw_number
+       FROM sib_num n) k
+ WHERE k.nkey IS NOT NULL
+), shared_number AS (
+ -- Another of the supplier's bills reads as the same number (12345A beside 12345B): this bill's
+ -- number cannot be told apart in mail, so the mail lane is off for it.
+ SELECT DISTINCT b.id AS bill
+ FROM b JOIN sib_key k ON k.bill = b.id AND k.nkey = b.nkey AND k.raw_number <> b.raw_number
 ),
 -- Strong lanes that read the bill's own words.
 s_job AS (
+ -- Our job numbers only: never our own sales invoice number, never a purchase order number (its
+ -- own lane), so one number never counts twice.
  SELECT DISTINCT b.id AS bill, r.job_id, 'job_number'::text AS lane, r.token AS detail
  FROM b CROSS JOIN LATERAL public.context_ref_jobs(public.context_job_ref_tokens(b.words)) r
  JOIN live l ON l.id = r.job_id
- -- A purchase order number is the purchase order lane's alone, so one number never counts twice.
- WHERE NOT p_blind AND r.ref_kind <> 'purchase_order'
+ WHERE NOT p_blind AND r.ref_kind = 'job_number'
 ), s_po AS (
+ -- One of our purchase order numbers as a whole token of the bill's words. A number made only of
+ -- digits counts only on a purchase order to this bill's supplier.
  SELECT DISTINCT b.id, po.job_id, 'purchase_order', po.po_number
- FROM b JOIN public.purchase_orders po ON po.job_id IS NOT NULL
+ FROM b CROSS JOIN LATERAL unnest(public.context_job_ref_tokens(b.words)) AS t(tok)
+ JOIN public.purchase_orders po ON po.job_id IS NOT NULL
   AND length(regexp_replace(coalesce(po.po_number, ''), '[^0-9A-Za-z]', '', 'g')) >= 6
-  AND b.words ~* ('(^|[^0-9A-Za-z])' || regexp_replace(po.po_number, '([^0-9A-Za-z ])', '\\\1', 'g') || '($|[^0-9A-Za-z])')
+  AND (upper(btrim(po.po_number)) = t.tok
+       OR regexp_replace(upper(po.po_number), '[^0-9A-Z]', '', 'g') = t.tok)
+  AND (po.po_number ~ '[A-Za-z]'
+       OR (po.supplier_id IS NOT NULL AND po.supplier_id IN (SELECT sup.supplier_id FROM sup WHERE sup.bill = b.id))
+       OR (b.xero_contact_id IS NOT NULL AND po.xero_contact_id = b.xero_contact_id)
+       OR (b.contact <> '' AND lower(btrim(coalesce(po.supplier_name, ''))) = b.contact))
  JOIN live l ON l.id = po.job_id
  WHERE NOT p_blind
 ), s_ref AS (
+ -- A supplier order reference Dispatch linked to a job, only from that same supplier.
  SELECT DISTINCT b.id, r.job_id, 'dispatch_order_ref', r.ref
  FROM b JOIN public.dispatch_v2_supplier_order_refs r ON r.job_id IS NOT NULL
+  AND coalesce(r.supplier_key, '') <> ''
+  AND (r.supplier_key = b.contact_key
+       OR r.supplier_key IN (SELECT sup.name_key FROM sup WHERE sup.bill = b.id AND sup.name_key <> ''))
+  AND public.context_job_evidence_number_key(r.ref) IS NOT NULL
   AND EXISTS (
    SELECT 1 FROM public.context_job_evidence_text_numbers(b.words) t
-   WHERE public.context_job_evidence_number_key(r.ref) IS NOT NULL
-     AND t.core = split_part(public.context_job_evidence_number_key(r.ref), '-', 1)
+   WHERE t.core = split_part(public.context_job_evidence_number_key(r.ref), '-', 1)
      AND (position('-' IN public.context_job_evidence_number_key(r.ref)) = 0
           OR t.full_key = public.context_job_evidence_number_key(r.ref)))
  JOIN live l ON l.id = r.job_id
@@ -222,55 +255,55 @@ s_job AS (
 ), job_keys AS MATERIALIZED (
  SELECT l.id, l.site_suburb, public.context_address_key(l.site_address) AS address_key
  FROM live l
- WHERE l.site_address IS NOT NULL AND EXISTS (SELECT 1 FROM mention)
-), site_jobs AS (
- SELECT mention.bill, mention.words, mention.address_key, jk.id AS job_id, jk.site_suburb
- FROM mention JOIN job_keys jk ON jk.address_key = mention.address_key
+ WHERE l.site_address IS NOT NULL AND nullif(btrim(l.site_suburb), '') IS NOT NULL
+   AND EXISTS (SELECT 1 FROM mention)
 ), s_site AS (
- SELECT DISTINCT sj.bill, sj.job_id, 'site_address', sj.address_key
- FROM site_jobs sj
- WHERE (nullif(btrim(sj.site_suburb), '') IS NOT NULL
-        AND sj.words ~* ('(^|[^A-Za-z])' || regexp_replace(btrim(sj.site_suburb), '([^0-9A-Za-z ])', '\\\1', 'g') || '($|[^A-Za-z])'))
-    OR (SELECT count(DISTINCT sj2.job_id) FROM site_jobs sj2 WHERE sj2.bill = sj.bill AND sj2.address_key = sj.address_key) = 1
+ -- A job's street address with the job's suburb named too.
+ SELECT DISTINCT mention.bill, jk.id, 'site_address', mention.address_key
+ FROM mention JOIN job_keys jk ON jk.address_key = mention.address_key
+ WHERE mention.words ~* ('(^|[^A-Za-z])' || regexp_replace(btrim(jk.site_suburb), '([^0-9A-Za-z ])', '\\\1', 'g') || '($|[^A-Za-z])')
 ),
--- The supplier's mail.
+-- The supplier's mail: matched on the sender first, words read only for the matched mail.
 inbox AS MATERIALIZED (
- SELECT e.id, e.job_id, e.occurred_at,
-        public.context_email_key(coalesce(e.payload->>'email', e.payload->>'from')) AS key,
-        lower(split_part(coalesce(e.payload->>'email', e.payload->>'from', ''), '@', 2)) AS domain,
-        coalesce(e.payload->>'subject', '') || E'\n' || coalesce(e.payload->>'body', e.payload->>'body_preview', '') AS body
+ SELECT e.id, e.job_id, coalesce(e.event_at, e.occurred_at) AS mail_at,
+        (coalesce((pol.p->'mail_placement_methods') ? e.match_method, false)
+         OR coalesce((pol.p->'mail_placement_rules') ? (e.metadata->>'placement_rule'), false)) AS placed_by_reference,
+        public.context_email_key(coalesce(e.payload->>'email', e.payload->>'from')) AS key
  FROM public.business_events e CROSS JOIN pol
  WHERE e.channel = 'email' AND e.event_type LIKE '%.email_in'
    AND e.occurred_at >= ((SELECT min(bill_date) FROM b) - (pol.p->>'mail_days_before')::int)::timestamptz
    AND e.occurred_at <  ((SELECT max(bill_date) FROM b) + (pol.p->>'mail_days_after')::int + 1)::timestamptz
+   AND EXISTS (SELECT 1 FROM sup_mail)
 ), mail AS (
- SELECT DISTINCT b.id AS bill, b.nkey, i.id AS mail_id, i.job_id AS mail_job, i.body
+ SELECT DISTINCT b.id AS bill, b.nkey, i.id AS mail_id, i.job_id AS mail_job, i.placed_by_reference
  FROM b CROSS JOIN pol
  JOIN sup_mail sm ON sm.bill = b.id
  JOIN inbox i
    ON (i.key = sm.key
-       OR (sm.domain <> '' AND NOT (pol.p->'free_mail_domains') ? sm.domain AND i.domain = sm.domain))
-  AND i.occurred_at >= (b.bill_date - (pol.p->>'mail_days_before')::int)::timestamptz
-  AND i.occurred_at <  (b.bill_date + (pol.p->>'mail_days_after')::int + 1)::timestamptz
+       OR (sm.domain <> '' AND NOT (pol.p->'shared_mail_domains') ? sm.domain AND split_part(i.key, '@', 2) = sm.domain))
+  AND i.mail_at >= (b.bill_date - (pol.p->>'mail_days_before')::int)::timestamptz
+  AND i.mail_at <  (b.bill_date + (pol.p->>'mail_days_after')::int + 1)::timestamptz
 ), part AS (
- SELECT m.bill, m.nkey, m.mail_id, m.mail_job, 'body'::text AS kind, m.mail_id::text AS part_id, m.mail_job AS part_job, m.body AS words
- FROM mail m
+ SELECT m.bill, m.nkey, m.mail_id, m.mail_job, m.placed_by_reference, 'body'::text AS kind, m.mail_id::text AS part_id,
+        m.mail_job AS part_job,
+        coalesce(e.payload->>'subject', '') || E'\n' || coalesce(e.payload->>'body', e.payload->>'body_preview', '') AS words
+ FROM mail m JOIN public.business_events e ON e.id = m.mail_id
  UNION ALL
- SELECT m.bill, m.nkey, m.mail_id, m.mail_job, 'attachment', d.id::text, d.job_id, coalesce(d.payload->>'text', '')
+ SELECT m.bill, m.nkey, m.mail_id, m.mail_job, m.placed_by_reference, 'attachment', d.id::text, d.job_id,
+        coalesce(d.payload->>'text', '')
  FROM mail m
  JOIN public.context_email_attachments a ON a.business_event_id = m.mail_id
  JOIN public.context_document_texts dt ON dt.source_kind = 'email_attachment' AND dt.source_id = a.id AND dt.event_id IS NOT NULL
  JOIN public.business_events d ON d.id = dt.event_id
 ), part_num AS (
- -- Each part's numbers once, with this bill's own number taken out (its suffix included).
- SELECT p.bill, p.part_id, t.core, t.full_key,
-        (p.nkey IS NOT NULL AND t.core = split_part(p.nkey, '-', 1)
-         AND (position('-' IN p.nkey) = 0 OR t.full_key = p.nkey)) AS is_own
+ -- Each part's numbers once. Only this bill's exact number (its suffix included, or none) is its own.
+ SELECT p.bill, p.part_id, t.core, t.full_key, (p.nkey IS NOT NULL AND t.full_key = p.nkey) AS is_own
  FROM (SELECT DISTINCT bill, nkey, part_id, words FROM part) p
  CROSS JOIN LATERAL public.context_job_evidence_text_numbers(p.words) t
 ), part_read AS (
  SELECT p.*,
         EXISTS (SELECT 1 FROM part_num n WHERE n.bill = p.bill AND n.part_id = p.part_id AND n.is_own) AS own,
+        p.words ~* '(\minv(oice)?\M|tax[[:space:]]+invoice)' AS says_invoice,
         public.context_job_evidence_is_statement(p.words) AS statement,
         EXISTS (
          SELECT 1 FROM part_num n JOIN sib_key k ON k.bill = n.bill AND k.core = n.core
@@ -284,11 +317,17 @@ inbox AS MATERIALIZED (
         bool_or(other) AS any_other
  FROM part_read GROUP BY bill, mail_id
 ), s_mail AS (
+ -- Counts only a mail placed by a reference (its writer's job, the ladder's reference rules, a
+ -- person, or a supplier order reference), and only a part that says invoice,
+ -- carries this bill's number and no other of the supplier's bills, and is no statement.
  SELECT DISTINCT pr.bill, pr.part_job AS job_id, 'supplier_mail', pr.mail_id::text
- FROM part_read pr JOIN mail_read mr ON mr.bill = pr.bill AND mr.mail_id = pr.mail_id
+ FROM part_read pr
+ JOIN mail_read mr ON mr.bill = pr.bill AND mr.mail_id = pr.mail_id
  JOIN live l ON l.id = pr.part_job
- WHERE pr.own AND NOT pr.other AND NOT pr.statement AND NOT mr.body_statement
+ WHERE pr.own AND pr.says_invoice AND NOT pr.other AND NOT pr.statement AND NOT mr.body_statement
    AND (pr.kind = 'attachment' OR NOT mr.any_other)
+   AND pr.placed_by_reference
+   AND pr.bill NOT IN (SELECT shared_number.bill FROM shared_number)
 ),
 -- Weak lanes, listed only.
 w_mail AS (
@@ -322,13 +361,11 @@ w_mail AS (
         jsonb_agg(DISTINCT jsonb_build_object('lane', ev.lane, 'detail', ev.detail)) FILTER (WHERE ev.strong) AS strong,
         jsonb_agg(DISTINCT jsonb_build_object('lane', ev.lane, 'detail', ev.detail)) FILTER (WHERE NOT ev.strong) AS weak
  FROM ev GROUP BY ev.bill, ev.job_id
-), ranked AS (
- SELECT pj.*,
-        max(pj.n_strong) OVER (PARTITION BY pj.bill) AS top,
-        count(*) FILTER (WHERE pj.n_strong > 0) OVER (PARTITION BY pj.bill, pj.n_strong) AS at_level
- FROM per_job pj
 ), winner AS (
- SELECT r.bill, r.job_id FROM ranked r WHERE r.n_strong > 0 AND r.n_strong = r.top AND r.at_level = 1
+ -- A job is named only when it is the one job with any strong evidence.
+ SELECT pj.bill, min(pj.job_id::text)::uuid AS job_id
+ FROM per_job pj WHERE pj.n_strong > 0
+ GROUP BY pj.bill HAVING count(*) = 1
 ), listing AS (
  SELECT r.bill,
         jsonb_agg(jsonb_build_object('job_id', r.job_id, 'job_number', j.job_number, 'lanes', r.strong)
@@ -336,33 +373,36 @@ w_mail AS (
         jsonb_agg(jsonb_build_object('job_id', r.job_id, 'job_number', j.job_number, 'lanes', r.weak)
                   ORDER BY j.job_number COLLATE "C") FILTER (WHERE r.weak IS NOT NULL) AS weak,
         bool_or(r.n_strong > 0) AS any_strong
- FROM ranked r JOIN public.jobs j ON j.id = r.job_id
+ FROM per_job r JOIN public.jobs j ON j.id = r.job_id
  GROUP BY r.bill
+), judged AS (
+ SELECT b.*, ((SELECT p FROM pol)->'nameable_statuses') ? b.status AS nameable FROM b
 )
 SELECT a.id,
        b.invoice_number,
        CASE WHEN b.id IS NULL THEN 'not_found'
-            WHEN (SELECT p FROM pol)->'skip_statuses' ? b.status THEN 'not_named'
+            WHEN NOT b.nameable THEN 'not_named'
             WHEN w.job_id IS NOT NULL THEN 'named'
             ELSE 'not_named' END,
-       CASE WHEN b.id IS NOT NULL AND NOT ((SELECT p FROM pol)->'skip_statuses' ? b.status) THEN w.job_id END,
-       CASE WHEN b.id IS NOT NULL AND NOT ((SELECT p FROM pol)->'skip_statuses' ? b.status) THEN j.job_number END,
+       CASE WHEN b.nameable THEN w.job_id END,
+       CASE WHEN b.nameable THEN j.job_number END,
        CASE WHEN b.id IS NULL THEN 'not_a_supplier_bill'
-            WHEN (SELECT p FROM pol)->'skip_statuses' ? b.status THEN 'bill_' || lower(b.status)
-            WHEN w.job_id IS NOT NULL THEN 'most_strong_evidence'
-            WHEN coalesce(li.any_strong, false) THEN 'strong_evidence_tied'
+            WHEN NOT b.nameable THEN 'bill_' || coalesce(nullif(lower(b.status), ''), 'status_unknown')
+            WHEN w.job_id IS NOT NULL THEN 'only_job_with_strong_evidence'
+            WHEN coalesce(li.any_strong, false) THEN 'strong_evidence_conflict'
             ELSE 'no_strong_evidence' END,
        coalesce(li.strong, '[]'::jsonb),
        coalesce(li.weak, '[]'::jsonb),
        CASE WHEN b.id IS NULL THEN '[]'::jsonb ELSE
         to_jsonb(array_remove(ARRAY[
          CASE WHEN b.nkey IS NULL THEN 'bill_number_too_short' END,
+         CASE WHEN b.id IN (SELECT shared_number.bill FROM shared_number) THEN 'bill_number_shared' END,
          CASE WHEN NOT EXISTS (SELECT 1 FROM sup_mail sm WHERE sm.bill = b.id) THEN 'no_supplier_email' END,
          CASE WHEN p_blind THEN 'blind' END
         ], NULL)) END,
        (SELECT p->>'version' FROM pol)
 FROM asked a
-LEFT JOIN b ON b.id = a.id
+LEFT JOIN judged b ON b.id = a.id
 LEFT JOIN winner w ON w.bill = b.id
 LEFT JOIN public.jobs j ON j.id = w.job_id
 LEFT JOIN listing li ON li.bill = b.id
