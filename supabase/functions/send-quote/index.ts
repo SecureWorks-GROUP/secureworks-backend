@@ -168,6 +168,7 @@ import {
   type SendQuoteAuthUser,
 } from './quote_send_auth.ts'
 import { ghlEmailNoteRequest, ghlMoveStageOutcome, quoteAcceptedStageId, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
+import { webLook, webPageSaved, WEB_LOOK_CSS } from './web_quote.ts'
 import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailHeading, quoteEmailProjectWords, quoteEmailSubject } from './division_routing.ts'
 import {
   customer3dLink,
@@ -983,6 +984,16 @@ serve(async (req: Request) => {
       // TK-S28: the owner-approved price on the named saved revision, read now
       // and judged with the sealed revision after the claim, before any email.
       const ownerPrice = await ownerPriceGate(sb, doc.job_id, sealedSource)
+
+      // Ruling 18 G (4): the web page is kept on the quote only when it is confirmed uploaded. The scoping tool
+      // uploads it after the PDF and before this call; one that is not there is cleared, so no customer link
+      // (the view redirect, the options list) points at a page that was never saved, and the customer sees this
+      // function's own quote page instead.
+      if (doc.html_url && !(await webPageSaved(doc.html_url))) {
+        const { error: clearErr } = await sb.from('job_documents').update({ html_url: null }).eq('id', doc.id)
+        if (clearErr) console.log('[send-quote] web page not saved; html_url not cleared:', clearErr.message)
+        else doc.html_url = null
+      }
 
       // Resolve name: use provided, fall back to job_contact, then job-level
       const client_name = providedName || doc.job_contacts?.client_name || doc.jobs?.client_name || 'there'
@@ -1866,17 +1877,7 @@ serve(async (req: Request) => {
         // absent on a significant portion of sent quotes. Verify the object exists before
         // redirecting; if missing, timed-out, or errored, fall through to the reliable
         // server-render so the client never lands on a blank 404 viewer page.
-        let htmlExists = false
-        try {
-          const ac = new AbortController()
-          const t = setTimeout(() => ac.abort(), 2500)
-          const head = await fetch(doc.html_url, { method: 'HEAD', signal: ac.signal })
-          clearTimeout(t)
-          htmlExists = head.ok
-        } catch (_e) {
-          htmlExists = false  // missing / network error / timeout -> safe fallback
-        }
-        if (htmlExists) {
+        if (await webPageSaved(doc.html_url)) {
           return Response.redirect(customerViewerUrl(QUOTE_VIEWER_BASE, doc.html_url, CUSTOMER_HOST), 302)
         }
         // Object missing — fall through to the reliable server-rendered client page below
@@ -4675,6 +4676,13 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
   const isDeclined = !!doc.declined_at
   // Ruling 11 item 8: empty unless the released quote sealed the sentence.
   const acceptingLine = acceptSentenceHtml(acceptWords)
+  // Ruling 18 G (5): the fence web quote's backdrop and floating bar. The quote's own pictures are in its PDF, and
+  // the job's render is on a private address, so the backdrop is the dark scrim alone.
+  const look = webLook({
+    photo: null,
+    pdf: doc.pdf_url ? customerUrl(doc.pdf_url, CUSTOMER_HOST) : null,
+    accept: !isAccepted && !isDeclined ? "respondToQuote('accept')" : null,
+  })
 
   // Mobile card display fields — omit gracefully if absent
   const mobQuoteRef = doc.quote_number || ''
@@ -4769,9 +4777,11 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
       .container { padding: 16px 16px 40px; }
     }
     ${options ? QUOTE_OPTIONS_CSS : ''}
+    ${WEB_LOOK_CSS}
   </style>
 </head>
-<body>
+<body class="sw-web">
+  ${look.backdrop}
   <!-- Slim top bar: wordmark only -->
   <div class="topbar">
     <div class="topbar-brand">SecureWorks <span>Group</span></div>
@@ -4848,6 +4858,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
       This quote is valid for 30 days from the date of issue.
     </div>
   </div>
+  ${look.bar}
 
   <script>
     function showDeclineForm() {
