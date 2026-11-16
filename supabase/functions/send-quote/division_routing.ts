@@ -45,3 +45,17 @@ export function quoteEmailProjectWords(projectType: string | null | undefined): 
   if (projectType === 'general') return 'project'
   return `${projectType || 'project'} project`
 }
+
+/**
+ * The line a customer calls about their quote (director, 16 Nov 2026 21:01, from the wiki's line canon: 774 patios,
+ * 772 fencing, 771 admin): the one place send-quote's quote page, its messages (the acceptance and waiting pages, the
+ * Accept "checking" box) and the quote email read it, so one trade's customer never sees two numbers. Any other job
+ * keeps the admin line. The invoice and council emails keep their own numbers.
+ */
+export const QUOTE_PHONES = Object.freeze({ patio: '0489 267 774', fencing: '0489 267 772', other: '0489 267 771' })
+export function quotePhone(jobType: string | null | undefined): string {
+  return jobType === 'fencing' ? QUOTE_PHONES.fencing : jobType === 'patio' ? QUOTE_PHONES.patio : QUOTE_PHONES.other
+}
+export function quotePhoneHref(jobType: string | null | undefined): string {
+  return 'tel:+61' + quotePhone(jobType).replace(/\s+/g, '').slice(1)
+}
