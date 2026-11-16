@@ -176,7 +176,7 @@ import {
   type SendQuoteAuthUser,
 } from './quote_send_auth.ts'
 import { ghlEmailNoteRequest, ghlMoveStageOutcome, quoteAcceptedStageId, quoteSentGhl, revisionLabelFromSealed } from './ghl_email_note.ts'
-import { pdfPagesHtml, readSavedWebPages, savedPagesHtml, type SavedWebPages, webLook, webPageSaved, WEB_LOOK_CSS } from './web_quote.ts'
+import { pdfPagesHtml, quoteLinkStateAnswer, readSavedWebPages, savedPagesHtml, type SavedWebPages, webLook, webPageSaved, WEB_LOOK_CSS } from './web_quote.ts'
 import { getClientReplyTo, getDivisionInbox, nextStepsProjectLabel, quoteEmailHeading, quoteEmailProjectWords, quoteEmailSubject } from './division_routing.ts'
 import {
   customer3dLink,
@@ -1702,6 +1702,16 @@ serve(async (req: Request) => {
     // ── CLIENT VIEWS QUOTE ──
     if (path === 'view' && req.method === 'GET') {
       const token = url.searchParams.get('token')
+      // The saved web page's state read (web_quote.ts quoteLinkStateAnswer): before any view is counted, a read only.
+      if (url.searchParams.get('state') === '1') {
+        const answer = await quoteLinkStateAnswer(token, (t) => sb.from('job_documents')
+          .select('accepted_at, declined_at, superseded_at')
+          .eq('share_token', t)
+          .eq('sent_to_client', true)
+          .eq('type', 'quote')
+          .maybeSingle())
+        return jsonResponse(answer.body, answer.status, { ...corsHeaders, 'Cache-Control': 'no-store' })
+      }
       if (!token) return await htmlResponse(errorPage('Invalid link'))
 
       // Try job_documents first
@@ -5854,11 +5864,11 @@ export function buildNextStepsPage(opts: {
         <h3 style="color:#293C46;font-size:16px;margin-top:8px;">Speed things up - send us your house plans now</h3>
         <p style="color:#4C6A7C;font-size:13px;margin-top:4px;">We need your original house plans (showing the house footprint) to start the engineering and council process.</p>
       </div>
-      <div id="planUploadArea" style="border:2px dashed #D4DEE4;border-radius:8px;padding:24px;text-align:center;cursor:pointer;transition:border-color 0.2s" onclick="document.getElementById('planFileInput').click()" ondragover="event.preventDefault();this.style.borderColor='#F15A29'" ondragleave="this.style.borderColor='#D4DEE4'" ondrop="event.preventDefault();this.style.borderColor='#D4DEE4';handlePlanDrop(event)">
+      <div id="planUploadArea" style="border:2px dashed #D4DEE4;border-radius:8px;padding:24px;text-align:center;cursor:pointer;transition:border-color 0.2s">
         <div style="font-size:18px;margin-bottom:4px;">📎</div>
         <div style="font-size:14px;font-weight:600;color:#293C46;">Drag files here or tap to upload</div>
         <div style="font-size:12px;color:#999;margin-top:4px;">Accepted: PDF, JPG, PNG (max 20MB)</div>
-        <input type="file" id="planFileInput" accept=".pdf,.jpg,.jpeg,.png" multiple style="display:none" onchange="handlePlanUpload(this.files)">
+        <input type="file" id="planFileInput" accept=".pdf,.jpg,.jpeg,.png" multiple style="display:none">
       </div>
       <div id="planUploadStatus" style="display:none;text-align:center;padding:16px;">
         <div style="font-size:24px;margin-bottom:8px;">✅</div>
@@ -5871,6 +5881,17 @@ export function buildNextStepsPage(opts: {
       </div>
     </div>
     <script>
+      // The plan upload's listeners live here, not in inline handlers, so the page also works where only its own script
+      // may run (the saved web quote shows this page in place under its script policy, scope-engine-v2 PR 1295).
+      (function () {
+        var area = document.getElementById('planUploadArea'), input = document.getElementById('planFileInput');
+        if (!area || !input) return;
+        area.addEventListener('click', function (e) { if (e.target !== input) input.click(); });
+        area.addEventListener('dragover', function (e) { e.preventDefault(); area.style.borderColor = '#F15A29'; });
+        area.addEventListener('dragleave', function () { area.style.borderColor = '#D4DEE4'; });
+        area.addEventListener('drop', function (e) { e.preventDefault(); area.style.borderColor = '#D4DEE4'; handlePlanDrop(e); });
+        input.addEventListener('change', function () { handlePlanUpload(input.files); });
+      })();
       async function handlePlanUpload(files) {
         if (!files || files.length === 0) return;
         var area = document.getElementById('planUploadArea');

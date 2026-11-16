@@ -34,6 +34,35 @@ export async function webPageSaved(url: string | null | undefined, fetchFn: type
 }
 
 /** The words the bar adds: the same words as the scoping tools' web quote (shared/quote/web.js in scope-engine-v2). */
+/**
+ * The quote's state on its link, for the saved web page (money14's review of scope-engine-v2 PR 1295, finding 2): after
+ * a lost or unclear Accept reply the page reads this before it offers Accept again, and on opening it shows an accepted,
+ * declined or replaced quote instead of Accept. A read only: it counts no view and changes nothing.
+ */
+export type QuoteLinkState = 'accepted' | 'declined' | 'gone' | 'open'
+export interface QuoteStateRow { accepted_at?: string | null; declined_at?: string | null; superseded_at?: string | null }
+export function quoteLinkState(row: QuoteStateRow | null | undefined): QuoteLinkState {
+  if (!row) return 'gone'
+  if (row.accepted_at) return 'accepted'
+  if (row.declined_at) return 'declined'
+  if (row.superseded_at) return 'gone'
+  return 'open'
+}
+/** The answer to view?token=&state=1: 200 with the state, or 503 with none when the quote cannot be read now. */
+export async function quoteLinkStateAnswer(
+  token: string | null,
+  read: (token: string) => PromiseLike<{ data: QuoteStateRow | null; error: unknown }>,
+): Promise<{ status: number; body: { state: QuoteLinkState | null } }> {
+  if (!token || !/^[A-Za-z0-9-]{8,}$/.test(token)) return { status: 200, body: { state: 'gone' } }
+  try {
+    const { data, error } = await read(token)
+    if (error) return { status: 503, body: { state: null } }
+    return { status: 200, body: { state: quoteLinkState(data) } }
+  } catch {
+    return { status: 503, body: { state: null } }
+  }
+}
+
 export const WEB_BAR_WORDS = Object.freeze({ ready: 'Ready to get started?', pdf: 'Download PDF', accept: 'Accept quote' })
 
 /** The words of the clean card shown when the PDF's pages cannot be drawn (or there is no PDF). */

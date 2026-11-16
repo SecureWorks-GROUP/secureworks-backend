@@ -13,6 +13,8 @@ import {
   PDF_READY_WORDS,
   pdfPagesHtml,
   PDFJS,
+  quoteLinkState,
+  quoteLinkStateAnswer,
   readSavedWebPages,
   SAVED_PAGE_MAX_BYTES,
   savedWebPageAddress,
@@ -24,7 +26,7 @@ import {
 import type { QuoteOptionsOffer } from './quote_options.ts'
 
 const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-const { _buildClientPageForTest: buildClientPage } = await import('./index.ts')
+const { _buildClientPageForTest: buildClientPage, buildNextStepsPage } = await import('./index.ts')
 
 const PROJECT = 'https://zzproject.supabase.co'
 const HTML = `${PROJECT}/storage/v1/object/public/job-pdfs/zz-org/zz-job/quote_v1_web.html`
@@ -380,4 +382,46 @@ Deno.test('wiring: the view route reads the saved pages only for a quote with op
   assert(page.includes('${WEB_LOOK_CSS}') && page.includes('const quotePages = saved ? savedPagesHtml(saved) : pdfPagesHtml(pdfAddress)'))
   assert(/const pdfAddress = doc\.pdf_url \? customerUrl\(doc\.pdf_url, CUSTOMER_HOST\) : null/.test(page), 'the PDF on its customer address')
   assert(/accept: !isAccepted && !isDeclined \? "respondToQuote\('accept'\)" : null/.test(page))
+})
+
+// The saved web page's Accept (money14's review of scope-engine-v2 PR 1295, finding 2): a lost or unclear reply is never
+// read as a no. The page reads the quote's state on its link before it offers Accept again.
+Deno.test('state: accepted, declined, replaced (or not found) and open, from the quote\'s own row', () => {
+  assertEquals(quoteLinkState({ accepted_at: '2026-11-16T09:00:00Z', declined_at: null, superseded_at: null }), 'accepted')
+  assertEquals(quoteLinkState({ accepted_at: null, declined_at: '2026-11-16T09:00:00Z' }), 'declined')
+  assertEquals(quoteLinkState({ superseded_at: '2026-11-16T09:00:00Z' }), 'gone')
+  assertEquals(quoteLinkState(null), 'gone')
+  assertEquals(quoteLinkState({ accepted_at: null, declined_at: null, superseded_at: null }), 'open')
+  // Accepted wins over replaced: a quote accepted before a newer one was sent still reads accepted.
+  assertEquals(quoteLinkState({ accepted_at: '2026-11-16T09:00:00Z', superseded_at: '2026-11-16T10:00:00Z' }), 'accepted')
+})
+
+Deno.test('state: a read that fails is 503 with no state (the page then keeps Accept off), never "open"', async () => {
+  const seen: string[] = []
+  const ok = await quoteLinkStateAnswer('0f3c2a1b-zztest', (t) => { seen.push(t); return Promise.resolve({ data: { accepted_at: null }, error: null }) })
+  assertEquals(ok, { status: 200, body: { state: 'open' } })
+  assertEquals(seen, ['0f3c2a1b-zztest'])
+  assertEquals(await quoteLinkStateAnswer('0f3c2a1b-zztest', () => Promise.resolve({ data: null, error: { message: 'zz' } })), { status: 503, body: { state: null } })
+  assertEquals(await quoteLinkStateAnswer('0f3c2a1b-zztest', () => Promise.reject(new Error('zz'))), { status: 503, body: { state: null } })
+  assertEquals(await quoteLinkStateAnswer(null, () => { throw new Error('never read') }), { status: 200, body: { state: 'gone' } })
+  assertEquals(await quoteLinkStateAnswer('x"><b>', () => { throw new Error('never read') }), { status: 200, body: { state: 'gone' } })
+})
+
+Deno.test('wiring: view?state=1 answers the state before any view is counted, reading the quote by its link only', () => {
+  const view = src.slice(src.indexOf("if (path === 'view' && req.method === 'GET') {"))
+  const state = view.indexOf("if (url.searchParams.get('state') === '1') {"), counted = view.indexOf('// Track views (first view sets viewed_at)')
+  assert(state > 0 && counted > state, 'the state read comes before the view is counted')
+  const block = view.slice(state, view.indexOf('if (!token) return await htmlResponse(errorPage', state))
+  assert(block.includes(".select('accepted_at, declined_at, superseded_at')") && block.includes(".eq('share_token', t)") && block.includes(".eq('sent_to_client', true)") && block.includes(".eq('type', 'quote')"))
+  assert(block.includes("return jsonResponse(answer.body, answer.status, { ...corsHeaders, 'Cache-Control': 'no-store' })"))
+  assert(!/\.update\(|\.insert\(/.test(block), 'a read only')
+})
+
+Deno.test('next steps: the acceptance page works where only its own script may run: no inline handlers', () => {
+  const page: string = buildNextStepsPage({ clientName: 'ZZTEST Scope Checker', projectType: 'patio', address: 'ZZTEST 1 Test Lab Way', depositAmount: 100, depositDescription: 'ZZTEST deposit',
+    paymentUrl: '', invoiceNumber: 'ZZ-INV-1', shareToken: '0f3c2a1b-zztest', isPatio: true, jobId: 'zz-job' })
+  assert(page.includes('id="planUploadArea"'), 'the plan upload is on this page')
+  assertEquals(page.match(/\son[a-z]+\s*=\s*["']/gi) ?? [], [], 'no inline handler')
+  assert(!/javascript:/i.test(page))
+  for (const ev of ["area.addEventListener('click'", "area.addEventListener('dragover'", "area.addEventListener('dragleave'", "area.addEventListener('drop'", "input.addEventListener('change'"]) assert(page.includes(ev), ev)
 })
