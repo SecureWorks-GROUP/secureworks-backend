@@ -580,10 +580,18 @@ export function dispatchV2CanSuggest(
 
 // ── Photos ──────────────────────────────────────────────────────────────────
 
-// Under Outlook's 3 MB per attachment, with room to spare.
+// Under Outlook's 3 MB per attachment, with room to spare. The same limit
+// holds for a file (PDF, Excel, CSV, Word) since 16 Nov 2026.
 export const DISPATCH_V2_PHOTO_MAX_BYTES = 3_000_000;
-export const DISPATCH_V2_PHOTOS_PER_EMAIL_MAX = 3;
-export const DISPATCH_V2_PHOTOS_PER_JOB_MAX = 20;
+// Photos and files together on one order email (Shaun, 16 Nov 2026: up to
+// 10; it was 3 photos before files could be added).
+export const DISPATCH_V2_PHOTOS_PER_EMAIL_MAX = 10;
+// Photos and files together on one job (40 from 16 Nov 2026; it was 20).
+export const DISPATCH_V2_PHOTOS_PER_JOB_MAX = 40;
+// All attachments on one order email together. send-outlook-email refuses a
+// message over 35 MB once base64 encoded (base64 adds a third), so 20 MB of
+// files stays well inside it with the body and signature.
+export const DISPATCH_V2_EMAIL_ATTACHMENT_MAX_BYTES = 20_000_000;
 export const DISPATCH_V2_PHOTO_BUCKET = "dispatch-material-photos";
 export const DISPATCH_V2_PHOTO_LINK_SECONDS = 600;
 
@@ -666,6 +674,184 @@ function photoKind(
   return null;
 }
 
+// ── Files on an order (16 Nov 2026) ─────────────────────────────────────────
+
+// What a supplier box takes besides photos (Shaun, 16 Nov 2026): a PDF, an
+// Excel or CSV sheet, or a Word document, e.g. a supplier's own order form.
+// Each goes on the order email as an attachment, like a photo. Saved to the
+// job afterwards, a file is office only; a photo stays crew-visible.
+export const DISPATCH_V2_FILE_KINDS: Record<
+  string,
+  { extension: string; label: string }
+> = {
+  "application/pdf": { extension: "pdf", label: "PDF" },
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {
+    extension: "xlsx",
+    label: "Excel",
+  },
+  "application/vnd.ms-excel": { extension: "xls", label: "Excel" },
+  "text/csv": { extension: "csv", label: "CSV" },
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": {
+    extension: "docx",
+    label: "Word",
+  },
+  "application/msword": { extension: "doc", label: "Word" },
+};
+
+export const DISPATCH_V2_PHOTO_CONTENT_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+];
+
+/** Every content type a supplier box may hold: the three photo kinds and the
+ * six file kinds. The table check and the bucket list match this. */
+export const DISPATCH_V2_ATTACHMENT_CONTENT_TYPES = [
+  ...DISPATCH_V2_PHOTO_CONTENT_TYPES,
+  ...Object.keys(DISPATCH_V2_FILE_KINDS),
+];
+
+/** True for a photo (JPEG, PNG or WebP); false for a file. */
+export function dispatchV2IsPhotoType(contentType: unknown): boolean {
+  return DISPATCH_V2_PHOTO_CONTENT_TYPES.includes(String(contentType ?? ""));
+}
+
+export type DispatchV2AttachmentCheck =
+  | {
+    ok: true;
+    bytes: Uint8Array;
+    contentType: string;
+    extension: string;
+    isPhoto: boolean;
+  }
+  | { ok: false; code: string; error: string; size_bytes?: number };
+
+const OLE2_MAGIC = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+
+function nameExtension(fileName: unknown): string {
+  const m = String(fileName ?? "").trim().toLowerCase().match(
+    /\.([a-z0-9]{1,5})$/,
+  );
+  return m ? m[1] : "";
+}
+
+// Does the ZIP (xlsx or docx) hold an entry under this folder? The entry
+// names sit in plain text in the ZIP's headers, so a search for "xl/" or
+// "word/" tells an Excel workbook from a Word document.
+function zipHasFolder(bytes: Uint8Array, folder: string): boolean {
+  const needle = new TextEncoder().encode(folder);
+  outer: for (let i = 0; i + needle.length <= bytes.length; i++) {
+    for (let j = 0; j < needle.length; j++) {
+      if (bytes[i + j] !== needle[j]) continue outer;
+    }
+    return true;
+  }
+  return false;
+}
+
+// The file kind, read from the bytes. The name's extension only decides
+// between kinds that share a container (the old .xls and .doc are both the
+// same OLE2 box) and marks a CSV, which has no first bytes of its own.
+function fileKind(bytes: Uint8Array, fileName: unknown): string | null {
+  const ext = nameExtension(fileName);
+  if (
+    bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 &&
+    bytes[3] === 0x46 && bytes[4] === 0x2d
+  ) {
+    return "application/pdf";
+  }
+  if (
+    bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 &&
+    bytes[3] === 0x04
+  ) {
+    if (zipHasFolder(bytes, "xl/")) {
+      return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    }
+    if (zipHasFolder(bytes, "word/")) {
+      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    }
+    return null;
+  }
+  if (OLE2_MAGIC.every((b, i) => bytes[i] === b)) {
+    if (ext === "xls") return "application/vnd.ms-excel";
+    if (ext === "doc") return "application/msword";
+    return null;
+  }
+  if (ext === "csv") {
+    if (bytes.includes(0)) return null;
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      return null;
+    }
+    return "text/csv";
+  }
+  return null;
+}
+
+/** Do these bytes really hold this kind of photo or file? Checked again
+ * before a sent attachment is copied to the job's documents. */
+export function dispatchV2BytesAreKind(
+  bytes: Uint8Array,
+  contentType: string,
+  fileName?: unknown,
+): boolean {
+  if (dispatchV2IsPhotoType(contentType)) {
+    return photoKind(bytes)?.contentType === contentType;
+  }
+  const ext = DISPATCH_V2_FILE_KINDS[contentType]?.extension;
+  if (!ext) return false;
+  // A stored name always ends in its kind's own extension; with no name,
+  // use that extension.
+  return fileKind(bytes, fileName ?? `file.${ext}`) === contentType;
+}
+
+/** A photo or a file the screen sends (16 Nov 2026): base64 bytes under
+ * 3,000,000 bytes. A photo is JPEG, PNG or WebP; a file is a PDF, Excel
+ * (.xlsx, .xls), CSV or Word (.docx, .doc). The kind is read from the bytes;
+ * the name only marks a CSV, and tells an old .xls from an old .doc.
+ * Anything else is refused with its name. */
+export function dispatchV2CheckAttachment(
+  base64: unknown,
+  fileName: unknown,
+): DispatchV2AttachmentCheck {
+  const photo = dispatchV2CheckPhoto(base64);
+  if (photo.ok) return { ...photo, isPhoto: true };
+  const shown = String(fileName ?? "").trim().slice(0, 120) || "This file";
+  if (photo.code === "photo_too_large") {
+    const size = photo.size_bytes ?? 0;
+    return {
+      ok: false,
+      code: "file_too_large",
+      error: `${shown} is ${
+        (size / 1_000_000).toFixed(1)
+      } MB. Each photo or file must be under 3 MB to go with an Outlook email. Shrink it, or send that one from Outlook.`,
+      size_bytes: size,
+    };
+  }
+  if (photo.code !== "photo_type_not_allowed") return photo;
+  // Valid base64 that is not a photo: decode it and try the file kinds.
+  const clean = String(base64).trim().replace(/^data:[^;,]+;base64,/, "");
+  const raw = atob(clean);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  const contentType = fileKind(bytes, fileName);
+  if (!contentType) {
+    return {
+      ok: false,
+      code: "file_type_not_allowed",
+      error: `${shown} cannot be attached. Only photos (JPEG, PNG, WebP), PDF, Excel (.xlsx, .xls), CSV and Word (.docx, .doc) files can go on an order.`,
+    };
+  }
+  return {
+    ok: true,
+    bytes,
+    contentType,
+    extension: DISPATCH_V2_FILE_KINDS[contentType].extension,
+    isPhoto: false,
+  };
+}
+
 // A file name safe to store and to attach: letters, digits, dot, dash and
 // underscore, at most 120 characters, ending in the photo's real kind.
 export function dispatchV2PhotoFileName(
@@ -726,9 +912,11 @@ const DISPATCH_V2_GONE_STATUSES = ["sent", "sending", "send_unknown"];
 
 // The photos a new email for one box takes (Tweak 5): the box's photos,
 // oldest first, leaving out any photo that already went on a sent email (as
-// lines already sent are left out), at most three. photos: the box's
-// dispatch_material_photos rows (id, created_at). emails: the box's order
-// emails (status, photo_ids).
+// lines already sent are left out), at most ten (photos and files together,
+// 16 Nov 2026) and at most 20 MB of them in all: the first one that would go
+// over is left for the next email. photos: the box's dispatch_material_photos
+// rows (id, created_at, size_bytes). emails: the box's order emails (status,
+// photo_ids).
 export function dispatchV2UnsentPhotoIds(
   photos: any[],
   emails: any[],
@@ -743,11 +931,19 @@ export function dispatchV2UnsentPhotoIds(
     }
   }
   const at = (photo: any) => String(photo?.created_at ?? "");
-  return [...(Array.isArray(photos) ? photos : [])]
+  const sorted = [...(Array.isArray(photos) ? photos : [])]
     .filter((photo) => photo?.id && !gone.has(String(photo.id)))
-    .sort((a, b) => at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0)
-    .slice(0, DISPATCH_V2_PHOTOS_PER_EMAIL_MAX)
-    .map((photo) => String(photo.id));
+    .sort((a, b) => at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0);
+  const out: string[] = [];
+  let total = 0;
+  for (const photo of sorted) {
+    if (out.length >= DISPATCH_V2_PHOTOS_PER_EMAIL_MAX) break;
+    const size = Math.max(0, Number(photo?.size_bytes) || 0);
+    if (total + size > DISPATCH_V2_EMAIL_ATTACHMENT_MAX_BYTES) break;
+    total += size;
+    out.push(String(photo.id));
+  }
+  return out;
 }
 
 // Do the box's lines still match the lines a held email was built from? Same

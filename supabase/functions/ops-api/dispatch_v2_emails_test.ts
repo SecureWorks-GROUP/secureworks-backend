@@ -17,6 +17,11 @@ import {
   dispatchV2BuildEmail,
   dispatchV2CanSuggest,
   dispatchV2CheckPhoto,
+  dispatchV2CheckAttachment,
+  dispatchV2BytesAreKind,
+  dispatchV2IsPhotoType,
+  DISPATCH_V2_ATTACHMENT_CONTENT_TYPES,
+  DISPATCH_V2_FILE_KINDS,
   dispatchV2ContactText,
   dispatchV2DefaultCc,
   dispatchV2DeliveryDateText,
@@ -455,6 +460,64 @@ Deno.test("photos: JPEG, PNG and WebP under 3,000,000 bytes; bigger is refused w
   assertEquals(dispatchV2PhotoFileName("", "png"), "photo.png");
 });
 
+Deno.test("files (16 Nov 2026): PDF, Excel, CSV and Word read from the bytes; anything else refused by name", () => {
+  const enc = (s: string) => [...new TextEncoder().encode(s)];
+  const zip = (entry: string) => b64([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0, ...enc(entry), 0, 0]);
+  const ole = b64([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0, 0, 0, 0]);
+  const kind = (base64: string, name: string) => {
+    const r = dispatchV2CheckAttachment(base64, name);
+    return r.ok ? [r.contentType, r.extension, r.isPhoto] : [r.code];
+  };
+  // A photo is still a photo.
+  assertEquals(kind(b64([0xff, 0xd8, 0xff, 0xe0, 1, 2]), "list.jpg"), ["image/jpeg", "jpg", true]);
+  // A PDF by its bytes, whatever its name says.
+  assertEquals(kind(b64(enc("%PDF-1.7 order")), "Solarspan form"), ["application/pdf", "pdf", false]);
+  // xlsx and docx are both ZIPs: told apart by the folders inside.
+  assertEquals(kind(zip("xl/workbook.xml"), "Order.xlsx"), [
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xlsx",
+    false,
+  ]);
+  assertEquals(kind(zip("word/document.xml"), "Order.docx"), [
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "docx",
+    false,
+  ]);
+  // A ZIP that is neither (a plain archive) is refused.
+  assertEquals(kind(zip("photos/a.jpg"), "photos.zip"), ["file_type_not_allowed"]);
+  // The old .xls and .doc share one container: the name decides; any other
+  // name on it is refused.
+  assertEquals(kind(ole, "Order.XLS"), ["application/vnd.ms-excel", "xls", false]);
+  assertEquals(kind(ole, "Order.doc"), ["application/msword", "doc", false]);
+  assertEquals(kind(ole, "Order.msg"), ["file_type_not_allowed"]);
+  // CSV: a .csv name with readable text; a NUL byte or broken text is refused.
+  assertEquals(kind(b64(enc("item,qty\npanel,10\n")), "lines.csv"), ["text/csv", "csv", false]);
+  assertEquals(kind(b64([...enc("a,b"), 0, ...enc("c")]), "lines.csv"), ["file_type_not_allowed"]);
+  assertEquals(kind(b64([0xc3, 0x28]), "lines.csv"), ["file_type_not_allowed"]);
+  assertEquals(kind(b64(enc("item,qty")), "lines.txt"), ["file_type_not_allowed"]);
+  // The refusal names the file and says what can go.
+  const heic = dispatchV2CheckAttachment(btoa("\x00\x00\x00\x18ftypheic"), "IMG_0001.HEIC");
+  assertEquals(heic.ok, false);
+  assert((heic as any).error.startsWith("IMG_0001.HEIC cannot be attached."));
+  assert((heic as any).error.includes("PDF, Excel"));
+  // Over 3 MB: refused with its name and size, before decoding.
+  const big = dispatchV2CheckAttachment("A".repeat(4_000_004), "Plans.pdf");
+  assertEquals((big as any).code, "file_too_large");
+  assert((big as any).error.startsWith("Plans.pdf is 3.0 MB."));
+  assert(!/[–—]/.test((big as any).error + (heic as any).error));
+  // The saved-file check agrees with the upload check.
+  const pdfBytes = new Uint8Array(enc("%PDF-1.4"));
+  assert(dispatchV2BytesAreKind(pdfBytes, "application/pdf"));
+  assert(!dispatchV2BytesAreKind(pdfBytes, "text/csv"));
+  assert(dispatchV2BytesAreKind(new Uint8Array(enc("a,b\n")), "text/csv"));
+  assert(!dispatchV2BytesAreKind(pdfBytes, "application/zip"));
+  // Photos and files: kinds and labels.
+  assert(dispatchV2IsPhotoType("image/webp"));
+  assert(!dispatchV2IsPhotoType("application/pdf"));
+  assertEquals(DISPATCH_V2_ATTACHMENT_CONTENT_TYPES.length, 9);
+  assertEquals(DISPATCH_V2_FILE_KINDS["application/vnd.ms-excel"].label, "Excel");
+});
+
 Deno.test("send answer: 202 with ids is sent; retry_safe or refused is not sent; unknown or 5xx is unknown", () => {
   assertEquals(
     readDispatchV2SendAnswer(202, {
@@ -713,7 +776,7 @@ Deno.test("send check: an email needs a line or a photo", () => {
   assert(!dispatchV2EmailHasSomethingToOrder({}));
 });
 
-Deno.test("photos for a new email: oldest first, at most three, leaving out photos already sent", () => {
+Deno.test("photos for a new email: oldest first, at most ten, leaving out photos already sent", () => {
   const photo = (id: string, at: string) => ({ id, created_at: at });
   const photos = [
     photo("p3", "2026-11-05T03:00:00Z"),
@@ -722,7 +785,7 @@ Deno.test("photos for a new email: oldest first, at most three, leaving out phot
     photo("p4", "2026-11-05T04:00:00Z"),
     photo("p5", "2026-11-05T05:00:00Z"),
   ];
-  assertEquals(dispatchV2UnsentPhotoIds(photos, []), ["p1", "p2", "p3"]);
+  assertEquals(dispatchV2UnsentPhotoIds(photos, []), ["p1", "p2", "p3", "p4", "p5"]);
   const emails = [
     { status: "sent", photo_ids: ["p1"] },
     { status: "send_unknown", photo_ids: ["p2"] },
@@ -731,6 +794,22 @@ Deno.test("photos for a new email: oldest first, at most three, leaving out phot
     { status: "discarded", photo_ids: ["p4"] },
   ];
   assertEquals(dispatchV2UnsentPhotoIds(photos, emails), ["p3", "p4", "p5"]);
+  // Twelve in the box: the ten oldest go (16 Nov 2026: 10 photos and files).
+  const twelve = Array.from({ length: 12 }, (_, i) =>
+    photo(`q${String(i + 1).padStart(2, "0")}`, `2026-11-16T${String(i + 1).padStart(2, "0")}:00:00Z`)
+  );
+  assertEquals(
+    dispatchV2UnsentPhotoIds(twelve, []),
+    ["q01", "q02", "q03", "q04", "q05", "q06", "q07", "q08", "q09", "q10"],
+  );
+  // At most 20 MB together: seven files of 2.9 MB come to 20.3 MB, so the
+  // seventh waits for the next email.
+  const heavy = Array.from({ length: 7 }, (_, i) => ({
+    id: `h${i + 1}`,
+    created_at: `2026-11-16T0${i + 1}:00:00Z`,
+    size_bytes: 2_900_000,
+  }));
+  assertEquals(dispatchV2UnsentPhotoIds(heavy, []), ["h1", "h2", "h3", "h4", "h5", "h6"]);
   assertEquals(
     dispatchV2UnsentPhotoIds(photos, [{ status: "sent", photo_ids: ["p1", "p2", "p3", "p4", "p5"] }]),
     [],

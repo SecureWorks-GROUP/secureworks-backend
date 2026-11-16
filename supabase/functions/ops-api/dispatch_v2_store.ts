@@ -48,6 +48,10 @@ import {
   DISPATCH_V2_PHOTO_LINK_SECONDS,
   DISPATCH_V2_PHOTOS_PER_EMAIL_MAX,
   DISPATCH_V2_PHOTOS_PER_JOB_MAX,
+  DISPATCH_V2_EMAIL_ATTACHMENT_MAX_BYTES,
+  DISPATCH_V2_FILE_KINDS,
+  dispatchV2CheckAttachment,
+  dispatchV2IsPhotoType,
   DISPATCH_V2_STALE_SENDING_MS,
   DISPATCH_V2_TEST_TO,
   dispatchV2BodyHtml,
@@ -58,7 +62,6 @@ import {
   dispatchV2FulfilmentParam,
   dispatchV2BytesToBase64,
   dispatchV2CanSuggest,
-  dispatchV2CheckPhoto,
   dispatchV2DefaultCc,
   dispatchV2EmailHasSomethingToOrder,
   dispatchV2EmptyDetailLines,
@@ -564,11 +567,19 @@ export function projectDispatchV2Line(row: any) {
 }
 
 function projectPhoto(row: any) {
+  const isPhoto = dispatchV2IsPhotoType(row?.content_type);
   return {
     id: row?.id,
     supplier_id: row?.supplier_id ?? null,
     file_name: row?.file_name,
     content_type: row?.content_type,
+    // 16 Nov 2026: a box holds files too. kind "photo" shows a thumbnail;
+    // kind "file" shows its name and label (PDF, Excel, CSV, Word).
+    kind: isPhoto ? "photo" : "file",
+    file_label: isPhoto
+      ? "Photo"
+      : DISPATCH_V2_FILE_KINDS[String(row?.content_type ?? "")]?.label ??
+        "File",
     size_bytes: row?.size_bytes,
     added_at: row?.created_at,
     added_by_email: row?.created_by_email ?? null,
@@ -2223,10 +2234,11 @@ export async function uploadDispatchV2Photo(
     ? null
     : supplierIdOrNull(body.supplier_id);
   if (supplierId) await boxOrRefuse(client, job.id, supplierId);
-  const checked = dispatchV2CheckPhoto(body?.data_base64);
+  // A photo, or since 16 Nov 2026 a PDF, Excel, CSV or Word file.
+  const checked = dispatchV2CheckAttachment(body?.data_base64, body?.file_name);
   if (!checked.ok) {
     refuse(
-      checked.code === "photo_too_large" ? 413 : 400,
+      checked.code === "file_too_large" ? 413 : 400,
       checked.code,
       checked.error,
       checked.size_bytes ? { size_bytes: checked.size_bytes } : {},
@@ -2241,7 +2253,7 @@ export async function uploadDispatchV2Photo(
     refuse(
       409,
       "too_many_photos",
-      `A job holds at most ${DISPATCH_V2_PHOTOS_PER_JOB_MAX} photos`,
+      `A job holds at most ${DISPATCH_V2_PHOTOS_PER_JOB_MAX} photos and files`,
     );
   }
   const id = crypto.randomUUID();
@@ -2608,7 +2620,7 @@ async function unsentBoxPhotoIds(
 ): Promise<string[]> {
   const [photoRes, emailRes] = await Promise.all([
     client.from("dispatch_material_photos")
-      .select("id, created_at")
+      .select("id, created_at, size_bytes")
       .eq("job_id", jobId)
       .eq("supplier_id", supplierId)
       .order("created_at", { ascending: true }),
@@ -2722,18 +2734,34 @@ export async function saveDispatchV2Email(
       !body.photo_ids.every(isDispatchUuid)
     ) {
       badRequest(
-        `photo_ids must be a list of at most ${DISPATCH_V2_PHOTOS_PER_EMAIL_MAX} photo ids`,
+        `photo_ids must be a list of at most ${DISPATCH_V2_PHOTOS_PER_EMAIL_MAX} photo or file ids`,
       );
     }
     const ids = [...new Set<string>(body.photo_ids)];
     if (ids.length > 0) {
       const { data, error } = await client.from("dispatch_material_photos")
-        .select("id")
+        .select("id, size_bytes")
         .eq("job_id", email.job_id)
         .in("id", ids);
       if (error) readFailed("photos read", error);
       if ((data || []).length !== ids.length) {
         refuse(409, "photo_not_found", "A photo on this email is not on the job");
+      }
+      // 16 Nov 2026: at most 20 MB of photos and files on one email, so the
+      // whole email stays under Outlook's limit.
+      const total = (data || []).reduce(
+        (sum: number, row: any) => sum + (Number(row?.size_bytes) || 0),
+        0,
+      );
+      if (total > DISPATCH_V2_EMAIL_ATTACHMENT_MAX_BYTES) {
+        refuse(
+          413,
+          "attachments_too_large",
+          `These photos and files come to ${
+            (total / 1_000_000).toFixed(1)
+          } MB. One order email can carry at most 20 MB. Take some off and send them on a second email.`,
+          { size_bytes: total },
+        );
       }
     }
     patch.photo_ids = ids;

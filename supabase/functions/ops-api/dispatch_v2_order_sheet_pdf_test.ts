@@ -26,6 +26,7 @@ import {
 } from "./dispatch_v2_order_confirmed_test_fakes.ts";
 import {
   dispatchDocBytesAre,
+  dispatchOrderFileName,
   dispatchOrderIsPhotoOnly,
   dispatchOrderPhotoName,
   sha256HexOf,
@@ -361,6 +362,46 @@ Deno.test("confirmed photo-only order, no supplier PDF: the crew line is written
   const again = await confirm(t.client);
   assertEquals(again.documents?.saved, []);
   assertEquals(t.tables.job_documents.length, 2);
+});
+
+Deno.test("confirmed order with photos and our own PDF file (16 Nov 2026): the file is saved office only, numbered apart", async () => {
+  const t = await photoOrder([]);
+  const FILE_1 = "c5000000-0000-4000-8000-000000000003";
+  const pdf = new Uint8Array([...new TextEncoder().encode("%PDF-1.4 Solarspan form")]);
+  t.tables.dispatch_material_photos.push({
+    id: FILE_1,
+    job_id: JOB,
+    file_name: "Solarspan-form.pdf",
+    content_type: "application/pdf",
+    sha256: await sha256HexOf(pdf),
+    storage_path: `${JOB}/form.pdf`,
+  });
+  t.objects.set(`${PHOTO_BUCKET}/${JOB}/form.pdf`, pdf);
+  // The file sits between the two photos on the email.
+  t.tables.dispatch_supplier_order_emails[0].photo_ids = [PHOTO_1, FILE_1, PHOTO_2];
+  const r = await confirm(t.client);
+  assertEquals(r.documents?.saved.map((s) => s.name), [
+    "Stratco order photo 1.jpg",
+    "Stratco order file 1.pdf",
+    "Stratco order photo 2.png",
+  ]);
+  assertEquals(
+    t.tables.job_documents.map((d) => [d.file_name, d.visible_to_trades, d.metadata.document_source]),
+    [
+      ["Stratco order photo 1.jpg", true, "order_photo"],
+      ["Stratco order file 1.pdf", false, "order_file"],
+      ["Stratco order photo 2.png", true, "order_photo"],
+    ],
+  );
+  assertEquals(
+    t.tables.dispatch_v2_order_documents.map((d) => [d.source, d.kind]),
+    [["order_photo", "order_photo"], ["order_file", "order_file"], ["order_photo", "order_photo"]],
+  );
+  // The copy is the file itself, byte for byte.
+  const filed = t.uploads.find((u) => u.contentType === "application/pdf");
+  assert(filed?.path.endsWith("-Stratco-order-file-1.pdf"));
+  assertEquals(t.objects.get(`job-documents/${filed!.path}`), pdf);
+  assertEquals(dispatchOrderFileName("", 2), "Supplier order file 2");
 });
 
 Deno.test("confirmed order with lines and photos, no supplier PDF: the sheet AND the photos are saved", async () => {
