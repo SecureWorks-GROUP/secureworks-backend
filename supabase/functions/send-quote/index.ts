@@ -4792,7 +4792,7 @@ function buildClientPage(doc: any, token: string, heroUrl: string | null = null,
       ${mobClientName ? `<div class="mob-client">${mobClientName}</div>` : ''}
       ${mobPriceStr ? `<div class="mob-price">${mobPriceStr}</div><div class="mob-price-label">inc GST</div>` : '<div style="margin-bottom:8px;"></div>'}
       <div class="mob-divider"></div>
-      <a href="https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(customerUrl(doc.pdf_url, CUSTOMER_HOST))}" target="_blank" class="btn-mob-primary">View Full Quote PDF</a>
+      <a href="${CUSTOMER_HOST ? customerUrl(doc.pdf_url, CUSTOMER_HOST) : `https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(customerUrl(doc.pdf_url, CUSTOMER_HOST))}`}" target="_blank" class="btn-mob-primary">View Full Quote PDF</a>
       <a href="${customerUrl(doc.pdf_url, CUSTOMER_HOST)}" download class="btn-mob-secondary">Download PDF</a>
       ${!isAccepted && !isDeclined ? `
       <div class="mob-actions-sep">

@@ -34,3 +34,9 @@ Deno.test("ops-api: the variation link uses customerVariationLink", () => {
   assertEquals(count(opsApi, /secureworks-ux\/quote-viewer\.html/g), 0)
   assertEquals(count(opsApi, /customerVariationLink\(customerPublicHost\(Deno\.env\.get\('CUSTOMER_PUBLIC_HOST'\)\), variation\.share_token\)/g), 1)
 })
+
+Deno.test("send-quote: the Google PDF viewer is used only when the company host is off", () => {
+  const lines = sendQuote.split("\n").filter((l) => l.includes("docs.google.com/gview"))
+  assert(lines.length >= 1)
+  for (const l of lines) assert(/CUSTOMER_HOST \? customerUrl\(/.test(l), l)
+})
