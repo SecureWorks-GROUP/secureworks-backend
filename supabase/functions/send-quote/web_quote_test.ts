@@ -548,4 +548,5 @@ Deno.test('accept held: the page keeps nothing between visits, so a fresh load o
   const { page, code } = clientScript()
   assert(!/localStorage|sessionStorage|document\.cookie|indexedDB/.test(code))
   assert(page.includes('class="sw-web-accept"') && page.includes(".sw-held{"), 'the bar Accept is there on load, and the held box has its look')
+  assert(page.includes('.sw-held .sw-held-check::before{content:none}') && acceptHeldScript({ stateUrl: 'x', phone: '1' }).includes('className="sw-web-ghost sw-held-check"'), '"Check again" has no download arrow')
 })

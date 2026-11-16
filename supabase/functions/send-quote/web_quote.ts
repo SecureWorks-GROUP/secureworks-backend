@@ -99,14 +99,14 @@ export function acceptHeldScript(o: { stateUrl: string; phone: string }): string
     + 'document.querySelectorAll(".btn-accept,.sw-web-accept").forEach(function(x){x.disabled=true;x.hidden=true;x.style.display="none";});'
     + 'var box=document.createElement("div");box.id="swHeld";box.className="sw-held";box.setAttribute("role","status");box.setAttribute("aria-live","polite");'
     + 'var p=document.createElement("p");p.id="swHeldText";box.appendChild(p);'
-    + 'var b=document.createElement("button");b.type="button";b.id="swHeldCheck";b.className="sw-web-ghost";b.textContent=SW_HELD.check;b.addEventListener("click",function(){if(!b.disabled)swHeldLook();});box.appendChild(b);'
+    + 'var b=document.createElement("button");b.type="button";b.id="swHeldCheck";b.className="sw-web-ghost sw-held-check";b.textContent=SW_HELD.check;b.addEventListener("click",function(){if(!b.disabled)swHeldLook();});box.appendChild(b);'
     + 'document.body.appendChild(box);swHeldSay(SW_HELD.held);setTimeout(swHeldLook,SW_SETTLE);}'
 }
 /** The held box's look: the bar's glass and orange edge, above the bar. */
 export const ACCEPT_HELD_CSS = '.sw-held{position:fixed;left:50%;transform:translateX(-50%);bottom:96px;z-index:10000;max-width:calc(100% - 32px);width:440px;box-sizing:border-box;'
   + 'background:rgba(16,33,49,.92);border:1px solid rgba(255,255,255,.16);border-left:4px solid #F15A29;border-radius:6px;padding:14px 16px;color:#fff;'
   + 'font-family:"Plus Jakarta Sans",system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.45;box-shadow:0 18px 40px rgba(8,16,22,.45)}'
-  + '.sw-held p{margin:0 0 10px}.sw-held button[hidden]{display:none}'
+  + '.sw-held p{margin:0 0 10px}.sw-held button[hidden]{display:none}.sw-held .sw-held-check::before{content:none}'
 
 export const WEB_BAR_WORDS = Object.freeze({ ready: 'Ready to get started?', pdf: 'Download PDF', accept: 'Accept quote' })
 
