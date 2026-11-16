@@ -84,7 +84,7 @@ export function buildQuoteOptionsCard(offer: QuoteOptionsOffer): string {
 export const QUOTE_OPTIONS_CSS = `
     .opt-card .opt-sentence { color: rgba(255,255,255,0.7); font-size: 14px; margin-bottom: 14px; }
     .opt-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.08); cursor: pointer; }
-    .opt-row input { width: 20px; height: 20px; margin-top: 2px; accent-color: #34C759; flex-shrink: 0; }
+    .opt-row input { width: 20px; height: 20px; margin-top: 2px; accent-color: #F15A29; flex-shrink: 0; }
     .opt-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
     .opt-name { font-weight: 600; color: #fff; font-size: 15px; }
     .opt-line { color: rgba(255,255,255,0.6); font-size: 13px; }
