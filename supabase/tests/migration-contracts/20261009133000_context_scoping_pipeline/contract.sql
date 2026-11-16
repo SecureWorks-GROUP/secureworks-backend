@@ -526,7 +526,12 @@ BEGIN
   SELECT pr.prosecdef, pr.provolatile, pr.proconfig, pr.prolang INTO p FROM pg_proc pr WHERE pr.oid = to_regprocedure(x.sig);
   IF p IS NULL THEN RAISE EXCEPTION 'scoping pipeline contract: % missing', x.sig; END IF;
   IF p.prosecdef IS DISTINCT FROM x.definer OR p.provolatile <> 's' OR p.prolang <> (SELECT l.oid FROM pg_language l WHERE l.lanname = 'sql')
-     OR (x.definer AND p.proconfig IS DISTINCT FROM ARRAY['search_path=public, pg_temp']) OR (NOT x.definer AND p.proconfig IS NOT NULL) THEN
+     -- (widened by the due list's time, 20261115092000: the due list alone may also carry
+     -- statement_timeout=45s, which PostgREST hoists onto the worker's request)
+     OR (x.definer AND p.proconfig IS DISTINCT FROM ARRAY['search_path=public, pg_temp']
+         AND NOT (x.sig = 'public.context_ledger_due(integer)'
+                  AND p.proconfig IS NOT DISTINCT FROM ARRAY['search_path=public, pg_temp', 'statement_timeout=45s']))
+     OR (NOT x.definer AND p.proconfig IS NOT NULL) THEN
    RAISE EXCEPTION 'scoping pipeline contract: % flags (definer %, volatility %, config %)', x.sig, p.prosecdef, p.provolatile, p.proconfig;
   END IF;
   IF has_function_privilege('anon', x.sig, 'EXECUTE') OR has_function_privilege('authenticated', x.sig, 'EXECUTE')
@@ -565,9 +570,21 @@ SELECT to_regprocedure('public.context_job_story_payment_terms(jsonb)') IS NOT N
 -- the story since: its down goes first, inside this transaction only.
 SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
 \if :placement_freshness_live
+-- (finished notes, 20261116060000) replaced the story since: its down goes first
+SELECT to_regprocedure('public.context_job_story_closed_paid(jsonb)') IS NOT NULL AS finished_notes_live \gset
+\if :finished_notes_live
+\ir ../../../rollbacks/20261116060000_context_story_finished_notes_down.sql
+\endif
+-- (rested notes, 20261115130000) replaced the story since: its down goes first
+SELECT to_regprocedure('public.context_job_story_rest(jsonb,jsonb,timestamptz)') IS NOT NULL AS rested_notes_live \gset
+\if :rested_notes_live
+\ir ../../../rollbacks/20261115130000_context_story_rested_notes_down.sql
+\endif
 -- Unwind the current metadata/review successor before testing an earlier body.
 SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
 \if :has_offjob_placement_successor
+-- (card speed, 20261116090000) replaced the story meta since: its down goes first (a no-op on the older body)
+\ir ../../../rollbacks/20261116090000_context_story_card_speed_down.sql
 \ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
 \endif
 \ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
@@ -598,6 +615,8 @@ SELECT to_regprocedure('public.context_job_card_events(uuid[])') IS NOT NULL AS 
 -- Unwind the current metadata/review successor before testing an earlier body.
 SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
 \if :has_offjob_placement_successor
+-- (card speed, 20261116090000) replaced the story meta since: its down goes first (a no-op on the older body)
+\ir ../../../rollbacks/20261116090000_context_story_card_speed_down.sql
 \ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
 \endif
 \ir ../../../rollbacks/20261027140000_context_cost_check_person_splits_down.sql

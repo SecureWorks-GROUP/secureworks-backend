@@ -98,6 +98,17 @@ END $c$;
 -- 2. Off: every replaced function answers byte for byte as the bodies before this migration do.
 BEGIN;
 \ir fixtures.sql
+-- (rested notes, 20261115130000) sets aside notes by their age, so the off answers are
+-- recorded without it: the earlier bodies below never rest a note, and this case is about
+-- the held-notes switch, not the clock.
+SELECT to_regprocedure('public.context_job_story_closed_paid(jsonb)') IS NOT NULL AS finished_notes_live \gset
+\if :finished_notes_live
+\ir ../../../rollbacks/20261116060000_context_story_finished_notes_down.sql
+\endif
+SELECT to_regprocedure('public.context_job_story_rest(jsonb,jsonb,timestamptz)') IS NOT NULL AS rested_notes_live \gset
+\if :rested_notes_live
+\ir ../../../rollbacks/20261115130000_context_story_rested_notes_down.sql
+\endif
 DO $c$
 DECLARE a uuid := '7f000000-0000-4000-8000-0000000000a1'; cl jsonb; res jsonb;
 BEGIN
@@ -126,9 +137,21 @@ BEGIN
 END $c$;
 SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
 \if :placement_freshness_live
+-- (finished notes, 20261116060000) replaced the story since: its down goes first
+SELECT to_regprocedure('public.context_job_story_closed_paid(jsonb)') IS NOT NULL AS finished_notes_live \gset
+\if :finished_notes_live
+\ir ../../../rollbacks/20261116060000_context_story_finished_notes_down.sql
+\endif
+-- (rested notes, 20261115130000) replaced the story since: its down goes first
+SELECT to_regprocedure('public.context_job_story_rest(jsonb,jsonb,timestamptz)') IS NOT NULL AS rested_notes_live \gset
+\if :rested_notes_live
+\ir ../../../rollbacks/20261115130000_context_story_rested_notes_down.sql
+\endif
 -- Unwind the current metadata/review successor before testing an earlier body.
 SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
 \if :has_offjob_placement_successor
+-- (card speed, 20261116090000) replaced the story meta since: its down goes first (a no-op on the older body)
+\ir ../../../rollbacks/20261116090000_context_story_card_speed_down.sql
 \ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
 \endif
 \ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql
@@ -158,6 +181,16 @@ ROLLBACK;
 -- message later on one job drops the item on the other and makes it certain on that one.
 BEGIN;
 \ir fixtures.sql
+-- (rested notes, 20261115130000) would set these October notes aside by age; this case is about
+-- the held marker, so it runs without that step (its own contract checks a rested note keeps the mark).
+SELECT to_regprocedure('public.context_job_story_closed_paid(jsonb)') IS NOT NULL AS finished_notes_live \gset
+\if :finished_notes_live
+\ir ../../../rollbacks/20261116060000_context_story_finished_notes_down.sql
+\endif
+SELECT to_regprocedure('public.context_job_story_rest(jsonb,jsonb,timestamptz)') IS NOT NULL AS rested_notes_live \gset
+\if :rested_notes_live
+\ir ../../../rollbacks/20261115130000_context_story_rested_notes_down.sql
+\endif
 DO $c$
 DECLARE a uuid := '7f000000-0000-4000-8000-0000000000a1'; b uuid := '7f000000-0000-4000-8000-0000000000b1';
  h uuid := '7fb00000-0000-4000-8000-000000000002'; h2 uuid := '7fb00000-0000-4000-8000-000000000003';
@@ -284,9 +317,21 @@ BEGIN;
 -- exact surface for its idempotence test only; ROLLBACK restores the full stack.
 SELECT to_regprocedure('public.context_ledger_placement_state(uuid)') IS NOT NULL AS placement_freshness_live \gset
 \if :placement_freshness_live
+-- (finished notes, 20261116060000) replaced the story since: its down goes first
+SELECT to_regprocedure('public.context_job_story_closed_paid(jsonb)') IS NOT NULL AS finished_notes_live \gset
+\if :finished_notes_live
+\ir ../../../rollbacks/20261116060000_context_story_finished_notes_down.sql
+\endif
+-- (rested notes, 20261115130000) replaced the story since: its down goes first
+SELECT to_regprocedure('public.context_job_story_rest(jsonb,jsonb,timestamptz)') IS NOT NULL AS rested_notes_live \gset
+\if :rested_notes_live
+\ir ../../../rollbacks/20261115130000_context_story_rested_notes_down.sql
+\endif
 -- Unwind the current metadata/review successor before testing an earlier body.
 SELECT to_regprocedure('public.context_ledger_event_locations(public.business_events)') IS NOT NULL AS has_offjob_placement_successor \gset
 \if :has_offjob_placement_successor
+-- (card speed, 20261116090000) replaced the story meta since: its down goes first (a no-op on the older body)
+\ir ../../../rollbacks/20261116090000_context_story_card_speed_down.sql
 \ir ../../../rollbacks/20261030165500_context_offjob_person_placement_down.sql
 \endif
 \ir ../../../rollbacks/20261030161813_context_placement_freshness_down.sql

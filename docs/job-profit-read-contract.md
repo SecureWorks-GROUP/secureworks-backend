@@ -27,8 +27,8 @@ carry no money.
 
 | Action | Returns |
 |---|---|
-| `job_profit&job_id=<uuid>` or `&job_number=<number>` | `job` (one row of the fields below), `trades`, `trade_charge_dates` (below), `cost_events`, `revenue_events`, `timeline`, `dispatch_orders` (below), `labels` |
-| `job_profit_list` (`type`, `status`, `from`, `to`, `date_field=created\|invoiced`, `limit`, `offset`) | `jobs` (rows of the fields below), `has_more`, `labels` |
+| `job_profit&job_id=<uuid>` or `&job_number=<number>` | `job` (one row of the fields below), `trades`, `trade_charge_dates` (below), `cost_events`, `revenue_events`, `timeline`, `dispatch_orders` (below), `cost_close` (below), `labels` |
+| `job_profit_list` (`type`, `status`, `from`, `to`, `date_field=created\|invoiced`, `limit`, `offset`) | `jobs` (rows of the fields below), `has_more`, `cost_close` (below, by job), `labels` |
 | `job_profit_list&view=rollup` (same filters) | `totals`, `by_type`, `by_month`, `labels` |
 
 `job_profit_list` returns no row count. `has_more` is true when another page
@@ -152,6 +152,195 @@ depends on the clock and holds would; for that case
 `context_job_story_money_sig` carries the order checks' state while the policy
 makes one hold, so the sweep rewrites the story on the day an order turns
 overdue. The signature also carries the job's variations.
+
+## Cost close (15 Nov 2026)
+
+Is a job's cost final, and if not, what is it waiting on. `job_cost_close(job_ids, as_of)`
+(migration 20261115143000, service role only) works the answer out from Job Profit's own row on
+every read. The answer is not stored, no person closes a job, and `v_job_profit` is untouched. Every number
+and list is in `job_cost_close_policy()` (`cost-close-v1`) and changes only by migration.
+
+The same migration adds `job_status_moves`: the database's own record of every job status move,
+written by a trigger on `jobs` whoever makes the change (a row when a job is created, one per status
+change naming both statuses, one per repair stage change (`source` `repair_stage`, old and new stage
+in the from and to columns), and one baseline row per job that existed when the record began). The
+rule dates a finish by the last time the job went back to work, and the application's events are not
+a complete record of that: five independent reviews each found another writer that changes
+`jobs.status` and logs something else or nothing (a restoration stage move, a quote accepted on a
+finished job, a declined quote run, a callback, a booking moving `accepted` to `processing`). The
+trigger cannot be got around by a new writer. It runs once per statement over the statement's
+transition tables, so a bulk update of jobs adds one insert, not one per row. It never fails the
+change it records (an error is caught in its own subtransaction and logged as a warning; a move lost
+that way is still bounded by the history floor below). Service role reads the table; nothing else
+reads or writes it.
+
+| `cost_state` | Means |
+|---|---|
+| `not_applicable` | A holding job, or a job that did not go ahead (cancelled, lost) that holds no cost, has none still to come and has nothing still under way (a callback, a crew visit to come, an undecided restoration quote or variation) |
+| `open` | The work is not finished, or the job is back in rectification or another working status |
+| `waiting` | Finished, but Job Profit names a cost reason: `waiting_on` lists them, in Job Profit's words |
+| `settling` | Finished with no cost reason, inside the quiet days (30) since the latest of the finish day, the day the newest cost reached the job, and the other days below |
+| `final` | Finished, no cost reason, quiet for 30 days. `final_on` is the day it became final, `closed_by` the rule |
+
+- **Finished** is where the job stands now, never a day on the job alone: a job sent back to work
+  keeps its old `completed_at` and its old sign-off. Read in this order:
+  - A job in `rectification` is never finished, and neither is a job with a callback open
+    (`jobs.is_callback`, or a `callback_opened` event with no `callback_resolved` after it), nor a
+    job with a crew visit still to come: a `job_assignments` row that is not a ghost or observer,
+    not cancelled and not complete, and either has no date yet, ends on or after `as_of` (its
+    `scheduled_end`, else its `scheduled_date`), or is clocked on and not off. A live row dated in
+    the past is not read as a visit to come (production carries stale bookings on finished jobs).
+    Nor is a job finished while a restoration quote on it is still `draft` or `sent`
+    (`restoration_open_quote_statuses`): the builder's answer decides the works. Nor while a
+    variation on it is `pending_approval` or `sent` (`variation_open_statuses`): more work may be
+    agreed.
+  - A cancelled or lost job is finished as `did_not_go_ahead` when it holds cost or a cost is still
+    to come (`pending_cost_reasons` in the policy: an open or unbilled order, a bill not placed or
+    not confirmed, unapproved trade charges, a Dispatch order, work order or costed variation with
+    no bill), so it reads `waiting`, not `not_applicable`. One that still has something under way
+    (a callback, a crew visit to come or in the last 30 days, an undecided restoration quote or
+    variation) reads `open`.
+  - A job that carries a repair stage is finished by stage `complete` while the stage stands
+    (below), whatever its status (the Repairs board moves the stage, not the status), or by status
+    `archived` (`closed_statuses`). One sent back to work after its stage reached `complete`, with
+    the stage left there, is open until it reaches a finished status again. An invoice never
+    finishes a repair, and a stage that is not `complete` is finished only by `archived`.
+  - Every other job is finished by a finished status (`complete`, `invoiced`, `final_payment`,
+    `get_review`, `archived`). A make-safe is also finished by its first counted invoice, but only
+    while it rests at `accepted`, `scheduled` or `processing` (`invoice_finish_statuses`: where
+    invoiced make-safes sit on production; `in_progress` and every other working status keep it
+    open), only on its first attendance (`makesafe_job_details.cycle_number` 1 and no
+    `reopen_reason`), never for restoration work (a restoration stage on the job, or a work
+    subtype that contains `restoration`: restoration is invoiced before the works), and only while
+    the invoice stands (below): one raised before the job went back to `in_progress`, was reopened
+    or was re-attended finishes nothing. Once a make-safe has been taken out of a finished status,
+    its invoice never finishes it again; only a finished status does. And the invoice stands only
+    while no move to a status that is not finished comes on a later day, except a move from one
+    resting status to another whose old status is named (by the record, or by the event; an old
+    status inferred from the previous logged move does not count, because a move nobody logged may
+    lie between).
+- **`finished_on` and `finished_basis`.** The finish day is the later of two days, so a job
+  finished a second time is never dated by its first finish and a job is never dated before it
+  came to stand where it stands. A job cannot go from `open` to `final` in a day.
+  - The work day: the later of `completed_at` and the newest client sign-off not revoked since.
+  - The day the job came to stand where it stands. A repair finished by its stage: the newest
+    `repair_stage_changed` to `complete`. A make-safe finished by its invoice: its first counted
+    invoice. A job at a finished status: the first move into a finished status at or after the
+    last move out of one (`job_events` `status_changed` / `status_change`), or for a make-safe
+    whose invoice stands, the invoice day when that is earlier (putting the card away later does
+    not restart the count).
+  - A day stands only while the status has not moved to a working one after it. A working move is
+    a move to any status that is not finished; for a make-safe or a job with a repair stage, whose
+    status is not its stage, a move to a resting status (`invoice_finish_statuses`) is not one.
+    A move out of a finished status is a working move wherever it lands (the old status is read
+    from the event, or is the status the last logged move set). Reopening or re-attending a
+    make-safe, a quote accepted, a quote run declined and a callback opened each put a job back to
+    work and may log no status move; each leaves its own event (`reopen_event_types`, and a note
+    starting `Job reopened`) and each counts as a working move. A complete
+    stage with no stage move on record stands only when no working move is on record either, and a
+    stage stands only while no stage move to another stage is on record after it last reached
+    `complete` (stage moves are read from `repair_stage_changed` events and from the record). A
+    stage day that does not stand gives way to the status move, and a repair finished by its
+    status is never dated before the day its stage last left `complete`. The invoice carries a day and no
+    time, so a working status move on the invoice day itself leaves it standing (a make-safe is
+    attended and invoiced on one day); a reopen or a re-attend on that day does not.
+  - The moves read are `job_status_moves` (complete from the day the record began) and, for the
+    time before, the events in `status_events`: `status_changed` and `status_change` (new status
+    under `new_status`, `to` or `status`), `restoration_stage_changed` (`job_status`), and the
+    events that set a status without naming it (`quote_accepted`, `quote_run_declined`,
+    `callback_opened`, `callback_resolved`).
+  - **The history floor.** Before the record began, a status move nobody logged cannot be later
+    than the day the job row last changed (`jobs.updated_at`, stamped by trigger on every update).
+    So the quiet count never starts before the earlier of that day and the day the job's record
+    began. A job untouched for 30 days loses nothing; one touched recently waits out the
+    difference once, and from 30 days after the record began the floor no longer holds anything.
+    Measured on production on 15 Nov 2026 (rehearsed with the record starting that day): 22 jobs
+    that would otherwise be final read `settling` because of it.
+  - `finished_basis` names the day used: `work_done`, `repair_stage`, `first_invoice`, `status`
+    (a status move, or no day on record), `did_not_go_ahead` (no day).
+  - The quiet count runs from the latest of the finish day, the day the newest cost reached the
+    job, the history floor, the last crew visit (the latest `scheduled_end`, `scheduled_date` or
+    clock-off day of a booking that was not cancelled), the day the last Dispatch order went out
+    and the day the last variation was accepted or approved, so labour worked or work agreed after
+    the finish day restarts it. A finished job with no day on record counts from the latest of
+    those days and the day the job record last changed (`jobs.updated_at`), so an old cost never
+    closes a job finished yesterday.
+  - **The day a cost reached the job** is not its document date: a bill dated in August and placed
+    on the job in November changed the job in November. It is the latest of the cost event's date
+    (`v_job_cost_events`), the day its row was written (`xero_invoices`, `trade_invoices`,
+    `purchase_orders` `created_at`), the bill's last change in Xero (`UpdatedDateUTC` in the stored
+    Xero record: a draft approved or an amount edited restarts the count, and so does a payment,
+    which only waits longer; `xero_invoices.updated_at` is our row's last write and is not used), a
+    crew invoice's `submitted_at`, and the day its own route placed it on this job:
+    `xero_invoices.job_linked_at` for a bill placed by its job link, the first `job_materials_facts`
+    row for a materials placement, the first bookkeeping evidence revision for a bookkeeping
+    placement. A placement day counts only for the route that placed the cost. `last_cost_on` in
+    the answer stays Job Profit's document date. Measured on production on 15 Nov 2026: 77 jobs
+    that would otherwise be final read `settling` because of it, mostly costs placed by the
+    bookkeeping load of 2 and 3 Nov, which turn final on 2 and 3 Dec. With no
+    cost date it reads `waiting` on `no_cost_date`; with a cost date and no day at all, `waiting`
+    on `no_finish_day`.
+  - Known limit: an invoiced make-safe at a resting status is taken as attended; no attendance
+    record is read. One nobody attended holds no labour, so Job Profit's own reasons keep it
+    `waiting`. Measured 15 Nov 2026: 216 of 285 such make-safes carry a trade report or a
+    completed booking; of the 69 that carry neither, 24 wait on a cost reason and 43 hold a dated
+    cost with nothing missing.
+  - Known limit: a make-safe past its first attendance that rests at `accepted`, `scheduled` or
+    `processing` stays `open` until its card reaches a finished status, even when its invoice came
+    after the last attendance. Only its first invoice day is read.
+  - A status changed outside the application, or by a writer that logs nothing, is in
+    `job_status_moves` from the day the record began. Before that, it is bounded by the history
+    floor.
+- **A cost reason** is any `completeness` code or non-ok `cost_flag`, except the ones that are about
+  revenue or structure and not cost (`not_cost_reasons` in the policy: a missing or draft customer
+  invoice, an unbilled variation, a holding job, a missing expected-cost lane, a Xero Project linked
+  by contact only). Every other code holds a close, `text_matched_lines` included, and so does a code
+  Job Profit adds later. The rule adds reasons of its own:
+  - `dispatch_order_not_billed`: a supplier order emailed from Dispatch (`v_dispatch_orders` kind
+    `dispatch_v2_email`) with no bill linked in `v_dispatch_order_bills` that is dated on or after
+    the order and is itself a counted cost on this job, a cost Job Profit's own row does not see yet
+    (17 jobs on 15 Nov 2026).
+  - `work_order_not_billed`: work orders that are not dead (`work_order_dead_statuses`: draft,
+    cancelled, void, declined, rejected) agree more labour (`agreed_labour_ex`) than the labour Job
+    Profit counts on the job (`is_actual`: an installer bill a person marked not job related is
+    not counted), by more than `work_order_tolerance_ex` ($1). A job work order and the crew work
+    orders under it describe the same labour, so the larger of the two totals counts, never their
+    sum (57 jobs on 15 Nov 2026; some will be work orders agreed above what was finally billed,
+    which a person settles by cancelling or adjusting the work order).
+  - `variation_cost_not_in`: a variation that is agreed (not `pending_approval` or `sent`, not
+    dead) carries a cost estimate, and the cost Job Profit counts that is dated on or after the day
+    it was agreed and reached the job after it was agreed is less than half (`variation_cost_cover_share`) of the estimates of every variation
+    agreed at or after that moment, taken together, so the same dollars never cover two
+    variations. It is agreed when accepted
+    or approved, or when made for a staff variation auto-approved under the limit (which carries
+    neither time). A cost bought before the variation was agreed does not cover it, even when that
+    older bill is paid, synced or re-linked after it; a person settles that by adjusting the
+    estimate. Coverage is a total, not a match of costs to the work: an unrelated new cost can
+    cover a variation, and another crew's labour can cover a crew work order.
+  - `draft_bill_on_job`: a supplier bill still at `DRAFT` or `SUBMITTED` in Xero
+    (`draft_bill_statuses`), with an amount, names the job: linked to it in Xero, placed on it as
+    materials, or its job number in the reference or a line. Job Profit counts no such bill until
+    it is approved, so the job's cost is not in. A crew bill mirrored from a trade invoice is left
+    out, because Job Profit counts that labour through the trade invoice's lines. A draft named
+    only in its reference holds the close, but once approved Job Profit does not read the
+    reference, so a person places it.
+  The read is planned for each call's own job ids (plpgsql, `plan_cache_mode =
+  force_custom_plan`); ops-api always passes the ids and runs the single-job read beside the
+  other Job Profit reads.
+  So `final` says the cost is complete; it does not say the job was invoiced.
+- **Nothing is frozen.** A cost that lands on a final job moves it back to `settling` with a later
+  `final_on`; a job put back into rectification or any working status reads `open`, and so does a
+  repair or a resting make-safe reopened, re-attended or sent back to work. `as_of` moves
+  only the day the quiet count is measured to: the costs, the status and the reasons are always
+  today's, so it is not a read of how the job stood on an earlier day. Measured on production on 15 Nov 2026:
+  of 261 jobs finished by 15 Aug, 22 took a cost more than 30 days after going quiet and 11 more than 90.
+- `job_profit` returns `cost_close` for its job; `job_profit_list` returns `cost_close.by_job` for
+  the page. Each is `{ ok: true, cost_state, cost_final, final_on, closed_by, finished, finished_on,
+  finished_basis, last_cost_on, waiting_on, all_costs_paid, quiet_days, as_of, rule }` and carries no
+  money figure. A read that fails, or a job the rule has no row for, is `{ ok: false, reason }`:
+  never `final`, never `open`. A job missing from `by_job` is not known.
+- It is not line evidence: `final` does not mean every cost line is verified (`line_evidence` says
+  that), and it never changes a margin or whether one is shown.
 
 ## Xero Project rule
 

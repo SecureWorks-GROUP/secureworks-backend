@@ -19,7 +19,14 @@
 // as_of picks the months shown and nothing else: allocation rows and Bills to
 // place states are read as they are today.
 //
-// Spend money (TP-08) comes back as not_yet_read with a null amount, never $0.
+// Spend money (TP-08) comes back as not_yet_read with a null amount, never $0,
+// inside the bills answer. Since 20261115110000 the door also asks
+// xero_spend_revenue_monthly for the two sides the bills answer does not cover
+// (card and bank spend sorted by Xero account, and customer invoices against
+// Job Profit) and returns it beside the bills answer as spend_revenue:
+// { ok: true, answer } or { ok: false, reason }. The bills answer is never
+// changed by it and never fails because of it: a second read that cannot be
+// read says so and the page keeps showing "Not read yet".
 // Supplier credit notes (TP-07) do too until xero-sync has finished a full
 // read of the org's credit notes; after it each month carries its credit
 // notes beside the bills total, never netted from it (20261030060000). Staff
@@ -77,7 +84,10 @@ export async function readXeroTieout(
   opts: { asOf?: string | null; months?: string | null; orgId: string | null },
 ): Promise<Record<string, unknown>> {
   const params = tieoutParams(opts.asOf, opts.months, opts.orgId);
-  const { data, error } = await client.rpc("xero_tieout_monthly", params);
+  const [{ data, error }, spendRevenue] = await Promise.all([
+    client.rpc("xero_tieout_monthly", params),
+    readSpendRevenue(client, params),
+  ]);
   // An unreadable tie-out is never shown as "nothing unplaced".
   if (
     error || !data || typeof data !== "object" ||
@@ -88,5 +98,34 @@ export async function readXeroTieout(
       503,
     );
   }
-  return { ok: true, tieout: data };
+  return { ok: true, tieout: data, spend_revenue: spendRevenue };
+}
+
+export type SpendRevenueRead =
+  | { ok: true; answer: Record<string, unknown> }
+  | { ok: false; reason: string };
+
+// The second read. Whatever goes wrong here is reported, never thrown: the
+// bills answer stands on its own.
+async function readSpendRevenue(
+  client: any,
+  params: { p_as_of: string | null; p_months: number; p_org_id: string },
+): Promise<SpendRevenueRead> {
+  try {
+    const { data, error } = await client.rpc(
+      "xero_spend_revenue_monthly",
+      params,
+    );
+    if (error) {
+      return { ok: false, reason: String(error.message ?? "read failed") };
+    }
+    if (
+      !data || typeof data !== "object" || !Array.isArray((data as any).months)
+    ) {
+      return { ok: false, reason: "no answer" };
+    }
+    return { ok: true, answer: data };
+  } catch (e) {
+    return { ok: false, reason: (e as Error)?.message ?? "read failed" };
+  }
 }

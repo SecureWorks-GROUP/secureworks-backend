@@ -1051,6 +1051,24 @@ purpose: its reading read every row landed by its claim, and a shadow held besid
 is never updated. A later change to those four bodies rolls this migration back first in the lead
 cutoff, story safety and story fixups re-applies and the lead cutoff break proof.
 
+## The Notes Due List Carries Its Own Time Limit
+
+`context_ledger_due(integer)` carries `statement_timeout = 45s` (`20261115092000`). PostgREST
+hoists it onto the request, so the notes worker's call may run 45 s where the service role's
+own limit is 30 s; the worker waits 43 s for that one call (`databaseCallTimeoutMs`,
+secureworks-jarvis) and 28 s for every other. The call took 21.7 s and 27.1 s on production on
+15 Nov 2026 and stopped the reader on 2 and 3 Nov at the old limit. Three things follow. A
+later `CREATE OR REPLACE` of the due list must say `SET statement_timeout = '45s'` or it drops
+the setting without a word (an edit made through `pg_get_functiondef`, as `20261104175000`
+does, keeps it, provided the definition it pins includes the setting). The rollbacks that
+replace the function (`20261102210000`'s and earlier) drop it too, and `20261104175000` pins
+the whole definition, so its rollback and a re-run of it both refuse while it is set: roll
+`20261115092000` back first and apply it again after. The five earlier contracts that pin
+the due list's settings accept it with or without this one (ledger store, notes freshness,
+scoping pipeline, finished wake, rebuild order); a new setting on it widens those five.
+The time limit is room, not a fix: the judge (9.5 s) and the unread-row ordering (4.3 s for 76
+due jobs) are where the time goes.
+
 ## The Job Story Sorts Text In C Order
 
 Production's collation is ICU `en-US` (letters compared without case first,
@@ -1112,6 +1130,44 @@ A story loop's `status` is `open` or `closing_evidence` when it is a move;
 work reopened after it was recorded finished is not finished again) and
 `unconfirmed` (R8 whose amount a C2 check leaves unknown) are never a move, the
 first line's item or a reason for whose move.
+
+## The Card Sets Aside AI Notes Nobody Owes Now
+
+Since `20261115130000` `context_job_story` assembles the card, asks the pure
+`context_job_story_rest` which standalone AI notes are not owed now (`said`: a claim the
+reader marked `needs_reply` false that blocks no step; `stage_passed`: blocks a step the phase
+has passed and was raised before it; `old`: plainly open (never `closing_evidence`), opened,
+and due if dated, more than `context_job_story_rest_policy().max_age_days` Perth days ago),
+and only when there are any assembles again with those items' status `rested` and adds
+`rested` (held-marked like the other sections) to the card. Money (payment or deposit blocks,
+an invoice, payment or refund about-key, a dollar amount in the words), a person's or locked
+note and a note attached to a record loop are never set aside, and nothing is written. This
+is the one rule in the story that moves with the clock: a note crossing the age line leaves
+`loops`, so `context_job_story_card_hash` moves once and the saved story reads stale once
+(the rewrite queue does not read the hash). A rested requested or offered agreement still
+shows in `agreements`, with status `rested`. Do not move this into the assembler (its body is
+md5-pinned). A later story read replaces this body and must run this down first wherever an
+earlier contract runs `20261030161813`'s down, as those 21 sites now do.
+
+## A Finished Job's Card Reads Xero's Answer
+
+Since `20261116060000` `context_job_story_rest` also sets aside, before the money guard, the
+standalone AI notes the records already answer: `paid` (about one of the job's own invoices that
+Xero shows `PAID` with nothing owing, when someone other than us owes it, it is a claim needing no
+reply, or it is the reader's "Invoice record:" copy; or about a payment someone other than us
+owes, or a claim about money needing no reply, on a job whose status is in the policy's
+`closed_statuses` with every invoice paid, no draft, and `context_job_story_money_settled`:
+nothing known left to invoice and nothing placed on no job), `supplier` (about a bill in the
+card's `money.supplier_bills`, by number, owed by us to someone other than the customer), `office` (`other:other-job`), `courtesy`
+(we asked for a review), and a deposit note someone else owes once the work is done with nothing
+owing. Refund, overpayment, credit or double-payment words or about-keys are never set aside by
+these. A completion matter or an undated visit we owe rests only once the office has closed the job (a dated `booking:YYYY-MM-DD` on or before the phase began rests on its own). A note with no `blocks`
+holds up the step its about-key's first word names in the policy's `about_step` (a visit's
+arrangements: the install), and a job at invoice, payment or complete has passed completion (6).
+`context_job_story_closed_paid` then reads a job the office closed with every invoice paid as
+phase `complete` (`now.closed_paid`). A later story read must run
+`20261116060000_context_story_finished_notes_down.sql` before `20261115130000`'s down wherever
+those 21 contract sites unwind the story.
 
 ## A Lead Not Followed Up Has One Rule
 
@@ -1194,6 +1250,13 @@ leads hold its head and nothing was queued), and an `unchanged` finish moves
 days always carry their year, so the clock never changes its words. Ship the
 writer first: the v3 writer never saves `money_sig`, so the sweep would keep
 rewriting its stories.
+
+A job with no current story is queued only by `context_job_story_enqueue_first`
+(`20261115091000`): the changed-jobs sweep sees only jobs that already hold a
+story, and production held none on 15 Nov 2026. Its reserve (60 of the day's
+story calls kept for real changes) and open limit (5) are in
+`context_job_story_first_policy()`; never queue first stories by hand or by
+loosening the sweep. Contract: `docs/context/job-story-text.md`, "The queue".
 
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
@@ -1621,6 +1684,17 @@ actions `restoration_*`. What must not regress:
   trade invoice mode bills a restoration job with one as a work order
   (`restoration_work_order.ts`). SWRESTO- books to Xero option
   `SW - RESTORATION`, which `ensure_xero_tracking_option` adds.
+
+- **Its report, and one look for every PDF** (owner, 13 Nov 2026):
+  `restoration_render_report` (dry run by default; live files the job's
+  `makesafe_report` document through the one attach path, sends nothing)
+  renders `restoration_report_render.ts`. Every PDF this function draws
+  (restoration report and quote, make-safe report, roof report) takes its look
+  from `report_design.ts`; change the look there, never in one renderer, and
+  never let a look change touch a renderer's field set, hash input, limits or
+  file name. The wiki's Python make-safe renderer is not on it yet (pinned
+  pair, see "The Curated Renderer Pin"). Contract: `docs/restoration-board-v1.md`,
+  "Report"; tests: `restoration_report_render_test.ts`.
 
 Tests: `restoration_intake_test.ts`, `restoration_workflow_test.ts`,
 `restoration_workflow_store_test.ts`, the SWRESTO cases in

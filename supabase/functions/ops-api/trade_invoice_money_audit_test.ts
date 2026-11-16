@@ -151,10 +151,19 @@ Deno.test("audit 2: manual hours must be finite, more than 0 and at most 24", ()
   assertEquals(_sanitiseManualAssignmentHours(undefined), null);
 });
 
-Deno.test("audit 2: generate_trade_invoice manual lane never reads a client rate", () => {
-  assertStringIncludes(INDEX, "hours_worked: h, hourly_rate: resolvedRate,");
-  assertEquals(INDEX.includes("clientRateProvided"), false, "client rate path must be gone");
+// Owner, 15 Nov 2026: a trade may set their own rate per booked job card. The
+// card's rate is read only when the app marks it typed by the trade, only
+// through tradeTypedJobRate (trade_rate_per_job.ts), and a missing office rate
+// still blocks the submission.
+Deno.test("audit 2: generate_trade_invoice manual lane reads a client rate only as the trade's typed job rate", () => {
+  assertStringIncludes(INDEX, "hours_worked: h, hourly_rate: typedRate ?? resolvedRate,");
+  assertStringIncludes(INDEX, "typedRate = manualRow.rate_source === 'client_entered'");
+  assertStringIncludes(INDEX, "? tradeTypedJobRate(manualRow.rate, resolvedRate,");
+  assertEquals(INDEX.includes("clientRateProvided"), false, "the old client rate path must stay gone");
   assertEquals(INDEX.includes("anyClientRate"), false, "client rate must not bypass RATE_NOT_CONFIGURED");
+  const guardAt = INDEX.indexOf("code: 'RATE_NOT_CONFIGURED',");
+  const readAt = INDEX.indexOf("typedRate = manualRow.rate_source === 'client_entered'");
+  assert(guardAt > 0 && readAt > guardAt, "the office-rate guard must run before a typed rate is read");
 });
 
 // ── 3. one live invoice per trade + week ─────────────────────────────────────

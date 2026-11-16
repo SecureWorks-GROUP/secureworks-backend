@@ -27,6 +27,8 @@ import { automationLaneEnabled } from '../_shared/automation_switch.ts'
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldownError, xeroAppKey } from '../_shared/xero_cooldown.ts'
 import { createXeroSyncTransport } from './xero_transport.ts'
+import { syncBankTransactionLines } from './bank_transactions.ts'
+import { syncXeroAccounts } from './accounts.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
 import { runInvoiceMirrorCheck } from './xero_mirror_check.ts'
 import { autoReleaseVoidedTradeInvoices } from '../ops-api/trade_invoice_voided_release.ts'
@@ -287,7 +289,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(result)
       }
       case 'sync_bank_transactions':
-        return json(await syncBankTransactions(sb))
+        return json(await syncBankTransactions(sb, { whole: true }))
       case 'ingest_materials_recent':
         // Scheduled every 15 minutes (xero-materials-ingest): the bills of the last 90 days, the
         // window every new bill falls in. The pre-match runs on its own schedule.
@@ -3801,72 +3803,26 @@ async function syncAgedPayables(sb: any) {
 
 
 // ════════════════════════════════════════════════════════════
-// BANK TRANSACTIONS — reconciled transactions (90-day window)
+// BANK TRANSACTIONS — reconciled transactions, with their lines
 // ════════════════════════════════════════════════════════════
 
-async function syncBankTransactions(sb: any) {
+async function syncBankTransactions(sb: any, opts: { whole: boolean } = { whole: false }) {
+  // The transaction copy as before, then the lines; rules in bank_transactions.ts.
+  // whole (the daily job) also reads every line of the window and the chart of accounts.
   const { accessToken, tenantId } = await getToken(sb)
-  const now = new Date()
-  const ninetyDaysAgo = new Date(now.getTime() - 90 * 86400000).toISOString().split('T')[0]
-
-  // Xero Accounting API: GET /BankTransactions
-  // Filter to reconciled transactions in the last 90 days
-  // No page param: Xero returns the whole 90-day window in one call for this
-  // endpoint (607 rows today). Adding page=N would cap each call at 100.
-  const data = await xeroGet('/BankTransactions', accessToken, tenantId, {
-    where: `Date>DateTime(${ninetyDaysAgo.replace(/-/g, ',')})&&IsReconciled==true`,
-    order: 'Date DESC',
-  })
-
-  const txns = data.BankTransactions || []
-  let synced = 0
-  let skipped = 0
-
-  for (const txn of txns) {
-    const txnId = txn.BankTransactionID
-    if (!txnId) continue
-
-    // Determine transaction type
-    let txnType = 'SPEND'
-    if (txn.Type === 'RECEIVE' || txn.Type === 'RECEIVE-OVERPAYMENT' || txn.Type === 'RECEIVE-PREPAYMENT') {
-      txnType = 'RECEIVE'
-    } else if (txn.Type === 'RECEIVE-TRANSFER' || txn.Type === 'SPEND-TRANSFER') {
-      txnType = 'TRANSFER'
-    }
-
-    // Calculate total amount from line items
-    const amount = txn.Total || txn.SubTotal || 0
-
-    const row: any = {
-      org_id: DEFAULT_ORG_ID,
-      xero_txn_id: txnId,
-      account_id: txn.BankAccount?.AccountID || '',
-      account_name: txn.BankAccount?.Name || null,
-      // Xero returns .NET-format dates (/Date(…)/); parse via the repo-standard
-      // parseXeroDate helper (returns ISO or null), then take the date part.
-      // Falls back to raw split for already-ISO strings, and to now for null.
-      txn_date: parseXeroDate(txn.Date)?.split('T')[0] ?? (txn.Date ? txn.Date.split('T')[0] : now.toISOString().split('T')[0]),
-      txn_type: txnType,
-      contact_name: txn.Contact?.Name || null,
-      reference: txn.Reference || null,
-      description: (txn.LineItems || []).map((li: any) => li.Description).filter(Boolean).join('; ') || null,
-      amount: txnType === 'SPEND' ? -Math.abs(amount) : Math.abs(amount),
-      sub_total: txn.SubTotal || null,
-      total_tax: txn.TotalTax || null,
-      status: txn.Status || null,
-      is_reconciled: txn.IsReconciled ?? true,
-      synced_at: now.toISOString(),
-    }
-    const { error } = await sb.from('xero_bank_transactions').upsert(row, { onConflict: 'org_id,xero_txn_id' })
-
-    if (error) {
-      if (skipped === 0) console.log(`[xero-sync] Bank txn upsert error sample:`, error.message, error.details)
-      skipped++
-    } else {
-      synced++
+  const get = (path: string, params: Record<string, string>, headers: Record<string, string>) =>
+    xeroGet(path, accessToken, tenantId, params, headers)
+  const result: any = await syncBankTransactionLines(sb, DEFAULT_ORG_ID, tenantId, get, opts)
+  if (result.skipped > 0) console.log('[xero-sync] Bank txn upsert error sample:', result.first_error)
+  console.log(`[xero-sync] Synced ${result.transactions_synced} bank transactions (${result.skipped} skipped); lines ${JSON.stringify(result.lines)}`)
+  if (opts.whole) {
+    try {
+      result.accounts = await syncXeroAccounts(sb, DEFAULT_ORG_ID, get)
+    } catch (e: any) {
+      if (e instanceof XeroCooldownError) throw e
+      result.accounts = { ok: false, reason: (e as Error).message }
+      console.error('[xero-sync] Chart of accounts sync error:', (e as Error).message)
     }
   }
-
-  console.log(`[xero-sync] Synced ${synced} bank transactions (${skipped} skipped)`)
-  return { success: true, transactions_synced: synced, skipped, first_error: skipped > 0 ? 'check edge function logs' : null }
+  return result
 }
