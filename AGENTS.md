@@ -5117,9 +5117,13 @@ budget line or not in it is ordered only with a signed-in person's reason in
 the append-only `dispatch_line_cost_reasons`; the order email stores
 `order_cost` and its body never prints a dollar. An unreadable switch is
 never off: it refuses the fill, email, send and reason (503
-`budget_switch_unreadable`). Contract: "Dispatch lines carry cost" in
-`docs/job-budget-v1.md`.
-=======
+`budget_switch_unreadable`). Ruling 17b-1: a line is built from the sealed
+order list (`order`, `order.v1`, in the revision's hashed pricing bytes, re-hashed
+on read) and takes only its cost from the budget line whose key is the row id;
+never build an order line from the budget's words. What does not join holds
+the whole fill (409 `order_held`, a reason code per row); a revision sealed
+before `order` keeps today's path; `withoutBudget` strips `order` too.
+Contract: "Dispatch lines carry cost" in `docs/job-budget-v1.md`.
 Step 5 (`20261114040000`): with `job_profit_expected_from_job_budget` on
 (seeded off) `v_job_profit` reads the newest budget first (`expected_source`
 `job_budget`; labour is the work order amount, plus `expected_other_ex` and

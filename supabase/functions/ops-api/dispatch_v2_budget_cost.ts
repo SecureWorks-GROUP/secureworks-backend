@@ -7,8 +7,9 @@
 //
 //   - readDispatchBudget: the job's current stored budget (job_budgets, newest
 //     version), its materials lines as sealed, or null when it has none.
-//   - dispatchBudgetFillLines: the order lines a budget gives (one list: the
-//     budget's materials are the order), each naming its budget line.
+//   - readDispatchOrder / dispatchOrderFillLines: the order lines the sealed
+//     order list gives (ruling 17b: the sealed order row is the order; the
+//     budget adds dollars only), each naming the budget line by its key.
 //   - dispatchLineCost: a line's unit cost, line cost and basis, and whether it
 //     may be ordered as it stands or needs a named person's reason.
 //   - dispatchOrderCost: the record of an order's cost kept beside its email.
@@ -33,7 +34,7 @@ import {
   cleanDispatchUnit,
   cleanSuggestedDescription,
 } from "./dispatch_materials.ts";
-import { dispatchV2SuggestionAllowed } from "./dispatch_v2_emails.ts";
+import { jsonHash } from "../_shared/release_packet/canonicalize.ts";
 
 export const DISPATCH_BUDGET_COST_FLAG = "dispatch_budget_cost_v1";
 export const DISPATCH_ORDER_COST_VERSION = "dispatch-order-cost.v1";
@@ -51,6 +52,7 @@ export type DispatchBudgetLine = {
   supplier_key: string | null;
   supplier_id: string | null;
   supplier_name: string | null;
+  /** A readable copy only (ruling 17b): Dispatch never builds a line from it. */
   description: string | null;
   quantity: number | null;
   unit: string | null;
@@ -58,19 +60,6 @@ export type DispatchBudgetLine = {
   line_cost_ex_gst: number | null;
   in_total: boolean;
   cost_from: string | null;
-  note_to_supplier: string | null;
-  /** What the supplier copy prints for the line (tool contract, 14 Nov):
-   * absent on a revision sealed before, read as absent, never as zero. */
-  stock_length_mm: number | null;
-  cuts: { length_mm: number; qty: number }[];
-  stock_to_confirm: boolean;
-  profile: string | null;
-  colour: string | null;
-  finish: string | null;
-  gauge_mm: number | null;
-  girth_mm: number | null;
-  /** The supplier copy's own cut words, used only when cuts is empty. */
-  cut: string | null;
 };
 
 export type DispatchBudgetSupplier = {
@@ -89,6 +78,10 @@ export type DispatchBudget = {
   scope_revision_id: string;
   version: number;
   trade: string;
+  /** The sealed pricing bytes' hash the budget was stored from. */
+  pricing_hash: string | null;
+  /** The quote options the customer took (budget.v1 taken_option_ids). */
+  taken_option_ids: string[];
   /** False: the budget priced all materials as one figure (T1). */
   priced_by_line: boolean;
   /** One figure for all materials, when priced_by_line is false. */
@@ -118,25 +111,17 @@ function money(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-// A physical measure: a positive finite number, else absent (never zero).
-function measure(value: unknown): number | null {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
-  return value;
-}
-
-function cutsOf(value: unknown): { length_mm: number; qty: number }[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((raw: unknown) => {
-    const c = rec(raw);
-    const length = measure(c.length_mm);
-    const qty = measure(c.qty);
-    return length !== null && qty !== null ? [{ length_mm: length, qty }] : [];
-  });
-}
-
 /** A stored budget record (job_budgets.budget, budget.v1) read for Dispatch. */
 export function dispatchBudgetFromRecord(
-  row: { id: string; job_id: string; scope_revision_id: string; version: number; trade: string; budget: unknown },
+  row: {
+    id: string;
+    job_id: string;
+    scope_revision_id: string;
+    version: number;
+    trade: string;
+    pricing_hash?: string | null;
+    budget: unknown;
+  },
 ): DispatchBudget {
   const b = rec(row.budget);
   const materials = rec(b.materials);
@@ -161,16 +146,6 @@ export function dispatchBudgetFromRecord(
       line_cost_ex_gst: money(l.line_cost_ex_gst),
       in_total: l.in_total === true,
       cost_from: text(l.cost_from),
-      note_to_supplier: text(l.note_to_supplier),
-      stock_length_mm: measure(l.stock_length_mm),
-      cuts: cutsOf(l.cuts),
-      stock_to_confirm: l.stock_to_confirm === true,
-      profile: text(l.profile),
-      colour: text(l.colour),
-      finish: text(l.finish),
-      gauge_mm: measure(l.gauge_mm),
-      girth_mm: measure(l.girth_mm),
-      cut: text(l.cut),
     }];
   });
   const bySupplier = (Array.isArray(materials.by_supplier) ? materials.by_supplier : [])
@@ -199,6 +174,10 @@ export function dispatchBudgetFromRecord(
     scope_revision_id: row.scope_revision_id,
     version: Number(row.version),
     trade: String(row.trade),
+    pricing_hash: text(row.pricing_hash),
+    taken_option_ids: Array.isArray(b.taken_option_ids)
+      ? b.taken_option_ids.filter((id: unknown): id is string => typeof id === "string")
+      : [],
     priced_by_line: pricedByLine,
     one_figure_ex_gst: oneFigure,
     materials_ex_gst: money(materials.total_ex_gst),
@@ -214,7 +193,7 @@ export function dispatchBudgetFromRecord(
  */
 export async function readDispatchBudget(client: any, jobId: string): Promise<DispatchBudget | null> {
   const { data, error } = await client.from("job_budgets")
-    .select("id, job_id, scope_revision_id, version, trade, budget")
+    .select("id, job_id, scope_revision_id, version, trade, pricing_hash, budget")
     .eq("job_id", jobId)
     .order("version", { ascending: false })
     .limit(1);
@@ -243,26 +222,193 @@ export async function readDispatchBudgetCostSwitch(client: any): Promise<Dispatc
   }
 }
 
-// ── Filling from the budget ─────────────────────────────────────────────────
+// ── The sealed order list (ruling 17b, addendum 17b-1) ─────────────────────
+//
+// What is ordered is the sealed order list: `order` (order.v1) at the top of
+// the sealed revision's pricing bytes, beside `budget`, one row for every row
+// the supplier copies print. A row's `id` is the key of the budget materials
+// line that holds its money. Dispatch builds each line from a row and takes
+// only the unit cost and line cost from that budget line. A revision sealed
+// before order.v1 has no `order`: Dispatch keeps today's path for it.
 
-export type DispatchBudgetFillLine = {
+export const DISPATCH_ORDER_VERSION = "order.v1";
+
+export type DispatchOrderCut = { length_mm: number; qty: number };
+
+export type DispatchOrderRow = {
+  id: string;
+  scope_line_id: string | null;
+  /** A quote option's row: ordered only when the customer took that option. */
+  option_id: string | null;
+  kind: "item" | "delivery" | "cutting";
+  supplier_id: string | null;
+  supplier_name: string | null;
+  supplier_code: string | null;
+  /** As the supplier copy prints it. */
   description: string;
   quantity: number | null;
   unit: string | null;
-  /** The supplier note the sealed line carries, printed under the line. */
+  stock_length_mm: number | null;
+  /** The stock length is the supplier's to confirm (no product on file). */
+  stock_to_confirm: boolean;
+  cuts: DispatchOrderCut[];
+  /** The supplier copy's own cut words, used only when cuts is empty. */
+  cut: string | null;
+  profile: string | null;
+  colour: string | null;
+  variant: string | null;
+  finish: string | null;
+  gauge_mm: number | null;
+  girth_mm: number | null;
+  note_to_supplier: string | null;
+  cost_by: "line" | "one_figure" | "allowance";
+};
+
+export type DispatchOrder = { rows: DispatchOrderRow[] };
+
+/** The sealed order list is there but cannot be used: never filled from, never ignored. */
+export class DispatchOrderShapeError extends Error {
+  constructor(readonly code: string) {
+    super(code);
+  }
+}
+
+// A physical measure: a positive finite number, else absent (never zero).
+function measure(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  return value;
+}
+
+function cutsOf(value: unknown): DispatchOrderCut[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((raw: unknown) => {
+    const c = rec(raw);
+    const length = measure(c.length_mm);
+    const qty = measure(c.qty);
+    return length !== null && qty !== null ? [{ length_mm: length, qty }] : [];
+  });
+}
+
+/**
+ * The sealed order list in a sealed pricing record, or null when the record
+ * has none (sealed before order.v1). An `order` that is there but not an
+ * order.v1 list of usable rows throws DispatchOrderShapeError.
+ */
+export function dispatchOrderFromPricing(pricing: unknown): DispatchOrder | null {
+  const p = rec(pricing);
+  if (!Object.prototype.hasOwnProperty.call(p, "order")) return null;
+  const o = p.order;
+  if (!o || typeof o !== "object" || Array.isArray(o) || o.version !== DISPATCH_ORDER_VERSION || !Array.isArray(o.rows)) {
+    throw new DispatchOrderShapeError("order_version_unknown");
+  }
+  const rows = (o.rows as unknown[]).map((raw): DispatchOrderRow => {
+    const r = rec(raw);
+    const id = text(r.id);
+    const description = text(r.description);
+    const kind = r.kind === "item" || r.kind === "delivery" || r.kind === "cutting" ? r.kind : null;
+    const costBy = r.cost_by === "line" || r.cost_by === "one_figure" || r.cost_by === "allowance" ? r.cost_by : null;
+    if (!id || !description || !kind || !costBy) throw new DispatchOrderShapeError("order_row_unreadable");
+    const supplier = r.supplier && typeof r.supplier === "object" ? rec(r.supplier) : {};
+    return {
+      id,
+      scope_line_id: text(r.scope_line_id),
+      option_id: text(r.option_id),
+      kind,
+      supplier_id: text(supplier.id),
+      supplier_name: text(supplier.name),
+      supplier_code: text(r.supplier_code),
+      description,
+      quantity: money(r.quantity),
+      unit: text(r.unit),
+      stock_length_mm: measure(r.stock_length_mm),
+      stock_to_confirm: r.stock_to_confirm === true,
+      cuts: cutsOf(r.cuts),
+      cut: text(r.cut),
+      profile: text(r.profile),
+      colour: text(r.colour),
+      variant: text(r.variant),
+      finish: text(r.finish),
+      gauge_mm: measure(r.gauge_mm),
+      girth_mm: measure(r.girth_mm),
+      note_to_supplier: text(r.note_to_supplier),
+      cost_by: costBy,
+    };
+  });
+  return { rows };
+}
+
+/**
+ * The sealed order list of the revision a budget was stored from: its pricing
+ * bytes re-hashed, and the hash the budget was stored from. Null when that
+ * revision has no `order`. A failed read throws DispatchBudgetReadError
+ * (retry); a missing revision, bytes that do not match their hash or the
+ * budget's, or an unusable `order` throws DispatchOrderShapeError.
+ */
+export async function readDispatchOrder(client: any, budget: DispatchBudget): Promise<DispatchOrder | null> {
+  const { data, error } = await client.from("scope_revisions")
+    .select("id, pricing_canonical_text, pricing_hash")
+    .eq("id", budget.scope_revision_id)
+    .maybeSingle();
+  if (error) throw new DispatchBudgetReadError(String(error?.message ?? "sealed revision read failed"));
+  if (!data || typeof data.pricing_canonical_text !== "string") {
+    throw new DispatchOrderShapeError("order_revision_missing");
+  }
+  let pricing: unknown;
+  try {
+    pricing = JSON.parse(data.pricing_canonical_text);
+  } catch {
+    throw new DispatchOrderShapeError("order_pricing_unreadable");
+  }
+  if (await jsonHash(pricing) !== data.pricing_hash || (budget.pricing_hash && budget.pricing_hash !== data.pricing_hash)) {
+    throw new DispatchOrderShapeError("order_pricing_hash_mismatch");
+  }
+  return dispatchOrderFromPricing(pricing);
+}
+
+// ── Filling from the sealed order list ──────────────────────────────────────
+
+export type DispatchOrderFillLine = {
+  description: string;
+  quantity: number | null;
+  unit: string | null;
+  /** What the supplier copy prints under the line. */
   detail: string | null;
   profile: string | null;
   colour: string | null;
-  /** The sealed line id (source_line_id), or null. */
+  /** The take-off line it comes from (source_line_id), or null. */
   scope_line_id: string | null;
   supplier_key: string | null;
   supplier_name: string | null;
+  /** The budget line that holds its money. */
   budget_line_key: string;
 };
 
-export type DispatchBudgetFill =
-  | { ok: true; lines: DispatchBudgetFillLine[]; notes: string[] }
-  | { ok: false; code: "supplier_note_too_long" | "order_detail_too_long"; keys: string[] };
+/** Why a sealed order cannot be filled as it stands. */
+export type DispatchOrderHoldCode =
+  /** A row costed by its own line has no budget line by its id. */
+  | "order_row_no_budget_line"
+  /** A row costed by its own line whose budget line has no cost. */
+  | "order_row_no_cost"
+  /** A row covered by the one figure, in a budget with no one figure. */
+  | "order_row_no_one_figure"
+  /** A row covered by the fixings allowance, in a budget with no single allowance. */
+  | "order_row_no_allowance"
+  /** A budget materials item line no order row names. */
+  | "budget_line_no_order_row"
+  /** Two budget lines on one key. */
+  | "budget_key_duplicated"
+  /** Two order rows on one id. */
+  | "order_row_duplicated"
+  /** A note to the supplier longer than a line holds. */
+  | "supplier_note_too_long"
+  /** Order detail, a profile or a colour longer than a line holds. */
+  | "order_detail_too_long";
+
+export type DispatchOrderHold = { code: DispatchOrderHoldCode; key: string };
+
+export type DispatchOrderFill =
+  | { ok: true; lines: DispatchOrderFillLine[]; notes: string[] }
+  | { ok: false; holds: DispatchOrderHold[] };
 
 /** The longest profile or colour a line holds (job_material_lines). */
 export const DISPATCH_PROFILE_MAX = 80;
@@ -281,25 +427,26 @@ function count(value: number): string {
 }
 
 /**
- * The physical order detail a budget line prints under itself on the supplier
- * copy: its stock length (or that the stock length is the supplier's to
- * confirm), its cuts, finish, gauge and girth, then the note to the supplier.
- * Profile and colour have their own fields. Only what the sealed line states;
- * nothing is made up for a line sealed before these fields existed.
+ * The order detail a sealed order row prints under itself: its supplier code,
+ * stock length (or that the supplier confirms it), cuts, variant, finish,
+ * gauge and girth, then the note to the supplier. Profile and colour have
+ * their own fields. Only what the row states; nothing is made up.
  */
-export function dispatchBudgetLineDetail(line: DispatchBudgetLine): string | null {
+export function dispatchOrderRowDetail(row: DispatchOrderRow): string | null {
   const parts: string[] = [];
-  if (line.stock_length_mm !== null) parts.push(`Length: ${mm(line.stock_length_mm)}`);
-  else if (line.stock_to_confirm) parts.push("Stock length to confirm");
-  if (line.cuts.length) {
-    parts.push(`Cuts: ${line.cuts.map((c) => `${count(c.qty)} x ${mm(c.length_mm)}`).join(", ")}`);
-  } else if (line.cut) {
-    parts.push(`Cuts: ${line.cut}`);
+  if (row.supplier_code) parts.push(`Code: ${row.supplier_code}`);
+  if (row.stock_length_mm !== null) parts.push(`Length: ${mm(row.stock_length_mm)}`);
+  else if (row.stock_to_confirm) parts.push("Stock length: supplier to confirm");
+  if (row.cuts.length) {
+    parts.push(`Cuts: ${row.cuts.map((c) => `${count(c.qty)} x ${mm(c.length_mm)}`).join(", ")}`);
+  } else if (row.cut) {
+    parts.push(`Cuts: ${row.cut}`);
   }
-  if (line.finish) parts.push(`Finish: ${line.finish}`);
-  if (line.gauge_mm !== null) parts.push(`Gauge: ${mm(line.gauge_mm)}`);
-  if (line.girth_mm !== null) parts.push(`Girth: ${mm(line.girth_mm)}`);
-  if (line.note_to_supplier) parts.push(line.note_to_supplier);
+  if (row.variant) parts.push(`Variant: ${row.variant}`);
+  if (row.finish) parts.push(`Finish: ${row.finish}`);
+  if (row.gauge_mm !== null) parts.push(`Gauge: ${mm(row.gauge_mm)}`);
+  if (row.girth_mm !== null) parts.push(`Girth: ${mm(row.girth_mm)}`);
+  if (row.note_to_supplier) parts.push(row.note_to_supplier);
   return parts.length ? parts.join("\n") : null;
 }
 
@@ -307,84 +454,137 @@ export function dispatchBudgetLineDetail(line: DispatchBudgetLine): string | nul
 // placeholder (scope_engine_materials.ts keeps the same two).
 const NO_SUPPLIER = new Set(["office", "supplier-to-confirm"]);
 
+// The budget entries no order row is for: the one figure for all materials
+// (T1) and the fixings allowance (T2).
+function coversOthers(l: DispatchBudgetLine): boolean {
+  return l.supplier_key === "one_figure" || l.cost_from === "allowance";
+}
+
 /**
- * The order lines a budget gives, in the budget's order. Only item lines are
- * order lines; a delivery or cutting charge stays on the budget under its
- * supplier (the order email says delivery or pickup itself). The one figure
- * for all materials and the fixings allowance are not lines anyone orders. A
- * line with no supplier goes on the draft list. A supplier note longer than a
- * line holds refuses the fill, so a note is never cut short.
+ * The order lines a sealed order list gives, in its order: one line per row,
+ * delivery and cutting rows included (the supplier copy prints them), a quote
+ * option's rows only when the customer took that option. Each
+ * names the budget line that holds its money. Anything that does not join
+ * holds the whole fill with a reason code per row or budget line: never a $0
+ * line, never a line without its detail, never one silently dropped.
  */
-export function dispatchBudgetFillLines(budget: DispatchBudget): DispatchBudgetFill {
-  const lines: DispatchBudgetFillLine[] = [];
-  const charges: string[] = [];
-  const tooLong: string[] = [];
-  const detailTooLong: string[] = [];
-  const held: string[] = [];
-  const offCopy: string[] = [];
+export function dispatchOrderFillLines(order: DispatchOrder, budget: DispatchBudget): DispatchOrderFill {
+  const holds: DispatchOrderHold[] = [];
+  const byKey = new Map<string, DispatchBudgetLine>();
   for (const l of budget.lines) {
-    if (l.kind !== "item") {
-      if (l.kind === "delivery" || l.kind === "cutting") charges.push(l.description ?? l.key);
+    if (byKey.has(l.key)) holds.push({ code: "budget_key_duplicated", key: l.key });
+    else byKey.set(l.key, l);
+  }
+  const aggregate = budget.lines.filter((l) => l.supplier_key === "one_figure");
+  const allowance = budget.lines.filter((l) => l.cost_from === "allowance");
+  const rowIds = new Set<string>();
+  const lines: DispatchOrderFillLine[] = [];
+  const unplaced: string[] = [];
+  let oneFigureRows = 0;
+  let allowanceRows = 0;
+  for (const row of order.rows) {
+    if (rowIds.has(row.id)) {
+      holds.push({ code: "order_row_duplicated", key: row.id });
       continue;
     }
-    if (l.supplier_key === "one_figure" || l.cost_from === "allowance") continue;
-    const description = cleanSuggestedDescription(l.description);
-    if (!description) continue;
-    // Calculated concrete, screws and the like never go on supplier copy (the
-    // email's standing lines ask for them): their cost stays on the budget.
-    if (!dispatchV2SuggestionAllowed(description)) {
-      offCopy.push(description);
+    rowIds.add(row.id);
+    // A row of an option the customer did not take is not ordered.
+    if (row.option_id !== null && !budget.taken_option_ids.includes(row.option_id)) continue;
+    let link: DispatchBudgetLine | null = byKey.get(row.id) ?? null;
+    if (row.cost_by === "line") {
+      if (!link) {
+        holds.push({ code: "order_row_no_budget_line", key: row.id });
+        continue;
+      }
+      if (link.unit_cost_ex_gst === null && !(link.line_cost_ex_gst !== null && link.in_total)) {
+        holds.push({ code: "order_row_no_cost", key: row.id });
+        continue;
+      }
+    } else if (row.cost_by === "one_figure") {
+      link ??= aggregate.length === 1 ? aggregate[0] : null;
+      if (!link) {
+        holds.push({ code: "order_row_no_one_figure", key: row.id });
+        continue;
+      }
+      oneFigureRows += 1;
+    } else {
+      link ??= allowance.length === 1 ? allowance[0] : null;
+      if (!link) {
+        holds.push({ code: "order_row_no_allowance", key: row.id });
+        continue;
+      }
+      allowanceRows += 1;
+    }
+    if (row.note_to_supplier && row.note_to_supplier.length > DISPATCH_SUPPLIER_NOTE_MAX) {
+      holds.push({ code: "supplier_note_too_long", key: row.id });
       continue;
     }
-    const quantity = cleanDispatchQuantity(l.quantity);
-    const unit = cleanDispatchUnit(l.unit);
-    if (l.note_to_supplier && l.note_to_supplier.length > DISPATCH_SUPPLIER_NOTE_MAX) {
-      tooLong.push(l.key);
-      continue;
-    }
-    // The length, cuts, profile and colour are what tell two lines of one
+    // The length, cuts, profile and colour are what tell two rows of one
     // section apart (two 90x90 stock lengths): never cut one short.
-    const detail = dispatchBudgetLineDetail(l);
+    const detail = dispatchOrderRowDetail(row);
     if (
       (detail && detail.length > DISPATCH_SUPPLIER_NOTE_MAX) ||
-      (l.profile && l.profile.length > DISPATCH_PROFILE_MAX) ||
-      (l.colour && l.colour.length > DISPATCH_PROFILE_MAX)
+      (row.profile && row.profile.length > DISPATCH_PROFILE_MAX) ||
+      (row.colour && row.colour.length > DISPATCH_PROFILE_MAX)
     ) {
-      detailTooLong.push(l.key);
+      holds.push({ code: "order_detail_too_long", key: row.id });
       continue;
     }
-    const placed = l.supplier_key !== null && l.supplier_key !== "none" &&
-      !(l.supplier_id && NO_SUPPLIER.has(l.supplier_id.toLowerCase()));
-    if (!placed) held.push(description);
+    const description = cleanSuggestedDescription(row.description);
+    const quantity = cleanDispatchQuantity(row.quantity);
+    const unit = cleanDispatchUnit(row.unit);
+    const placed = (row.supplier_id !== null || row.supplier_name !== null) &&
+      !(row.supplier_id && NO_SUPPLIER.has(row.supplier_id.toLowerCase()));
+    if (!placed) unplaced.push(description);
     lines.push({
       description,
       quantity: quantity.ok ? quantity.value : null,
       unit: unit.ok ? unit.value : null,
       detail,
-      profile: l.profile,
-      colour: l.colour,
-      scope_line_id: l.line_id && l.line_id.length <= 100 ? l.line_id : null,
-      supplier_key: placed ? (l.supplier_id ?? l.supplier_name ?? l.supplier_key) : null,
-      supplier_name: placed ? l.supplier_name : null,
-      budget_line_key: l.key,
+      profile: row.profile,
+      colour: row.colour,
+      scope_line_id: row.scope_line_id && row.scope_line_id.length <= 100 ? row.scope_line_id : null,
+      supplier_key: placed ? (row.supplier_id ?? row.supplier_name) : null,
+      supplier_name: placed ? row.supplier_name : null,
+      budget_line_key: link.key,
     });
   }
-  if (tooLong.length) return { ok: false, code: "supplier_note_too_long", keys: tooLong };
-  if (detailTooLong.length) return { ok: false, code: "order_detail_too_long", keys: detailTooLong };
-  const notes = [`These lines come from the job budget (version ${budget.version}), with their costs.`];
-  if (charges.length) {
-    notes.push(`Delivery and cutting charges stay on the budget, not as lines: ${charges.join(", ")}.`);
+  for (const l of budget.lines) {
+    if (l.kind === "item" && !coversOthers(l) && !rowIds.has(l.key)) {
+      holds.push({ code: "budget_line_no_order_row", key: l.key });
+    }
   }
-  if (offCopy.length) {
-    notes.push(`Never on a supplier order, so their cost stays on the budget: ${offCopy.join(", ")}.`);
+  if (holds.length) return { ok: false, holds };
+  const notes = [
+    `These lines come from the sealed order list, costed from the job budget (version ${budget.version}).`,
+  ];
+  if (unplaced.length) {
+    notes.push(`${unplaced.length === 1 ? "1 line has" : `${unplaced.length} lines have`} no supplier in the sealed order, so ${unplaced.length === 1 ? "it is" : "they are"} on the draft list: ${unplaced.join(", ")}.`);
   }
-  if (held.length) {
-    notes.push(`${held.length === 1 ? "1 line has" : `${held.length} lines have`} no supplier in the budget, so ${held.length === 1 ? "it is" : "they are"} on the draft list: ${held.join(", ")}.`);
+  if (oneFigureRows) {
+    notes.push("The budget priced the materials as one figure, so those lines carry no dollars of their own.");
   }
-  if (!budget.priced_by_line) {
-    notes.push("The budget priced the materials as one figure, so its lines carry no dollars of their own.");
+  if (allowanceRows) {
+    notes.push("The fixings allowance covers the fixings lines, so they carry no dollars of their own.");
   }
   return { ok: true, lines, notes };
+}
+
+/** Plain words for a hold, by code. */
+export function dispatchOrderHoldWords(holds: DispatchOrderHold[]): string {
+  const say: Record<DispatchOrderHoldCode, string> = {
+    order_row_no_budget_line: "a line has no line in the job budget",
+    order_row_no_cost: "a line's budget line has no cost",
+    order_row_no_one_figure: "a line covered by one figure, in a budget with no one figure",
+    order_row_no_allowance: "a fixings line, in a budget with no fixings allowance",
+    budget_line_no_order_row: "a budget line is on no sealed order line",
+    budget_key_duplicated: "two budget lines share one key",
+    order_row_duplicated: "two sealed order lines share one id",
+    supplier_note_too_long: `a note to the supplier is longer than ${DISPATCH_SUPPLIER_NOTE_MAX} characters`,
+    order_detail_too_long: "a line has more order detail than a line holds",
+  };
+  const codes = [...new Set(holds.map((h) => h.code))];
+  return `The sealed order is held, so the list was not filled: ${codes.map((c) => say[c]).join("; ")}. Fix it in the quote tool.`;
 }
 
 // ── A line's cost ───────────────────────────────────────────────────────────
@@ -393,8 +593,10 @@ export function dispatchBudgetFillLines(budget: DispatchBudget): DispatchBudgetF
 export type DispatchCostBasis =
   /** At or under its budget line, same unit, the budget's unit cost. */
   | "budget"
-  /** At or under its budget line in a budget priced as one figure. */
+  /** At or under its budget line in a budget priced as one figure, or covered by the one figure. */
   | "one_figure"
+  /** Covered by the fixings allowance (no dollars of its own). */
+  | "allowance"
   /** More than its budget line's quantity. */
   | "over_budget"
   /** Not in its budget line's unit, so the budget's unit cost does not apply. */
@@ -431,7 +633,7 @@ export type DispatchLineCost = {
   /** Unit cost times quantity in whole cents, or the budget line's whole cost. */
   line_cost_ex_gst: number | null;
   /** Where the cost came from. */
-  cost_from: "budget" | "reason" | "one_figure" | null;
+  cost_from: "budget" | "reason" | "one_figure" | "allowance" | null;
   /** The line needs a named person's reason before it is ordered. */
   needs_reason: boolean;
   /** That reason must also give a unit cost (the budget gives none that applies). */
@@ -507,6 +709,8 @@ export function dispatchLineCost(
       line_cost_ex_gst: lineCost,
       cost_from: basis === "one_figure"
         ? "one_figure"
+        : basis === "allowance"
+        ? "allowance"
         : lineCost === null
         ? null
         : needsReason && covers && reason!.unit_cost_ex_gst !== null
@@ -525,6 +729,14 @@ export function dispatchLineCost(
   }
   if (quantity === null) {
     return make("quantity_missing", null, false, "This line has no quantity, so its cost cannot be worked out. Add the quantity.");
+  }
+  // A sealed order row covered by the fixings allowance or the one figure for
+  // all materials names that budget entry: no dollars of its own (17b-1 B).
+  if (linked.cost_from === "allowance") {
+    return make("allowance", null, false, "The fixings allowance in the job budget covers this line.");
+  }
+  if (linked.supplier_key === "one_figure") {
+    return make("one_figure", null, false, "The budget priced the materials as one figure; this line is part of it.");
   }
   if (!sameUnit(unit, linked.unit)) {
     return make("unit_changed", null, true, `The budget counts this line in ${linked.unit ?? "no unit"}. It needs a reason and a unit cost before it is ordered.`);
@@ -571,6 +783,8 @@ export type DispatchOrderCost = {
   lines_ex_gst: number;
   /** Lines with no dollars of their own (part of a one-figure budget). */
   one_figure_lines: number;
+  /** Lines the fixings allowance covers (no dollars of their own). */
+  allowance_lines: number;
   /** The supplier's budget entry, when every budget line on the order is one supplier's. */
   supplier_budget: DispatchBudgetSupplier | null;
 };
@@ -585,10 +799,12 @@ export function dispatchOrderCost(
 ): DispatchOrderCost {
   let cents = 0;
   let oneFigure = 0;
+  let allowance = 0;
   const supplierKeys = new Set<string>();
   const lines = costed.map(({ line, cost }) => {
     if (cost.line_cost_ex_gst !== null) cents += Math.round(cost.line_cost_ex_gst * 100);
     if (cost.basis === "one_figure") oneFigure += 1;
+    if (cost.basis === "allowance") allowance += 1;
     const bl = cost.budget_line_key ? budget.lines.find((l) => l.key === cost.budget_line_key) : null;
     if (bl?.supplier_key) supplierKeys.add(bl.supplier_key);
     return {
@@ -611,6 +827,7 @@ export function dispatchOrderCost(
     lines,
     lines_ex_gst: dollars(cents),
     one_figure_lines: oneFigure,
+    allowance_lines: allowance,
     supplier_budget: only ? budget.by_supplier.find((e) => e.key === only) ?? null : null,
   };
 }

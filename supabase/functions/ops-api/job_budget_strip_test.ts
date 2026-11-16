@@ -68,6 +68,15 @@ Deno.test('the pricing strip keeps everything but the budget', () => {
   assert(!asText.includes('budget'))
 })
 
+Deno.test('the pricing strip drops the sealed order list with the budget (ruling 17b-1: shown nowhere new)', () => {
+  const order = { version: 'order.v1', rows: [{ id: 'patio:SL-1', description: 'ZZTEST post', kind: 'item', cost_by: 'line' }] }
+  const pricing = { totalIncGST: 11000, budget: patioBase(), order }
+  assertEquals(withoutBudget(pricing) as unknown, { totalIncGST: 11000 })
+  assertEquals(withoutBudget({ totalIncGST: 1, order }) as unknown, { totalIncGST: 1 })
+  const asText = withoutBudget(JSON.stringify(pricing))
+  assert(!asText.includes('order.v1') && !asText.includes('ZZTEST post'))
+})
+
 Deno.test('every customer and trade read that receives pricing strips or drops it', async () => {
   const ops = await read('./index.ts')
   // trade_job_detail: the quote packer gets the pricing without its budget, and

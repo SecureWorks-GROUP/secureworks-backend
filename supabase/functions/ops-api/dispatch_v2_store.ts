@@ -95,14 +95,17 @@ import {
   cleanDispatchUnitCost,
   type DispatchBudget,
   DispatchBudgetReadError,
-  DISPATCH_SUPPLIER_NOTE_MAX,
-  dispatchBudgetFillLines,
   type DispatchLineCost,
   dispatchLineCost,
   type DispatchLineReason,
   dispatchOrderCost,
+  dispatchOrderFillLines,
+  dispatchOrderHoldWords,
+  type DispatchOrder,
+  DispatchOrderShapeError,
   readDispatchBudget,
   readDispatchBudgetCostSwitch,
+  readDispatchOrder,
 } from "./dispatch_v2_budget_cost.ts";
 // Tweak 4: the supplier picker rules and the name a box shows.
 import {
@@ -402,12 +405,15 @@ async function readJobLines(client: any, jobId: string): Promise<any[]> {
 
 // ── Ruling 17 step 3: the job budget's cost on each line ───────────────────
 
-// The budget a job's lines are costed against, or null: with the switch off
-// (explicitly false, or no row) every Dispatch path runs exactly as before
-// step 3, and a job with no stored budget keeps today's path too. A switch or
-// budget that cannot be read refuses with a retryable 503: a line is never
-// ordered as though the switch were off or the job had no budget.
-type BudgetCostState = { on: boolean; budget: DispatchBudget | null };
+// The budget a job's lines are costed against and the sealed order list they
+// are built from, or null: with the switch off (explicitly false, or no row)
+// every Dispatch path runs exactly as before step 3; a job with no stored
+// budget, or whose budget's revision was sealed before the order list
+// (order.v1, ruling 17b-1), keeps today's path too. A switch, budget or
+// revision that cannot be read refuses with a retryable 503; a sealed order
+// that is there but cannot be used refuses 409 `order_unreadable`. A line is
+// never ordered as though the switch were off or the job had no budget.
+type BudgetCostState = { on: boolean; budget: DispatchBudget | null; order: DispatchOrder | null };
 
 async function readBudgetCostState(client: any, jobId: string): Promise<BudgetCostState> {
   const sw = await readDispatchBudgetCostSwitch(client);
@@ -415,13 +421,25 @@ async function readBudgetCostState(client: any, jobId: string): Promise<BudgetCo
     console.error("[dispatch_v2] dispatch budget cost switch read failed");
     refuse(503, "budget_switch_unreadable", "The job budget setting could not be read, so nothing was changed. Try again.");
   }
-  if (sw === "off") return { on: false, budget: null };
+  if (sw === "off") return { on: false, budget: null, order: null };
   try {
-    return { on: true, budget: await readDispatchBudget(client, jobId) };
+    const budget = await readDispatchBudget(client, jobId);
+    if (!budget) return { on: true, budget: null, order: null };
+    const order = await readDispatchOrder(client, budget);
+    return order ? { on: true, budget, order } : { on: true, budget: null, order: null };
   } catch (error) {
     if (error instanceof DispatchBudgetReadError) {
       console.error("[dispatch_v2] job budget read failed:", error.message);
       refuse(503, "budget_unreadable", "The job budget could not be read, so nothing was changed. Try again.");
+    }
+    if (error instanceof DispatchOrderShapeError) {
+      console.error("[dispatch_v2] sealed order list unusable:", error.code);
+      refuse(
+        409,
+        "order_unreadable",
+        "The sealed order list for this job could not be used, so nothing was changed. Check the accepted quote in the quote tool.",
+        { reason: error.code },
+      );
     }
     throw error;
   }
@@ -504,13 +522,22 @@ async function readBudgetCostView(client: any, jobId: string, lines: any[]): Pro
   if (sw === "unreadable") return { budget: null, reasons, view: { state: "switch_unreadable" } };
   if (sw === "off") return { budget: null, reasons, view: null };
   let budget: DispatchBudget | null;
+  let order: DispatchOrder | null;
   try {
     budget = await readDispatchBudget(client, jobId);
+    order = budget ? await readDispatchOrder(client, budget) : null;
   } catch (error) {
+    if (error instanceof DispatchOrderShapeError) {
+      console.error("[dispatch_v2] sealed order list unusable:", error.code);
+      return { budget: null, reasons, view: { state: "order_unreadable", reason: error.code } };
+    }
     console.error("[dispatch_v2] job budget read failed:", error);
     return { budget: null, reasons, view: { state: "unreadable" } };
   }
   if (!budget) return { budget: null, reasons, view: { state: "none" } };
+  // Sealed before the order list: today's path, no budget cost on its lines.
+  if (!order) return { budget: null, reasons, view: { state: "no_order", budget_id: budget.id, version: budget.version } };
+  const orderFill = dispatchOrderFillLines(order, budget);
   try {
     for (const [id, r] of await readLineReasons(client, lines)) reasons.set(id, r);
   } catch (error) {
@@ -535,6 +562,11 @@ async function readBudgetCostView(client: any, jobId: string, lines: any[]): Pro
       one_figure_ex_gst: budget.one_figure_ex_gst,
       by_supplier: budget.by_supplier,
       lines_needing_reason: open,
+      // The sealed order list as it joins the budget: held (with a reason code
+      // per row or budget line) or ready to fill.
+      order: orderFill.ok
+        ? { state: "ok", rows: order.rows.length }
+        : { state: "held", holds: orderFill.holds },
     },
   };
 }
@@ -1720,11 +1752,12 @@ export async function suggestDispatchV2Draft(
     }
     refill = state;
   }
-  // Ruling 17 step 3: with dispatch_budget_cost_v1 on, a job with a stored
-  // budget fills from the budget's materials (the budget is the order: one
-  // list), each line naming its budget line so its cost can be read. The
-  // budget must be the one sealed with the revision this fill reads.
-  const { budget } = await readBudgetCostState(client, job.id);
+  // Ruling 17 step 3 and 17b: with dispatch_budget_cost_v1 on, a job with a
+  // stored budget whose revision sealed its order list fills from that list,
+  // one line per sealed order row, each naming the budget line that holds its
+  // money (row id = budget line key). The budget must be the one sealed with
+  // the revision this fill reads.
+  const { budget, order } = await readBudgetCostState(client, job.id);
   if (budget && budget.scope_revision_id !== revision.id) {
     refuse(
       409,
@@ -1733,22 +1766,9 @@ export async function suggestDispatchV2Draft(
       { scope_revision: revision },
     );
   }
-  const budgetFill = budget ? dispatchBudgetFillLines(budget) : null;
-  if (budgetFill && !budgetFill.ok && budgetFill.code === "order_detail_too_long") {
-    refuse(
-      409,
-      "order_detail_too_long",
-      `A line in the job budget has more order detail (length, cuts, note, profile or colour) than a line holds, so the list was not filled. Shorten its note in the quote tool.`,
-      { budget_line_keys: budgetFill.keys },
-    );
-  }
+  const budgetFill = budget && order ? dispatchOrderFillLines(order, budget) : null;
   if (budgetFill && !budgetFill.ok) {
-    refuse(
-      409,
-      "supplier_note_too_long",
-      `A note to the supplier in the job budget is longer than ${DISPATCH_SUPPLIER_NOTE_MAX} characters, so the list was not filled. Shorten it in the quote tool.`,
-      { budget_line_keys: budgetFill.keys },
-    );
+    refuse(409, "order_held", dispatchOrderHoldWords(budgetFill.holds), { holds: budgetFill.holds });
   }
   // A fencing job scoped in the fence tool is read with the material ordering
   // rules (panels, posts, plinths, gates). A Scope Engine patio record lists

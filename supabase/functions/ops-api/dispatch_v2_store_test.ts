@@ -124,6 +124,8 @@ const SCHEMA: Record<string, string[]> = {
     "scope_hash",
     "pricing_hash",
     "scope_canonical_text",
+    // The sealed pricing bytes the order list is read from (ruling 17b-1).
+    "pricing_canonical_text",
   ],
   suppliers: [
     "id",
@@ -352,7 +354,7 @@ const SCHEMA: Record<string, string[]> = {
     // Ruling 17 step 3: migration 20261114020000_dispatch_line_budget_cost.sql.
     "order_cost",
   ],
-  job_budgets: ["id", "job_id", "scope_revision_id", "version", "trade", "budget"],
+  job_budgets: ["id", "job_id", "scope_revision_id", "version", "trade", "budget", "pricing_hash"],
   dispatch_line_cost_reasons: [
     "id",
     "org_id",
@@ -1029,6 +1031,7 @@ async function seal(
     scope_hash: scope.hash,
     pricing_hash: pricing.hash,
     scope_canonical_text: scope.canonical,
+    pricing_canonical_text: pricing.canonical,
     ...over,
   });
   return id;
@@ -3582,33 +3585,57 @@ Deno.test("gate: the routine key is refused on all seventeen before any call; a 
 const BUDGET = uuid("ab", 1);
 
 // A patio job's stored budget (job_budgets, budget.v1), sealed with the job's
-// frozen revision: two costed lines, one with no cost yet, Stratco's
-// delivery, and screws that never go on supplier copy.
+// frozen revision: three costed lines, Stratco's delivery and the tek screws,
+// each with its own cost.
 function patioBudget() {
   return {
     version: "budget.v1",
     materials: {
       priced_by_line: true,
-      total_ex_gst: 725,
+      total_ex_gst: 775,
       lines: [
         { key: "b-roof", line_id: "SL-roof", supplier_key: "stratco", supplier: { id: "stratco", name: "Stratco" }, kind: "item", description: "Trimdek roof sheet 4,600", quantity: 10, unit: "sheet", unit_cost_ex_gst: 45.5, line_cost_ex_gst: 455, in_total: true, cost_from: "supplier_price", note_to_supplier: "Cut to 4,600" },
         { key: "b-post", line_id: "SL-post", supplier_key: "metroll", supplier: { id: "metroll", name: "Metroll" }, kind: "item", description: "100x100 SHS post 2,900", quantity: 3, unit: "length", unit_cost_ex_gst: 60, line_cost_ex_gst: 180, in_total: true, cost_from: "supplier_price", note_to_supplier: null },
-        { key: "b-flash", line_id: "SL-flash", supplier_key: "stratco", supplier: { id: "stratco", name: "Stratco" }, kind: "item", description: "Barge flashing 3,000", quantity: 4, unit: "length", unit_cost_ex_gst: null, line_cost_ex_gst: null, in_total: false, cost_from: "not_bought_before", note_to_supplier: null },
+        { key: "b-flash", line_id: "SL-flash", supplier_key: "stratco", supplier: { id: "stratco", name: "Stratco" }, kind: "item", description: "Barge flashing 3,000", quantity: 4, unit: "length", unit_cost_ex_gst: 12.5, line_cost_ex_gst: 50, in_total: true, cost_from: "supplier_price", note_to_supplier: null },
         { key: "stratco:delivery", line_id: null, supplier_key: "stratco", supplier: { id: "stratco", name: "Stratco" }, kind: "delivery", description: "Delivery", quantity: 1, unit: "each", unit_cost_ex_gst: 90, line_cost_ex_gst: 90, in_total: true, cost_from: "supplier_price", note_to_supplier: null },
         { key: "b-tek", line_id: "SL-fix", supplier_key: "stratco", supplier: { id: "stratco", name: "Stratco" }, kind: "item", description: "Tek screws 14g x 22", quantity: 200, unit: "each", unit_cost_ex_gst: 0.1, line_cost_ex_gst: 20, in_total: true, cost_from: "supplier_price", note_to_supplier: null },
       ],
       by_supplier: [
-        { key: "stratco", supplier: { id: "stratco", name: "Stratco" }, lines_ex_gst: 475, surcharge_ex_gst: 0, delivery_ex_gst: 90, total_ex_gst: 565 },
+        { key: "stratco", supplier: { id: "stratco", name: "Stratco" }, lines_ex_gst: 525, surcharge_ex_gst: 0, delivery_ex_gst: 90, total_ex_gst: 615 },
         { key: "metroll", supplier: { id: "metroll", name: "Metroll" }, lines_ex_gst: 180, surcharge_ex_gst: 0, delivery_ex_gst: 0, total_ex_gst: 180 },
       ],
     },
   };
 }
 
-async function budgetJob(on = true, db = makeDb()) {
-  db.tables.jobs.find((j: any) => j.id === JOB.patio)!.scope_json = patioRecord();
+// The sealed order list (ruling 17b-1, order.v1) the tool saves beside the
+// budget: one row per supplier copy row, row id = the budget line's key, no
+// dollars. Stratco's copy prints its delivery.
+function patioOrder() {
+  const row = (id: string, scope: string | null, supplier: string, description: string, quantity: number, unit: string, more: Row = {}) => ({
+    id, scope_line_id: scope, option_id: null, kind: "item", supplier: { id: supplier, name: supplier[0].toUpperCase() + supplier.slice(1) },
+    supplier_code: null, description, quantity, unit, cost_by: "line", ...more,
+  });
+  return {
+    version: "order.v1",
+    rows: [
+      row("b-roof", "SL-roof", "stratco", "Trimdek roof sheet 4,600", 10, "sheet", { note_to_supplier: "Cut to 4,600" }),
+      row("b-post", "SL-post", "metroll", "100x100 SHS post 2,900", 3, "length"),
+      row("b-flash", "SL-flash", "stratco", "Barge flashing 3,000", 4, "length"),
+      row("b-tek", "SL-fix", "stratco", "Tek screws 14g x 22", 200, "each"),
+      row("stratco:delivery", null, "stratco", "Delivery", 1, "each", { kind: "delivery" }),
+    ],
+  };
+}
+
+async function budgetJob(on = true, db = makeDb(), order: unknown = patioOrder(), budget: Row = patioBudget()) {
+  const job = db.tables.jobs.find((j: any) => j.id === JOB.patio)!;
+  job.scope_json = patioRecord();
+  // The sealed pricing carries the budget and, from 17b-1 on, the order list.
+  job.pricing_json = order === null ? { budget } : { budget, order };
   const revision = await seal(db, JOB.patio, 3);
-  db.tables.job_budgets.push({ id: BUDGET, job_id: JOB.patio, scope_revision_id: revision, version: 1, trade: "patio", budget: patioBudget() });
+  const pricingHash = db.tables.scope_revisions.find((r: any) => r.id === revision)!.pricing_hash;
+  db.tables.job_budgets.push({ id: BUDGET, job_id: JOB.patio, scope_revision_id: revision, version: 1, trade: "patio", budget, pricing_hash: pricingHash });
   if (on) db.tables.feature_flags.push({ flag_name: "dispatch_budget_cost_v1", enabled: true });
   return { db, revision };
 }
@@ -3630,7 +3657,7 @@ Deno.test("budget cost off: a job with a stored budget fills, makes and reads ex
   assertEquals(db.tables.dispatch_line_cost_reasons, []);
 });
 
-Deno.test("budget fill: the budget's materials are the order, each line naming its budget line, its note on the line", async () => {
+Deno.test("budget fill: each line is built from its sealed order row and names its budget line; the delivery row Stratco's copy prints is carried", async () => {
   const { db, revision } = await budgetJob();
   const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio });
   assertEquals(
@@ -3639,17 +3666,71 @@ Deno.test("budget fill: the budget's materials are the order, each line naming i
       ["Trimdek roof sheet 4,600", 10, "sheet", SUP.stratco, "SL-roof", "b-roof", "Cut to 4,600"],
       ["100x100 SHS post 2,900", 3, "length", SUP.metroll, "SL-post", "b-post", null],
       ["Barge flashing 3,000", 4, "length", SUP.stratco, "SL-flash", "b-flash", null],
+      ["Tek screws 14g x 22", 200, "each", SUP.stratco, "SL-fix", "b-tek", null],
+      ["Delivery", 1, "each", SUP.stratco, null, "stratco:delivery", null],
     ],
   );
   assert(db.tables.job_material_lines.every((l: any) => l.budget_id === BUDGET && l.source_version_id === revision));
-  assert(out.notes.some((n: string) => n.includes("Delivery and cutting charges stay on the budget")));
-  assert(out.notes.some((n: string) => n.includes("Tek screws 14g x 22")));
+  assert(out.notes.some((n: string) => n.includes("sealed order list")));
   assertOnlyV2Writes(db);
 });
 
+Deno.test("budget fill: the order row's words are the line; the budget's copy of the words is never read", async () => {
+  const budget = patioBudget();
+  for (const l of budget.materials.lines as any[]) l.description = "ZZTEST budget words";
+  const { db } = await budgetJob(true, makeDb(), patioOrder(), budget);
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio });
+  assert(out.lines.every((l: any) => l.description !== "ZZTEST budget words"));
+});
+
+Deno.test("budget fill: a revision sealed before the order list keeps today's path, no budget costing", async () => {
+  const { db } = await budgetJob(true, makeDb(), null);
+  const out = await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio });
+  assertEquals(out.lines.length, 7, "the sealed scope lines, as before");
+  assert(db.tables.job_material_lines.every((l: any) => !l.budget_id && !l.budget_line_key));
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.patio });
+  assertEquals([read.budget.state, read.budget.budget_id], ["no_order", BUDGET]);
+  const made = await makeEmail(db, JOB.patio, SUP.stratco);
+  assertEquals(made.email.order_cost, null);
+});
+
+Deno.test("budget fill: a line with no budget cost, a row with no budget line, or a budget line on no row holds the whole fill with reason codes; nothing written; the read shows held", async () => {
+  const budget = patioBudget();
+  Object.assign((budget.materials.lines as any[]).find((l) => l.key === "b-flash"), { unit_cost_ex_gst: null, line_cost_ex_gst: null, in_total: false, cost_from: "not_bought_before" });
+  const order = patioOrder();
+  order.rows[1].id = "b-post-moved";
+  const { db } = await budgetJob(true, makeDb(), order, budget);
+  const err: any = await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio }), 409, "order_held");
+  assertEquals(err.body.holds, [
+    { code: "order_row_no_budget_line", key: "b-post-moved" },
+    { code: "order_row_no_cost", key: "b-flash" },
+    { code: "budget_line_no_order_row", key: "b-post" },
+  ]);
+  assert(!err.message.includes("$"));
+  assertEquals(db.tables.job_material_lines, []);
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.patio });
+  assertEquals(read.budget.order.state, "held");
+  assertEquals(read.budget.order.holds.length, 3);
+});
+
+Deno.test("budget fill: an order list that is not order.v1, or pricing bytes that are not what the budget was stored from, refuses; nothing written", async () => {
+  const { db } = await budgetJob(true, makeDb(), { version: "order.v9", rows: [] });
+  const bad: any = await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio }), 409, "order_unreadable");
+  assertEquals(bad.body.reason, "order_version_unknown");
+  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.patio });
+  assertEquals(read.budget, { state: "order_unreadable", reason: "order_version_unknown" });
+  const { db: db2 } = await budgetJob();
+  db2.tables.job_budgets[0].pricing_hash = "e".repeat(64);
+  const moved: any = await refused(call(db2, "dispatch_v2_suggest_draft", { job_id: JOB.patio }), 409, "order_unreadable");
+  assertEquals(moved.body.reason, "order_pricing_hash_mismatch");
+  assertEquals([db.tables.job_material_lines, db2.tables.job_material_lines], [[], []]);
+});
+
 Deno.test("budget fill: a budget sealed with another revision is refused, nothing filled", async () => {
-  const { db } = await budgetJob();
-  db.tables.job_budgets[0].scope_revision_id = uuid("f1", 99);
+  const { db, revision } = await budgetJob();
+  // A newer revision sealed since: the budget is the older one's.
+  db.tables.scope_revisions.find((r: any) => r.id === revision)!.status = "superseded";
+  await seal(db, JOB.patio, 4);
   await refused(call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio }), 409, "budget_not_current_revision");
   assertEquals(db.tables.job_material_lines, []);
 });
@@ -3657,43 +3738,35 @@ Deno.test("budget fill: a budget sealed with another revision is refused, nothin
 Deno.test("budget read: each line carries its cost, and the budget block counts the lines still needing a reason", async () => {
   const { db } = await budgetJob();
   await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio });
-  const read = await get(db, "dispatch_v2_materials", { job_id: JOB.patio });
-  assertEquals([read.budget.state, read.budget.budget_id, read.budget.lines_needing_reason], ["ok", BUDGET, 1]);
+  let read = await get(db, "dispatch_v2_materials", { job_id: JOB.patio });
+  assertEquals([read.budget.state, read.budget.budget_id, read.budget.lines_needing_reason, read.budget.order.state], ["ok", BUDGET, 0, "ok"]);
   const stratco = read.suppliers.find((b: any) => b.supplier_id === SUP.stratco);
   assertEquals(
     stratco.lines.map((l: any) => [l.budget_line_key, l.cost.basis, l.cost.line_cost_ex_gst, l.cost.resolved]),
-    [["b-roof", "budget", 455, true], ["b-flash", "no_budget_cost", null, false]],
+    [["b-roof", "budget", 455, true], ["b-flash", "budget", 50, true], ["b-tek", "budget", 20, true], ["stratco:delivery", "budget", 90, true]],
   );
+  const post = lineByKey(db, "b-post");
+  await call(db, "dispatch_v2_save_line", { job_id: JOB.patio, expected_updated_at: post.updated_at, line: { id: post.id, description: post.description, quantity: 4, unit: post.unit } });
+  read = await get(db, "dispatch_v2_materials", { job_id: JOB.patio });
+  assertEquals(read.budget.lines_needing_reason, 1);
 });
 
-Deno.test("budget make: a line with no budget cost holds the order until a signed-in person gives a reason and a unit cost", async () => {
+Deno.test("budget make: an order within its budget lines is made with its cost stored and no dollar on the supplier email; the delivery row goes with it", async () => {
   const { db } = await budgetJob();
   await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio });
-  await refused(makeEmail(db, JOB.patio, SUP.stratco), 409, "line_cost_needs_reason");
-  assertEquals(db.tables.dispatch_supplier_order_emails, []);
-  const flash = lineByKey(db, "b-flash");
-  const ask = { job_id: JOB.patio, line_id: flash.id, expected_updated_at: flash.updated_at, reason: "Builder asked for barge flashing" };
-  // The ops key names nobody.
-  await refused(call(db, "dispatch_v2_line_cost_reason", ask, ctx(undefined, { actor: { userId: null, email: "ops@ops.test", orgId: null } as any })), 403, "named_person_required");
-  await refused(call(db, "dispatch_v2_line_cost_reason", ask), 400, "unit_cost_required");
-  await refused(call(db, "dispatch_v2_line_cost_reason", { ...ask, reason: "ok" }), 400, "invalid_request");
-  const given = await call(db, "dispatch_v2_line_cost_reason", { ...ask, unit_cost_ex_gst: 12.5 });
-  assertEquals([given.line.cost.basis, given.line.cost.unit_cost_ex_gst, given.line.cost.line_cost_ex_gst, given.line.cost.resolved], ["no_budget_cost", 12.5, 50, true]);
-  assertEquals(db.tables.dispatch_line_cost_reasons.map((r: any) => [r.basis, r.quantity, r.unit, r.unit_cost_ex_gst, r.given_by, r.budget_line_key]), [
-    ["no_budget_cost", 4, "length", 12.5, SHAUN.userId, "b-flash"],
-  ]);
   const made = await makeEmail(db, JOB.patio, SUP.stratco);
   const oc = made.email.order_cost;
-  assertEquals([oc.version, oc.budget_id, oc.lines_ex_gst], ["dispatch-order-cost.v1", BUDGET, 505]);
+  assertEquals([oc.version, oc.budget_id, oc.lines_ex_gst], ["dispatch-order-cost.v1", BUDGET, 615]);
   assertEquals(oc.lines.map((l: any) => [l.budget_line_key, l.basis, l.line_cost_ex_gst, l.reason_id !== null]), [
     ["b-roof", "budget", 455, false],
-    ["b-flash", "no_budget_cost", 50, true],
+    ["b-flash", "budget", 50, false],
+    ["b-tek", "budget", 20, false],
+    ["stratco:delivery", "budget", 90, false],
   ]);
-  assertEquals(oc.supplier_budget.total_ex_gst, 565);
-  // The supplier's email prints no dollar.
+  assertEquals(oc.supplier_budget.total_ex_gst, 615);
   const body = made.email.body_text as string;
   assert(!/\$|45\.5|455|12\.5/.test(body), body);
-  assert(body.includes("Trimdek roof sheet 4,600") && body.includes("Cut to 4,600"));
+  assert(body.includes("Trimdek roof sheet 4,600") && body.includes("Cut to 4,600") && body.includes("Delivery"));
   const sent = await call(db, "dispatch_v2_send_email", { email_id: made.email.id, expected_updated_at: made.email.updated_at });
   assertEquals(sent.email.status, "sent");
   assertOnlyV2Writes(db);
@@ -3802,10 +3875,10 @@ Deno.test("budget switch explicitly off reads exactly as a missing switch: the o
   assertEquals(made.email.order_cost, null);
 });
 
-Deno.test("budget make: a line's stock length, cuts and colour from the sealed budget print on the supplier email, never a dollar", async () => {
-  const { db } = await budgetJob();
-  const post = db.tables.job_budgets[0].budget.materials.lines.find((l: any) => l.key === "b-post");
-  Object.assign(post, { stock_length_mm: 6500, cuts: [{ length_mm: 2900, qty: 3 }], stock_to_confirm: false, profile: null, colour: "Monument", cut: "3 × 2900" });
+Deno.test("budget make: a row's stock length, cuts and colour from the sealed order print on the supplier email, never a dollar", async () => {
+  const order = patioOrder();
+  Object.assign(order.rows[1], { stock_length_mm: 6500, cuts: [{ length_mm: 2900, qty: 3 }], colour: "Monument" });
+  const { db } = await budgetJob(true, makeDb(), order);
   await call(db, "dispatch_v2_suggest_draft", { job_id: JOB.patio });
   const line = lineByKey(db, "b-post");
   assertEquals([line.detail, line.colour], ["Length: 6,500 mm\nCuts: 3 x 2,900 mm", "Monument"]);

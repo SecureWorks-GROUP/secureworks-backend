@@ -235,11 +235,41 @@ off, so an uncosted order cannot reach Send. On, for a job with a stored budget
 
 | Step | What happens |
 | --- | --- |
-| Fill (`dispatch_v2_suggest_draft`) | Lines come from the budget's materials lines, each naming its budget line (`job_material_lines.budget_id` + `budget_line_key`). The budget must be for the job's current frozen revision, else `budget_not_current_revision`. A line's detail prints what the supplier copy prints, from the sealed line only: `Length: <stock_length_mm>` (or `Stock length to confirm` when `stock_to_confirm`), `Cuts: <qty> x <length_mm>, ...` (else the line's `cut` words), `Finish`, `Gauge`, `Girth`, then its `note_to_supplier`; `profile` and `colour` fill the line's own fields. A line sealed before these fields has none of them and prints its note only. A note over 300 characters refuses `supplier_note_too_long`; a detail over 300, or a profile or colour over 80, refuses `order_detail_too_long` (never cut short). Delivery and cutting lines, and lines that never go on a supplier order (tek screws, removal, labour), stay on the budget and are named in the fill notes. Taken options are already in the budget, so they are not added again. Standing lines are unchanged. |
+| Fill (`dispatch_v2_suggest_draft`) | Lines come from the sealed order list (ruling 17b-1, below), never from the budget's words: each `order` row is one line, in its order, and takes only its unit and line cost from the budget line whose `key` is the row's `id` (`job_material_lines.budget_id` + `budget_line_key`). The budget must be for the job's current frozen revision, else `budget_not_current_revision`. A line's detail prints what the supplier copy prints, from the row only: `Code: <supplier_code>`, `Length: <stock_length_mm>` (or `Stock length: supplier to confirm` when `stock_to_confirm`), `Cuts: <qty> x <length_mm>, ...` (else the row's `cut` words), `Variant`, `Finish`, `Gauge`, `Girth`, then its `note_to_supplier`; `profile` and `colour` fill the line's own fields. A zero or missing measure prints nothing. A note over 300 characters holds `supplier_note_too_long`; a detail over 300, or a profile or colour over 80, holds `order_detail_too_long` (never cut short). Delivery and cutting rows the supplier copy prints are lines like any other. A quote option's rows are filled only when the customer took that option. Standing lines are unchanged. |
 | Read (`dispatch_materials`) | Each line carries `cost` (basis, unit cost, line cost, needs a reason or not); the reply carries `budget` (state, version, totals by supplier, how many open lines need a reason). A budget read fault answers `budget: {state: 'unreadable'}`, never "no budget". |
 | Make the email | Every orderable line must be costed or carry a covering reason, else 409 `line_cost_needs_reason` naming the lines. The email row stores `order_cost` (`dispatch-order-cost.v1`: each line's basis and cost, the total, the supplier's budget). |
 | Send | Refuses `order_cost_missing` if the email was made without its cost, `budget_changed` if a newer budget was stored since, and `line_cost_needs_reason` if a line moved. |
 | Reason (`dispatch_v2_line_cost_reason`) | `job_id`, `line_id`, `reason` (3 to 500 characters), `expected_updated_at`, and `unit_cost_ex_gst` only where the budget has none. Signed-in staff only: the ops key is refused `named_person_required`, so every reason names who. |
+
+The sealed order list (ruling 17b-1): at seal the quote tool saves `order`
+(`order.v1`) inside the sealed revision's hashed pricing bytes, beside
+`budget`: one row per row the supplier copies print, from the one function
+behind the supplier copy, the draft order cards and the budget. A row is `id`
+(the budget materials line's `key`), `scope_line_id`, `option_id` (null, or the
+quote option it belongs to), `kind` (`item`, `delivery`, `cutting`),
+`supplier` (`{id, name}` or null), `supplier_code`, `description`, `quantity`,
+`unit`, `stock_length_mm`, `stock_to_confirm`, `cuts`, `cut`, `profile`,
+`colour`, `variant`, `finish`, `gauge_mm`, `girth_mm`, `note_to_supplier` and
+`cost_by` (`line`, `one_figure`, `allowance`). No dollars. Dispatch reads it
+from `scope_revisions.pricing_canonical_text` and re-hashes it: the hash must
+equal the revision's `pricing_hash` and the stored budget's, else 409
+`order_unreadable` (reason `order_pricing_hash_mismatch`; an unknown version or
+a bad row is `order_version_unknown` / `order_row_unreadable`). A revision
+sealed before order.v1 has no `order`: Dispatch keeps today's path (no budget
+costing) and the read answers `budget: {state: 'no_order'}`; nobody rebuilds an
+order from a live scope. The fill is held whole, 409 `order_held` with one
+reason code per row or budget line, and the read shows `budget.order.state:
+'held'`, when: a `cost_by: line` row has no budget line
+(`order_row_no_budget_line`) or its line has no cost (`order_row_no_cost`); a
+budget item line is on no row (`budget_line_no_order_row`; the one-figure
+aggregate and the fixings allowance are exempt); two budget lines share a key
+(`budget_key_duplicated`) or two rows an id (`order_row_duplicated`); a
+`one_figure` or `allowance` row has nothing to cover it
+(`order_row_no_one_figure`, `order_row_no_allowance`). A `one_figure` or
+`allowance` row is not held: it is ordered with no dollars of its own (basis
+`one_figure` or `allowance`), and the order's total says what covers it. A
+delivery on no supplier copy stays a budget line only. `withoutBudget` strips
+`order` with `budget`, so it is shown nowhere new.
 
 How a line is costed:
 
@@ -247,6 +277,7 @@ How a line is costed:
 | --- | --- | --- |
 | `budget` | Linked, same unit, at or under the budget quantity | Nothing. Line cost = budget unit cost x quantity, whole cents half up. |
 | `one_figure` | A one-figure budget's line at or under quantity | Nothing. No per-line dollars: the job has one materials figure. |
+| `allowance` | A fixings row covered by the fixings allowance | Nothing. No per-line dollars: the allowance covers it. |
 | `over_budget` | Over the budget quantity | A reason for that quantity and unit. The budget unit cost still applies (a one-figure line also needs a unit cost). |
 | `unit_changed` | Unit differs from the budget line | A reason and a unit cost. |
 | `no_budget_cost` | The budget line has no unit cost | A reason and a unit cost. |

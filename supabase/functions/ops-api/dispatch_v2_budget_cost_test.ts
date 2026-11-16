@@ -9,8 +9,14 @@ import {
   cleanDispatchCostReason,
   cleanDispatchUnitCost,
   type DispatchBudget,
-  dispatchBudgetFillLines,
   dispatchBudgetFromRecord,
+  DispatchBudgetReadError,
+  type DispatchOrder,
+  dispatchOrderFillLines,
+  dispatchOrderFromPricing,
+  dispatchOrderHoldWords,
+  DispatchOrderShapeError,
+  readDispatchOrder,
   dispatchLineCost,
   dispatchLineCostCents,
   type DispatchLineReason,
@@ -18,6 +24,7 @@ import {
 } from "./dispatch_v2_budget_cost.ts";
 import native from "../_shared/job_budget/fixtures/native-budgets.json" with { type: "json" };
 import { dispatchV2LineText } from "./dispatch_v2_emails.ts";
+import { jsonHash } from "../_shared/release_packet/canonicalize.ts";
 
 const BUDGET_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -52,10 +59,96 @@ function reason(over: Partial<DispatchLineReason> = {}): DispatchLineReason {
   };
 }
 
-Deno.test("fill: a fence budget's lines are the order, each naming its budget line; screws (never on supplier copy) and delivery stay on the budget", () => {
-  const b = stored("fence_standard");
-  const fill = dispatchBudgetFillLines(b);
-  assert(fill.ok);
+// The sealed order list (ruling 17b-1) as the tool seals it, made here from a
+// native budget's own lines: one row per line the supplier copy prints, row id
+// = the budget line key. A stand-in until the tool seals order.v1.
+function orderFor(raw: any, edit: (row: any) => void = () => {}): DispatchOrder {
+  const rows = raw.materials.lines
+    .filter((l: any) => l.supplier_key !== "one_figure" && l.cost_from !== "allowance")
+    .map((l: any) => {
+      const row: any = {
+        id: l.key,
+        scope_line_id: l.line_id ?? null,
+        option_id: null,
+        kind: l.kind,
+        supplier: l.supplier ?? null,
+        supplier_code: null,
+        description: l.description,
+        quantity: l.quantity,
+        unit: l.unit,
+        cost_by: l.cost_from === "one_figure" ? "one_figure" : "line",
+      };
+      edit(row);
+      return row;
+    });
+  return dispatchOrderFromPricing({ order: { version: "order.v1", rows } })!;
+}
+const fromRaw = (raw: any, trade = "patio") =>
+  dispatchBudgetFromRecord({ id: BUDGET_ID, job_id: "j", scope_revision_id: "r", version: 1, trade, budget: raw });
+// patio_standard with its one uncosted line taken out (that line holds a fill:
+// see the holds test).
+function patioCosted(): any {
+  const raw = structuredClone(native.budgets.patio_standard) as any;
+  raw.materials.lines = raw.materials.lines.filter((l: any) => l.key !== "patio:SL-28f63ccd9594f698");
+  return raw;
+}
+
+Deno.test("order: a revision sealed before order.v1 has none; one that is there must be order.v1 rows, never guessed", () => {
+  assertEquals(dispatchOrderFromPricing({ budget: {} }), null);
+  assertEquals(dispatchOrderFromPricing(null), null);
+  const code = (p: unknown) => {
+    try {
+      dispatchOrderFromPricing(p);
+      return "read";
+    } catch (e) {
+      return e instanceof DispatchOrderShapeError ? e.code : String(e);
+    }
+  };
+  assertEquals(code({ order: null }), "order_version_unknown");
+  assertEquals(code({ order: { version: "order.v2", rows: [] } }), "order_version_unknown");
+  assertEquals(code({ order: { version: "order.v1" } }), "order_version_unknown");
+  const row = { id: "a", description: "Post", kind: "item", cost_by: "line" };
+  assertEquals(code({ order: { version: "order.v1", rows: [row] } }), "read");
+  for (const bad of [{ ...row, id: "" }, { ...row, description: null }, { ...row, kind: "labour" }, { ...row, cost_by: "free" }]) {
+    assertEquals(code({ order: { version: "order.v1", rows: [bad] } }), "order_row_unreadable");
+  }
+});
+
+Deno.test("order read: the sealed pricing bytes are re-hashed and must be the bytes the budget was stored from", async () => {
+  const pricing = { budget: { version: "budget.v1" }, order: { version: "order.v1", rows: [] } };
+  const text = JSON.stringify(pricing);
+  const hash = await jsonHash(pricing);
+  const client = (row: any, error: any = null) => ({
+    from: (t: string) => {
+      assertEquals(t, "scope_revisions");
+      const q: any = { select: () => q, eq: () => q, maybeSingle: () => Promise.resolve({ data: row, error }) };
+      return q;
+    },
+  });
+  const budget = { ...fromRaw(patioCosted()), scope_revision_id: "r", pricing_hash: hash };
+  assertEquals(await readDispatchOrder(client({ pricing_canonical_text: text, pricing_hash: hash }), budget), { rows: [] });
+  const fails = async (c: any, b = budget) => {
+    try {
+      await readDispatchOrder(c, b);
+      return "read";
+    } catch (e) {
+      return e instanceof DispatchOrderShapeError ? e.code : e instanceof DispatchBudgetReadError ? "retry" : String(e);
+    }
+  };
+  assertEquals(await fails(client({ pricing_canonical_text: text, pricing_hash: "f".repeat(64) })), "order_pricing_hash_mismatch");
+  assertEquals(await fails(client({ pricing_canonical_text: text, pricing_hash: hash }), { ...budget, pricing_hash: "e".repeat(64) }), "order_pricing_hash_mismatch");
+  assertEquals(await fails(client({ pricing_canonical_text: "{", pricing_hash: hash })), "order_pricing_unreadable");
+  assertEquals(await fails(client(null)), "order_revision_missing");
+  assertEquals(await fails(client(null, { message: "timeout" })), "retry");
+  // A revision sealed before order.v1: null, so Dispatch keeps today's path.
+  const old = { budget: {} };
+  assertEquals(await readDispatchOrder(client({ pricing_canonical_text: JSON.stringify(old), pricing_hash: await jsonHash(old) }), { ...budget, pricing_hash: null }), null);
+});
+
+Deno.test("fill: a fence order's rows are the lines, delivery row included, each naming its budget line by key; no dollar in a line", () => {
+  const raw = native.budgets.fence_standard as any;
+  const fill = dispatchOrderFillLines(orderFor(raw), fromRaw(raw, "fence"));
+  assert(fill.ok, JSON.stringify(fill));
   assertEquals(
     fill.lines.map((l) => [l.budget_line_key, l.quantity, l.unit, l.supplier_key]),
     [
@@ -63,95 +156,147 @@ Deno.test("fill: a fence budget's lines are the order, each naming its budget li
       ["fence:group:0:1", 6, "each", "Fencing Warehouse"],
       ["fence:group:0:2", 6, "each", "Fencing Warehouse"],
       ["fence:concrete", 9, "each", "Fencing Warehouse"],
+      ["fence:tekScrewBox", 1, "each", "Fencing Warehouse"],
+      ["fence:delivery|Delivery (Fencing Warehouse)", 1, "each", "Fencing Warehouse"],
     ],
   );
   assert(fill.lines.every((l) => l.scope_line_id?.startsWith("SL-")));
-  assert(fill.notes.some((n) => n.startsWith("Never on a supplier order") && n.includes("Tek screws")));
-  assert(fill.notes.some((n) => n.startsWith("Delivery and cutting charges stay on the budget")));
-  // No line carries money into the order text.
   assert(!JSON.stringify(fill.lines).match(/128|154|1152/));
 });
 
-Deno.test("fill: a supplier note rides on its line; one too long refuses the fill by key", () => {
-  const raw = structuredClone(native.budgets.fence_standard) as any;
-  raw.materials.lines[0].note_to_supplier = "Cut each sheet to 1,650";
-  let fill = dispatchBudgetFillLines(dispatchBudgetFromRecord({ id: BUDGET_ID, job_id: "j", scope_revision_id: "r", version: 1, trade: "fence", budget: raw }));
+Deno.test("fill: a line is built from its order row, never from the budget's copy of the words", () => {
+  const raw = patioCosted();
+  const order = orderFor(raw);
+  for (const l of raw.materials.lines) l.description = "ZZTEST budget words";
+  const fill = dispatchOrderFillLines(order, fromRaw(raw));
   assert(fill.ok);
-  assertEquals(fill.lines[0].detail, "Cut each sheet to 1,650");
-  raw.materials.lines[1].note_to_supplier = "x".repeat(301);
-  fill = dispatchBudgetFillLines(dispatchBudgetFromRecord({ id: BUDGET_ID, job_id: "j", scope_revision_id: "r", version: 1, trade: "fence", budget: raw }));
-  assertEquals(fill, { ok: false, code: "supplier_note_too_long", keys: ["fence:group:0:1"] });
+  assert(fill.lines.every((l) => l.description !== "ZZTEST budget words"));
+  assertEquals(fill.lines.find((l) => l.budget_line_key === "patio:SL-960b8f314bbd83cb")?.description, "90x90x2 SHS");
 });
 
-Deno.test("fill: a one-figure patio budget fills its order lines, never the one figure, and says it has no per-line dollars", () => {
-  const b = stored("patio_one_figure");
-  const fill = dispatchBudgetFillLines(b);
+Deno.test("fill: two stock rows of one section print their own length and cuts, so each reads as its supplier copy row", () => {
+  const raw = patioCosted();
+  const order = orderFor(raw, (row) => {
+    if (row.id === "patio:SL-960b8f314bbd83cb") Object.assign(row, { stock_length_mm: 8000, cuts: [{ length_mm: 3350, qty: 2 }], colour: "Monument" });
+    if (row.id === "patio:SL-960b8f314bbd83cb#2") Object.assign(row, { stock_length_mm: 4100, cuts: [{ length_mm: 3350, qty: 1 }], colour: "Monument" });
+  });
+  const fill = dispatchOrderFillLines(order, fromRaw(raw));
   assert(fill.ok);
-  assert(!fill.lines.some((l) => l.budget_line_key === "one_figure" || l.supplier_key === "one_figure"));
-  assert(fill.lines.length > 0);
-  // Two budget lines from one sealed line keep their own keys.
   const twins = fill.lines.filter((l) => l.scope_line_id === "SL-960b8f314bbd83cb");
   assertEquals(twins.map((l) => l.budget_line_key), ["patio:SL-960b8f314bbd83cb", "patio:SL-960b8f314bbd83cb#2"]);
-  assert(fill.notes.some((n) => n.includes("one figure")));
-});
-
-// The tool's physical order detail per line (r17 step 3 tool contract, 14 Nov).
-function withTwinDetail(): any {
-  const raw = structuredClone(native.budgets.patio_one_figure) as any;
-  const twins = raw.materials.lines.filter((l: any) => l.line_id === "SL-960b8f314bbd83cb");
-  Object.assign(twins[0], { stock_length_mm: 8000, cuts: [{ length_mm: 3350, qty: 2 }], stock_to_confirm: false, profile: null, colour: "Monument", finish: null, gauge_mm: null, girth_mm: null, cut: "2 \u00d7 3350" });
-  Object.assign(twins[1], { stock_length_mm: 4100, cuts: [{ length_mm: 3350, qty: 1 }], stock_to_confirm: false, profile: null, colour: "Monument", finish: null, gauge_mm: null, girth_mm: null, cut: "1 \u00d7 3350" });
-  return raw;
-}
-const fromRaw = (raw: any) =>
-  dispatchBudgetFromRecord({ id: BUDGET_ID, job_id: "j", scope_revision_id: "r", version: 1, trade: "patio", budget: raw });
-
-Deno.test("fill: two stock rows of one section print their own length and cuts, so the supplier copy tells them apart", () => {
-  const fill = dispatchBudgetFillLines(fromRaw(withTwinDetail()));
-  assert(fill.ok);
-  const twins = fill.lines.filter((l) => l.scope_line_id === "SL-960b8f314bbd83cb");
   const texts = twins.map((l) => dispatchV2LineText(l));
   assertEquals(texts, [
     "1 length x 90x90x2 SHS\nLength: 8,000 mm\nCuts: 2 x 3,350 mm\nColour: Monument",
     "1 length x 90x90x2 SHS\nLength: 4,100 mm\nCuts: 1 x 3,350 mm\nColour: Monument",
   ]);
-  assertEquals(twins.map((l) => l.colour), ["Monument", "Monument"]);
-  // No dollar reaches the order text.
   assert(!texts.join("\n").includes("$"));
 });
 
-Deno.test("fill: a line sealed before the order detail existed prints only what it states; nothing is made up", () => {
-  const fill = dispatchBudgetFillLines(stored("patio_one_figure"));
+Deno.test("fill: supplier code, no stock length on file, cut words, variant, finish, gauge, girth and the note print as the row states; nothing is made up", () => {
+  const raw = patioCosted();
+  const order = orderFor(raw, (row) => {
+    if (row.id === "patio:SL-960b8f314bbd83cb") {
+      Object.assign(row, { supplier_code: "SHS9090", stock_to_confirm: true, cut: "Cut to 6,000", variant: "Galv", profile: "Square", finish: "Matt", gauge_mm: 0.42, girth_mm: 300, note_to_supplier: "Deliver with the posts" });
+    }
+    if (row.id === "patio:SL-960b8f314bbd83cb#2") Object.assign(row, { stock_length_mm: 0, cuts: [{ length_mm: -1, qty: 2 }], gauge_mm: 0 });
+  });
+  const fill = dispatchOrderFillLines(order, fromRaw(raw));
   assert(fill.ok);
-  const twins = fill.lines.filter((l) => l.scope_line_id === "SL-960b8f314bbd83cb");
-  assertEquals(twins.map((l) => [l.detail, l.profile, l.colour]), [[null, null, null], [null, null, null]]);
-  assertEquals(twins.map((l) => dispatchV2LineText(l)), ["1 length x 90x90x2 SHS", "1 length x 90x90x2 SHS"]);
-});
-
-Deno.test("fill: no stock length on file says so; cut words stand in for empty cuts; finish, gauge, girth and the note follow", () => {
-  const raw = withTwinDetail();
-  const twin = raw.materials.lines.find((l: any) => l.key === "patio:SL-960b8f314bbd83cb");
-  Object.assign(twin, { stock_length_mm: null, stock_to_confirm: true, cuts: [], cut: "2 x 3350", profile: "Square", finish: "Matt", gauge_mm: 0.42, girth_mm: 300, note_to_supplier: "Deliver with the posts" });
-  const fill = dispatchBudgetFillLines(fromRaw(raw));
-  assert(fill.ok);
-  const line = fill.lines.find((l) => l.budget_line_key === "patio:SL-960b8f314bbd83cb")!;
-  assertEquals(line.detail, "Stock length to confirm\nCuts: 2 x 3350\nFinish: Matt\nGauge: 0.42 mm\nGirth: 300 mm\nDeliver with the posts");
-  assertEquals(line.profile, "Square");
+  const [a, b] = fill.lines.filter((l) => l.scope_line_id === "SL-960b8f314bbd83cb");
+  assertEquals(a.detail, "Code: SHS9090\nStock length: supplier to confirm\nCuts: Cut to 6,000\nVariant: Galv\nFinish: Matt\nGauge: 0.42 mm\nGirth: 300 mm\nDeliver with the posts");
+  assertEquals(a.profile, "Square");
   // A zero or negative measure is absent, never zero.
-  Object.assign(twin, { stock_length_mm: 0, stock_to_confirm: false, cuts: [{ length_mm: -1, qty: 2 }], cut: null, finish: null, gauge_mm: 0, girth_mm: null, note_to_supplier: null });
-  const again = dispatchBudgetFillLines(fromRaw(raw));
-  assert(again.ok);
-  assertEquals(again.lines.find((l) => l.budget_line_key === "patio:SL-960b8f314bbd83cb")!.detail, null);
+  assertEquals([b.detail, b.profile, b.colour], [null, null, null]);
 });
 
-Deno.test("fill: order detail longer than a line holds refuses the fill by key, never cut short", () => {
-  const raw = withTwinDetail();
-  const twin = raw.materials.lines.find((l: any) => l.key === "patio:SL-960b8f314bbd83cb#2");
-  twin.note_to_supplier = "x".repeat(290);
-  assertEquals(dispatchBudgetFillLines(fromRaw(raw)), { ok: false, code: "order_detail_too_long", keys: ["patio:SL-960b8f314bbd83cb#2"] });
-  twin.note_to_supplier = null;
-  twin.colour = "c".repeat(81);
-  assertEquals(dispatchBudgetFillLines(fromRaw(raw)), { ok: false, code: "order_detail_too_long", keys: ["patio:SL-960b8f314bbd83cb#2"] });
+Deno.test("fill: what does not join holds the whole fill with a reason code per row or budget line, never a $0 line or a dropped one", () => {
+  const holds = (raw: any, edit: (o: any, raw: any) => void = () => {}) => {
+    const o: any = orderFor(raw);
+    edit(o, raw);
+    const fill = dispatchOrderFillLines(o, fromRaw(raw));
+    return fill.ok ? "filled" : fill.holds.map((h) => `${h.code}:${h.key}`);
+  };
+  // The native patio's uncosted 3PL cap: a row costed by its line with no cost.
+  assertEquals(holds(structuredClone(native.budgets.patio_standard)), ["order_row_no_cost:patio:SL-28f63ccd9594f698"]);
+  assertEquals(holds(patioCosted()), "filled");
+  // A row whose budget line is gone; a budget item line no row names.
+  assertEquals(
+    holds(patioCosted(), (o) => (o.rows[0].id = "patio:SL-nowhere")),
+    ["order_row_no_budget_line:patio:SL-nowhere", "budget_line_no_order_row:patio:SL-ae32dfda743e952c"],
+  );
+  // A delivery line on no supplier copy stays on the budget: never held.
+  assertEquals(holds(patioCosted(), (o) => (o.rows = o.rows.filter((r: any) => r.kind !== "delivery"))), "filled");
+  // Two budget lines on one key; two rows on one id.
+  assertEquals(
+    holds(patioCosted(), (_o, raw) => raw.materials.lines.push(structuredClone(raw.materials.lines[0]))),
+    ["budget_key_duplicated:patio:SL-ae32dfda743e952c"],
+  );
+  assertEquals(holds(patioCosted(), (o) => o.rows.push({ ...o.rows[0] })), ["order_row_duplicated:patio:SL-ae32dfda743e952c"]);
+  // One figure or allowance rows with nothing in the budget to cover them.
+  assertEquals(holds(patioCosted(), (o) => o.rows.push({ ...o.rows[0], id: "x:1", cost_by: "one_figure" })), ["order_row_no_one_figure:x:1"]);
+  assertEquals(holds(patioCosted(), (o) => o.rows.push({ ...o.rows[0], id: "x:2", cost_by: "allowance" })), ["order_row_no_allowance:x:2"]);
+  // Too long for a line: never cut short.
+  assertEquals(holds(patioCosted(), (o) => (o.rows[1].note_to_supplier = "x".repeat(301))), ["supplier_note_too_long:patio:SL-1adef0739ac2cfaa"]);
+  assertEquals(holds(patioCosted(), (o) => Object.assign(o.rows[1], { supplier_code: "SHS9090", note_to_supplier: "x".repeat(290) })), ["order_detail_too_long:patio:SL-1adef0739ac2cfaa"]);
+  assertEquals(holds(patioCosted(), (o) => (o.rows[1].colour = "c".repeat(81))), ["order_detail_too_long:patio:SL-1adef0739ac2cfaa"]);
+  const words = dispatchOrderHoldWords([{ code: "order_row_no_cost", key: "k" }, { code: "budget_line_no_order_row", key: "j" }]);
+  assert(words.includes("no cost") && words.includes("no sealed order line") && !words.includes("—"));
+});
+
+Deno.test("fill: a one-figure patio fills its rows at no dollars of their own; a row with no line of its own is covered by the one figure", () => {
+  const raw = structuredClone(native.budgets.patio_one_figure) as any;
+  const o: any = orderFor(raw, (row) => {
+    if (row.id === "patio:SL-28f63ccd9594f698") row.cost_by = "one_figure";
+  });
+  o.rows.push({ ...o.rows[0], id: "patio:SL-extra", scope_line_id: "SL-extra", description: "Extra bracket" });
+  const b = fromRaw(raw);
+  const fill = dispatchOrderFillLines(o, b);
+  assert(fill.ok, JSON.stringify(fill));
+  assert(!fill.lines.some((l) => l.supplier_key === "one_figure"));
+  const extra = fill.lines.find((l) => l.scope_line_id === "SL-extra")!;
+  assertEquals(extra.budget_line_key, "patio:one-figure");
+  const cost = dispatchLineCost({ quantity: extra.quantity, unit: extra.unit, budget_id: b.id, budget_line_key: extra.budget_line_key }, b, null);
+  assertEquals([cost.basis, cost.line_cost_ex_gst, cost.cost_from, cost.resolved], ["one_figure", null, "one_figure", true]);
+  assert(fill.notes.some((n) => n.includes("one figure")));
+});
+
+Deno.test("fill and cost: fixings covered by the allowance are ordered with no dollars of their own", () => {
+  const raw = patioCosted();
+  raw.materials.lines.push({ key: "patio:fixings-allowance", line_id: null, supplier_key: "none", supplier: null, kind: "item", description: "Fixings allowance", quantity: 1, unit: "allowance", unit_cost_ex_gst: 50, line_cost_ex_gst: 50, in_total: true, cost_from: "allowance" });
+  const o: any = orderFor(raw);
+  o.rows.push({ ...o.rows[0], id: "patio:fix-tek", scope_line_id: null, description: "Tek screws", quantity: 2, unit: "box", cost_by: "allowance" });
+  const b = fromRaw(raw);
+  const fill = dispatchOrderFillLines(o, b);
+  assert(fill.ok, JSON.stringify(fill));
+  const tek = fill.lines.find((l) => l.description === "Tek screws")!;
+  assertEquals(tek.budget_line_key, "patio:fixings-allowance");
+  const cost = dispatchLineCost({ quantity: 2, unit: "box", budget_id: b.id, budget_line_key: tek.budget_line_key }, b, null);
+  assertEquals([cost.basis, cost.unit_cost_ex_gst, cost.line_cost_ex_gst, cost.cost_from, cost.needs_reason, cost.resolved], ["allowance", null, null, "allowance", false, true]);
+  const order = dispatchOrderCost([{ line: { id: "l-tek", quantity: 2, unit: "box" }, cost }], b);
+  assertEquals([order.lines_ex_gst, order.allowance_lines], [0, 1]);
+  assert(fill.notes.some((n) => n.includes("fixings allowance")));
+});
+
+Deno.test("fill: a quote option's rows are ordered only when the customer took it, joined on its option line", () => {
+  const raw = patioCosted();
+  const o: any = orderFor(raw);
+  o.rows.push({ ...o.rows[0], id: "option:o1", option_id: "o1", scope_line_id: null, description: "Extra post", quantity: 1, unit: "each" });
+  o.rows.push({ ...o.rows[0], id: "option:o9", option_id: "o9", scope_line_id: null, description: "Untaken screen", quantity: 1, unit: "each" });
+  // Not taken: neither row is ordered.
+  let fill = dispatchOrderFillLines(o, fromRaw(raw));
+  assert(fill.ok);
+  assert(!fill.lines.some((l) => l.description === "Extra post" || l.description === "Untaken screen"));
+  // Taken: its budget line (the options formula's option:o1) holds the money.
+  raw.taken_option_ids = ["o1"];
+  raw.materials.lines.push({ key: "option:o1", line_id: null, supplier_key: "bd-metals", supplier: { id: "bd-metals", name: "B&D Metals" }, kind: "item", description: "Extra post", quantity: 1, unit: "each", unit_cost_ex_gst: 180, line_cost_ex_gst: 180, in_total: true, cost_from: "option" });
+  fill = dispatchOrderFillLines(o, fromRaw(raw));
+  assert(fill.ok, JSON.stringify(fill));
+  assertEquals(fill.lines.filter((l) => l.description === "Extra post").map((l) => l.budget_line_key), ["option:o1"]);
+  assert(!fill.lines.some((l) => l.description === "Untaken screen"));
+  // A taken option's budget line whose row the seal lacks holds the fill.
+  o.rows = o.rows.filter((r: any) => r.id !== "option:o1");
+  fill = dispatchOrderFillLines(o, fromRaw(raw));
+  assertEquals(fill.ok ? [] : fill.holds, [{ code: "budget_line_no_order_row", key: "option:o1" }]);
 });
 
 Deno.test("cost: at its budget quantity a line costs the budget's unit cost times its quantity; under is fine too", () => {
