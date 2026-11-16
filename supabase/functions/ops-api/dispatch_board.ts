@@ -626,12 +626,17 @@ export const DISPATCH_BOARD_BOX_SELECT =
 export const DISPATCH_BOARD_LINE_SELECT =
   "id, job_id, supplier_id, status, dispatch_order_email_id, purchase_order_id, created_at, updated_at";
 
-// The v2 supplier order emails that really went (status sent). A test copy to
-// admin@ is never status sent, so it never counts as an order sent. The table
-// comes with the supplier order emails slice
+// The v2 supplier order emails that really went (status sent), and those
+// saved as drafts and not sent yet (status draft; Needs you now "Order
+// drafted", Shaun 13 Nov 2026). A test copy to admin@ is never status sent,
+// so it never counts as an order sent; only status sent ones ever count as
+// sent (dispatchArrival filters them). The table comes with the supplier
+// order emails slice
 // (20261023214200_dispatch_v2_emails_draft_list_and_order_emails.sql).
 export const DISPATCH_BOARD_SENT_EMAIL_SELECT =
   "id, job_id, supplier_id, status, sent_at, delivery_date, body_text";
+// The statuses the board reads: sent, and draft for order_drafted.
+export const DISPATCH_BOARD_EMAIL_STATUSES = ["sent", "draft"];
 
 // The account list (on account or pay first): which approved entry each Xero
 // supplier is linked to, and each entry's on_account (migration
@@ -729,6 +734,10 @@ export type DispatchArrivalOrder = {
   supplier_id: string | null;
   supplier_name: string | null;
   order_sent: boolean;
+  // A supplier box with an order email saved as a draft and not sent yet
+  // (Needs you now "Order drafted", Shaun 13 Nov 2026): Shaun has written
+  // it, only the send is left. Always false for a purchase order.
+  order_drafted: boolean;
   sent_at: string | null;
   delivery_date: string | null;
   // Where the date came from: the box (set by hand or from an accepted
@@ -937,7 +946,8 @@ function oldestFirst(a: any, b: any): number {
 
 // The Arrival line for one job: one entry per supplier box (in box order),
 // then one per material order that sits under no box. A box's order is sent
-// when its v2 order email went (`sentEmails`); its date is the box's own
+// when its v2 order email went (`sentEmails`, status sent; a status draft
+// row there only marks the box order_drafted); its date is the box's own
 // date, else the date that email asked for (never confirmed), else a v1
 // Dispatch order for the same supplier, so a v1 order still draws. A box date
 // set before the box's newest send belongs to an earlier order (an extra
@@ -972,6 +982,14 @@ export function dispatchArrival(
   );
   const used = new Set<string>();
   const entries: DispatchArrivalOrder[] = [];
+  // Only status sent emails count as sent; status draft ones (read for
+  // order_drafted) never reach the stage or the dates.
+  const allEmails = input.sentEmails || [];
+  const sentEmails = allEmails.filter((e) => token(e?.status) === "sent");
+  const draftSuppliers = new Set(
+    allEmails.filter((e) => token(e?.status) === "draft")
+      .map((e) => String(e?.supplier_id ?? "")).filter(Boolean),
+  );
 
   for (const box of boxes) {
     const supplierId = text(box.supplier_id);
@@ -983,7 +1001,7 @@ export function dispatchArrival(
     if (v1) used.add(String(v1.id));
     const view = dispatchV2BoxStage({
       box,
-      emails: input.sentEmails,
+      emails: sentEmails,
       lines: input.lines,
       terms: dispatchV2TermsFor(input.accounts, supplierId),
       installDay,
@@ -1023,6 +1041,7 @@ export function dispatchArrival(
       supplier_name: dispatchV2ApprovedNameFor(input.accounts, supplierId) ??
         text(box.supplier_name),
       order_sent: !!sent || sentByOrder,
+      order_drafted: draftSuppliers.has(supplierId),
       sent_at: sent?.sent_at ?? null,
       delivery_date: deliveryDate,
       date_source: dateSource,
@@ -1066,6 +1085,7 @@ export function dispatchArrival(
       supplier_id: text(order.supplier_id),
       supplier_name: text(order.supplier_name),
       order_sent: ORDER_SENT_STATUSES.has(token(order.status)),
+      order_drafted: false,
       sent_at: null,
       delivery_date: date ? date.slice(0, 10) : null,
       date_source: date ? "order" : null,
@@ -1592,7 +1612,7 @@ export async function loadDispatchBoardExtras(
           client.from("dispatch_supplier_order_emails")
             .select(DISPATCH_BOARD_SENT_EMAIL_SELECT)
             .in("job_id", chunk)
-            .eq("status", "sent"),
+            .in("status", DISPATCH_BOARD_EMAIL_STATUSES),
         "pipeline.dispatch_board_sent_emails",
         "id",
       )
@@ -2014,7 +2034,7 @@ export async function dispatchArrivalRead(
           client.from("dispatch_supplier_order_emails")
             .select(DISPATCH_BOARD_SENT_EMAIL_SELECT)
             .eq("job_id", jobId)
-            .eq("status", "sent"),
+            .in("status", DISPATCH_BOARD_EMAIL_STATUSES),
         "dispatch_arrival.sent_emails",
         "id",
       )
