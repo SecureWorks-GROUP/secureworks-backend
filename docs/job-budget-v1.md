@@ -260,7 +260,11 @@ costing) and the read answers `budget: {state: 'no_order'}`; nobody rebuilds an
 order from a live scope. The fill is held whole, 409 `order_held` with one
 reason code per row or budget line, and the read shows `budget.order.state:
 'held'`, when: a `cost_by: line` row has no budget line
-(`order_row_no_budget_line`) or its line has no cost (`order_row_no_cost`); a
+(`order_row_no_budget_line`), its line has no cost (`order_row_no_cost`), or
+the row and its line count it in different units (`order_row_unit_mismatch`;
+one unit on both, no conversion between units) or different quantities
+(`order_row_quantity_mismatch`), so an unchanged sealed order never asks a
+person for a reason; a
 budget item line is on no row (`budget_line_no_order_row`; the one-figure
 aggregate and the fixings allowance are exempt); two budget lines share a key
 (`budget_key_duplicated`) or two rows an id (`order_row_duplicated`); a
@@ -269,16 +273,21 @@ aggregate and the fixings allowance are exempt); two budget lines share a key
 `allowance` row is not held: it is ordered with no dollars of its own (basis
 `one_figure` or `allowance`), and the order's total says what covers it. A
 delivery on no supplier copy stays a budget line only. `withoutBudget` strips
-`order` with `budget`, so it is shown nowhere new.
+`order` with `budget`, and both Trade App boundaries (`redactTradeScopeQuote`
+and the every-tier `stripTradePrivateCarriers`) drop an order list wherever the
+scope carries it, a fence revision pack included, as an object or as JSON text
+(`tradeSealedOrderList`: an `order` whose `version` reads `order.<n>` or that
+has `rows`); a number or plain words under `order` stay. So it is shown nowhere
+new.
 
 How a line is costed:
 
 | Basis | When | Needs |
 | --- | --- | --- |
-| `budget` | Linked, same unit, at or under the budget quantity | Nothing. Line cost = budget unit cost x quantity, whole cents half up. |
+| `budget` | Linked, same unit, at or under the budget quantity | Nothing. At the budget quantity, line cost = the budget line's sealed cost exactly. Under it, that cost shared by quantity (sealed cost / sealed quantity, unrounded) and rounded once, whole cents half up. The shown unit cost (to the cent) is never multiplied back up, and the budget is never changed. |
 | `one_figure` | A one-figure budget's line at or under quantity | Nothing. No per-line dollars: the job has one materials figure. |
 | `allowance` | A fixings row covered by the fixings allowance | Nothing. No per-line dollars: the allowance covers it. |
-| `over_budget` | Over the budget quantity | A reason for that quantity and unit. The budget unit cost still applies (a one-figure line also needs a unit cost). |
+| `over_budget` | Over the budget quantity | A reason for that quantity and unit. The sealed cost shared by quantity still applies, unless the person gives a unit cost (a one-figure line also needs a unit cost). |
 | `unit_changed` | Unit differs from the budget line | A reason and a unit cost. |
 | `no_budget_cost` | The budget line has no unit cost | A reason and a unit cost. |
 | `not_in_budget` | Typed in, or from an older budget | A reason and a unit cost. |

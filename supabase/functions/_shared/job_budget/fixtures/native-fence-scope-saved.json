@@ -1,0 +1,574 @@
+{
+ "about": "A fence scope as the paired Scope Engine PR saves it (review fixture, 16 Nov, synthetic ZZTEST job): its runs and gates and its one revision pack, with that pack's order (order.v1) and budget exactly as saved. Other pack fields not needed here are left out.",
+ "scope": {
+  "scopeType": "fence-and-gate",
+  "ref": "ZZTEST-SE-20261116-33",
+  "runs": [
+   {
+    "id": "t-run-1",
+    "name": "Rear",
+    "length": 7.095,
+    "sheetHeight": 1800,
+    "extension": "none",
+    "neighbourId": null,
+    "panels": [
+     {
+      "id": "t-run-1-p1",
+      "height": 1800,
+      "retaining": 0,
+      "step": "level",
+      "stepMm": 0,
+      "slopePlinths": 0,
+      "panelWidth": "standard",
+      "_bay": 2
+     },
+     {
+      "id": "t-run-1-p2",
+      "height": 1800,
+      "retaining": 0,
+      "step": "level",
+      "stepMm": 0,
+      "slopePlinths": 0,
+      "panelWidth": "standard",
+      "_bay": 2
+     },
+     {
+      "id": "t-run-1-p3",
+      "height": 1800,
+      "retaining": 0,
+      "step": "level",
+      "stepMm": 0,
+      "slopePlinths": 0,
+      "panelWidth": "standard",
+      "_bay": 2,
+      "cutMm": 2335
+     }
+    ],
+    "slope": {
+     "mode": "simple",
+     "points": [
+      {
+       "distanceM": 0,
+       "heightMm": 0
+      },
+      {
+       "distanceM": 7.095,
+       "heightMm": 0
+      }
+     ],
+     "simple": {
+      "direction": "left-to-right",
+      "totalFallMm": 0,
+      "startsFrom": "start"
+     },
+     "monotonic": null
+    },
+    "siteAnswers": {
+     "install": true
+    },
+    "_syncKey": "7.095|0|2400|3150",
+    "_autoLayout": "standard:0,standard:0,standard:2335",
+    "boundary": "own"
+   }
+  ],
+  "gates": [],
+  "revisionPacks": [
+   {
+    "n": 1,
+    "code": "0O42FPJ",
+    "at": "2026-11-16T05:09:46.517Z",
+    "quoteWords": "plain",
+    "acceptSentence": "7.1 m of Trimclad in Surfmist, 1,800 mm high, as drawn on page 2.",
+    "order": {
+     "version": "order.v1",
+     "rows": [
+      {
+       "id": "fence:group:0:0",
+       "scope_line_id": "SL-071c37cbbc629242",
+       "option_id": null,
+       "kind": "item",
+       "supplier": {
+        "id": null,
+        "name": "Fencing Warehouse"
+       },
+       "supplier_code": null,
+       "description": "Metroll Trimclad infill sheets 1790mm (3 a bay)",
+       "detail": null,
+       "quantity": 9,
+       "unit": "each",
+       "quantity_words": "9",
+       "stock_length_mm": null,
+       "stock_to_confirm": false,
+       "cuts": [],
+       "cut": null,
+       "profile": null,
+       "colour": null,
+       "variant": null,
+       "finish": null,
+       "gauge_mm": null,
+       "girth_mm": null,
+       "note_to_supplier": null,
+       "cost_by": "line"
+      },
+      {
+       "id": "fence:group:0:1",
+       "scope_line_id": "SL-39981aad2f5f9804",
+       "option_id": null,
+       "kind": "item",
+       "supplier": {
+        "id": null,
+        "name": "Fencing Warehouse"
+       },
+       "supplier_code": null,
+       "description": "Metroll fence rails 2365mm (2 a bay)",
+       "detail": null,
+       "quantity": 6,
+       "unit": "each",
+       "quantity_words": "6",
+       "stock_length_mm": null,
+       "stock_to_confirm": false,
+       "cuts": [],
+       "cut": null,
+       "profile": null,
+       "colour": null,
+       "variant": null,
+       "finish": null,
+       "gauge_mm": null,
+       "girth_mm": null,
+       "note_to_supplier": null,
+       "cost_by": "line"
+      },
+      {
+       "id": "fence:group:0:2",
+       "scope_line_id": "SL-9e453dbf8875d1cc",
+       "option_id": null,
+       "kind": "item",
+       "supplier": {
+        "id": null,
+        "name": "Fencing Warehouse"
+       },
+       "supplier_code": null,
+       "description": "Metroll fence posts 2400mm (2 a bay)",
+       "detail": null,
+       "quantity": 6,
+       "unit": "each",
+       "quantity_words": "6",
+       "stock_length_mm": null,
+       "stock_to_confirm": false,
+       "cuts": [],
+       "cut": null,
+       "profile": null,
+       "colour": null,
+       "variant": null,
+       "finish": null,
+       "gauge_mm": null,
+       "girth_mm": null,
+       "note_to_supplier": null,
+       "cost_by": "line"
+      },
+      {
+       "id": "fence:concrete",
+       "scope_line_id": "SL-29647d01dc54030d",
+       "option_id": null,
+       "kind": "item",
+       "supplier": {
+        "id": null,
+        "name": "Fencing Warehouse"
+       },
+       "supplier_code": null,
+       "description": "Concrete 20kg bag (Kwikset)",
+       "detail": null,
+       "quantity": 9,
+       "unit": "each",
+       "quantity_words": "9",
+       "stock_length_mm": null,
+       "stock_to_confirm": false,
+       "cuts": [],
+       "cut": null,
+       "profile": null,
+       "colour": null,
+       "variant": null,
+       "finish": null,
+       "gauge_mm": null,
+       "girth_mm": null,
+       "note_to_supplier": null,
+       "cost_by": "line"
+      },
+      {
+       "id": "fence:tekScrewBox",
+       "scope_line_id": "SL-3b3ca2e870f6f714",
+       "option_id": null,
+       "kind": "item",
+       "supplier": {
+        "id": null,
+        "name": "Fencing Warehouse"
+       },
+       "supplier_code": null,
+       "description": "Tek screws, pack of 100",
+       "detail": null,
+       "quantity": 1,
+       "unit": "each",
+       "quantity_words": "1",
+       "stock_length_mm": null,
+       "stock_to_confirm": false,
+       "cuts": [],
+       "cut": null,
+       "profile": null,
+       "colour": null,
+       "variant": null,
+       "finish": null,
+       "gauge_mm": null,
+       "girth_mm": null,
+       "note_to_supplier": null,
+       "cost_by": "line"
+      },
+      {
+       "id": "fence:delivery|Delivery (Fencing Warehouse)",
+       "scope_line_id": "SL-a66fa620aa85a8ec",
+       "option_id": null,
+       "kind": "delivery",
+       "supplier": {
+        "id": null,
+        "name": "Fencing Warehouse"
+       },
+       "supplier_code": null,
+       "description": "Delivery (Fencing Warehouse)",
+       "detail": null,
+       "quantity": 1,
+       "unit": "each",
+       "quantity_words": "1",
+       "stock_length_mm": null,
+       "stock_to_confirm": false,
+       "cuts": [],
+       "cut": null,
+       "profile": null,
+       "colour": null,
+       "variant": null,
+       "finish": null,
+       "gauge_mm": null,
+       "girth_mm": null,
+       "note_to_supplier": null,
+       "cost_by": "line"
+      },
+      {
+       "id": "fence:custom:0",
+       "scope_line_id": "SL-c05f0fc55abb1abc",
+       "option_id": null,
+       "kind": "item",
+       "supplier": {
+        "id": "stratco",
+        "name": "Stratco"
+       },
+       "supplier_code": null,
+       "description": "ZZTEST supplier bracket",
+       "detail": null,
+       "quantity": 4,
+       "unit": "each",
+       "quantity_words": "4",
+       "stock_length_mm": null,
+       "stock_to_confirm": false,
+       "cuts": [],
+       "cut": null,
+       "profile": null,
+       "colour": null,
+       "variant": null,
+       "finish": null,
+       "gauge_mm": null,
+       "girth_mm": null,
+       "note_to_supplier": null,
+       "cost_by": "line"
+      }
+     ]
+    },
+    "budget": {
+     "version": "budget.v1",
+     "trade": "fence",
+     "job": {
+      "scope_revision_id": null,
+      "local_revision_id": "0O42FPJ",
+      "revision_n": 1,
+      "sell_ex_gst": 4041.8,
+      "gst": 404.18,
+      "total_inc_gst": 4445.98,
+      "scoped_by": {
+       "staff_id": "zztest-staff-0001",
+       "name": "ZZTEST checker"
+      },
+      "salesperson": {
+       "staff_id": "zztest-staff-0001",
+       "name": "ZZTEST checker"
+      }
+     },
+     "materials": {
+      "priced_by_line": true,
+      "lines": [
+       {
+        "key": "fence:group:0:0",
+        "line_id": "SL-071c37cbbc629242",
+        "supplier_key": "name:Fencing Warehouse",
+        "supplier": {
+         "id": null,
+         "name": "Fencing Warehouse",
+         "code": null
+        },
+        "kind": "item",
+        "description": "Metroll Trimclad infill sheets 1790mm (3 a bay)",
+        "quantity": 9,
+        "unit": "each",
+        "cut": null,
+        "unit_cost_ex_gst": 128,
+        "line_cost_ex_gst": 1152,
+        "in_total": true,
+        "cost_from": "supplier_price",
+        "note_to_supplier": null
+       },
+       {
+        "key": "fence:group:0:1",
+        "line_id": "SL-39981aad2f5f9804",
+        "supplier_key": "name:Fencing Warehouse",
+        "supplier": {
+         "id": null,
+         "name": "Fencing Warehouse",
+         "code": null
+        },
+        "kind": "item",
+        "description": "Metroll fence rails 2365mm (2 a bay)",
+        "quantity": 6,
+        "unit": "each",
+        "cut": null,
+        "unit_cost_ex_gst": 130,
+        "line_cost_ex_gst": 780,
+        "in_total": true,
+        "cost_from": "supplier_price",
+        "note_to_supplier": null
+       },
+       {
+        "key": "fence:group:0:2",
+        "line_id": "SL-9e453dbf8875d1cc",
+        "supplier_key": "name:Fencing Warehouse",
+        "supplier": {
+         "id": null,
+         "name": "Fencing Warehouse",
+         "code": null
+        },
+        "kind": "item",
+        "description": "Metroll fence posts 2400mm (2 a bay)",
+        "quantity": 6,
+        "unit": "each",
+        "cut": null,
+        "unit_cost_ex_gst": 154,
+        "line_cost_ex_gst": 924,
+        "in_total": true,
+        "cost_from": "supplier_price",
+        "note_to_supplier": null
+       },
+       {
+        "key": "fence:concrete",
+        "line_id": "SL-29647d01dc54030d",
+        "supplier_key": "name:Fencing Warehouse",
+        "supplier": {
+         "id": null,
+         "name": "Fencing Warehouse",
+         "code": null
+        },
+        "kind": "item",
+        "description": "Concrete 20kg bag (Kwikset)",
+        "quantity": 9,
+        "unit": "each",
+        "cut": null,
+        "unit_cost_ex_gst": 33,
+        "line_cost_ex_gst": 297,
+        "in_total": true,
+        "cost_from": "supplier_price",
+        "note_to_supplier": null
+       },
+       {
+        "key": "fence:tekScrewBox",
+        "line_id": "SL-3b3ca2e870f6f714",
+        "supplier_key": "name:Fencing Warehouse",
+        "supplier": {
+         "id": null,
+         "name": "Fencing Warehouse",
+         "code": null
+        },
+        "kind": "item",
+        "description": "Tek screws, pack of 100",
+        "quantity": 1,
+        "unit": "each",
+        "cut": null,
+        "unit_cost_ex_gst": 34,
+        "line_cost_ex_gst": 34,
+        "in_total": true,
+        "cost_from": "supplier_price",
+        "note_to_supplier": null
+       },
+       {
+        "key": "fence:delivery|Delivery (Fencing Warehouse)",
+        "line_id": "SL-a66fa620aa85a8ec",
+        "supplier_key": "name:Fencing Warehouse",
+        "supplier": {
+         "id": null,
+         "name": "Fencing Warehouse",
+         "code": null
+        },
+        "kind": "delivery",
+        "description": "Delivery (Fencing Warehouse)",
+        "quantity": 1,
+        "unit": "each",
+        "cut": null,
+        "unit_cost_ex_gst": 101,
+        "line_cost_ex_gst": 101,
+        "in_total": true,
+        "cost_from": "supplier_price",
+        "note_to_supplier": null
+       },
+       {
+        "key": "fence:custom:0",
+        "line_id": "SL-c05f0fc55abb1abc",
+        "supplier_key": "stratco",
+        "supplier": {
+         "id": "stratco",
+         "name": "Stratco",
+         "code": null
+        },
+        "kind": "item",
+        "description": "ZZTEST supplier bracket",
+        "quantity": 4,
+        "unit": "each",
+        "cut": null,
+        "unit_cost_ex_gst": 7,
+        "line_cost_ex_gst": 28,
+        "in_total": true,
+        "cost_from": "typed",
+        "note_to_supplier": null
+       }
+      ],
+      "by_supplier": [
+       {
+        "key": "name:Fencing Warehouse",
+        "supplier": {
+         "id": null,
+         "name": "Fencing Warehouse"
+        },
+        "lines_ex_gst": 3187,
+        "surcharge_ex_gst": 0,
+        "delivery_ex_gst": 101,
+        "total_ex_gst": 3288
+       },
+       {
+        "key": "stratco",
+        "supplier": {
+         "id": "stratco",
+         "name": "Stratco"
+        },
+        "lines_ex_gst": 28,
+        "surcharge_ex_gst": 0,
+        "delivery_ex_gst": 0,
+        "total_ex_gst": 28
+       }
+      ],
+      "total_ex_gst": 3316
+     },
+     "labour": {
+      "pay": "group_work_order",
+      "amount_ex_gst": 312.18,
+      "hourly": null,
+      "lines": [
+       {
+        "key": "labour:base-1",
+        "task": "Fence install",
+        "people": null,
+        "days": null,
+        "day_rate_ex_gst": null,
+        "amount_ex_gst": 312.18,
+        "in_total": true
+       }
+      ],
+      "work_order_amount_ex_gst": 312.18
+     },
+     "other": [
+      {
+       "lane": "buffer",
+       "lines": [
+        {
+         "key": "fence:jobBuffer",
+         "description": "Misc job buffer (internal cost)",
+         "quantity": 1,
+         "unit": "each",
+         "cost_ex_gst": 100,
+         "in_total": true,
+         "paid_to": "office",
+         "supplier": null
+        }
+       ],
+       "total_ex_gst": 100
+      }
+     ],
+     "commission": {
+      "salesperson": {
+       "staff_id": "zztest-staff-0001",
+       "name": "ZZTEST checker"
+      },
+      "rule_id": "not_set",
+      "pct": null,
+      "basis": "gross_profit",
+      "amount_ex_gst": null
+     },
+     "totals": {
+      "cost_before_commission_ex_gst": 3728.18,
+      "gross_profit_ex_gst": 313.62,
+      "gross_profit_pct": 7.76,
+      "commission_ex_gst": null,
+      "profit_after_commission_ex_gst": null,
+      "profit_after_commission_pct": null
+     },
+     "complete": false,
+     "gaps": [
+      {
+       "where": "materials",
+       "key": "fence:group:0:0",
+       "code": "no_supplier_id",
+       "what": "Supplier not on the list"
+      },
+      {
+       "where": "materials",
+       "key": "fence:group:0:1",
+       "code": "no_supplier_id",
+       "what": "Supplier not on the list"
+      },
+      {
+       "where": "materials",
+       "key": "fence:group:0:2",
+       "code": "no_supplier_id",
+       "what": "Supplier not on the list"
+      },
+      {
+       "where": "materials",
+       "key": "fence:concrete",
+       "code": "no_supplier_id",
+       "what": "Supplier not on the list"
+      },
+      {
+       "where": "materials",
+       "key": "fence:tekScrewBox",
+       "code": "no_supplier_id",
+       "what": "Supplier not on the list"
+      },
+      {
+       "where": "materials",
+       "key": "fence:delivery|Delivery (Fencing Warehouse)",
+       "code": "no_supplier_id",
+       "what": "Supplier not on the list"
+      },
+      {
+       "where": "commission",
+       "key": "commission",
+       "code": "no_rate",
+       "what": "No rate"
+      }
+     ]
+    }
+   }
+  ]
+ }
+}

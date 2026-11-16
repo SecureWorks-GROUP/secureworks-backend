@@ -46249,6 +46249,32 @@ export function tradeScopePrivateKey(key: string): boolean {
   return TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key) ||
     TRADE_SCOPE_PRIVATE_KEY_RE.test(key)
 }
+// Ruling 17b-1 D: the sealed order list is shown nowhere new in the Trade App,
+// for any tier. The tools seal it as `order` (order.v1) on the pricing record
+// and on each fence revision pack. `order` is a plain word, so it is matched
+// by key and shape: an `order` that is an order list (a `version` reading
+// order.<n>, or `rows`), or a JSON string of one, at any depth. A number or
+// plain text under `order` (a position, a page's words) is an existing scope
+// fact and is kept; JSON-looking text under `order` that cannot be read is
+// dropped, never returned unread.
+export function tradeSealedOrderList(value: unknown): boolean {
+  if (typeof value === 'string') {
+    const t = value.trim()
+    if (!t.startsWith('{') && !t.startsWith('[')) return false
+    try {
+      return tradeSealedOrderList(JSON.parse(t))
+    } catch {
+      return true
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const v = value as Record<string, unknown>
+  return (typeof v.version === 'string' && /^order\./i.test(v.version.trim())) || Array.isArray(v.rows)
+}
+/** A key and value no Trade App scope answer carries (see the two rules above). */
+export function tradeScopePrivateEntry(key: string, value: unknown): boolean {
+  return tradeScopePrivateKey(key) || (key === 'order' && tradeSealedOrderList(value))
+}
 // Ruling 17a, every tier: the office and a division manager read the quote on
 // the Trade App, but the job budget, commission and the salesperson never reach
 // Trade App job data for anyone. This strip runs over the whole trade_job_detail
@@ -46260,7 +46286,7 @@ export const TRADE_PRIVATE_CARRIER_MAX_DEPTH = 64
 export function tradePrivateCarrierKey(key: string): boolean {
   return key === 'budget' || TRADE_SCOPE_PRIVATE_KEY_RE.test(key)
 }
-const TRADE_PRIVATE_CARRIER_TEXT_RE = /commission|salesperson|"budget"/i
+const TRADE_PRIVATE_CARRIER_TEXT_RE = /commission|salesperson|"budget"|"order"/i
 export function stripTradePrivateCarriers<T>(node: T): T {
   const walk = (x: any, depth: number): any => {
     if (x == null) return x
@@ -46279,7 +46305,7 @@ export function stripTradePrivateCarriers<T>(node: T): T {
     if (Array.isArray(x)) return x.map((v) => walk(v, depth + 1)).filter((v) => v !== undefined)
     const out: Record<string, any> = {}
     for (const [k, v] of Object.entries(x)) {
-      if (tradePrivateCarrierKey(k)) continue
+      if (tradePrivateCarrierKey(k) || (k === 'order' && tradeSealedOrderList(v))) continue
       const w = walk(v, depth + 1)
       if (w === undefined) continue
       out[k] = w
@@ -46497,7 +46523,7 @@ function sanitizeTradeAllocatedJsonTree(node: any, depth = 0, parentKey?: string
   if (typeof node !== 'object') return tradeScopeRetainPrimitive(node, parentKey)
   const out: Record<string, any> = {}
   for (const [key, value] of Object.entries(node)) {
-    if (tradeScopePrivateKey(key)) continue
+    if (tradeScopePrivateEntry(key, value)) continue
     if (typeof value === 'number' && Number.isFinite(value)) {
       if (!tradeScopeKeepNumericLeaf(key)) continue
       out[key] = value
@@ -46531,7 +46557,7 @@ function sanitizeTradeAllocatedMediaNotes(media: any[]): any[] {
     if (!row || typeof row !== 'object' || Array.isArray(row)) return row
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(row)) {
-      if (tradeScopePrivateKey(key)) continue
+      if (tradeScopePrivateEntry(key, value)) continue
       if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
         if (typeof value === 'string') {
           const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)
@@ -46720,7 +46746,7 @@ function walkTradeQuoteObjectAllowlist(node: any, depth: number, parentKey?: str
   const out: Record<string, any> = {}
   for (const [key, value] of Object.entries(node)) {
     if (!TRADE_SCOPE_QUOTE_OBJECT_ALLOWLIST.has(key)) continue
-    if (tradeScopePrivateKey(key)) continue
+    if (tradeScopePrivateEntry(key, value)) continue
     // Nested quote/quotes are narrative keys, same as the outer walker:
     // a bare numeric / "$594" value is money, not a quote object.
     if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key) && tradeScopeBareMoneyValue(value)) {
@@ -46758,7 +46784,7 @@ export function redactTradeScopeQuote(scope: any): any {
     if (typeof node !== 'object') return tradeScopeRetainPrimitive(node, parentKey)
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(node)) {
-      if (tradeScopePrivateKey(key)) continue
+      if (tradeScopePrivateEntry(key, value)) continue
       if (TRADE_SCOPE_NARRATIVE_QUOTE_KEYS.has(key)) {
         if (tradeScopeBareMoneyValue(value)) continue
         if (typeof value === 'string') {
@@ -46866,7 +46892,7 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
     const out: Record<string, any> = {}
     for (const [key, value] of Object.entries(item)) {
       if (!TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key)) continue
-      if (tradeScopePrivateKey(key)) continue
+      if (tradeScopePrivateEntry(key, value)) continue
       if (!isTradeWoScopeItemScalar(value)) continue
       if (key === 'is_variation') {
         if (typeof value === 'boolean') out[key] = value
@@ -46907,7 +46933,7 @@ export function redactTradeWorkOrdersForAllocated(orders: any[]): any[] {
         out.scope_items = redactTradeWorkOrderScopeItems(value)
         continue
       }
-      if (tradeScopePrivateKey(key)) continue
+      if (tradeScopePrivateEntry(key, value)) continue
       if (TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key)) {
         if (typeof value === 'string') {
           const cleaned = sanitizeTradeAllocatedStringLeaf(value, key)

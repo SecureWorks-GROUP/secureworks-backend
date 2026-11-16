@@ -20,9 +20,11 @@ import {
   dispatchLineCost,
   dispatchLineCostCents,
   type DispatchLineReason,
+  dispatchSealedShareCents,
   dispatchOrderCost,
 } from "./dispatch_v2_budget_cost.ts";
 import native from "../_shared/job_budget/fixtures/native-budgets.json" with { type: "json" };
+import savedPatio from "../_shared/job_budget/fixtures/native-order-patio-saved.json" with { type: "json" };
 import { dispatchV2LineText } from "./dispatch_v2_emails.ts";
 import { jsonHash } from "../_shared/release_packet/canonicalize.ts";
 
@@ -299,7 +301,7 @@ Deno.test("fill: a quote option's rows are ordered only when the customer took i
   assertEquals(fill.ok ? [] : fill.holds, [{ code: "budget_line_no_order_row", key: "option:o1" }]);
 });
 
-Deno.test("cost: at its budget quantity a line costs the budget's unit cost times its quantity; under is fine too", () => {
+Deno.test("cost: at its budget quantity a line costs its sealed line cost; under is that cost shared by quantity", () => {
   const b = stored("fence_standard");
   const at = dispatchLineCost(lineOf(b, "fence:group:0:0"), b, null);
   assertEquals([at.basis, at.unit_cost_ex_gst, at.line_cost_ex_gst, at.cost_from, at.needs_reason, at.resolved], ["budget", 128, 1152, "budget", false, true]);
@@ -384,4 +386,67 @@ Deno.test("reason and unit cost inputs", () => {
   assertEquals(cleanDispatchUnitCost(1.234), null);
   assertEquals(cleanDispatchUnitCost(-1), null);
   assertEquals(cleanDispatchUnitCost("12"), null);
+});
+
+// Review 1427/1279 (money14, 16 Nov), director's choices (2) and (3), on the
+// patio revision exactly as the paired tool sealed it.
+const SOLARSPAN = "patio:SL-3b619c57ce3ed5b3";
+const CONCRETE = "patio:SL-52bc826a5ed189db#bag";
+const savedCost = (b: DispatchBudget, l: { quantity: number | null; unit: string | null; budget_line_key: string }, r: DispatchLineReason | null = null) =>
+  dispatchLineCost({ quantity: l.quantity, unit: l.unit, budget_id: b.id, budget_line_key: l.budget_line_key }, b, r);
+
+Deno.test("saved patio: concrete in bags on its row and each on its budget line holds the fill, never asks for a reason", () => {
+  const order = dispatchOrderFromPricing({ order: structuredClone(savedPatio.order) })!;
+  const fill = dispatchOrderFillLines(order, fromRaw(structuredClone(savedPatio.budget)));
+  assertEquals(fill.ok ? "filled" : fill.holds.map((h) => `${h.code}:${h.key}`), [`order_row_unit_mismatch:${CONCRETE}`]);
+  assert(dispatchOrderHoldWords(fill.ok ? [] : fill.holds).includes("different units"));
+  // A row and its budget line counting different quantities hold it too.
+  const raw = structuredClone(savedPatio.budget) as any;
+  raw.materials.lines.find((l: any) => l.key === CONCRETE).unit = "bag";
+  const o2 = structuredClone(savedPatio.order) as any;
+  o2.rows.find((r: any) => r.id === CONCRETE).quantity = 79;
+  const fill2 = dispatchOrderFillLines(dispatchOrderFromPricing({ order: o2 })!, fromRaw(raw));
+  assertEquals(fill2.ok ? "filled" : fill2.holds.map((h) => `${h.code}:${h.key}`), [`order_row_quantity_mismatch:${CONCRETE}`]);
+});
+
+Deno.test("saved patio, concrete in bags on both: every line costs its sealed cost exactly with no reason, and the budget is not changed", () => {
+  const raw = structuredClone(savedPatio.budget) as any;
+  raw.materials.lines.find((l: any) => l.key === CONCRETE).unit = "bag";
+  const before = structuredClone(raw);
+  const b = fromRaw(raw);
+  const fill = dispatchOrderFillLines(dispatchOrderFromPricing({ order: structuredClone(savedPatio.order) })!, b);
+  assert(fill.ok, JSON.stringify(fill));
+  const costed = fill.lines.map((l, i) => ({ line: { ...l, id: `line-${i}` }, cost: savedCost(b, l) }));
+  assert(costed.every(({ cost }) => cost.resolved && !cost.needs_reason), JSON.stringify(costed.filter(({ cost }) => !cost.resolved || cost.needs_reason).map(({ cost }) => cost.budget_line_key)));
+  const concrete = costed.find(({ cost }) => cost.budget_line_key === CONCRETE)!.cost;
+  assertEquals([concrete.basis, concrete.unit_cost_ex_gst, concrete.line_cost_ex_gst, concrete.cost_from], ["budget", 4, 312, "budget"]);
+  // Each line on the budget's own figures is its sealed line cost, to the cent.
+  for (const { cost } of costed.filter(({ cost }) => cost.basis === "budget")) {
+    const sealed = raw.materials.lines.find((l: any) => l.key === cost.budget_line_key);
+    assertEquals(cost.line_cost_ex_gst, sealed.line_cost_ex_gst, cost.budget_line_key!);
+  }
+  const oc = dispatchOrderCost(costed, b);
+  const sealedSum = costed.filter(({ cost }) => cost.basis === "budget")
+    .reduce((c, { cost }) => c + Math.round(raw.materials.lines.find((l: any) => l.key === cost.budget_line_key).line_cost_ex_gst * 100), 0);
+  assertEquals(Math.round(oc.lines_ex_gst * 100), sealedSum);
+  assertEquals(raw, before);
+});
+
+Deno.test("cost: six SolarSpan lengths sealed at 216.27 cost 216.27, never 6 x the shown 36.05; another quantity shares the sealed cost, rounded once", () => {
+  const b = fromRaw(structuredClone(savedPatio.budget));
+  const line = { quantity: 6, unit: "length", budget_line_key: SOLARSPAN };
+  const at = savedCost(b, line);
+  assertEquals([at.basis, at.unit_cost_ex_gst, at.line_cost_ex_gst, at.needs_reason], ["budget", 36.05, 216.27, false]);
+  // 216.27 / 6 x 5 = 180.225, rounded once: 180.23 (6 x 36.05 would give 180.25).
+  assertEquals(savedCost(b, { ...line, quantity: 5 }).line_cost_ex_gst, 180.23);
+  assertEquals(savedCost(b, { ...line, quantity: 4 }).line_cost_ex_gst, 144.18);
+  assertEquals(savedCost(b, { ...line, quantity: 0.5 }).line_cost_ex_gst, 18.02);
+  // Over: a reason for the quantity; the sealed cost shared by quantity, unless the person gave a unit cost.
+  const over = { ...line, quantity: 7 };
+  assertEquals(savedCost(b, over, reason({ quantity: 7, unit: "length" })).line_cost_ex_gst, 252.32);
+  assertEquals(savedCost(b, over, reason({ quantity: 7, unit: "length", unit_cost_ex_gst: 40 })).line_cost_ex_gst, 280);
+  assertEquals(dispatchSealedShareCents(216.27, 6, 6), 21627);
+  assertEquals(dispatchSealedShareCents(216.27, 6, 5), 18023);
+  assertEquals(dispatchSealedShareCents(0.01, 3, 1), 0);
+  assertEquals(dispatchSealedShareCents(0.02, 3, 1), 1);
 });

@@ -5196,7 +5196,11 @@ order list (`order`, `order.v1`, in the revision's hashed pricing bytes, re-hash
 on read) and takes only its cost from the budget line whose key is the row id;
 never build an order line from the budget's words. What does not join holds
 the whole fill (409 `order_held`, a reason code per row); a revision sealed
-before `order` keeps today's path; `withoutBudget` strips `order` too.
+before `order` keeps today's path; `withoutBudget` strips `order` too, and
+both Trade App boundaries drop an order list at any depth (`tradeScopePrivateEntry`).
+A line at its budget quantity costs the budget line's sealed cost exactly, never
+the shown unit cost times the quantity; a row and its budget line in different
+units or quantities hold the fill.
 Contract: "Dispatch lines carry cost" in `docs/job-budget-v1.md`.
 Step 5 (`20261114040000`): with `job_profit_expected_from_job_budget` on
 (seeded off) `v_job_profit` reads the newest budget first (`expected_source`

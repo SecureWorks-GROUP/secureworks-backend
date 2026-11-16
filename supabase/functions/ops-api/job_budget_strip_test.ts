@@ -3,9 +3,10 @@
 // to one of them (docs/job-budget-v1.md, "Who can see it").
 
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
-import { redactTradeScopeQuote } from './index.ts'
+import { redactTradeScopeQuote, stripTradePrivateCarriers } from './index.ts'
 import { withoutBudget } from '../_shared/job_budget/budget_v1.ts'
 import { patioBase } from '../_shared/job_budget/budget_examples.ts'
+import savedFence from '../_shared/job_budget/fixtures/native-fence-scope-saved.json' with { type: 'json' }
 
 const here = new URL('.', import.meta.url)
 const read = (rel: string) => Deno.readTextFile(new URL(rel, here))
@@ -75,6 +76,78 @@ Deno.test('the pricing strip drops the sealed order list with the budget (ruling
   assertEquals(withoutBudget({ totalIncGST: 1, order }) as unknown, { totalIncGST: 1 })
   const asText = withoutBudget(JSON.stringify(pricing))
   assert(!asText.includes('order.v1') && !asText.includes('ZZTEST post'))
+})
+
+// Review 1427/1279 finding 4: the tool seals the order list on each fence
+// revision pack, not only on the pricing record. The fence scope exactly as
+// the paired tool saves it, through both Trade App boundaries: the trade scope
+// redactor and the every-tier private carrier strip, as an object and as JSON
+// text. Every order list goes; the scope's own facts stay.
+const orderLists = (x: unknown): number => {
+  let n = 0
+  const walk = (v: unknown) => {
+    if (typeof v === 'string') {
+      const t = v.trim()
+      if (t.startsWith('{') || t.startsWith('[')) {
+        try {
+          walk(JSON.parse(t))
+        } catch { /* plain text */ }
+      }
+      return
+    }
+    if (Array.isArray(v)) return v.forEach(walk)
+    if (v && typeof v === 'object') {
+      for (const [k, w] of Object.entries(v)) {
+        if (k === 'order' && w && typeof w === 'object' && /^order\./.test(String((w as any).version))) n++
+        walk(w)
+      }
+    }
+  }
+  walk(x)
+  return n
+}
+
+Deno.test('the saved fence scope: no order list (order.v1) reaches the Trade App at either boundary, object or JSON text', () => {
+  const saved = savedFence.scope
+  assertEquals(orderLists(saved), 1, 'the native pack carries one order list')
+  const scope = redactTradeScopeQuote(structuredClone(saved))
+  const carrier = stripTradePrivateCarriers({ scope_json: structuredClone(saved) })
+  const text = stripTradePrivateCarriers({ scope_json: JSON.stringify(saved) })
+  const packText = stripTradePrivateCarriers({ scope_json: { ...structuredClone(saved), revisionPacks: [{ ...saved.revisionPacks[0], order: JSON.stringify(saved.revisionPacks[0].order) }] } })
+  const scopeText = redactTradeScopeQuote({ ...structuredClone(saved), revisionPacks: [{ ...saved.revisionPacks[0], order: JSON.stringify(saved.revisionPacks[0].order) }] })
+  for (const [name, out] of Object.entries({ scope, carrier, text, packText, scopeText })) {
+    assertEquals(orderLists(out), 0, name)
+    assert(!JSON.stringify(out).includes('order.v1'), name)
+    assert(!JSON.stringify(out).includes('"budget"'), name)
+  }
+  // The scope's own facts stay: the runs, the gates, the pack's number and code.
+  assertEquals(carrier.scope_json.runs, saved.runs)
+  assertEquals(carrier.scope_json.gates, saved.gates)
+  assertEquals([carrier.scope_json.revisionPacks[0].n, carrier.scope_json.revisionPacks[0].code], [saved.revisionPacks[0].n, saved.revisionPacks[0].code])
+  assertEquals(JSON.parse(text.scope_json).runs, saved.runs)
+  assertEquals(scope.revisionPacks[0].code, saved.revisionPacks[0].code)
+})
+
+Deno.test('an order list of any version or without one goes; a number or plain words under order stay', () => {
+  const rows = [{ id: 'fence:group:0:0', description: 'ZZTEST sheet', quantity: 9, unit: 'each', cost_by: 'line' }]
+  const scope = {
+    runs: [{ label: 'A', order: 1 }],
+    photos: [{ order: 'Front first' }],
+    later: { order: { version: 'order.v2', rows } },
+    unversioned: { order: { rows } },
+    unreadable: { order: '{"version":"order.v1","rows":[' },
+  }
+  const redacted = redactTradeScopeQuote(structuredClone(scope))
+  const carried = stripTradePrivateCarriers(structuredClone(scope))
+  // The every-tier strip keeps both; the redactor keeps the words (its own
+  // rule for bare numbers, unchanged here, keeps only named measures).
+  assertEquals(carried.runs, [{ label: 'A', order: 1 }])
+  assertEquals(redacted.runs, [{ label: 'A' }])
+  for (const out of [redacted, carried]) {
+    assertEquals(out.photos, [{ order: 'Front first' }])
+    assertEquals([out.later, out.unversioned, out.unreadable], [{}, {}, {}])
+    assert(!JSON.stringify(out).includes('ZZTEST sheet'))
+  }
 })
 
 Deno.test('every customer and trade read that receives pricing strips or drops it', async () => {

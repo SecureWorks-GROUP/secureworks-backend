@@ -15,8 +15,11 @@
 //   - dispatchOrderCost: the record of an order's cost kept beside its email.
 //
 // A line is costed from the budget line it names (job_material_lines.budget_id
-// + budget_line_key). Its unit cost is the budget's; its line cost is that unit
-// cost times the quantity ordered, in whole cents. A line may be ordered as it
+// + budget_line_key). At the budget line's own quantity its cost is that line's
+// sealed cost exactly; at another quantity it is the sealed cost shared by
+// quantity (sealed cost / sealed quantity, unrounded) and rounded once to the
+// cent. The budget's shown unit cost (rounded to the cent) is never multiplied
+// back up, and the sealed budget is never changed. A line may be ordered as it
 // stands only when it is at or under its budget line's quantity, in the same
 // unit, with a cost the budget gives. Anything else (over the budget quantity,
 // a different unit, a budget line with no cost, a line not in the budget) is
@@ -389,6 +392,10 @@ export type DispatchOrderHoldCode =
   | "order_row_no_budget_line"
   /** A row costed by its own line whose budget line has no cost. */
   | "order_row_no_cost"
+  /** A row and its budget line count it in different units. */
+  | "order_row_unit_mismatch"
+  /** A row and its budget line count different quantities. */
+  | "order_row_quantity_mismatch"
   /** A row covered by the one figure, in a budget with no one figure. */
   | "order_row_no_one_figure"
   /** A row covered by the fixings allowance, in a budget with no single allowance. */
@@ -500,6 +507,20 @@ export function dispatchOrderFillLines(order: DispatchOrder, budget: DispatchBud
         holds.push({ code: "order_row_no_cost", key: row.id });
         continue;
       }
+      // The row says what is ordered and its budget line what that costs: they
+      // count it the same way, in one unit (no conversion between units). A
+      // sealed record where they differ is wrong, so the fill holds: an
+      // unchanged sealed order never asks a person for a reason.
+      const rowQuantity = cleanDispatchQuantity(row.quantity);
+      const rowUnit = cleanDispatchUnit(row.unit);
+      if (!sameUnit(rowUnit.ok ? rowUnit.value : null, link.unit)) {
+        holds.push({ code: "order_row_unit_mismatch", key: row.id });
+        continue;
+      }
+      if (rowQuantity.ok && rowQuantity.value !== null && link.quantity !== null && Math.abs(rowQuantity.value - link.quantity) > 1e-9) {
+        holds.push({ code: "order_row_quantity_mismatch", key: row.id });
+        continue;
+      }
     } else if (row.cost_by === "one_figure") {
       link ??= aggregate.length === 1 ? aggregate[0] : null;
       if (!link) {
@@ -575,6 +596,8 @@ export function dispatchOrderHoldWords(holds: DispatchOrderHold[]): string {
   const say: Record<DispatchOrderHoldCode, string> = {
     order_row_no_budget_line: "a line has no line in the job budget",
     order_row_no_cost: "a line's budget line has no cost",
+    order_row_unit_mismatch: "a line and its budget line are in different units",
+    order_row_quantity_mismatch: "a line and its budget line have different quantities",
     order_row_no_one_figure: "a line covered by one figure, in a budget with no one figure",
     order_row_no_allowance: "a fixings line, in a budget with no fixings allowance",
     budget_line_no_order_row: "a budget line is on no sealed order line",
@@ -591,7 +614,7 @@ export function dispatchOrderHoldWords(holds: DispatchOrderHold[]): string {
 
 /** Why a line is costed the way it is. */
 export type DispatchCostBasis =
-  /** At or under its budget line, same unit, the budget's unit cost. */
+  /** At or under its budget line, same unit: its sealed cost, shared by quantity. */
   | "budget"
   /** At or under its budget line in a budget priced as one figure, or covered by the one figure. */
   | "one_figure"
@@ -628,9 +651,17 @@ export type DispatchLineCost = {
   budget_quantity: number | null;
   budget_unit: string | null;
   budget_unit_cost_ex_gst: number | null;
-  /** The unit cost the order uses (the budget's, else the reason's), or null. */
+  /**
+   * The unit cost as the budget shows it (to the cent), else the reason's, or
+   * null. A budget line's total is never rebuilt from it.
+   */
   unit_cost_ex_gst: number | null;
-  /** Unit cost times quantity in whole cents, or the budget line's whole cost. */
+  /**
+   * At the budget line's own quantity, its sealed cost exactly. At another
+   * quantity, that cost shared by quantity (sealed cost / sealed quantity,
+   * unrounded) and rounded once to the cent. With a person's unit cost, that
+   * unit cost times the quantity in whole cents.
+   */
   line_cost_ex_gst: number | null;
   /** Where the cost came from. */
   cost_from: "budget" | "reason" | "one_figure" | "allowance" | null;
@@ -655,6 +686,20 @@ export function dispatchLineCostCents(unitCost: number, quantity: number): numbe
   const unitCents = Math.round(unitCost * 100);
   const milli = Math.round(quantity * 1000);
   return Math.floor((unitCents * milli + 500) / 1000);
+}
+
+/**
+ * A budget line's sealed cost (dollars) shared by quantity: sealed cost /
+ * sealed quantity, unrounded, times the quantity ordered, rounded once to the
+ * cent (half up). At the sealed quantity it is the sealed cost exactly.
+ * Worked in whole numbers, so no figure is rounded twice.
+ */
+export function dispatchSealedShareCents(sealedLineCost: number, sealedQuantity: number, quantity: number): number {
+  const lineCents = BigInt(Math.round(sealedLineCost * 100));
+  const sealedMilli = BigInt(Math.round(sealedQuantity * 1000));
+  const milli = BigInt(Math.round(quantity * 1000));
+  if (sealedMilli <= 0n) throw new RangeError("sealed quantity must be above zero");
+  return Number((lineCents * milli * 2n + sealedMilli) / (2n * sealedMilli));
 }
 
 function dollars(cents: number): number {
@@ -688,18 +733,26 @@ export function dispatchLineCost(
     needsReason: boolean,
     words: string,
     whole: number | null = null,
+    sealed: { cost: number; quantity: number } | null = null,
   ): DispatchLineCost => {
     const needsUnitCost = needsReason && budgetUnitCost === null;
     const covers = !!reason && quantity !== null &&
       reason.quantity + 1e-9 >= quantity && sameUnit(reason.unit, unit) &&
       (!needsUnitCost || reason.unit_cost_ex_gst !== null);
     const ok = needsReason ? covers : basis !== "quantity_missing";
-    const unitCost = needsReason && covers && reason!.unit_cost_ex_gst !== null
+    const reasonUnitCost = needsReason && covers && reason!.unit_cost_ex_gst !== null
       ? reason!.unit_cost_ex_gst
-      : budgetUnitCost;
+      : null;
+    const unitCost = reasonUnitCost ?? budgetUnitCost;
     const lineCost = whole !== null && !needsReason
       ? whole
-      : unitCost !== null && quantity !== null
+      : quantity === null
+      ? null
+      : reasonUnitCost !== null
+      ? dollars(dispatchLineCostCents(reasonUnitCost, quantity))
+      : sealed !== null
+      ? dollars(dispatchSealedShareCents(sealed.cost, sealed.quantity, quantity))
+      : unitCost !== null
       ? dollars(dispatchLineCostCents(unitCost, quantity))
       : null;
     return {
@@ -748,9 +801,13 @@ export function dispatchLineCost(
       : make("one_figure", null, false, "The budget priced the materials as one figure; this line is part of it.");
   }
   if (linked.unit_cost_ex_gst !== null) {
+    // The sealed line cost is the money; the shown unit cost is rounded.
+    const sealed = linked.line_cost_ex_gst !== null && linked.quantity !== null && linked.quantity > 0
+      ? { cost: linked.line_cost_ex_gst, quantity: linked.quantity }
+      : null;
     return over
-      ? make("over_budget", linked.unit_cost_ex_gst, true, `This is more than the budget's ${linked.quantity}. It needs a reason before it is ordered.`)
-      : make("budget", linked.unit_cost_ex_gst, false, "Costed from the job budget.");
+      ? make("over_budget", linked.unit_cost_ex_gst, true, `This is more than the budget's ${linked.quantity}. It needs a reason before it is ordered.`, null, sealed)
+      : make("budget", linked.unit_cost_ex_gst, false, "Costed from the job budget.", null, sealed);
   }
   if (linked.line_cost_ex_gst !== null && linked.in_total) {
     // A line the budget costs as a whole (a taken option): the whole cost at
