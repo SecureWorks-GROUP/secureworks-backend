@@ -414,7 +414,7 @@ const REVISION_SIGNAL =
 // strip it from the strong-instruction anchor that recovers late attachment-only
 // evidence, so they are scoped to the subject line.
 const REVISION_SUBJECT_SIGNAL =
-  /(?:^\s*re\s*:[^\n]*\b(?:MLB|AJBR|AJS|BWCWA|WB|RAPID)[-\s#]*\d{3,}\b|\b(?:info\s+required|follow\s*up|booking\s+(?:update|request)|any\s+update)\b)/i;
+  /(?:^\s*re\s*:[^\n]*\b(?:MLB|MLR|AJBR|AJS|BWCWA|WB|RAPID)[-\s#]*\d{3,}\b|\b(?:info\s+required|follow\s*up|booking\s+(?:update|request)|any\s+update)\b)/i;
 const REOPEN_SIGNAL =
   /\b(re-?attend|reopen|return\s+(?:visit|to\s+site)|attend\s+again)\b/i;
 // Charter 6b + Ruling 12 (sealed): collection, rectification and "-R" reattend
@@ -440,7 +440,7 @@ const RECTIFICATION_SIGNAL =
 // Ruling 12: the "-R" suffix on a builder ref is the reattend marker. The base
 // ref stays the identity (binds to the parent); the suffix opens the cycle.
 const REATTEND_REF_SUFFIX_SIGNAL =
-  /\b(?:AJBR|ABJR|AJS|MLB|BWCWA|WB)[-\s#]*\d{3,}\s*-\s*R(?![A-Za-z0-9])/i;
+  /\b(?:AJBR|ABJR|AJS|MLB|MLR|BWCWA|WB)[-\s#]*\d{3,}\s*-\s*R(?![A-Za-z0-9])/i;
 
 function isLifecycleReopenText(fullText: string): boolean {
   return REOPEN_SIGNAL.test(fullText) ||
@@ -464,7 +464,8 @@ const AJS_SIGNAL = /\b(?:AJBR|AJS)[-\s#]*\d{3,}\b/i;
 const BUILDERWEST_SIGNAL = /\bBWCWA[-\s#]*\d{3,}\b|\bbuilderwest\b/i;
 const WESTERN_SIGNAL =
   /\bmake\s+safe\s+work\s+order\s*:\s*WB\d{3,}\b|\bwestern\.mailer\b/i;
-const MLB_SIGNAL = /\bMLB[-\s#]*\d{3,}\b/i;
+// MLR is ML Builders' restoration job-number series (first seen 9 Nov 2026).
+const MLB_SIGNAL = /\bML[BR][-\s#]*\d{3,}\b/i;
 // Ambrose Construct Group's purchase-order mail names itself in the subject:
 // "Ambrose Construct Group Purchase Order Make Safe: <PO> - <address> is
 // attached", "Updated:Ambrose Construct Group Purchase Order: <PO> - ...", and
@@ -794,7 +795,7 @@ function extractRawIdentity(
     ? hay.match(/\b(SYNTHLIVE-[A-Z0-9][A-Z0-9._#/-]{2,})\b/i)?.[1] || null
     : null;
   const family = adapterId === "mlb" || adapterId === "prime"
-    ? hay.match(/\bMLB[-\s#]*(\d{3,})(?:[-\s]*(?:REV|R)\s*([A-Z0-9]+))?\b/i)
+    ? hay.match(/\bML[BR][-\s#]*(\d{3,})(?:[-\s]*(?:REV|R)\s*([A-Z0-9]+))?\b/i)
     : adapterId === "ajs_ajbr"
     ? hay.match(
       /\b(?:AJBR|AJS)[-\s#]*(\d{3,})(?:[-\s]*(?:REV|R)\s*([A-Z0-9]+))?\b/i,
@@ -816,6 +817,10 @@ function extractRawIdentity(
     ? "WB"
     : adapterId === "rapid"
     ? "RAPID"
+    // MLR is ML Builders' restoration job-number series; the claim keeps the
+    // spelling the builder wrote.
+    : family && /^MLR/i.test(family[0])
+    ? "MLR"
     : "MLB";
   const familyExternalRef = syntheticExternalRef ||
     (family
@@ -1522,6 +1527,7 @@ function buildKnown(
     prefixes: [
       "SYNTHLIVE",
       "MLB",
+      "MLR",
       "AJBR",
       "AJS",
       "BWCWA",

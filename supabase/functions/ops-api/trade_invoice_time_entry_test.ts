@@ -10,8 +10,8 @@
  *          searched-in hour lines (extra_items) store the fields sent,
  *        - save_trade_invoice_draft: the no-week insert and the dated persist
  *          store the fields sent,
- *        - the auto-collected lanes (generate_trade_invoice's clock lane and
- *          submit_trade_invoice's legacy hourly lane) store none: see 6,
+ *        - the auto-collected lane (generate_trade_invoice's clock lane)
+ *          stores none: see 6 (submit_trade_invoice is retired, 410),
  *   3. a job's list reads its entries, billed and saved on the job view, and
  *      every read of an invoice line answers the four fields,
  *   4. the day worked is never after today, Perth, on every path,
@@ -1428,215 +1428,25 @@ handlerTest("generate_trade_invoice clock lane (flag on): every auto-collected c
   assertEquals(out.writes, []);
 });
 
-// ── 2b. submit_trade_invoice: the legacy hourly lane ────────────────────────
+// ── 2b. submit_trade_invoice: retired ───────────────────────────────────────
 
-type Write = { table: string; op: string; payload: any };
-
-function legacyClient(
-  fx: { flagOn: boolean; assignments: any[]; invoiceType?: string },
-): { client: any; writes: Write[] } {
-  const writes: Write[] = [];
+// The legacy hourly lane is retired (Marnin, 11 Nov 2026): it answers 410
+// use_weekly_invoice before reading the flag, the cards or anything else, so
+// no line, timed or not, is written through it.
+Deno.test("submit_trade_invoice is retired: 410 before any read or write", async () => {
+  const tables: string[] = [];
   const client = {
     from(table: string) {
-      let op = "select";
-      let payload: any = null;
-      const filters: Record<string, unknown> = {};
-      const rows = (): any[] => {
-        if (table === "users") {
-          return [{
-            name: "Tess Trade",
-            email: "",
-            xero_contact_id: null,
-            trade_details: {},
-            invoice_type: fx.invoiceType || "hourly",
-          }];
-        }
-        if (table === "feature_flags") {
-          return filters.flag_name === TRADE_INVOICE_TIME_ENTRY_FLAG
-            ? [{ enabled: fx.flagOn }]
-            : [];
-        }
-        if (table === "trade_rates") return [{ hourly_rate: 50 }];
-        if (table === "job_assignments") {
-          const ids = Array.isArray(filters.id) ? filters.id.map(String) : null;
-          return fx.assignments.filter((a) => !ids || ids.includes(String(a.id)));
-        }
-        if (table === "trade_invoices") {
-          return op === "insert" ? [{ id: NEW_INVOICE }] : [];
-        }
-        return [];
-      };
-      const builder: any = {
-        select: () => builder,
-        eq(column: string, value: unknown) {
-          filters[column] = value;
-          return builder;
-        },
-        in(column: string, value: unknown) {
-          filters[column] = value;
-          return builder;
-        },
-        gte: () => builder,
-        lte: () => builder,
-        or: () => builder,
-        not: () => builder,
-        order: () => builder,
-        limit: () => builder,
-        insert(p: any) {
-          op = "insert";
-          payload = p;
-          return builder;
-        },
-        update(p: any) {
-          op = "update";
-          payload = p;
-          return builder;
-        },
-        delete() {
-          op = "delete";
-          return builder;
-        },
-        maybeSingle: () =>
-          builder.then((r: any) => ({ data: (r.data || [])[0] ?? null, error: null })),
-        single: () =>
-          builder.then((r: any) => ({ data: (r.data || [])[0] ?? null, error: null })),
-        then(resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) {
-          if (op !== "select") writes.push({ table, op, payload });
-          return Promise.resolve({ data: rows(), error: null }).then(resolve, reject);
-        },
-      };
-      return builder;
-    },
-  };
-  return { client, writes };
-}
-
-const completedCard = (id: string, extra: Record<string, unknown> = {}) => ({
-  id,
-  user_id: TRADE_ID,
-  scheduled_date: "2026-08-26",
-  started_at: "2026-08-26T00:00:00Z", // 08:00 Perth
-  completed_at: "2026-08-26T08:00:00Z", // 16:00 Perth
-  status: "complete",
-  role: "installer",
-  assignment_type: "install",
-  invoiced_in: null,
-  jobs: {
-    id: JOB_A,
-    type: "fencing",
-    job_number: "SWF-TIME-1",
-    client_name: "Client A",
-    site_address: "1 First St",
-    site_suburb: "Perth",
-  },
-  ...extra,
-});
-
-// The lane goes on to Xero, which a fake client cannot answer: every run
-// rejects there. What matters is what was written before that point.
-async function submitLegacy(
-  fx: { flagOn: boolean; assignments: any[] },
-): Promise<{ lines: any[]; writes: Write[]; error: Error }> {
-  const { client, writes } = legacyClient(fx);
-  const error = await assertRejects(() =>
-    submitTradeInvoice(client, TRADE_ID, { week_ending: WEEK_END, gst_on: false })
-  ) as Error;
-  const lines = writes
-    .filter((w) => w.table === "trade_invoice_lines" && w.op === "insert")
-    .flatMap((w) => w.payload);
-  return { lines, writes, error };
-}
-
-Deno.test("submit_trade_invoice (flag off): the lines are saved as before, with no time entry", async () => {
-  const dayTwo = completedCard(CARD_B, {
-    scheduled_date: "2026-08-27",
-    started_at: "2026-08-26T23:00:00Z", // 07:00 Perth, 27 Aug
-    completed_at: "2026-08-27T03:00:00Z", // 11:00 Perth
-  });
-
-  // one card with a same-day pair of stamps: the server fills in no entry
-  const single = await submitLegacy({
-    flagOn: false,
-    assignments: [completedCard(CARD_A)],
-  });
-  assertEquals(single.lines.length, 1);
-  assertEquals(
-    [single.lines[0].total_hours, single.lines[0].line_total_ex],
-    [8, 400],
-  );
-  assertEquals(storedTimeOf(single.lines[0]), NO_TIME);
-
-  // two days on one job: one line, as before
-  const grouped = await submitLegacy({
-    flagOn: false,
-    assignments: [completedCard(CARD_A), dayTwo],
-  });
-  assertEquals(grouped.lines.length, 1);
-  assertEquals(
-    [grouped.lines[0].total_hours, grouped.lines[0].line_total_ex],
-    [12, 600],
-  );
-  assertEquals(grouped.lines[0].assignment_ids, [CARD_A, CARD_B]);
-  assertEquals(storedTimeOf(grouped.lines[0]), NO_TIME);
-});
-
-Deno.test("submit_trade_invoice (flag on): every card is refused by name before any write", async () => {
-  const on = await submitLegacy({
-    flagOn: true,
-    assignments: [
-      completedCard(CARD_A, { scheduled_date: "2026-08-25" }),
-      completedCard(CARD_B, {
-        scheduled_date: "2026-08-26",
-        jobs: { id: JOB_B, type: "fencing", job_number: "SWF-TIME-2" },
-      }),
-    ],
-  });
-  assertEquals((on.error as any).status, 422);
-  assertEquals((on.error as any).body?.code, "time_entry_required");
-  assertEquals((on.error as any).body?.needs_times, [
-    {
-      assignment_id: CARD_A,
-      job_id: JOB_A,
-      job_number: "SWF-TIME-1",
-      work_date: "2026-08-25",
-    },
-    {
-      assignment_id: CARD_B,
-      job_id: JOB_B,
-      job_number: "SWF-TIME-2",
-      work_date: "2026-08-26",
-    },
-  ]);
-  // each job and day, and the one way to give the times
-  assertEquals(on.error.message, NEEDS_TIMES_ON_TWO_JOBS);
-  assertEquals(on.writes, []);
-});
-
-Deno.test("submit_trade_invoice (group switch off): no group table is read", async () => {
-  const tables: string[] = [];
-  const { client, writes } = legacyClient({
-    flagOn: false,
-    assignments: [completedCard(CARD_A)],
-  });
-  const wrapped = {
-    from(table: string) {
       tables.push(table);
-      return client.from(table);
+      throw new Error("the retired door must not read " + table);
     },
   };
-  await assertRejects(() =>
-    submitTradeInvoice(wrapped, TRADE_ID, {
-      week_ending: WEEK_END,
-      gst_on: false,
-    })
+  const error: any = await assertRejects(() =>
+    submitTradeInvoice(client, TRADE_ID, { week_ending: WEEK_END, gst_on: false })
   );
-  assertEquals(tables.some((table) => table.startsWith("group_")), false);
-  assertEquals(
-    writes.some((row) =>
-      row.table === "trade_invoice_lines" && row.op === "insert"
-    ),
-    true,
-  );
+  assertEquals(error.status, 410);
+  assertEquals(error.body?.code, "use_weekly_invoice");
+  assertEquals(tables, []);
 });
 
 // ── 3. A job's list ─────────────────────────────────────────────────────────

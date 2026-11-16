@@ -34,6 +34,8 @@ import type {
   SetConfirmedDeliveryInput,
 } from "./dispatch_v2_replies_sources.ts";
 import {
+  approvedMatchEmails,
+  identifySender,
   type JobHint,
   jobNumberForms,
   type V2Order,
@@ -738,6 +740,38 @@ Deno.test("scan: two open orders and nothing to choose by goes to the tray with 
   assertEquals(bySeq(107)!.order_desk, false);
 });
 
+Deno.test("scan: accounts mail from an order desk's domain is not guessed and does not count (option B)", async () => {
+  const t = setup();
+  t.store.events = [
+    {
+      seq: 111,
+      from: "invoicing@cmiwa.com.au",
+      subject: "Combined Metal Industries - Sales Invoice PSI-225844",
+      body: "Please find your invoice attached.",
+    },
+    {
+      seq: 112,
+      from: "sales@fencingwarehousewa.au",
+      subject: "Tax Invoice 10095112 for Account 001185 - SECUREWORKS",
+      body: "Your tax invoice is attached.",
+    },
+  ].map(eventRow);
+  t.store.scan.cursor_sequence = 100;
+  await t.run("dispatch_v2_replies_scan");
+  const bySeq = (seq: number) =>
+    t.store.emails.find((e) => e.sequence_number === seq)!;
+  // CMI has one open order: an order reply would be a best guess (seq 104),
+  // an invoice is not.
+  assertEquals(bySeq(111).state, "unmatched");
+  assertEquals(bySeq(111).order_desk, false);
+  assertEquals(bySeq(112).state, "unmatched");
+  assertEquals(bySeq(112).order_desk, false);
+  const tray = await t.run("dispatch_v2_replies_unmatched");
+  assertEquals(tray.counts.needs_confirmation, 0);
+  assertEquals(tray.counts.unmatched_order_desk, 0);
+  assertEquals(tray.counts.unmatched_other, 2);
+});
+
 Deno.test("scan: a second run over the same rows stores nothing twice", async () => {
   const t = await scanned();
   const r = await t.run("dispatch_v2_replies_scan", { from_sequence: 100 });
@@ -991,6 +1025,24 @@ Deno.test("hide: only an unmatched email", async () => {
     409,
     "not_unmatched",
   );
+});
+
+Deno.test("clear: Clear all turns down the guesses and hides every listed email; others are skipped", async () => {
+  const t = await scanned();
+  const guess = t.bySeq(104)!;
+  const tray = t.bySeq(107)!;
+  const matched = t.bySeq(101)!;
+  const r = await t.run("dispatch_v2_replies_clear", {
+    email_ids: [guess.id, tray.id, matched.id, tray.id],
+  });
+  assertEquals(r, { ok: true, cleared: 2, skipped: 1 });
+  const row = (id: string) => t.store.emails.find((e) => e.id === id)!;
+  assertEquals(row(guess.id).state, "hidden");
+  assertEquals(row(guess.id).rejected_order_ids, [O3]);
+  assertEquals(row(tray.id).state, "hidden");
+  assertEquals(row(matched.id).state, "matched");
+  await refused(t.run("dispatch_v2_replies_clear", { email_ids: [] }), 400, "invalid_request");
+  await refused(t.run("dispatch_v2_replies_clear", { email_ids: ["nope"] }), 400, "invalid_request");
 });
 
 Deno.test("accept: sets the order's confirmed date and never the job status", async () => {
@@ -1746,4 +1798,105 @@ Deno.test("supplier number: picked by hand with no order, the number is kept aga
     t.store.refs.map((x) => [x.ref, x.job_id, x.order_id, x.linked_via]),
     [["11041784", J1, null, "assigned"]],
   );
+});
+
+// ── Solarspan is Bondor (Shaun, 11 Nov 2026) ─────────────────────────────
+// Shaun's Bondor orders go to wasales@solarspan.com.au; Bondor's staff reply
+// from bondor.com.au (natalia.kuschell@bondor.com.au, "RE: Material Order Ref
+// SWP-26100 // Bondor #1465465"). Bondor's approved entry carries the
+// Solarspan address as a recognise-only address, so both reply to Bondor.
+
+const S_BONDOR = "b6aacf3b-5ca7-400b-aa39-5c2eed2a465c";
+const O4 = "aaaaaaa4-0000-4000-8000-000000000004";
+
+function bondorSetup() {
+  const t = setup();
+  const base = t.sources.listApprovedSenders.bind(t.sources);
+  t.sources.listApprovedSenders = async () => {
+    const r = await base();
+    return {
+      available: true,
+      rows: [...r.rows, {
+        supplier_key: "bondor",
+        supplier_name: "Bondor",
+        supplier_ids: [S_BONDOR],
+        // approvedMatchEmails: To, then the recognise-only address.
+        emails: approvedMatchEmails({
+          to_emails: ["wa@bondor.com.au"],
+          cc_emails: [],
+          also_known_emails: ["wasales@solarspan.com.au"],
+        }),
+      }],
+    };
+  };
+  // The order Shaun sent from Outlook to Solarspan, recorded as Bondor's.
+  t.sources.orders.push({
+    order_id: O4,
+    job_id: J2,
+    job_number: "SWP-26701",
+    supplier_id: S_BONDOR,
+    supplier_name: "Bondor",
+    status: "sent",
+    sent_at: "2026-10-22T01:00:00Z",
+    sent_internet_message_id: "<o4@outlook.com>",
+    sent_conversation_id: "CONV-O4",
+    confirmed_delivery_date: null,
+  });
+  return t;
+}
+
+Deno.test("solarspan: a reply from bondor.com.au or solarspan.com.au to an order sent to Solarspan ties to that Bondor order", async () => {
+  const t = bondorSetup();
+  t.store.events = [
+    {
+      seq: 201,
+      from: "Natalia Kuschell <natalia.kuschell@bondor.com.au>",
+      subject: "RE: Material Order Ref SWP-26701 // Bondor #1465465",
+      body: "Hi Shaun,\n\nYour order is booked for delivery Thursday 29 October.\n\nRegards",
+    },
+    {
+      seq: 202,
+      from: "wasales@solarspan.com.au",
+      subject: "RE: Material Order Ref SWP-26701",
+      body: "Thanks, order received.",
+    },
+  ].map(eventRow);
+  t.store.scan.cursor_sequence = 200;
+  await t.run("dispatch_v2_replies_scan");
+  const bySeq = (seq: number) =>
+    t.store.emails.find((e) => e.sequence_number === seq)!;
+  for (const seq of [201, 202]) {
+    const e = bySeq(seq);
+    assertEquals(
+      [e.state, e.job_id, e.order_id, e.supplier_key, e.supplier_name],
+      ["matched", J2, O4, "bondor", "Bondor"],
+    );
+  }
+  assertEquals(bySeq(201).sender_via, "approved_domain");
+  assertEquals(bySeq(202).sender_via, "approved_address");
+});
+
+Deno.test("solarspan: identifySender names Bondor for its own and its Solarspan addresses only", () => {
+  const approved = [{
+    supplier_key: "bondor",
+    supplier_name: "Bondor",
+    supplier_ids: [S_BONDOR],
+    emails: approvedMatchEmails({
+      to_emails: ["wa@bondor.com.au"],
+      cc_emails: null,
+      also_known_emails: ["WASales@Solarspan.com.au", "wa@bondor.com.au"],
+    }),
+  }];
+  // Lower case, once each, To first.
+  assertEquals(approved[0].emails, ["wa@bondor.com.au", "wasales@solarspan.com.au"]);
+  const who = (from: string) => identifySender(from, approved, []).supplier_key;
+  assertEquals(who("natalia.kuschell@bondor.com.au"), "bondor");
+  assertEquals(who("wasales@solarspan.com.au"), "bondor");
+  assertEquals(who("accounts@solarspan.com.au"), "bondor");
+  assertEquals(who("someone@metroll.com.au"), null);
+  // Missing or empty recognise-only addresses change nothing.
+  assertEquals(approvedMatchEmails({ to_emails: ["a@b.com.au"], cc_emails: ["c@b.com.au"] }), [
+    "a@b.com.au",
+    "c@b.com.au",
+  ]);
 });

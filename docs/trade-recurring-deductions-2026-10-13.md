@@ -21,8 +21,8 @@ This is the back end. The trade app and ops screens need a paired change in
   (`user_id`), `label`, `amount`, `first_week_start`, optional
   `last_week_start`, `active`. No amount lives in code.
 - Only an invoice with an invoice week (`week_start`) carries one: the weekly
-  invoice (`generate_trade_invoice` with `week_start`, `submit_trade_invoice`)
-  and its draft (`save_trade_invoice_draft` with `week_start`). A single
+  invoice (`generate_trade_invoice` with `week_start`; `submit_trade_invoice`
+  is retired since 11 Nov 2026, 410 `use_weekly_invoice`) and its draft (`save_trade_invoice_draft` with `week_start`). A single
   work-order invoice (`submit_work_order_invoice`) and an invoice submitted
   with no week carry none.
 - That skip is never silent. When a work-order invoice or a no-week invoice is

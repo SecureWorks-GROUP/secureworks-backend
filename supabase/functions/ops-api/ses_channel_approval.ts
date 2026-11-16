@@ -538,7 +538,7 @@ export function sesChannelTotpEnrolmentUri(
 
 // ── message parsing ─────────────────────────────────────────────────────────
 
-const CARD_REFERENCE_RE = /\b(SWMS-\d{3,}|INV-\d{2,})\b/gi;
+const CARD_REFERENCE_RE = /\b((?:SWMS|SWRESTO)-\d{3,}|INV-\d{2,})\b/gi;
 const COMMAND_WORD_RE = /\b(approve|approved|send|sendit)\b/gi;
 const CODE_RE = /(?<!\d)\d{6}(?!\d)/g;
 
@@ -715,7 +715,7 @@ export async function resolveSesChannelCard(
   client: SesSupabaseClient,
   reference: string,
 ): Promise<{ job_id: string; job_number: string }> {
-  if (reference.startsWith("SWMS-")) {
+  if (reference.startsWith("SWMS-") || reference.startsWith("SWRESTO-")) {
     const response = await client.from("jobs")
       .select("id,job_number").eq("job_number", reference).limit(2);
     if (response.error) {

@@ -1,6 +1,6 @@
 // deno-lint-ignore-file no-import-prefix
 
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 
 const INDEX = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
 
@@ -95,18 +95,17 @@ Deno.test("PDF attach happens before pushed_to_xero so a failed attach is retrya
     "work-order submit must not mark pushed_to_xero before attach",
   );
 
+  // submit_trade_invoice is retired (410 use_weekly_invoice) and pushes no
+  // bill at all.
   const submitFn = INDEX.slice(
     INDEX.indexOf("async function submitTradeInvoice"),
     INDEX.indexOf("async function setTradeRate"),
   );
-  assert(
-    submitFn.includes("attachTradeInvoicePdfsThenMarkReconciled"),
-    "submit_trade_invoice must attach before marking pushed_to_xero",
-  );
+  assertStringIncludes(submitFn, "'use_weekly_invoice'");
   assertEquals(
-    submitFn.includes("await markTradeInvoiceXeroSplitReconciled"),
+    submitFn.includes("createTradeXeroBillOnce"),
     false,
-    "submit_trade_invoice must not mark pushed_to_xero before attach",
+    "the retired submit_trade_invoice must not create a Xero bill",
   );
 
   assertEquals(

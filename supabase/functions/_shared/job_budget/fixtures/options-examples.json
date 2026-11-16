@@ -1,0 +1,73 @@
+{
+  "about": "budget.v1 options formula, worked examples (docs/job-budget-v1.md section 5). Made-up figures, no real job or price. The tool (verify/r17-budget/options-examples.mjs) and the job system each run every case through their own function; both must match expect to the cent.",
+  "bases": {
+    "patio": {
+      "version": "budget.v1", "trade": "patio",
+      "job": { "scope_revision_id": "example", "revision_n": 1, "sell_ex_gst": 10000.00, "gst": 1000.00, "total_inc_gst": 11000.00,
+               "scoped_by": { "staff_id": "staff-example", "name": "Example" }, "salesperson": { "staff_id": "staff-example", "name": "Example" } },
+      "materials": { "priced_by_line": true, "lines": [
+        { "key": "m1", "line_id": "l1", "supplier_key": "sup-a", "supplier": { "id": "sup-a", "name": "Supplier A", "code": null }, "kind": "item",
+          "description": "Roof sheets", "quantity": 1, "unit": "each", "cut": null, "unit_cost_ex_gst": 3000.00, "line_cost_ex_gst": 3000.00, "in_total": true, "cost_from": "supplier_price", "note_to_supplier": null },
+        { "key": "m2", "line_id": null, "supplier_key": "sup-a", "supplier": { "id": "sup-a", "name": "Supplier A", "code": null }, "kind": "delivery",
+          "description": "Delivery", "quantity": 1, "unit": "each", "cut": null, "unit_cost_ex_gst": 120.00, "line_cost_ex_gst": 120.00, "in_total": true, "cost_from": "supplier_price", "note_to_supplier": null } ],
+        "by_supplier": [ { "key": "sup-a", "supplier": { "id": "sup-a", "name": "Supplier A" }, "lines_ex_gst": null, "surcharge_ex_gst": 45.00, "delivery_ex_gst": null, "total_ex_gst": null } ],
+        "total_ex_gst": null },
+      "labour": { "pay": "group_work_order", "amount_ex_gst": null, "hourly": null, "lines": [
+        { "key": "crew", "task": "Build", "people": null, "days": null, "day_rate_ex_gst": null, "amount_ex_gst": 2800.00, "in_total": true } ], "work_order_amount_ex_gst": null },
+      "other": [
+        { "lane": "skip_and_tip", "lines": [ { "key": "o-skip", "description": "Skip bin", "quantity": 1, "unit": "each", "cost_ex_gst": 350.00, "in_total": true, "paid_to": "office", "supplier": null } ], "total_ex_gst": null },
+        { "lane": "buffer", "lines": [ { "key": "buffer", "description": "Job buffer", "quantity": 1, "unit": "job", "cost_ex_gst": 200.00, "in_total": true, "paid_to": "office", "supplier": null } ], "total_ex_gst": null } ],
+      "commission": { "salesperson": { "staff_id": "staff-example", "name": "Example" }, "rule_id": "example", "pct": 8, "basis": "gross_profit", "amount_ex_gst": null },
+      "totals": {},
+      "options": [
+        { "option_id": "o1", "sell_ex_gst": 400.00, "gst": 40.00, "sell_inc_gst": 440.00, "cost_ex_gst": 180.00, "surcharge_ex_gst": 2.70,
+          "lands": { "lane": "materials", "supplier": { "id": "sup-a", "name": "Supplier A" } }, "line": { "description": "Two downlights", "quantity": 2, "unit": "each" } },
+        { "option_id": "o2", "sell_ex_gst": 520.00, "gst": 52.00, "sell_inc_gst": 572.00, "cost_ex_gst": 250.00, "surcharge_ex_gst": 0,
+          "lands": { "lane": "labour" }, "line": { "description": "Ceiling fan fitted", "quantity": 1, "unit": "each" } },
+        { "option_id": "o3", "sell_ex_gst": 300.00, "gst": 30.00, "sell_inc_gst": 330.00, "cost_ex_gst": null, "surcharge_ex_gst": 0,
+          "lands": { "lane": "hire", "paid_to": "office" }, "line": { "description": "Scaffold hire", "quantity": 1, "unit": "each" } } ],
+      "complete": false, "gaps": []
+    },
+    "fence": {
+      "version": "budget.v1", "trade": "fence",
+      "job": { "scope_revision_id": "example", "revision_n": 1, "sell_ex_gst": 1000.00, "gst": 100.00, "total_inc_gst": 1100.00,
+               "scoped_by": { "staff_id": "staff-example", "name": "Example" }, "salesperson": { "staff_id": "staff-example", "name": "Example" } },
+      "materials": { "priced_by_line": true, "lines": [
+        { "key": "fence:panel_kits", "line_id": null, "supplier_key": "sup-f", "supplier": { "id": "sup-f", "name": "Supplier F", "code": null }, "kind": "item",
+          "description": "Panel kits", "quantity": 1, "unit": "each", "cut": null, "unit_cost_ex_gst": 700.00, "line_cost_ex_gst": 700.00, "in_total": true, "cost_from": "supplier_price", "note_to_supplier": null },
+        { "key": "fence:delivery", "line_id": null, "supplier_key": "sup-f", "supplier": { "id": "sup-f", "name": "Supplier F", "code": null }, "kind": "delivery",
+          "description": "Delivery", "quantity": 1, "unit": "each", "cut": null, "unit_cost_ex_gst": 80.00, "line_cost_ex_gst": 80.00, "in_total": true, "cost_from": "supplier_price", "note_to_supplier": null } ],
+        "by_supplier": [ { "key": "sup-f", "supplier": { "id": "sup-f", "name": "Supplier F" }, "lines_ex_gst": null, "surcharge_ex_gst": 0, "delivery_ex_gst": null, "total_ex_gst": null } ],
+        "total_ex_gst": null },
+      "labour": { "pay": "group_work_order", "amount_ex_gst": null, "hourly": null, "lines": [
+        { "key": "fence:labour", "task": "Install", "people": null, "days": null, "day_rate_ex_gst": null, "amount_ex_gst": 320.00, "in_total": true } ], "work_order_amount_ex_gst": null },
+      "other": [],
+      "commission": { "salesperson": { "staff_id": "staff-example", "name": "Example" }, "rule_id": "example", "pct": 15, "basis": "gross_profit", "amount_ex_gst": null },
+      "totals": {},
+      "options": [
+        { "option_id": "o4", "sell_ex_gst": 250.00, "gst": 25.00, "sell_inc_gst": 275.00, "cost_ex_gst": 49.90, "surcharge_ex_gst": 0,
+          "lands": { "lane": "materials", "supplier": { "id": "sup-f", "name": "Supplier F" } }, "line": { "description": "Rail upgrade", "quantity": 1, "unit": "each" } } ],
+      "complete": false, "gaps": []
+    }
+  },
+  "cases": [
+    { "name": "base patio, nothing taken", "base": "patio", "taken": [],
+      "expect": { "sell_ex_gst": 10000, "gst": 1000, "total_inc_gst": 11000, "by_supplier": { "sup-a": 3165 }, "labour": 2800, "work_order": 2800, "other": { "skip_and_tip": 350, "buffer": 200 },
+        "cost_before_commission_ex_gst": 6515, "gross_profit_ex_gst": 3485, "gross_profit_pct": 34.85, "commission_ex_gst": 278.8, "profit_after_commission_ex_gst": 3206.2, "profit_after_commission_pct": 32.06, "complete": true, "gaps": [] } },
+    { "name": "A: o1 taken", "base": "patio", "taken": ["o1"],
+      "expect": { "sell_ex_gst": 10400, "gst": 1040, "total_inc_gst": 11440, "by_supplier": { "sup-a": 3347.7 }, "labour": 2800, "work_order": 2800, "other": { "skip_and_tip": 350, "buffer": 200 },
+        "cost_before_commission_ex_gst": 6697.7, "gross_profit_ex_gst": 3702.3, "gross_profit_pct": 35.6, "commission_ex_gst": 296.18, "profit_after_commission_ex_gst": 3406.12, "profit_after_commission_pct": 32.75, "complete": true, "gaps": [] } },
+    { "name": "B: o1 and o2 taken", "base": "patio", "taken": ["o1", "o2"],
+      "expect": { "sell_ex_gst": 10920, "gst": 1092, "total_inc_gst": 12012, "by_supplier": { "sup-a": 3347.7 }, "labour": 3050, "work_order": 3050, "other": { "skip_and_tip": 350, "buffer": 200 },
+        "cost_before_commission_ex_gst": 6947.7, "gross_profit_ex_gst": 3972.3, "gross_profit_pct": 36.38, "commission_ex_gst": 317.78, "profit_after_commission_ex_gst": 3654.52, "profit_after_commission_pct": 33.47, "complete": true, "gaps": [] } },
+    { "name": "C: o3 taken, no cost", "base": "patio", "taken": ["o3"],
+      "expect": { "sell_ex_gst": 10300, "gst": 1030, "total_inc_gst": 11330, "by_supplier": { "sup-a": 3165 }, "labour": 2800, "work_order": 2800, "other": { "skip_and_tip": 350, "hire": null, "buffer": 200 },
+        "cost_before_commission_ex_gst": null, "gross_profit_ex_gst": null, "gross_profit_pct": null, "commission_ex_gst": null, "profit_after_commission_ex_gst": null, "profit_after_commission_pct": null, "complete": false, "gaps": ["no_cost@option:o3"] } },
+    { "name": "D base: fence at a loss, commission 0", "base": "fence", "taken": [],
+      "expect": { "sell_ex_gst": 1000, "gst": 100, "total_inc_gst": 1100, "by_supplier": { "sup-f": 780 }, "labour": 320, "work_order": 320, "other": {},
+        "cost_before_commission_ex_gst": 1100, "gross_profit_ex_gst": -100, "gross_profit_pct": -10, "commission_ex_gst": 0, "profit_after_commission_ex_gst": -100, "profit_after_commission_pct": -10, "complete": true, "gaps": [] } },
+    { "name": "D: o4 taken, the rounding trap", "base": "fence", "taken": ["o4"],
+      "expect": { "sell_ex_gst": 1250, "gst": 125, "total_inc_gst": 1375, "by_supplier": { "sup-f": 829.9 }, "labour": 320, "work_order": 320, "other": {},
+        "cost_before_commission_ex_gst": 1149.9, "gross_profit_ex_gst": 100.1, "gross_profit_pct": 8.01, "commission_ex_gst": 15.02, "profit_after_commission_ex_gst": 85.08, "profit_after_commission_pct": 6.81, "complete": true, "gaps": [] } }
+  ]
+}

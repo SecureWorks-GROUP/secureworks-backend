@@ -9,6 +9,11 @@
 -- its down runs first, and it is applied again after 20261104200500 at the end.
 SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.v_job_profit'::regclass AND attname = 'office_variations_ex' AND NOT attisdropped) AS rq15g_live_20261009100000 \gset
 \if :rq15g_live_20261009100000
+-- 20261114040000 (ruling 17 step 5) sits on v_job_profit after 20261111100000: unwind it first when live.
+SELECT strpos(pg_get_viewdef('public.v_job_profit'::regclass, true), 'budget_rev AS (') > 0 AS r17s5_live_20261009100000_contract_0 \gset
+\if :r17s5_live_20261009100000_contract_0
+\ir ../../../rollbacks/20261114040000_job_profit_expected_from_budget_down.sql
+\endif
 \ir ../../../rollbacks/20261111100000_job_profit_office_variations_down.sql
 \endif
 SELECT md5(pg_get_functiondef('public.job_profit_line_evidence_many(uuid[])'::regprocedure))='b9114d87ccc74b6171bbb51d92be69b4' AS a2c_live_20261009100000 \gset
@@ -1015,4 +1020,7 @@ ROLLBACK;
 \if :rq15g_live_20261009100000
 \ir ../20261111100000_job_profit_office_variations/setup.sql
 \ir ../../../migrations/20261111100000_job_profit_office_variations.sql
+\if :r17s5_live_20261009100000_contract_0
+\ir ../../../migrations/20261114040000_job_profit_expected_from_budget.sql
+\endif
 \endif

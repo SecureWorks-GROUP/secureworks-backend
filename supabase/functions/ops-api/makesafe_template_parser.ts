@@ -84,7 +84,7 @@ export const TEMPLATE_DEFAULT_REQUIRED = ["external_ref", "client_name", "site_a
 
 // Known builder ref prefixes (mirrors slugFromRefPrefix + the intake ref regex).
 const SUBJECT_REF_RE =
-  /\b((?:AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*\d{3,6})\b/i;
+  /\b((?:AJBR|AJS|MLB|MLR|BWCWA|BWC|WB|KBA)[-\s#]*\d{3,6})\b/i;
 
 // WA-common street-type suffixes; anchors a "<number> <words> <type>" street match.
 const STREET_TYPE =

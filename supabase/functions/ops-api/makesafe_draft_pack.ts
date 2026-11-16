@@ -1207,7 +1207,8 @@ function isMlbDraft(ctx: DraftPackContext, output: DraftPackOutput): boolean {
     output.invoice.contact_name || detail.requesting_company_name ||
       makesafeCompany.name || "",
   ).toLowerCase();
-  return ref.startsWith("MLB") || company.includes("major loss") ||
+  return ref.startsWith("MLB") || ref.startsWith("MLR") ||
+    company.includes("major loss") ||
     company.includes("ml builders");
 }
 

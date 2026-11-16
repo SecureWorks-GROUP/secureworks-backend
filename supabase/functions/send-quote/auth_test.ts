@@ -138,7 +138,7 @@ function captureAuthLog() {
 Deno.test("staff operator roles match the ops-api office set", () => {
   assertEquals(
     [...QUOTE_SEND_OFFICE_PATHS].sort(),
-    ["send", "send-invoice", "send-runs"],
+    ["accept-for-customer", "send", "send-invoice", "send-runs"],
   );
   assertEquals(
     [...SEND_QUOTE_STAFF_OPERATOR_ROLES].sort(),

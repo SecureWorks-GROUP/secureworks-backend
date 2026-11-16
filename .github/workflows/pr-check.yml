@@ -279,6 +279,14 @@ jobs:
             supabase/functions/ops-api/job_deposit_advance_test.ts \
             supabase/functions/ops-api/deposit_invoice_lines_test.ts
 
+      # Scheduled-job reminder texts (job_schedule_reminders.ts): the weekly and
+      # day-before rule, the captain's fixed wording, the prior-text scan, the holds,
+      # the claim before the send and the switch. Every write and SMS is a fake.
+      - name: Test the scheduled-job reminder texts
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/ops-api/job_schedule_reminders_test.ts
+
       - name: Test the call transcription word list
         run: |
           deno test --allow-read --allow-env supabase/functions/transcribe-call/vocabulary_test.ts
@@ -336,6 +344,28 @@ jobs:
             supabase/functions/ops-api/scope_owner_approvals_test.ts \
             supabase/functions/ops-api/job_work_order_office_approve_test.ts
 
+      # Ruling 17 step 1: the job budget. The options formula and its worked
+      # examples to the cent, every add-up check by code, the acceptance writer
+      # (bound revision only, refusal event without money, expected_costs
+      # untouched) and the strip on every customer and trade read. The strip
+      # file imports index.ts: same --no-check reason as above. The Postgres half
+      # is the 20261113190000 migration contract.
+      - name: Test the job budget (formula, checks, acceptance writer, strip)
+        run: |
+          deno test --allow-env --allow-read \
+            supabase/functions/_shared/job_budget/budget_v1_test.ts \
+            supabase/functions/_shared/job_budget/record_job_budget_test.ts
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/job_budget_strip_test.ts
+
+      # A scope draft prepare registers each sealed payer as a job party and
+      # never loses the saved drafts when that registration is refused
+      # (RQ-17.c, 20261111120000).
+      - name: Test scope job drafts and payer party registration
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/scope_job_drafts_test.ts
+
       # A service-role key committed in 2026-03 stayed live for six months.
       # Refuse any tracked service_role JWT or sb_secret_ key, whatever path
       # it sits under.
@@ -365,6 +395,25 @@ jobs:
             supabase/functions/ops-api/insurance_repairs_board_test.ts \
             supabase/functions/ops-api/insurance_repairs_pipeline_test.ts \
             supabase/functions/ops-api/quote_builder_test.ts
+
+      # Restoration work on the SES board (docs/restoration-workflow-v1.md): the
+      # work order header that declares it, the MLR- job numbers, the plan and
+      # quote rules, the hand-off to the invoice path, and the rule that no
+      # quote money is stored where a trade can read. Same --no-check reason as
+      # the step above.
+      - name: Check restoration intake and workflow contracts
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/restoration_intake_test.ts \
+            supabase/functions/ops-api/restoration_workflow_test.ts \
+            supabase/functions/ops-api/restoration_workflow_store_test.ts \
+            supabase/functions/ops-api/restoration_send_test.ts \
+            supabase/functions/ops-api/restoration_stage_test.ts \
+            supabase/functions/ops-api/restoration_report_render_test.ts \
+            supabase/functions/ops-api/restoration_work_order_test.ts \
+            supabase/functions/ops-api/ses_owner_directed_approval_test.ts \
+            supabase/functions/ops-api/makesafe_pdf_declared_type_test.ts \
+            supabase/functions/ops-api/makesafe_intake_gate_test.ts
 
       # Builder mail read from a general company Group (swwa@) must never store
       # or download anyone else's mail, and one purchase order must stay one job
@@ -455,6 +504,17 @@ jobs:
             supabase/functions/ops-api/debt_autotexts_off_test.ts \
             supabase/functions/daily-digest/deposit_autotexts_off_test.ts
 
+      # Supplier price checks (daily digest price drift, ops AI
+      # check_supplier_pricing) never read a staff_only scope default, such as
+      # the commission percentage, as a material price
+      # (_shared/supplier_price_defaults.ts). Drives the real daily-digest
+      # handler, so the same --no-check reason as above.
+      - name: Test supplier price checks skip staff-only rows
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/_shared/supplier_price_defaults_test.ts \
+            supabase/functions/daily-digest/staff_only_price_drift_test.ts
+
       # The Dispatch tab's list read is opt-in on `pipeline`: the plain read must
       # stay exactly as it was, and the list must never drop a job past the
       # 1000-row ceiling or select the whole scope blob. These files type-check,
@@ -526,6 +586,12 @@ jobs:
             supabase/functions/send-quote/send_runs_request_test.ts \
             supabase/functions/send-quote/quote_party_view_test.ts \
             supabase/functions/send-quote/ghl_email_note_test.ts \
+            supabase/functions/send-quote/quote_accepted_stage_test.ts \
+            supabase/functions/send-quote/acceptance_invoice_outcome_test.ts \
+            supabase/functions/send-quote/accept_page_invoice_words_test.ts \
+            supabase/functions/send-quote/division_routing_test.ts \
+            supabase/functions/send-quote/customer_address_words_test.ts \
+            supabase/functions/_shared/customer_site_line_test.ts \
             supabase/functions/ghl-proxy/hardening_helpers_test.ts \
             supabase/functions/ghl-proxy/misc_scope_save_test.ts \
             supabase/functions/ghl-proxy/provider_reads_test.ts \
@@ -537,6 +603,7 @@ jobs:
             supabase/functions/ghl-proxy/calendar_events_test.ts \
             supabase/functions/ghl-proxy/calendar_appointment_test.ts \
             supabase/functions/ghl-proxy/calendar_appointment_release_test.ts \
+            supabase/functions/ghl-proxy/stage_move_target_test.ts \
             supabase/functions/xero-sync/xero_invoice_reconciliation_test.ts \
             supabase/functions/xero-sync/customer_allocations_test.ts \
             supabase/functions/xero-sync/xero_mirror_check_test.ts \
@@ -545,6 +612,7 @@ jobs:
             supabase/functions/xero-sync/project_job_link_test.ts \
             supabase/functions/xero-sync/bill_prematch_test.ts \
             supabase/functions/xero-sync/materials_ingest_test.ts \
+            supabase/functions/xero-sync/bank_transactions_test.ts \
             supabase/functions/ops-api/materials_recon_test.ts \
             supabase/functions/ops-api/job_profit_test.ts \
             supabase/functions/ops-api/job_dispatch_orders_test.ts \
@@ -580,6 +648,8 @@ jobs:
             supabase/functions/ops-api/sales_booking_routes_test.ts \
             supabase/functions/reporting-api/reporting_staff_gate_test.ts \
             supabase/functions/reporting-api/job_profitability_test.ts \
+            supabase/functions/reporting-api/commission_summary_test.ts \
+            supabase/functions/ops-api/job_profit_patio_expected_test.ts \
             supabase/functions/reporting-api/team_activity_test.ts
 
       # This suite imports the serving monolith, whose pre-existing type errors
@@ -681,6 +751,13 @@ jobs:
         run: |
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ghl-proxy/misc_scope_save_handler_test.ts
+
+      # An office status move sends an Execution-pipeline stage only to an
+      # opportunity in that pipeline, never to the Sales one (refused 400).
+      - name: Test GHL stage moves reach the Execution opportunity
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/ghl-proxy/stage_move_handler_test.ts
 
       # C7: GHL text reactions are one client.sms_reaction row each (channel
       # status, never read as the customer writing), and the operator's

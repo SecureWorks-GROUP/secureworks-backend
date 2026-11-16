@@ -65,13 +65,17 @@ Deno.test("Xero tie-out: no org is a 403, never every org's bills", () => {
   }
 });
 
-Deno.test("Xero tie-out: passes the parameters and returns the read whole", async () => {
+Deno.test("Xero tie-out: passes the parameters and returns both reads whole", async () => {
   const calls: any[] = [];
   const body = { covers: "bills only", months: [{ month: "2026-10" }] };
+  const second = { basis: "ex GST", months: [{ month: "2026-10" }] };
   const client = {
     rpc: (name: string, args: any) => {
       calls.push([name, args]);
-      return Promise.resolve({ data: body, error: null });
+      return Promise.resolve({
+        data: name === "xero_tieout_monthly" ? body : second,
+        error: null,
+      });
     },
   };
   assertEquals(
@@ -80,13 +84,13 @@ Deno.test("Xero tie-out: passes the parameters and returns the read whole", asyn
       months: "6",
       orgId: ORG,
     }),
-    { ok: true, tieout: body },
+    { ok: true, tieout: body, spend_revenue: { ok: true, answer: second } },
   );
-  assertEquals(calls, [["xero_tieout_monthly", {
-    p_as_of: "2026-10-29",
-    p_months: 6,
-    p_org_id: ORG,
-  }]]);
+  const args = { p_as_of: "2026-10-29", p_months: 6, p_org_id: ORG };
+  assertEquals(calls, [
+    ["xero_tieout_monthly", args],
+    ["xero_spend_revenue_monthly", args],
+  ]);
 });
 
 Deno.test("Xero tie-out: an unreadable answer is a 503, never an empty page", async () => {
@@ -105,6 +109,36 @@ Deno.test("Xero tie-out: an unreadable answer is a 503, never an empty page", as
       XeroTieoutError,
     );
     assertEquals(err.status, 503);
+  }
+});
+
+Deno.test("Xero tie-out: a spend and revenue read that fails never fails the bills answer", async () => {
+  const body = { covers: "bills only", months: [{ month: "2026-10" }] };
+  const cases: Array<[() => Promise<any>, string]> = [
+    [
+      () =>
+        Promise.resolve({
+          data: null,
+          error: { message: "function xero_spend_revenue_monthly does not exist" },
+        }),
+      "function xero_spend_revenue_monthly does not exist",
+    ],
+    [() => Promise.resolve({ data: null, error: null }), "no answer"],
+    [() => Promise.resolve({ data: { basis: "ex GST" }, error: null }), "no answer"],
+    [() => Promise.reject(new Error("connection reset")), "connection reset"],
+  ];
+  for (const [second, reason] of cases) {
+    const client = {
+      rpc: (name: string) =>
+        name === "xero_tieout_monthly"
+          ? Promise.resolve({ data: body, error: null })
+          : second(),
+    };
+    assertEquals(await readXeroTieout(client, { orgId: ORG }), {
+      ok: true,
+      tieout: body,
+      spend_revenue: { ok: false, reason },
+    });
   }
 });
 

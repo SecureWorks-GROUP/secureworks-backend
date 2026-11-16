@@ -23,6 +23,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { completionPackReviewPdfLine, completionPackReviewVisitHtml } from './review_cta.ts'
 import { signatureImageTag } from '../_shared/signature_image.ts'
+import { customerSiteLine } from '../_shared/customer_site_line.ts'
 import {
   COMPLETION_PACK_CLIENT_EMAIL_FLAG,
   completionPackEmailPlan,
@@ -337,7 +338,7 @@ body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#293C46;backg
   <div class="info-grid">
     <div class="info-item"><div class="label">Client</div><div class="value">${esc(job.client_name)}</div></div>
     <div class="info-item"><div class="label">Job Number</div><div class="value">${esc(job.job_number)}</div></div>
-    <div class="info-item"><div class="label">Site Address</div><div class="value">${esc((job.site_address || '') + (job.site_suburb ? ', ' + job.site_suburb : ''))}</div></div>
+    <div class="info-item"><div class="label">Site Address</div><div class="value">${esc(customerSiteLine(job.site_address, job.site_suburb))}</div></div>
     <div class="info-item"><div class="label">Completion Date</div><div class="value">${completedDate}</div></div>
   </div>
 </div>`
@@ -644,7 +645,7 @@ serve(async (req: Request) => {
       const details = [
         `Job: ${job.job_number || 'N/A'}`,
         `Type: ${(job.type || 'patio').charAt(0).toUpperCase() + (job.type || 'patio').slice(1)}`,
-        `Address: ${job.site_address || ''}, ${job.site_suburb || ''}`,
+        `Address: ${customerSiteLine(job.site_address, job.site_suburb)}`,
         `Completed: ${job.completed_at ? new Date(job.completed_at).toLocaleDateString('en-AU') : 'N/A'}`,
       ]
       let y = 72

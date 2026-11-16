@@ -344,18 +344,22 @@ function keysOf(cards: Array<Record<string, unknown>>) {
   return cards.map((card) => sourceKey(card));
 }
 
-Deno.test("running invoice draft flag defaults off", () => {
-  assertEquals(runningInvoiceDraftEnabled(null), false);
-  assertEquals(runningInvoiceDraftEnabled({}), false);
+Deno.test("running invoice draft is on unless the profile says exactly false", () => {
+  assertEquals(runningInvoiceDraftEnabled(null), true);
+  assertEquals(runningInvoiceDraftEnabled(undefined), true);
+  assertEquals(runningInvoiceDraftEnabled({}), true);
+  assertEquals(runningInvoiceDraftEnabled({ runningInvoiceDraft: true }), true);
+  assertEquals(runningInvoiceDraftEnabled({ runningInvoiceDraft: "true" }), true);
+  assertEquals(runningInvoiceDraftEnabled({ runningInvoiceDraft: null }), true);
   assertEquals(
     runningInvoiceDraftEnabled({ runningInvoiceDraft: false }),
     false,
   );
+  // Only the literal false switches it off.
   assertEquals(
-    runningInvoiceDraftEnabled({ runningInvoiceDraft: "true" }),
-    false,
+    runningInvoiceDraftEnabled({ runningInvoiceDraft: "false" }),
+    true,
   );
-  assertEquals(runningInvoiceDraftEnabled({ runningInvoiceDraft: true }), true);
 });
 
 Deno.test("source key prefers an explicit key, then work order, assignment, job day", () => {
@@ -688,9 +692,16 @@ Deno.test("another kind of draft already on the week is left alone", async () =>
   assertEquals(loaded.code, "week_draft_occupied");
 });
 
-Deno.test("the flag off refuses the save and writes nothing", async () => {
+Deno.test("an unset flag saves (on by default)", async () => {
   const db = baseDb();
   db.tables.users[0] = user({});
+  await saveRunningInvoiceDraft(db, USER, saveBody(), "agent");
+  assertEquals(db.rpcs.length, 1);
+});
+
+Deno.test("the flag switched off (false) refuses the save and writes nothing", async () => {
+  const db = baseDb();
+  db.tables.users[0] = user({ runningInvoiceDraft: false });
   const error = await assertRejects(
     () => saveRunningInvoiceDraft(db, USER, saveBody(), "agent"),
     RunningDraftError,

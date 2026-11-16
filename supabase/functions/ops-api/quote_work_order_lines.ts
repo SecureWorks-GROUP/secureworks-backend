@@ -573,6 +573,45 @@ export function patioToolLabourLines(labourLines: unknown): QuoteWorkOrderLine[]
   return out;
 }
 
+/** Ruling 14 step 1 (contract 4.4): a quote option the customer took that goes
+ *  to the crew. Its sealed labour_line joins the work order as one line, keyed
+ *  by the option id; its total (null when the tool sealed none) is what joins
+ *  the agreed labour. The words are the tool's own line description, else the
+ *  option's name. */
+export function quoteOptionLabourLines(
+  options: Array<{ id: string; name: string; line: Record<string, unknown> }>,
+): QuoteWorkOrderLine[] {
+  return options.map((o) => {
+    const l = asObject(o.line);
+    const n = (v: unknown) => {
+      const x = typeof v === "number" ? v : NaN;
+      return Number.isFinite(x) && x >= 0 ? x : null;
+    };
+    const total = n(l.total);
+    const hours = n(l.hours);
+    const unit = text(l.unit) || (hours !== null ? "hours" : "");
+    const work = text(l.description) || text(o.name);
+    return {
+      line_key: `option:${o.id}`,
+      source: "quote",
+      basis: "quote_labour_line",
+      description: work ? `Labour: ${work}` : "Labour",
+      qty: n(l.quantity ?? l.qty) ?? hours,
+      unit: unit || null,
+      hours,
+      rate: n(l.rate ?? l.cost_per_hour),
+      rate_unit: hours !== null || isHoursUnit(l.unit) ? "hour" : null,
+      total,
+      counted: false,
+      flags: total === null ? [QUOTE_OPTION_LABOUR_UNKNOWN_FLAG] : [],
+      needs_review: total === null,
+    };
+  });
+}
+
+/** A taken crew option whose sealed labour carries no total. */
+export const QUOTE_OPTION_LABOUR_UNKNOWN_FLAG = "quote_option_labour_unknown";
+
 /** One labour line from a patio scope's {trades, days, dayRate}; null unless
  *  all three are positive numbers. It always asks the approver to look. */
 export function patioScopeLabourLine(

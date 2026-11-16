@@ -35,8 +35,10 @@ switched off."): create, join, hours (submit and delete), my share, crew
 sign, client sign-off (on-site capture and the public page), the public
 read, public feedback, the client-link preview, freeze, and unfreeze.
 A normal invoice still returns after the `feature_flags` read:
-`submit_trade_invoice` and `submit_work_order_invoice` do not read the
-group tables while the switch is off. A share-shaped line on
+`submit_work_order_invoice` does not read the group tables while the switch
+is off (`submit_trade_invoice` is retired, 410 `use_weekly_invoice`). The
+patio pay rule (`patio_pay_group_only_v1`, hours on a patio job refused) also
+applies only while this switch is on, so a patio trade can always be paid. A share-shaped line on
 `generate_trade_invoice` or `save_trade_invoice_draft` is 409
 `group_work_order_disabled` before any group-table read and before any
 invoice write. The invoice-line trigger still refuses a second payment

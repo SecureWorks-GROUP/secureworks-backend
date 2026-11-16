@@ -294,7 +294,7 @@ export const LABOUR_ACTUAL_OPEN = [
 // cannot, so a missing flag says nothing.
 export const INSTALLER_RULE_PROBE = "job_cost_installer_bill";
 
-const ACCEPTED_SOURCES = ["frozen_at_acceptance", "accepted_quote_revision"];
+const ACCEPTED_SOURCES = ["job_budget", "frozen_at_acceptance", "accepted_quote_revision"];
 
 /**
  * The job's recorded acceptance: a quote document's `accepted_at`, or a

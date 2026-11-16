@@ -2077,6 +2077,14 @@ export async function assertPatioPaysThroughGroup(
     .select("enabled").eq("flag_name", PATIO_PAY_GROUP_ONLY_FLAG).maybeSingle();
   throwQuery(flagError, "check the patio pay rule");
   if (flag?.enabled !== true) return;
+  // Patio pay goes through a group only while groups themselves are on: with
+  // group_work_order_v1 off nobody can open or join a group, so refusing hours
+  // would leave a patio trade with no way to be paid at all. A failed read of
+  // that switch refuses as the patio rule does (it never reads as "off").
+  const { data: groupFlag, error: groupFlagError } = await client.from("feature_flags")
+    .select("enabled").eq("flag_name", GROUP_WORK_ORDER_FLAG).maybeSingle();
+  throwQuery(groupFlagError, "check whether group work orders are on");
+  if (groupFlag?.enabled !== true) return;
   const jobs = await rowsOf(
     client.from("jobs").select("id, type, work_order_id, org_id").in("id", jobIds),
     "check the job type",

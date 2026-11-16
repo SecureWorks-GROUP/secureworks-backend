@@ -322,7 +322,7 @@ export function catalogueHistoricalEmailShape(
     /\b(?:purchase\s*order|p\s*[./]?\s*o)\s*(?:(?:number|no\.?)\s*[:#-]?|[:#-])/i
       .test(haystack);
   const hasClaim = /\b(?:our|client|claim|job|external)\s+ref(?:erence)?\s*:/i
-    .test(haystack) || /\b(?:MLB|AJBR|AJS|RR)[-\s#]*\d{3,}\b/i.test(haystack);
+    .test(haystack) || /\b(?:MLB|MLR|AJBR|AJS|RR)[-\s#]*\d{3,}\b/i.test(haystack);
   const identityForm: HistoricalEmailShape["identity_form"] = hasWo && hasPo
     ? "wo_and_po"
     : hasWo

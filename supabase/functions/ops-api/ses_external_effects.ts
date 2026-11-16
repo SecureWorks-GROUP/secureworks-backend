@@ -12,7 +12,9 @@ export type SesEffectKind =
   /** Captain's one Docs Ready SMS — exact-once per job per attendance cycle. */
   | "docs_ready_sms"
   /** KPI trade chase — exact-once per job per local day, internal trade phone only. */
-  | "trade_chase_sms";
+  | "trade_chase_sms"
+  /** A restoration card's invoice or quote to the builder's restoration contact. */
+  | "restoration_send";
 export type SesEffectState =
   | "reserved"
   | "dispatching"
@@ -287,7 +289,8 @@ export async function buildSesEffect(args: {
   // payload_hash, which reconciles the original effect rather than minting a
   // second email. Include job_id in the identity ONLY for that kind so
   // existing operation keys for invoice/release effects stay bit-stable.
-  const identity = args.effect_kind === "mailer_ops_send"
+  const identity = args.effect_kind === "mailer_ops_send" ||
+      args.effect_kind === "restoration_send"
     ? {
       effect_kind: args.effect_kind,
       job_id: args.job_id || null,
@@ -337,10 +340,13 @@ function unknownRefusal(
 ): SesRefusal {
   const detail = String(underlyingError || "").trim().slice(0, 400);
   const evidence = detail ? { underlying_error: detail } : undefined;
-  if (kind === "route_send" || kind === "mailer_ops_send") {
+  if (
+    kind === "route_send" || kind === "mailer_ops_send" ||
+    kind === "restoration_send"
+  ) {
     return sesRefusal(
       "graph_outcome_unknown",
-      kind === "mailer_ops_send"
+      kind === "mailer_ops_send" || kind === "restoration_send"
         ? "Reconcile admin@ Sent Items by the exact SES operation token; do not redispatch this mailer ops send."
         : "Retry the same frozen release. The exact SES operation token is reconciled before any missing route is redispatched, and a confirmed route is never sent again.",
       {

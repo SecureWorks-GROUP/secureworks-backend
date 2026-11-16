@@ -239,3 +239,55 @@ Deno.test("physical roof protection outranks a secondary report phrase", () => {
     "general_makesafe",
   );
 });
+
+// Owner's word 12 Nov 2026: restoration work is accepted through ses@. The
+// builder's own "Restoration" allocation header declares the family; prose
+// alone still parks (Ruling 15) and the AJ floor still wins for AJ.
+Deno.test("job-family decision: a declared Restoration header is the restoration family", () => {
+  const declared = {
+    declaredType: "restoration" as const,
+    fenceSubtype: false,
+    restorationLabel: true,
+    headerLine: "Restoration",
+    anchored: true,
+  };
+  assertEquals(
+    decideMakeSafeJobFamily(
+      "NEW WORK ORDER - MLR-40001",
+      "You've been assigned the above work order.",
+      null,
+      {
+        builder: "mlb",
+        pdfDeclaredType: declared,
+        pdfScopeText:
+          "Please attend to inspect damage and provide a quote for structural drying.",
+      },
+    ),
+    { family: "restoration", evidence: "pdf_declared_type_header" },
+  );
+  // The quote wording that used to make this an assessment report no longer
+  // decides once the header has declared restoration.
+  assertEquals(
+    decideMakeSafeJobFamily("NEW WORK ORDER", "work order", null, {
+      builder: "mlb",
+      pdfScopeText: "Please inspect and provide quote.",
+    }).family,
+    "assessment_report_quote",
+  );
+  // AJ: everything is a make-safe, whatever a header says.
+  assertEquals(
+    decideMakeSafeJobFamily("Job No 70001", "work order", null, {
+      builder: "aj",
+      pdfDeclaredType: declared,
+    }).family,
+    "general_makesafe",
+  );
+  // Prose alone still parks.
+  assertEquals(
+    decideMakeSafeJobFamily("NEW WORK ORDER", "", null, {
+      builder: "mlb",
+      pdfScopeText: "Water damage restoration works to the lounge.",
+    }),
+    { family: null, evidence: "text_restoration_park" },
+  );
+});

@@ -46,7 +46,9 @@ export type ApprovedSupplierSender = {
   supplier_name: string;
   // suppliers.id rows (Xero contacts) that are this supplier.
   supplier_ids: string[];
-  // Every approved To and CC address for the supplier, lower case.
+  // Every address the supplier is known by, lower case: its approved To and
+  // CC, and its recognise-only addresses (approvedMatchEmails). For matching
+  // only; Dispatch's own sends read to_emails and cc_emails, never this.
   emails: string[];
 };
 
@@ -177,6 +179,33 @@ export function emailAddressOf(value: unknown): string | null {
 
 export function domainOf(address: string): string {
   return address.slice(address.lastIndexOf("@") + 1);
+}
+
+/** Every address an approved order list entry is known by, lower case, once
+ * each: its To and CC (where Dispatch sends its own orders), then its
+ * recognise-only addresses (also_known_emails). Shaun, 11 Nov 2026: Solarspan
+ * is Bondor's brand, so an order emailed to wasales@solarspan.com.au is a
+ * Bondor order and a reply from solarspan.com.au is Bondor's. Use this only
+ * to match who an email went to or came from: Dispatch never sends to or
+ * copies a recognise-only address. */
+export function approvedMatchEmails(row: {
+  to_emails?: unknown;
+  cc_emails?: unknown;
+  also_known_emails?: unknown;
+}): string[] {
+  const list = (v: unknown) => (Array.isArray(v) ? v : []) as unknown[];
+  const out: string[] = [];
+  for (
+    const x of [
+      ...list(row.to_emails),
+      ...list(row.cc_emails),
+      ...list(row.also_known_emails),
+    ]
+  ) {
+    const a = String(x ?? "").trim().toLowerCase();
+    if (a && !out.includes(a)) out.push(a);
+  }
+  return out;
 }
 
 // Shared mail services: a domain here never identifies a supplier by itself,
@@ -363,6 +392,30 @@ export function isAutoReply(subject: string, body: string): boolean {
   const b = body.slice(0, 600).toLowerCase();
   return /\b(i am|i'm) (currently )?(out of the office|away from the office|on leave)\b/
     .test(b) && b.length < 600;
+}
+
+// Accounts and marketing mail from a supplier (Shaun's option B, 12 Nov
+// 2026). Of ~90 tray emails cleared that day only ~10 were order replies; the
+// rest were tax invoices, receipts, statements, payment notices, Stratco lead
+// assignments, pricing updates and closure notices from the same supplier
+// domains as the order desks. Such an email is never best-guessed to an open
+// order and never counts in the tray: it is stored with order_desk false, so
+// it shows only under "Also show accounts and other supplier mail". It still
+// matches a job by its thread, a job number or the supplier's own number.
+const ACCOUNTS_SUBJECT_RE =
+  /\b(tax invoice|invoices?|receipts?|statements?|payments?|remittance|credit (note|link|application)|invoice due|courtesy reminder|lead assignment|pricing update|price (increase|update)|closure|closing dates|newsletter|unsubscribe)\b/i;
+const ACCOUNTS_SENDER_RE =
+  /^(accounts?|accountsreceivable|ar|remittance|remittances|invoicing|invoices?|billing|credit|creditcontrol|receivables|leads|marketing|news|newsletter|promotions?|no-?reply|do-?not-?reply)@/i;
+
+/** True when an email from a supplier looks like accounts or marketing mail,
+ * by its subject or by who sent it, rather than a reply about an order. */
+export function looksLikeAccountsMail(
+  fromEmail: string | null,
+  subject: string,
+): boolean {
+  const from = emailAddressOf(fromEmail);
+  if (from && ACCOUNTS_SENDER_RE.test(from)) return true;
+  return ACCOUNTS_SUBJECT_RE.test(subject ?? "");
 }
 
 // ── What it quotes ────────────────────────────────────────────────────────
@@ -1080,6 +1133,19 @@ export function matchEmail(
     (!o.sent_at || !email.received_at ||
       Date.parse(o.sent_at) <= Date.parse(email.received_at))
   );
+  // Accounts or marketing mail is never guessed to an open order (option B):
+  // a tax invoice is not a reply to confirm. It waits, unguessed, in the
+  // hidden "other" list with the open orders as candidates to assign.
+  if (open.length > 0 && looksLikeAccountsMail(email.from_email, email.subject)) {
+    return {
+      state: "unmatched",
+      rung: null,
+      reason: "Looks like accounts or marketing mail, so not guessed",
+      candidates: open.slice(0, 5).map((o) =>
+        candidateOf(o, inputs.jobsById.get(o.job_id), "open order")
+      ),
+    };
+  }
   if (open.length === 1) {
     const o = open[0];
     return {

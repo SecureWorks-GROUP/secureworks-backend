@@ -112,6 +112,7 @@ import {
 } from './fence_mint.ts'
 import { lookupScopeMintDuplicates } from './scope_mint_contacts.ts'
 import { resolveGhlProxyRoute, testModeCommsBlock } from './test_mode.ts'
+import { resolveStageMoveTarget, type StageMoveTarget } from './stage_move_target.ts'
 import {
   assertGhlProviderReadCaller,
   GhlProviderReadError,
@@ -350,6 +351,7 @@ async function fetchOpportunityPages(args: {
   pipelineId?: string
   contactId?: string
   q?: string
+  status?: string
   limit?: number
   maxPages?: number
   perPageTimeoutMs?: number
@@ -387,6 +389,7 @@ async function fetchOpportunityPages(args: {
       pipelineId: args.pipelineId,
       contactId: args.contactId,
       q: args.q,
+      status: args.status,
       limit,
       startAfter,
       startAfterId,
@@ -654,6 +657,52 @@ serve(async (req: Request) => {
     ? {}
     : PRODUCTION_OPS_TO_GHL_STAGES
   const DEFAULT_ORG_ID = route.organisationId
+
+  // Where an Execution-pipeline stage for this job type may go: the job's own
+  // opportunity when it is in Execution, else its Execution twin, else nowhere.
+  // Reads only. A GoHighLevel read failure is a not-moved answer, except a rate
+  // limit, which propagates as the existing 429.
+  async function executionStageTarget(opportunityId: string, type: string): Promise<StageMoveTarget> {
+    const executionPipelineId = EXECUTION_PIPELINES[`${type}_exec`] || ''
+    const salesPipelineId = PIPELINES[type] || ''
+    if (!executionPipelineId || !salesPipelineId) {
+      return {
+        kind: 'not_moved',
+        reason: 'opportunity_in_other_pipeline',
+        message: `No ${type} Sales and Execution pipelines are configured, so no stage was sent`,
+      }
+    }
+    try {
+      return await resolveStageMoveTarget({
+        opportunityId,
+        jobType: type,
+        executionPipelineId,
+        salesPipelineId,
+        readOpportunity: (id) => ghl(`/opportunities/${id}`, { signal: AbortSignal.timeout(8000) }),
+        searchExecution: async ({ pipelineId, contactId }) => {
+          const paged = await fetchOpportunityPages({
+            locationId: GHL_LOCATION_ID,
+            pipelineId,
+            contactId,
+            status: 'all',
+            limit: 100,
+            maxPages: 3,
+            perPageTimeoutMs: 8000,
+            budgetMs: 20000,
+          })
+          return { opportunities: paged.opportunities, exhausted: paged.exhausted }
+        },
+      })
+    } catch (e) {
+      rethrowIfGhlRateLimited(e)
+      console.log('[ghl-proxy] stage target read failed:', (e as Error).message)
+      return {
+        kind: 'not_moved',
+        reason: 'opportunity_unreadable',
+        message: 'GoHighLevel could not be read for this opportunity, so no stage was sent',
+      }
+    }
+  }
 
   // ── Dual Authentication: API Key (server-to-server) + JWT (browser) ──
   const validKey = Deno.env.get('SW_API_KEY')
@@ -1844,6 +1893,11 @@ serve(async (req: Request) => {
       // GHL stage UUID; MCP `sw_move_stage` lets the agent pass a `stageId` directly
       // for cases where it already knows the destination stage.
       let targetStageId: string | undefined
+      // A status always maps to an Execution-pipeline stage, so it goes to the
+      // opportunity that is actually in that pipeline (stage_move_target.ts).
+      // A caller-chosen stageId is sent to the opportunity it named, unchanged.
+      let targetOpportunityId: string = opportunityId
+      let salesOpportunityId: string | null = null
       if (stageId) {
         targetStageId = stageId
       } else {
@@ -1852,15 +1906,22 @@ serve(async (req: Request) => {
         if (!stages) return json({ error: `No stage mapping for type "${type}"` }, 400)
         targetStageId = stages[status]
         if (!targetStageId) return json({ error: `No GHL stage for status "${status}" in ${type}` }, 400)
+        const target = await executionStageTarget(opportunityId, type)
+        if (target.kind === 'not_moved') {
+          console.warn(`[ghl-proxy] move_stage not moved: ${opportunityId} → ${status} (${target.reason}): ${target.message}`)
+          return json({ success: false, moved: false, reason: target.reason, error: target.message })
+        }
+        targetOpportunityId = target.opportunityId
+        salesOpportunityId = target.salesOpportunityId
       }
 
       try {
-        await ghl(`/opportunities/${opportunityId}`, {
+        await ghl(`/opportunities/${targetOpportunityId}`, {
           method: 'PUT',
           body: JSON.stringify({ pipelineStageId: targetStageId }),
         })
-        console.log(`[ghl-proxy] move_stage: ${opportunityId} → ${status || stageId} (${targetStageId})`)
-        return json({ success: true, stageId: targetStageId })
+        console.log(`[ghl-proxy] move_stage: ${targetOpportunityId}${salesOpportunityId ? ` (Execution twin of ${salesOpportunityId})` : ''} → ${status || stageId} (${targetStageId})`)
+        return json({ success: true, moved: true, stageId: targetStageId, opportunityId: targetOpportunityId, salesOpportunityId })
       } catch (e) {
         rethrowIfGhlRateLimited(e)
         console.log('[ghl-proxy] move_stage failed:', e)
@@ -1891,16 +1952,27 @@ serve(async (req: Request) => {
         return json({ success: true, stageMoved: false, reason: 'stage_id_not_configured' })
       }
 
-      // Move GHL opportunity stage
+      // Move GHL opportunity stage. Job Complete is an Execution-pipeline
+      // stage, so it goes to the opportunity in that pipeline or nowhere.
       let stageMoved = false
+      let notMovedReason: string | null = null
+      let movedOpportunityId: string | null = null
       try {
-        await ghl(`/opportunities/${opportunityId}`, {
-          method: 'PUT',
-          body: JSON.stringify({ pipelineStageId: completeStageId }),
-        })
-        stageMoved = true
-        console.log(`[ghl-proxy] Opportunity ${opportunityId} moved to Job Complete stage: ${completeStageId}`)
+        const target = await executionStageTarget(opportunityId, type)
+        if (target.kind === 'not_moved') {
+          notMovedReason = target.reason
+          console.warn(`[ghl-proxy] move_to_complete not moved: ${opportunityId} (${target.reason}): ${target.message}`)
+        } else {
+          await ghl(`/opportunities/${target.opportunityId}`, {
+            method: 'PUT',
+            body: JSON.stringify({ pipelineStageId: completeStageId }),
+          })
+          stageMoved = true
+          movedOpportunityId = target.opportunityId
+          console.log(`[ghl-proxy] Opportunity ${target.opportunityId} moved to Job Complete stage: ${completeStageId}`)
+        }
       } catch (e) {
+        notMovedReason = notMovedReason || 'ghl_refused'
         console.log('[ghl-proxy] Job Complete stage move failed:', e)
       }
 
@@ -1910,11 +1982,22 @@ serve(async (req: Request) => {
         await sbComplete.from('jobs').update({ status: 'complete', completed_at: new Date().toISOString() }).eq('id', jobId)
         await sbComplete.from('job_events').insert({
           job_id: jobId, event_type: 'status_change',
-          detail_json: { status: 'complete', source: 'trade_report', ghl_stage_moved: stageMoved },
+          detail_json: {
+            status: 'complete',
+            source: 'trade_report',
+            ghl_stage_moved: stageMoved,
+            ...(movedOpportunityId ? { ghl_opportunity_moved: movedOpportunityId } : {}),
+            ...(notMovedReason ? { ghl_not_moved_reason: notMovedReason } : {}),
+          },
         })
       }
 
-      return json({ success: true, stageMoved })
+      return json({
+        success: true,
+        stageMoved,
+        ...(movedOpportunityId ? { opportunityId: movedOpportunityId } : {}),
+        ...(notMovedReason ? { reason: notMovedReason } : {}),
+      })
     }
 
     // ── Update GHL opportunity custom fields (scheduling info) ──

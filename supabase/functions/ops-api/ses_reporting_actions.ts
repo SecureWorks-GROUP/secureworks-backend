@@ -205,7 +205,10 @@ export interface SesActionAuth {
    * assuming a session was presented; the exact trust statement lives at the
    * top of the producing module.
    */
-  identity_provenance?: "bound_channel_totp" | "bound_channel_echo_code";
+  identity_provenance?:
+    | "bound_channel_totp"
+    | "bound_channel_echo_code"
+    | "owner_directed_via_agent";
 }
 
 export class SesActionError extends Error {

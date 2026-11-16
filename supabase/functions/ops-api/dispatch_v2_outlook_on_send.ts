@@ -17,7 +17,9 @@
 //     a job that is not on the Dispatch board, never makes an order: the
 //     email waits under "Emails to sort" for a person.
 //   * The supplier comes from the To addresses. One email to two suppliers
-//     makes two orders.
+//     makes two orders. An entry's recognise-only addresses count too
+//     (also_known_emails: Shaun, 11 Nov 2026, an order to
+//     wasales@solarspan.com.au is a Bondor order).
 //   * The box shows Sent to supplier, with the lines read from "Materials
 //     Needed:", delivery or pickup, the date or ASAP and the address, read
 //     exactly as section 3f.1 reads them. With no readable list the email's
@@ -41,6 +43,7 @@
 
 import {
   type ApprovedSupplierSender,
+  approvedMatchEmails,
   dayLabel,
   domainOf,
   emailAddressOf,
@@ -755,7 +758,9 @@ export function postgrestOnSendStore(client: any): OnSendStore {
 
     async approvedEntries(orgId) {
       const entries = await client.from("dispatch_approved_supplier_emails")
-        .select("id, name, to_emails, cc_emails, active, on_account")
+        .select(
+          "id, name, to_emails, cc_emails, also_known_emails, active, on_account",
+        )
         .eq("org_id", orgId)
         .eq("active", true);
       if (entries.error) failed("approved list read", entries.error);
@@ -773,9 +778,9 @@ export function postgrestOnSendStore(client: any): OnSendStore {
         supplier_key: supplierKeyOf(e.name),
         supplier_name: String(e.name),
         supplier_ids: ids.get(String(e.id)) ?? [],
-        emails: [...(e.to_emails || []), ...(e.cc_emails || [])]
-          .map((x: unknown) => String(x).trim().toLowerCase())
-          .filter(Boolean),
+        // To, CC and the recognise-only addresses (Solarspan on Bondor's
+        // entry): who an order went to, never who Dispatch sends to.
+        emails: approvedMatchEmails(e),
         on_account: typeof e.on_account === "boolean" ? e.on_account : null,
       }));
     },

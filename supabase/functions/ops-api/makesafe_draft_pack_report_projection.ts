@@ -39,7 +39,8 @@ export function compactDraftPackBillingNote(
       companyDetail.name ||
       "",
   ).toLowerCase();
-  const isMlb = ref.includes("MLB") || company.includes("major loss") ||
+  const isMlb = ref.includes("MLB") || ref.includes("MLR") ||
+    company.includes("major loss") ||
     company.includes("ml builders");
   const labourLines = lines.filter((line) => {
     const description = String(line?.description || "").toLowerCase();

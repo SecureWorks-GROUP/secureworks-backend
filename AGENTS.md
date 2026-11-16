@@ -1051,6 +1051,24 @@ purpose: its reading read every row landed by its claim, and a shadow held besid
 is never updated. A later change to those four bodies rolls this migration back first in the lead
 cutoff, story safety and story fixups re-applies and the lead cutoff break proof.
 
+## The Notes Due List Carries Its Own Time Limit
+
+`context_ledger_due(integer)` carries `statement_timeout = 45s` (`20261115092000`). PostgREST
+hoists it onto the request, so the notes worker's call may run 45 s where the service role's
+own limit is 30 s; the worker waits 43 s for that one call (`databaseCallTimeoutMs`,
+secureworks-jarvis) and 28 s for every other. The call took 21.7 s and 27.1 s on production on
+15 Nov 2026 and stopped the reader on 2 and 3 Nov at the old limit. Three things follow. A
+later `CREATE OR REPLACE` of the due list must say `SET statement_timeout = '45s'` or it drops
+the setting without a word (an edit made through `pg_get_functiondef`, as `20261104175000`
+does, keeps it, provided the definition it pins includes the setting). The rollbacks that
+replace the function (`20261102210000`'s and earlier) drop it too, and `20261104175000` pins
+the whole definition, so its rollback and a re-run of it both refuse while it is set: roll
+`20261115092000` back first and apply it again after. The five earlier contracts that pin
+the due list's settings accept it with or without this one (ledger store, notes freshness,
+scoping pipeline, finished wake, rebuild order); a new setting on it widens those five.
+The time limit is room, not a fix: the judge (9.5 s) and the unread-row ordering (4.3 s for 76
+due jobs) are where the time goes.
+
 ## The Job Story Sorts Text In C Order
 
 Production's collation is ICU `en-US` (letters compared without case first,
@@ -1112,6 +1130,44 @@ A story loop's `status` is `open` or `closing_evidence` when it is a move;
 work reopened after it was recorded finished is not finished again) and
 `unconfirmed` (R8 whose amount a C2 check leaves unknown) are never a move, the
 first line's item or a reason for whose move.
+
+## The Card Sets Aside AI Notes Nobody Owes Now
+
+Since `20261115130000` `context_job_story` assembles the card, asks the pure
+`context_job_story_rest` which standalone AI notes are not owed now (`said`: a claim the
+reader marked `needs_reply` false that blocks no step; `stage_passed`: blocks a step the phase
+has passed and was raised before it; `old`: plainly open (never `closing_evidence`), opened,
+and due if dated, more than `context_job_story_rest_policy().max_age_days` Perth days ago),
+and only when there are any assembles again with those items' status `rested` and adds
+`rested` (held-marked like the other sections) to the card. Money (payment or deposit blocks,
+an invoice, payment or refund about-key, a dollar amount in the words), a person's or locked
+note and a note attached to a record loop are never set aside, and nothing is written. This
+is the one rule in the story that moves with the clock: a note crossing the age line leaves
+`loops`, so `context_job_story_card_hash` moves once and the saved story reads stale once
+(the rewrite queue does not read the hash). A rested requested or offered agreement still
+shows in `agreements`, with status `rested`. Do not move this into the assembler (its body is
+md5-pinned). A later story read replaces this body and must run this down first wherever an
+earlier contract runs `20261030161813`'s down, as those 21 sites now do.
+
+## A Finished Job's Card Reads Xero's Answer
+
+Since `20261116060000` `context_job_story_rest` also sets aside, before the money guard, the
+standalone AI notes the records already answer: `paid` (about one of the job's own invoices that
+Xero shows `PAID` with nothing owing, when someone other than us owes it, it is a claim needing no
+reply, or it is the reader's "Invoice record:" copy; or about a payment someone other than us
+owes, or a claim about money needing no reply, on a job whose status is in the policy's
+`closed_statuses` with every invoice paid, no draft, and `context_job_story_money_settled`:
+nothing known left to invoice and nothing placed on no job), `supplier` (about a bill in the
+card's `money.supplier_bills`, by number, owed by us to someone other than the customer), `office` (`other:other-job`), `courtesy`
+(we asked for a review), and a deposit note someone else owes once the work is done with nothing
+owing. Refund, overpayment, credit or double-payment words or about-keys are never set aside by
+these. A completion matter or an undated visit we owe rests only once the office has closed the job (a dated `booking:YYYY-MM-DD` on or before the phase began rests on its own). A note with no `blocks`
+holds up the step its about-key's first word names in the policy's `about_step` (a visit's
+arrangements: the install), and a job at invoice, payment or complete has passed completion (6).
+`context_job_story_closed_paid` then reads a job the office closed with every invoice paid as
+phase `complete` (`now.closed_paid`). A later story read must run
+`20261116060000_context_story_finished_notes_down.sql` before `20261115130000`'s down wherever
+those 21 contract sites unwind the story.
 
 ## A Lead Not Followed Up Has One Rule
 
@@ -1194,6 +1250,13 @@ leads hold its head and nothing was queued), and an `unchanged` finish moves
 days always carry their year, so the clock never changes its words. Ship the
 writer first: the v3 writer never saves `money_sig`, so the sweep would keep
 rewriting its stories.
+
+A job with no current story is queued only by `context_job_story_enqueue_first`
+(`20261115091000`): the changed-jobs sweep sees only jobs that already hold a
+story, and production held none on 15 Nov 2026. Its reserve (60 of the day's
+story calls kept for real changes) and open limit (5) are in
+`context_job_story_first_policy()`; never queue first stories by hand or by
+loosening the sweep. Contract: `docs/context/job-story-text.md`, "The queue".
 
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
@@ -1549,6 +1612,93 @@ and assemble on the physical labour/materials pack path — matrix rows in
 `ses_family_matrix.ts` with `family` repair/restoration and
 `job_type: physical_makesafe` (same pattern as temporary_fencing). Evidence
 ruler: `physicalShapedFamily()` for both. Do not invent a weaker pack shape.
+
+## Restoration Is An SES Card With A Quote Stage, And Its Prices Live Off The Job
+
+Owner's word, 12 Nov 2026: restoration work is accepted through ses@. Contract:
+`docs/restoration-workflow-v1.md`. A restoration job is a make-safe board card
+(family `restoration`, `jobs.type` still `makesafe`) in one of two modes read off the work order:
+`do_and_charge` (the existing pack path, unchanged) or `assess_and_quote`
+(report + quote, wait for the builder's yes, works, invoice). Rules:
+`restoration_workflow.ts`; reads and writes: `restoration_workflow_store.ts`;
+actions `restoration_*`. What must not regress:
+
+- **Intake.** Only the builder's own header declares restoration: an anchored
+  `Restoration` with no other type line and no `Make Safe` sub-line
+  (`extractPdfDeclaredType`). `Restoration` + `Make Safe` stays a make-safe
+  (Ruling 9), prose alone still parks (Ruling 15), AJ stays a make-safe.
+  `MLR-` is ML Builders' restoration job-number series: a second claim prefix
+  of the one `MLB` scope (key stays `MLB:PO-n`). It is NOT in
+  `REF_PREFIX_FLOOR` or the company row yet; that needs a migration.
+- **No quote money where a trade can read.** `jobs.metadata.restoration` and
+  the `restoration_*` job events are price-free (`restorationPlanForStorage`).
+  Lines and totals live only on the quote's own `job_documents` row (`type =
+  'other'`, `metadata.restoration_document = 'quote'`, never trade-visible;
+  `toggle_document_visibility` refuses to switch it on). A content hash binds
+  record to document; a mismatch refuses (`restoration_quote_mismatch`), and
+  only an interrupted draft is repaired by saving again.
+- **It prices nothing and sends nothing.** An approved quote reaches an invoice
+  only as the `commercial_quantity_override` object in the `restoration_plan`
+  read, passed unchanged to `prepare_ses_invoice_obligation`. Do not add an
+  invoice basis, a quote email or a board stage here. A quote the override
+  cannot carry (no labour line, two labour rates) is refused with the reason.
+- An approval needs the builder's person and where it can be read. Never
+  record one from inference.
+- **Owner-directed invoice approval** (owner, 12 Nov 2026):
+  `approve_ses_invoice_revision_owner_directed` lets an agent with the server
+  key record an SES invoice approval for a NAMED active `admin_owner`/`captain`
+  operator, quoting their words, behind `feature_flags.ses_owner_directed_approval_v1`
+  (missing or unreadable is off). Same action and guards as the cockpit press;
+  recorded as `identity_provenance: owner_directed_via_agent`. Any server-key
+  holder can use it while the switch is on, so it is weaker than a session:
+  `ses_owner_directed_approval.ts` states the trust.
+
+- **Numbering.** A restoration mint is numbered `SWRESTO-` (owner, 12 Nov 2026;
+  `next_job_number('restoration')`, `20261112150000`, same yearly counter); its
+  type stays `makesafe`, so type-keyed reads still find it. Cards minted before
+  keep their `SWMS-` numbers. Code that reads a make-safe off the number accepts
+  both prefixes (the xero-sync and PO reference
+  grammars, text approvals); `trackingCategoryForJob` must read `SWRESTO-` before
+  its `SWR` slice, which answers ''. Restoration reports and photos may go to a
+  builder's `makesafe_companies.restoration_recipients` (outbound only) through
+  `send_mailer_ops_visibility`, restoration cards only, named by the operator.
+  The invoice and the quote, which that route must never carry, go through
+  `send_restoration_document` (`restoration_send.ts`, effect_kind
+  `restoration_send`, `20261112170000`): restoration cards only, one named
+  document per call, an AUTHORISED or PAID ACCREC invoice on that job or the
+  card's restoration quote document, to a listed restoration contact with ses@
+  copied, dry run by default. It never mints, authorises or changes money.
+  Both restoration routes also copy the builder's
+  `makesafe_companies.restoration_cc` (`restorationCcFor`, `20261112190000`;
+  ML Builders: its Prime mailer, so its team sees it when the coordinator is
+  away). Outbound only, like `restoration_recipients`.
+
+- **Its own board** (owner, 12 Nov 2026): restoration cards leave the ops
+  make-safe board (`excludeRestoration`) for `restoration_board`, seven stages
+  stored in `jobs.metadata.restoration_stage` with the job status, moved by
+  `restoration_set_stage` or forward-only by the quote-sent, quote-approved and
+  invoice-sent actions. Rules: `restoration_stage.ts`; contract:
+  `docs/restoration-board-v1.md`. A restoration report submit no longer
+  cancels the rest of the crew. Trade pay is the job's work order:
+  `restoration_set_work_order` sets and approves its agreed labour, and the
+  trade invoice mode bills a restoration job with one as a work order
+  (`restoration_work_order.ts`). SWRESTO- books to Xero option
+  `SW - RESTORATION`, which `ensure_xero_tracking_option` adds.
+
+- **Its report, and one look for every PDF** (owner, 13 Nov 2026):
+  `restoration_render_report` (dry run by default; live files the job's
+  `makesafe_report` document through the one attach path, sends nothing)
+  renders `restoration_report_render.ts`. Every PDF this function draws
+  (restoration report and quote, make-safe report, roof report) takes its look
+  from `report_design.ts`; change the look there, never in one renderer, and
+  never let a look change touch a renderer's field set, hash input, limits or
+  file name. The wiki's Python make-safe renderer is not on it yet (pinned
+  pair, see "The Curated Renderer Pin"). Contract: `docs/restoration-board-v1.md`,
+  "Report"; tests: `restoration_report_render_test.ts`.
+
+Tests: `restoration_intake_test.ts`, `restoration_workflow_test.ts`,
+`restoration_workflow_store_test.ts`, the SWRESTO cases in
+`makesafe_intake_auto_allocate_test.ts`.
 
 ## Repair Mints As A Real SWR- Job Type, Supervised, With No Backfill
 
@@ -4623,7 +4773,12 @@ minus line. Captain 2026-09-18: `super_amount` stays 12% of gross (bookkeeper /
 fund); cash withheld from the trade is 6%; the company contributes the other
 6%. On $1,000: super $120, worker $60, company $60, `net_pay` $940, company
 total out $1,060. `total_inc` stays `gross + GST` (supply face, not company
-cost). Historical 12% carve-out rows remain valid and are not rewritten. Once
+cost). Historical 12% carve-out rows remain valid and are not rewritten.
+No super on commission (Marnin, 12 Nov 2026): commission lines stay in gross
+but leave the super base (`super_base_ex`, stored only on an invoice with
+commission; null = whole gross, as on every older row, which stays valid).
+Every read that validates money must select `super_base_ex`; migration
+`20261112090000` also patches the group unfreeze. Once
 Xero creates a bill, its ID is checkpointed locally before returned-line
 reconciliation; only a reconciled split may advance to `pushed_to_xero`. Every
 create/retry uses the persisted invoice ID as its Xero idempotency key, and any
@@ -4823,9 +4978,9 @@ time entry, invoice line or status change; `--apply --file` opens only the
 reviewed ids) and the crew-row retirement is `scripts/retire-crew-work-orders.ts`:
 both dry-run by default, neither is a migration or a cron, and both are on
 Marnin's go-live checklist. Turn `crew_invoice_line_office_review_v1` on
-before or with `crew_invoice_on_job_work_order_v1`: that 410s
-`submit_trade_invoice` and holds the other crew-invoice doors until every
-line is approved. The hard rule, when on, refuses an open job only, and
+before or with `crew_invoice_on_job_work_order_v1`: that holds the
+crew-invoice doors until every line is approved (`submit_trade_invoice` is
+retired whatever the flag, next section but one). The hard rule, when on, refuses an open job only, and
 Travel is exempt. With `retire_crew_work_orders_v1` on, `my_work_orders`
 returns approved job work orders with the money stripped and drops drafts.
 
@@ -4852,6 +5007,45 @@ is refused only when the picked card holds saved times for another day.
 Write paths, refusal codes, reads and the per-job list
 `job_trade_time_entries`:
 `docs/trade-invoice-time-entries-2026-10-12.md`.
+
+## A Trade May Book Only Themselves, Only To Invoice
+
+`self_allocate_for_invoice` (`ops-api/trade_self_allocation.ts`, Marnin
+11 Nov 2026) is the one door through which a plain trade writes a
+`job_assignments` row, and it is the exception to `_resolveAllocationAuthz`.
+It books only the caller, one day not after today, on a live job in their
+company, through `createAssignment` with no text, plus a
+`trade_self_allocated` job event. Being booked is what passes the invoice's
+`booked_on_job` rule; it also grants the allocated Trade App tier on that job.
+Never widen it to book anyone else or to reassign. The app calls it only after
+`generate_trade_invoice` refuses with `extra_job_not_allowed`. Contract:
+`docs/trade-self-allocation-v1.md`. Both it and `trade_invoice_job_modes` must
+stay on `OPS_API_PROFILE_SCOPED_JWT_ACTIONS`, or the front door 403s every
+plain trade before the route runs.
+
+## A Job Is Invoiced One Way, Decided By The Job
+
+`trade_invoice_mode.ts` (Marnin, 11 Nov 2026) is the one rule: live group work
+order, else per-metre trade -> work order, else patio -> group work order,
+fencing -> work order, everything else hourly (vertical via `_jobVertical`,
+repair family first). `my_hours` stamps `invoice_mode` /
+`can_claim_commission` on every card (null plus `invoice_mode_unavailable`
+when unreadable, never a guess); `trade_invoice_job_modes` answers any job in
+the caller's company. It decides and refuses nothing: fencing helpers still
+bill hours on fencing jobs, so never add an hourly refusal off it. Commission
+is a line, not a mode: only on a job the trade created, manages, or holds the
+invoice-any-job grant for (`trade_invoice_extra_job_authority.ts`; booking
+never allows it, refusal `commission_not_allowed`). The saved weekly draft is
+on unless `trade_details.runningInvoiceDraft` is exactly false
+(`runningInvoiceDraftEnabled`, one helper). `submit_trade_invoice` is retired:
+410 `use_weekly_invoice` before any read. Patio hours are refused only while
+`patio_pay_group_only_v1` AND `group_work_order_v1` are on. A work-order job
+with an APPROVED job work order bills its `agreed_labour_ex` (Marnin,
+12 Nov 2026): the mode answer carries `work_order_agreed_ex` /
+`job_work_order_id`, and `generate_trade_invoice` refuses any other
+work-order amount, or a second work-order line on that job, before any write
+(409 `work_order_amount_not_agreed`, `workOrderAmountRefusal`). Contract:
+`docs/trade-invoice-mode-v1.md`.
 
 ## A Recurring Deduction Comes Off The Payable, Never The Gross
 
@@ -4974,6 +5168,40 @@ legacy insert), and only send-quote's own sources (`send-quote`,
 `supabase/tests/migration-contracts/20260923233000_job_quote_values/`,
 `job_commercial_read_test.ts`.
 
+## The Job Budget Is Read From The Bound Revision Only, And Never Reaches A Customer Or Trade
+
+Ruling 17 step 1 (`20261113190000`, `docs/job-budget-v1.md`): at acceptance
+`recordJobBudgetOnAcceptance` stores the accepted revision's frozen
+`budget` (`budget.v1`) in `job_budgets` / `job_budget_lines` through the one
+writer `record_job_budget`, with the taken options added by `budgetWithOptions`
+(`_shared/job_budget/budget_v1.ts`, the one formula). Read it only from the
+`bound` revision, re-hashed; never from `jobs.pricing_json`. A budget that does
+not add up stores nothing and leaves one `job_budget_refused` job event (code
+only, never money: trades read job events); the acceptance always stands.
+`jobs.expected_costs` is untouched until step 5. The budget carries commission
+and the salesperson: any read that hands pricing or scope to a customer, trade
+or crew document strips it (`withoutBudget`, and `budget` is on
+`TRADE_SCOPE_QUOTE_KEYS`, and every key naming commission or the salesperson
+is dropped from a trade scope by `tradeScopePrivateKey`); a new such read must too, and joins the list in the
+doc and `ops-api/job_budget_strip_test.ts`.
+Step 5 (`20261114040000`): with `job_profit_expected_from_job_budget` on
+(seeded off) `v_job_profit` reads the newest budget first (`expected_source`
+`job_budget`; labour is the work order amount, plus `expected_other_ex` and
+`budget_gross_profit_ex`). Commission and margin are never worked from an
+assumed percentage; read the budget's gross profit.
+
+Step 2 (`20261113230000`, `ops-api/job_commission.ts`): the commission rate is
+`commission_rates` (fence 15, patio 8, of gross profit; append-only, changed
+only through `set_commission_rate` by an id in
+`commission_rate_settings.editor_user_ids`, never the server key), and each
+stored budget copies its commission into write-once `job_commissions` by
+trigger. On a job with a record, a commission line is accepted only from the
+named salesperson and only up to the expected amount; triggers on
+`trade_invoice_lines` and `trade_invoices` hold every write path, and
+`generate_trade_invoice` pre-checks the same rule. A new write path for
+commission lines needs nothing extra, but never count a draft or `ops-reject`
+invoice against the amount. Contract: `docs/job-budget-v1.md`, "Commission (step 2)".
+
 ## Booking confirmation authority
 
 Read/approval handoff, published availability freshness and ledger/outcome
@@ -5050,7 +5278,11 @@ the owner row is keyed `primary`): `jobs` owns the owner's contact, a null
 never overwrites a set id (flag `owner_id_divergence`). Every call writes one
 ids-only `job_party_events` receipt. The four legacy writers (scope sync,
 `prepare_neighbour_quotes`, send-quote accept, invoice creation) still write
-directly until S-M2 moves them; do not add a fifth. The table is RLS-on with
+directly until S-M2 moves them; do not add a fifth. Scope payer drafts
+register each sealed payer through `upsert_job_party`
+(`register_scope_payer_parties`, `20261111120000`, keyed by payer id; an older
+neighbour row it cannot match refuses; a blank detail is never sent, and a
+payer it registered that the quote drops is soft-removed): `docs/scope-job-drafts.md`. The table is RLS-on with
 no policy and revoked from anon and authenticated (the live read found both
 held TRUNCATE, which RLS does not cover); view `run_summary`, which read
 its names past RLS, is revoked the same way and `security_invoker`. Placement reconsideration after a

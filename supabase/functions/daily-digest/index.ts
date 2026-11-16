@@ -15,6 +15,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { logQueryErrors } from '../_shared/pgrest.ts'
+import { isSupplierPricedDefault, NON_SUPPLIER_PRICED_CATEGORY_FILTER } from '../_shared/supplier_price_defaults.ts'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -3139,7 +3140,7 @@ async function createDailyAnnotations(sb: any, digest: any) {
       sb.from('scope_tool_defaults')
         .select('scope_tool, category, item_key, item_description, material_code, unit, default_price, default_cost_rate')
         .eq('org_id', DEFAULT_ORG_ID)
-        .not('category', 'in', '("fencing_surcharge","fencing_panels")'), // Skip non-priceable rows
+        .not('category', 'in', NON_SUPPLIER_PRICED_CATEGORY_FILTER), // Skip non-priceable rows (staff_only included)
       sb.from('material_price_ledger')
         .select('supplier_name, material_category, material_code, item_description, unit_price, captured_at')
         .eq('org_id', DEFAULT_ORG_ID)
@@ -3157,6 +3158,7 @@ async function createDailyAnnotations(sb: any, digest: any) {
     }
 
     for (const def of (scopeDefaults || [])) {
+      if (!isSupplierPricedDefault(def)) continue
       const isFencing = (def.scope_tool || 'patio-tool') === 'fence-designer'
       const matches = (recentLedger || []).filter((l: any) => {
         // Division filter: don't cross-match patio defaults to fencing ledger items

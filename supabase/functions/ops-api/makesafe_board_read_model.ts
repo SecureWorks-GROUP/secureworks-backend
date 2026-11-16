@@ -24,6 +24,10 @@ import {
   sesFamilyLabel,
 } from "./ses_family_matrix.ts";
 import {
+  restorationBoardStatus,
+  restorationScopeText,
+} from "./restoration_workflow.ts";
+import {
   canonicalSesPortalSourceUrl,
   isSesSha256,
   isTrustedSesPortalCaptureProducer,
@@ -296,6 +300,7 @@ export function projectOpsMakesafeCardRow(row: any) {
     projection_warning: row?.projection_warning || null,
     makesafe_type: row?.makesafe_type || null,
     builder: row?.builder || null,
+    restoration: row?.restoration || null,
     contact: slimContactForCard(row?.contact),
     assignments: slimAssignmentsForCard(row?.assignments || []),
     report: row?.report || null,
@@ -1820,6 +1825,16 @@ export function buildCanonicalMakesafeRows(
         name: base?.requesting_company_name || base?.requesting_company || null,
         external_ref: base?.external_ref || null,
       },
+      // Restoration cards only: mode, phase and next step from the one
+      // restoration reader, over the price-free record the job carries. Ops
+      // only (the trade projection allow-lists its keys and leaves it out).
+      // Presentation: it never feeds placement or any gate.
+      restoration: sesFamily === "restoration"
+        ? restorationBoardStatus(
+          base?.metadata,
+          restorationScopeText(base, detail),
+        )
+        : null,
       report: reportPayload,
       // Direct, current-card coordinates for headless board consumers. These
       // are aliases of evidence already loaded and cycle-scoped by the board;

@@ -37,7 +37,8 @@ interface BuilderContactRule {
 const BUILDER_CONTACT_RULES: BuilderContactRule[] = [
   {
     canonical: "Major Loss Builders",
-    refTokens: ["MLB"],
+    // MLR is ML Builders' restoration job-number series (same contact).
+    refTokens: ["MLB", "MLR"],
     // "mlb" is the company slug and is what leaked into Xero on 2026-08-04.
     aliases: ["mlb", "mlbuilder", "mlbuilders", "majorlossbuilder", "majorlossbuilders"],
   },

@@ -1,0 +1,2035 @@
+{
+  "about": "budget.v1 records in the Scope Engine tool shape (contract draft 3), test data only (ZZTEST staff, made-up or catalogue figures). delivery and one_figure: the exact review fixtures. patio_standard, patio_one_figure, fence_standard: native seal/save/reopen payloads from the paired tool PR, scope_revision_id null as a local seal writes it.",
+  "budgets": {
+    "delivery": {
+      "version": "budget.v1",
+      "trade": "patio",
+      "job": {
+        "scope_revision_id": "11111111-1111-4111-8111-111111111111",
+        "revision_n": 1,
+        "sell_ex_gst": 10000,
+        "gst": 1000,
+        "total_inc_gst": 11000,
+        "scoped_by": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scoper"
+        },
+        "salesperson": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scoper"
+        }
+      },
+      "materials": {
+        "priced_by_line": true,
+        "lines": [
+          {
+            "key": "m1",
+            "line_id": "sl-1",
+            "supplier": {
+              "id": "sup-a",
+              "name": "Supplier A",
+              "code": null
+            },
+            "description": "Roof sheets",
+            "quantity": 10,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 200,
+            "line_cost_ex_gst": 2000,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null,
+            "supplier_key": "sup-a",
+            "kind": "item"
+          },
+          {
+            "key": "m2",
+            "line_id": "sl-2",
+            "supplier": {
+              "id": "sup-a",
+              "name": "Supplier A",
+              "code": null
+            },
+            "description": "Posts",
+            "quantity": 4,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 250,
+            "line_cost_ex_gst": 1000,
+            "in_total": true,
+            "cost_from": "typed",
+            "note_to_supplier": null,
+            "supplier_key": "sup-a",
+            "kind": "item"
+          },
+          {
+            "key": "sup-a:delivery",
+            "line_id": "ZZTEST-delivery",
+            "supplier_key": "sup-a",
+            "supplier": {
+              "id": "sup-a",
+              "name": "Supplier A",
+              "code": null
+            },
+            "kind": "delivery",
+            "description": "Delivery",
+            "quantity": 1,
+            "unit": "job",
+            "unit_cost_ex_gst": 120,
+            "line_cost_ex_gst": 120,
+            "in_total": true,
+            "cost_from": "supplier_price"
+          }
+        ],
+        "by_supplier": [
+          {
+            "key": "sup-a",
+            "supplier": {
+              "id": "sup-a",
+              "name": "Supplier A"
+            },
+            "lines_ex_gst": 3000,
+            "surcharge_ex_gst": 45,
+            "delivery_ex_gst": 120,
+            "total_ex_gst": 3165
+          }
+        ],
+        "total_ex_gst": 3165
+      },
+      "labour": {
+        "pay": "group_work_order",
+        "amount_ex_gst": 2800,
+        "hourly": null,
+        "lines": [
+          {
+            "key": "l1",
+            "task": "Build",
+            "people": 2,
+            "days": 2,
+            "day_rate_ex_gst": 700,
+            "amount_ex_gst": 2800,
+            "in_total": true
+          }
+        ],
+        "work_order_amount_ex_gst": 2800
+      },
+      "other": [
+        {
+          "lane": "skip_and_tip",
+          "lines": [
+            {
+              "key": "x1",
+              "description": "Skip bin",
+              "quantity": 1,
+              "unit": "each",
+              "cost_ex_gst": 350,
+              "in_total": true,
+              "paid_to": "office",
+              "supplier": null
+            }
+          ],
+          "total_ex_gst": 350
+        },
+        {
+          "lane": "buffer",
+          "lines": [
+            {
+              "key": "b1",
+              "description": "Job buffer",
+              "quantity": 1,
+              "unit": "job",
+              "cost_ex_gst": 200,
+              "in_total": true,
+              "paid_to": "office",
+              "supplier": null
+            }
+          ],
+          "total_ex_gst": 200
+        }
+      ],
+      "commission": {
+        "salesperson": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scoper"
+        },
+        "rule_id": "patio_commission_rate",
+        "pct": 8,
+        "basis": "gross_profit",
+        "amount_ex_gst": 278.8
+      },
+      "totals": {
+        "cost_before_commission_ex_gst": 6515,
+        "gross_profit_ex_gst": 3485,
+        "gross_profit_pct": 34.85,
+        "commission_ex_gst": 278.8,
+        "profit_after_commission_ex_gst": 3206.2,
+        "profit_after_commission_pct": 32.06
+      },
+      "options": [
+        {
+          "option_id": "o1",
+          "sell_ex_gst": 400,
+          "gst": 40,
+          "sell_inc_gst": 440,
+          "cost_ex_gst": 180,
+          "surcharge_ex_gst": 2.7,
+          "lands": {
+            "lane": "materials",
+            "supplier": {
+              "id": "sup-a",
+              "name": "Supplier A"
+            }
+          },
+          "line": {
+            "description": "Two downlights",
+            "quantity": 2,
+            "unit": "each"
+          }
+        },
+        {
+          "option_id": "o2",
+          "sell_ex_gst": 520,
+          "gst": 52,
+          "sell_inc_gst": 572,
+          "cost_ex_gst": 250,
+          "surcharge_ex_gst": 0,
+          "lands": {
+            "lane": "labour"
+          },
+          "line": {
+            "description": "Ceiling fan fitted",
+            "quantity": 1,
+            "unit": "each"
+          }
+        },
+        {
+          "option_id": "o3",
+          "sell_ex_gst": 300,
+          "gst": 30,
+          "sell_inc_gst": 330,
+          "cost_ex_gst": null,
+          "surcharge_ex_gst": 0,
+          "lands": {
+            "lane": "hire",
+            "paid_to": "office"
+          },
+          "line": {
+            "description": "Scaffold hire",
+            "quantity": 1,
+            "unit": "each"
+          }
+        }
+      ],
+      "complete": true,
+      "gaps": []
+    },
+    "one_figure": {
+      "version": "budget.v1",
+      "trade": "patio",
+      "job": {
+        "scope_revision_id": "11111111-1111-4111-8111-111111111111",
+        "revision_n": 1,
+        "sell_ex_gst": 10000,
+        "gst": 1000,
+        "total_inc_gst": 11000,
+        "scoped_by": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scoper"
+        },
+        "salesperson": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scoper"
+        }
+      },
+      "materials": {
+        "priced_by_line": false,
+        "lines": [
+          {
+            "key": "m1",
+            "line_id": "sl-1",
+            "supplier": {
+              "id": "sup-a",
+              "name": "Supplier A",
+              "code": null
+            },
+            "description": "Roof sheets",
+            "quantity": 10,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null,
+            "supplier_key": "sup-a",
+            "kind": "item"
+          },
+          {
+            "key": "m2",
+            "line_id": "sl-2",
+            "supplier": {
+              "id": "sup-a",
+              "name": "Supplier A",
+              "code": null
+            },
+            "description": "Posts",
+            "quantity": 4,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "typed",
+            "note_to_supplier": null,
+            "supplier_key": "sup-a",
+            "kind": "item"
+          },
+          {
+            "key": "materials:one-figure",
+            "supplier_key": "one_figure",
+            "supplier": {
+              "id": null,
+              "name": "One figure"
+            },
+            "kind": "item",
+            "description": "Materials as one figure",
+            "quantity": 1,
+            "unit": "job",
+            "unit_cost_ex_gst": 3165,
+            "line_cost_ex_gst": 3165,
+            "in_total": true,
+            "cost_from": "one_figure"
+          }
+        ],
+        "by_supplier": [
+          {
+            "key": "sup-a",
+            "supplier": {
+              "id": "sup-a",
+              "name": "Supplier A"
+            },
+            "lines_ex_gst": 0,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 0,
+            "total_ex_gst": 0
+          },
+          {
+            "key": "one_figure",
+            "supplier": {
+              "id": null,
+              "name": "One figure"
+            },
+            "lines_ex_gst": 3165,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 0,
+            "total_ex_gst": 3165
+          }
+        ],
+        "total_ex_gst": 3165
+      },
+      "labour": {
+        "pay": "group_work_order",
+        "amount_ex_gst": 2800,
+        "hourly": null,
+        "lines": [
+          {
+            "key": "l1",
+            "task": "Build",
+            "people": 2,
+            "days": 2,
+            "day_rate_ex_gst": 700,
+            "amount_ex_gst": 2800,
+            "in_total": true
+          }
+        ],
+        "work_order_amount_ex_gst": 2800
+      },
+      "other": [
+        {
+          "lane": "skip_and_tip",
+          "lines": [
+            {
+              "key": "x1",
+              "description": "Skip bin",
+              "quantity": 1,
+              "unit": "each",
+              "cost_ex_gst": 350,
+              "in_total": true,
+              "paid_to": "office",
+              "supplier": null
+            }
+          ],
+          "total_ex_gst": 350
+        },
+        {
+          "lane": "buffer",
+          "lines": [
+            {
+              "key": "b1",
+              "description": "Job buffer",
+              "quantity": 1,
+              "unit": "job",
+              "cost_ex_gst": 200,
+              "in_total": true,
+              "paid_to": "office",
+              "supplier": null
+            }
+          ],
+          "total_ex_gst": 200
+        }
+      ],
+      "commission": {
+        "salesperson": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scoper"
+        },
+        "rule_id": "patio_commission_rate",
+        "pct": 8,
+        "basis": "gross_profit",
+        "amount_ex_gst": 278.8
+      },
+      "totals": {
+        "cost_before_commission_ex_gst": 6515,
+        "gross_profit_ex_gst": 3485,
+        "gross_profit_pct": 34.85,
+        "commission_ex_gst": 278.8,
+        "profit_after_commission_ex_gst": 3206.2,
+        "profit_after_commission_pct": 32.06
+      },
+      "options": [
+        {
+          "option_id": "o1",
+          "sell_ex_gst": 400,
+          "gst": 40,
+          "sell_inc_gst": 440,
+          "cost_ex_gst": 180,
+          "surcharge_ex_gst": 2.7,
+          "lands": {
+            "lane": "materials",
+            "supplier": {
+              "id": "sup-a",
+              "name": "Supplier A"
+            }
+          },
+          "line": {
+            "description": "Two downlights",
+            "quantity": 2,
+            "unit": "each"
+          }
+        },
+        {
+          "option_id": "o2",
+          "sell_ex_gst": 520,
+          "gst": 52,
+          "sell_inc_gst": 572,
+          "cost_ex_gst": 250,
+          "surcharge_ex_gst": 0,
+          "lands": {
+            "lane": "labour"
+          },
+          "line": {
+            "description": "Ceiling fan fitted",
+            "quantity": 1,
+            "unit": "each"
+          }
+        },
+        {
+          "option_id": "o3",
+          "sell_ex_gst": 300,
+          "gst": 30,
+          "sell_inc_gst": 330,
+          "cost_ex_gst": null,
+          "surcharge_ex_gst": 0,
+          "lands": {
+            "lane": "hire",
+            "paid_to": "office"
+          },
+          "line": {
+            "description": "Scaffold hire",
+            "quantity": 1,
+            "unit": "each"
+          }
+        }
+      ],
+      "complete": true,
+      "gaps": []
+    },
+    "patio_standard": {
+      "version": "budget.v1",
+      "trade": "patio",
+      "job": {
+        "scope_revision_id": null,
+        "revision_n": 1,
+        "sell_ex_gst": 1620.25,
+        "gst": 162.03,
+        "total_inc_gst": 1782.28,
+        "scoped_by": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scope Checker"
+        },
+        "salesperson": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scope Checker"
+        }
+      },
+      "materials": {
+        "priced_by_line": true,
+        "lines": [
+          {
+            "key": "patio:SL-ae32dfda743e952c",
+            "line_id": "SL-ae32dfda743e952c",
+            "supplier_key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals",
+              "code": null
+            },
+            "kind": "item",
+            "description": "100×50×2 RHS",
+            "quantity": 1,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": 8,
+            "line_cost_ex_gst": 8,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-1adef0739ac2cfaa",
+            "line_id": "SL-1adef0739ac2cfaa",
+            "supplier_key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals",
+              "code": null
+            },
+            "kind": "item",
+            "description": "150×50×2 RHS",
+            "quantity": 2,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": 9,
+            "line_cost_ex_gst": 18,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-960b8f314bbd83cb",
+            "line_id": "SL-960b8f314bbd83cb",
+            "supplier_key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals",
+              "code": null
+            },
+            "kind": "item",
+            "description": "90×90×2 SHS",
+            "quantity": 1,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": 3,
+            "line_cost_ex_gst": 3,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-960b8f314bbd83cb#2",
+            "line_id": "SL-960b8f314bbd83cb",
+            "supplier_key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals",
+              "code": null
+            },
+            "kind": "item",
+            "description": "90×90×2 SHS",
+            "quantity": 1,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": 3,
+            "line_cost_ex_gst": 3,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-28f63ccd9594f698",
+            "line_id": "SL-28f63ccd9594f698",
+            "supplier_key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals",
+              "code": null
+            },
+            "kind": "item",
+            "description": "3PL cap (past engineering set)",
+            "quantity": 6,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "not_bought_before",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:bought-b-d-metals-freight/bought-evidence",
+            "line_id": null,
+            "supplier_key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals",
+              "code": null
+            },
+            "kind": "delivery",
+            "description": "Freight",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 6,
+            "line_cost_ex_gst": 6,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-3b619c57ce3ed5b3",
+            "line_id": "SL-3b619c57ce3ed5b3",
+            "supplier_key": "bondor",
+            "supplier": {
+              "id": "bondor",
+              "name": "Bondor",
+              "code": null
+            },
+            "kind": "item",
+            "description": "S/SPAN SURFMIST / SURFMIST 75MM, Smooth ceiling",
+            "quantity": 6,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": 16.02,
+            "line_cost_ex_gst": 96.12,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:bought-bondor-transbon1/bought-evidence",
+            "line_id": null,
+            "supplier_key": "bondor",
+            "supplier": {
+              "id": "bondor",
+              "name": "Bondor",
+              "code": null
+            },
+            "kind": "delivery",
+            "description": "TRANSPORT BONDOR - HIAB",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 7,
+            "line_cost_ex_gst": 7,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-52bc826a5ed189db",
+            "line_id": "SL-52bc826a5ed189db",
+            "supplier_key": "bunnings",
+            "supplier": {
+              "id": "bunnings",
+              "name": "Bunnings",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Mass concrete pad footing, 600 x 600 on plan and 650 deep",
+            "quantity": 0.702,
+            "unit": "m3",
+            "cut": null,
+            "unit_cost_ex_gst": 4,
+            "line_cost_ex_gst": 2.81,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-770b246ec459342e",
+            "line_id": "SL-770b246ec459342e",
+            "supplier_key": "cmi",
+            "supplier": {
+              "id": "cmi",
+              "name": "CMI (Combined Metal Industries)",
+              "code": null
+            },
+            "kind": "item",
+            "description": "CUSTOM L RISER 700H x 200W: CMI riser elbow SW-120-R, 100 × 50 × 2.0 RHS, 700 × 300 outside (leg by arm), mitred at 45° and welded at the elbow, both ends open; cut on site to 587 leg × 165 arm",
+            "quantity": 4,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 5,
+            "line_cost_ex_gst": 20,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:bought-cmi-delstdz1/bought-evidence",
+            "line_id": null,
+            "supplier_key": "cmi",
+            "supplier": {
+              "id": "cmi",
+              "name": "CMI (Combined Metal Industries)",
+              "code": null
+            },
+            "kind": "delivery",
+            "description": "DELIVERY- STANDARD ZONE 1",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 8,
+            "line_cost_ex_gst": 8,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-3af7913262685871",
+            "line_id": "SL-3af7913262685871",
+            "supplier_key": "hi-precision-engineering",
+            "supplier": {
+              "id": "hi-precision-engineering",
+              "name": "Hi-Precision Engineering",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Internal bracket 100 x 50 (patio)",
+            "quantity": 4,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 5,
+            "line_cost_ex_gst": 20,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-67a1e25a0b676bb9",
+            "line_id": "SL-67a1e25a0b676bb9",
+            "supplier_key": "hi-precision-engineering",
+            "supplier": {
+              "id": "hi-precision-engineering",
+              "name": "Hi-Precision Engineering",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Rafter bracket 600 mm, M10",
+            "quantity": 6,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 7,
+            "line_cost_ex_gst": 42,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-b95ba5da358132c1",
+            "line_id": "SL-b95ba5da358132c1",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Square downpipe 95 x 45 x 1800mm",
+            "quantity": 4,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": 9,
+            "line_cost_ex_gst": 36,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-0fd63e7c6b2cadc9",
+            "line_id": "SL-0fd63e7c6b2cadc9",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "MONUMENT DOWNPIPE STRAP 95x45 (STRAP95/45MT)",
+            "quantity": 4,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 8,
+            "line_cost_ex_gst": 32,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-66071a4267bedac6",
+            "line_id": "SL-66071a4267bedac6",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Patioline gutter; family-level match in one Metroll bill line.",
+            "quantity": 1,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": 30,
+            "line_cost_ex_gst": 30,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-4686584e818f4fe8",
+            "line_id": "SL-4686584e818f4fe8",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "ZINCALUME DOWNPIPE OUTLET 95 x 45",
+            "quantity": 2,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 3,
+            "line_cost_ex_gst": 6,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-58063d222873ea9a",
+            "line_id": "SL-58063d222873ea9a",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Metroll Patioline stop end, left hand (also fits Quickfix)",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 4,
+            "line_cost_ex_gst": 4,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-ebdfd9019a7e6d83",
+            "line_id": "SL-ebdfd9019a7e6d83",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Metroll Patioline stop end, right hand (also fits Quickfix)",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 5,
+            "line_cost_ex_gst": 5,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-f4cd2a0b459f8470",
+            "line_id": "SL-f4cd2a0b459f8470",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "UNIVERSAL CLIP, the Metroll gutter clip for Patioline and Quickfix",
+            "quantity": 6,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 6,
+            "line_cost_ex_gst": 36,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-138be3232a6329ec",
+            "line_id": "SL-138be3232a6329ec",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Flashing allowance",
+            "quantity": 8.3,
+            "unit": "m",
+            "cut": null,
+            "unit_cost_ex_gst": 3,
+            "line_cost_ex_gst": 24.9,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-d5f35b5e680621fb",
+            "line_id": "SL-d5f35b5e680621fb",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Flashing allowance",
+            "quantity": 6,
+            "unit": "m",
+            "cut": null,
+            "unit_cost_ex_gst": 3,
+            "line_cost_ex_gst": 18,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-04935c246d8c518b",
+            "line_id": "SL-04935c246d8c518b",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Flashing allowance",
+            "quantity": 6.1,
+            "unit": "m",
+            "cut": null,
+            "unit_cost_ex_gst": 3,
+            "line_cost_ex_gst": 18.3,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-a110e7e817c4be68",
+            "line_id": "SL-a110e7e817c4be68",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Flashing allowance",
+            "quantity": 6.2,
+            "unit": "m",
+            "cut": null,
+            "unit_cost_ex_gst": 3,
+            "line_cost_ex_gst": 18.6,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:bought-metroll-delivery-charge/bought-evidence",
+            "line_id": null,
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "delivery",
+            "description": "DELIVERY CHARGE",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 9,
+            "line_cost_ex_gst": 9,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          }
+        ],
+        "by_supplier": [
+          {
+            "key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals"
+            },
+            "lines_ex_gst": 32,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 6,
+            "total_ex_gst": 38
+          },
+          {
+            "key": "bondor",
+            "supplier": {
+              "id": "bondor",
+              "name": "Bondor"
+            },
+            "lines_ex_gst": 96.12,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 7,
+            "total_ex_gst": 103.12
+          },
+          {
+            "key": "bunnings",
+            "supplier": {
+              "id": "bunnings",
+              "name": "Bunnings"
+            },
+            "lines_ex_gst": 2.81,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 0,
+            "total_ex_gst": 2.81
+          },
+          {
+            "key": "cmi",
+            "supplier": {
+              "id": "cmi",
+              "name": "CMI (Combined Metal Industries)"
+            },
+            "lines_ex_gst": 20,
+            "surcharge_ex_gst": 0.42,
+            "delivery_ex_gst": 8,
+            "total_ex_gst": 28.42
+          },
+          {
+            "key": "hi-precision-engineering",
+            "supplier": {
+              "id": "hi-precision-engineering",
+              "name": "Hi-Precision Engineering"
+            },
+            "lines_ex_gst": 62,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 0,
+            "total_ex_gst": 62
+          },
+          {
+            "key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll"
+            },
+            "lines_ex_gst": 228.8,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 9,
+            "total_ex_gst": 237.8
+          }
+        ],
+        "total_ex_gst": 472.15
+      },
+      "labour": {
+        "pay": "group_work_order",
+        "amount_ex_gst": 400,
+        "hourly": null,
+        "lines": [
+          {
+            "key": "labour:crew",
+            "task": "Build the patio: footings, posts, frame, roof, gutter and flashings",
+            "people": null,
+            "days": null,
+            "day_rate_ex_gst": null,
+            "amount_ex_gst": 400,
+            "in_total": true
+          }
+        ],
+        "work_order_amount_ex_gst": 400
+      },
+      "other": [
+        {
+          "lane": "buffer",
+          "lines": [
+            {
+              "key": "buffer",
+              "description": "Job buffer",
+              "quantity": 1,
+              "unit": "job",
+              "cost_ex_gst": 100,
+              "in_total": true,
+              "paid_to": "office",
+              "supplier": null
+            }
+          ],
+          "total_ex_gst": 100
+        }
+      ],
+      "commission": {
+        "salesperson": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scope Checker"
+        },
+        "rule_id": "staff_policy",
+        "pct": 8,
+        "basis": "gross_profit",
+        "amount_ex_gst": 51.85
+      },
+      "totals": {
+        "cost_before_commission_ex_gst": 972.15,
+        "gross_profit_ex_gst": 648.1,
+        "gross_profit_pct": 40,
+        "commission_ex_gst": 51.85,
+        "profit_after_commission_ex_gst": 596.25,
+        "profit_after_commission_pct": 36.8
+      },
+      "complete": true,
+      "gaps": []
+    },
+    "patio_one_figure": {
+      "version": "budget.v1",
+      "trade": "patio",
+      "job": {
+        "scope_revision_id": null,
+        "revision_n": 1,
+        "sell_ex_gst": 4742.78,
+        "gst": 474.28,
+        "total_inc_gst": 5217.06,
+        "scoped_by": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scope Checker"
+        },
+        "salesperson": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scope Checker"
+        }
+      },
+      "materials": {
+        "priced_by_line": false,
+        "lines": [
+          {
+            "key": "patio:SL-ae32dfda743e952c",
+            "line_id": "SL-ae32dfda743e952c",
+            "supplier_key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals",
+              "code": null
+            },
+            "kind": "item",
+            "description": "100×50×2 RHS",
+            "quantity": 1,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-1adef0739ac2cfaa",
+            "line_id": "SL-1adef0739ac2cfaa",
+            "supplier_key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals",
+              "code": null
+            },
+            "kind": "item",
+            "description": "150×50×2 RHS",
+            "quantity": 2,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-960b8f314bbd83cb",
+            "line_id": "SL-960b8f314bbd83cb",
+            "supplier_key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals",
+              "code": null
+            },
+            "kind": "item",
+            "description": "90×90×2 SHS",
+            "quantity": 1,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-960b8f314bbd83cb#2",
+            "line_id": "SL-960b8f314bbd83cb",
+            "supplier_key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals",
+              "code": null
+            },
+            "kind": "item",
+            "description": "90×90×2 SHS",
+            "quantity": 1,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-28f63ccd9594f698",
+            "line_id": "SL-28f63ccd9594f698",
+            "supplier_key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals",
+              "code": null
+            },
+            "kind": "item",
+            "description": "3PL cap (past engineering set)",
+            "quantity": 6,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "not_bought_before",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:bought-b-d-metals-freight/bought-evidence",
+            "line_id": null,
+            "supplier_key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals",
+              "code": null
+            },
+            "kind": "delivery",
+            "description": "Freight",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-3b619c57ce3ed5b3",
+            "line_id": "SL-3b619c57ce3ed5b3",
+            "supplier_key": "bondor",
+            "supplier": {
+              "id": "bondor",
+              "name": "Bondor",
+              "code": null
+            },
+            "kind": "item",
+            "description": "S/SPAN SURFMIST / SURFMIST 75MM, Smooth ceiling",
+            "quantity": 6,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:bought-bondor-transbon1/bought-evidence",
+            "line_id": null,
+            "supplier_key": "bondor",
+            "supplier": {
+              "id": "bondor",
+              "name": "Bondor",
+              "code": null
+            },
+            "kind": "delivery",
+            "description": "TRANSPORT BONDOR - HIAB",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-52bc826a5ed189db",
+            "line_id": "SL-52bc826a5ed189db",
+            "supplier_key": "bunnings",
+            "supplier": {
+              "id": "bunnings",
+              "name": "Bunnings",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Mass concrete pad footing, 600 x 600 on plan and 650 deep",
+            "quantity": 0.702,
+            "unit": "m3",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-770b246ec459342e",
+            "line_id": "SL-770b246ec459342e",
+            "supplier_key": "cmi",
+            "supplier": {
+              "id": "cmi",
+              "name": "CMI (Combined Metal Industries)",
+              "code": null
+            },
+            "kind": "item",
+            "description": "CUSTOM L RISER 700H x 200W: CMI riser elbow SW-120-R, 100 × 50 × 2.0 RHS, 700 × 300 outside (leg by arm), mitred at 45° and welded at the elbow, both ends open; cut on site to 587 leg × 165 arm",
+            "quantity": 4,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:bought-cmi-delstdz1/bought-evidence",
+            "line_id": null,
+            "supplier_key": "cmi",
+            "supplier": {
+              "id": "cmi",
+              "name": "CMI (Combined Metal Industries)",
+              "code": null
+            },
+            "kind": "delivery",
+            "description": "DELIVERY- STANDARD ZONE 1",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-3af7913262685871",
+            "line_id": "SL-3af7913262685871",
+            "supplier_key": "hi-precision-engineering",
+            "supplier": {
+              "id": "hi-precision-engineering",
+              "name": "Hi-Precision Engineering",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Internal bracket 100 x 50 (patio)",
+            "quantity": 4,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-67a1e25a0b676bb9",
+            "line_id": "SL-67a1e25a0b676bb9",
+            "supplier_key": "hi-precision-engineering",
+            "supplier": {
+              "id": "hi-precision-engineering",
+              "name": "Hi-Precision Engineering",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Rafter bracket 600 mm, M10",
+            "quantity": 6,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-b95ba5da358132c1",
+            "line_id": "SL-b95ba5da358132c1",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Square downpipe 95 x 45 x 1800mm",
+            "quantity": 4,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-0fd63e7c6b2cadc9",
+            "line_id": "SL-0fd63e7c6b2cadc9",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "MONUMENT DOWNPIPE STRAP 95x45 (STRAP95/45MT)",
+            "quantity": 4,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-66071a4267bedac6",
+            "line_id": "SL-66071a4267bedac6",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Patioline gutter; family-level match in one Metroll bill line.",
+            "quantity": 1,
+            "unit": "length",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-4686584e818f4fe8",
+            "line_id": "SL-4686584e818f4fe8",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "ZINCALUME DOWNPIPE OUTLET 95 x 45",
+            "quantity": 2,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-58063d222873ea9a",
+            "line_id": "SL-58063d222873ea9a",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Metroll Patioline stop end, left hand (also fits Quickfix)",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-ebdfd9019a7e6d83",
+            "line_id": "SL-ebdfd9019a7e6d83",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Metroll Patioline stop end, right hand (also fits Quickfix)",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-f4cd2a0b459f8470",
+            "line_id": "SL-f4cd2a0b459f8470",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "UNIVERSAL CLIP, the Metroll gutter clip for Patioline and Quickfix",
+            "quantity": 6,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-138be3232a6329ec",
+            "line_id": "SL-138be3232a6329ec",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Flashing allowance",
+            "quantity": 8.3,
+            "unit": "m",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-d5f35b5e680621fb",
+            "line_id": "SL-d5f35b5e680621fb",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Flashing allowance",
+            "quantity": 6,
+            "unit": "m",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-04935c246d8c518b",
+            "line_id": "SL-04935c246d8c518b",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Flashing allowance",
+            "quantity": 6.1,
+            "unit": "m",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:SL-a110e7e817c4be68",
+            "line_id": "SL-a110e7e817c4be68",
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Flashing allowance",
+            "quantity": 6.2,
+            "unit": "m",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:bought-metroll-delivery-charge/bought-evidence",
+            "line_id": null,
+            "supplier_key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll",
+              "code": null
+            },
+            "kind": "delivery",
+            "description": "DELIVERY CHARGE",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": null,
+            "line_cost_ex_gst": null,
+            "in_total": false,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          },
+          {
+            "key": "patio:one-figure",
+            "line_id": null,
+            "supplier_key": "one_figure",
+            "supplier": {
+              "id": null,
+              "name": null,
+              "code": null
+            },
+            "kind": "item",
+            "description": "All materials, one figure",
+            "quantity": 1,
+            "unit": "job",
+            "cut": null,
+            "unit_cost_ex_gst": 2345.67,
+            "line_cost_ex_gst": 2345.67,
+            "in_total": true,
+            "cost_from": "one_figure",
+            "note_to_supplier": null
+          }
+        ],
+        "by_supplier": [
+          {
+            "key": "bd-metals",
+            "supplier": {
+              "id": "bd-metals",
+              "name": "B&D Metals"
+            },
+            "lines_ex_gst": 0,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 0,
+            "total_ex_gst": 0
+          },
+          {
+            "key": "bondor",
+            "supplier": {
+              "id": "bondor",
+              "name": "Bondor"
+            },
+            "lines_ex_gst": 0,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 0,
+            "total_ex_gst": 0
+          },
+          {
+            "key": "bunnings",
+            "supplier": {
+              "id": "bunnings",
+              "name": "Bunnings"
+            },
+            "lines_ex_gst": 0,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 0,
+            "total_ex_gst": 0
+          },
+          {
+            "key": "cmi",
+            "supplier": {
+              "id": "cmi",
+              "name": "CMI (Combined Metal Industries)"
+            },
+            "lines_ex_gst": 0,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 0,
+            "total_ex_gst": 0
+          },
+          {
+            "key": "hi-precision-engineering",
+            "supplier": {
+              "id": "hi-precision-engineering",
+              "name": "Hi-Precision Engineering"
+            },
+            "lines_ex_gst": 0,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 0,
+            "total_ex_gst": 0
+          },
+          {
+            "key": "metroll",
+            "supplier": {
+              "id": "metroll",
+              "name": "Metroll"
+            },
+            "lines_ex_gst": 0,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 0,
+            "total_ex_gst": 0
+          },
+          {
+            "key": "one_figure",
+            "supplier": {
+              "id": null,
+              "name": "One figure for all materials"
+            },
+            "lines_ex_gst": 2345.67,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 0,
+            "total_ex_gst": 2345.67
+          }
+        ],
+        "total_ex_gst": 2345.67
+      },
+      "labour": {
+        "pay": "group_work_order",
+        "amount_ex_gst": 400,
+        "hourly": null,
+        "lines": [
+          {
+            "key": "labour:crew",
+            "task": "Build the patio: footings, posts, frame, roof, gutter and flashings",
+            "people": null,
+            "days": null,
+            "day_rate_ex_gst": null,
+            "amount_ex_gst": 400,
+            "in_total": true
+          }
+        ],
+        "work_order_amount_ex_gst": 400
+      },
+      "other": [
+        {
+          "lane": "buffer",
+          "lines": [
+            {
+              "key": "buffer",
+              "description": "Job buffer",
+              "quantity": 1,
+              "unit": "job",
+              "cost_ex_gst": 100,
+              "in_total": true,
+              "paid_to": "office",
+              "supplier": null
+            }
+          ],
+          "total_ex_gst": 100
+        }
+      ],
+      "commission": {
+        "salesperson": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scope Checker"
+        },
+        "rule_id": "staff_policy",
+        "pct": 8,
+        "basis": "gross_profit",
+        "amount_ex_gst": 151.77
+      },
+      "totals": {
+        "cost_before_commission_ex_gst": 2845.67,
+        "gross_profit_ex_gst": 1897.11,
+        "gross_profit_pct": 40,
+        "commission_ex_gst": 151.77,
+        "profit_after_commission_ex_gst": 1745.34,
+        "profit_after_commission_pct": 36.8
+      },
+      "complete": true,
+      "gaps": []
+    },
+    "fence_standard": {
+      "version": "budget.v1",
+      "trade": "fence",
+      "job": {
+        "scope_revision_id": null,
+        "revision_n": 1,
+        "sell_ex_gst": 4001.8,
+        "gst": 400.18,
+        "total_inc_gst": 4401.98,
+        "scoped_by": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scope Checker"
+        },
+        "salesperson": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scope Checker"
+        }
+      },
+      "materials": {
+        "priced_by_line": true,
+        "lines": [
+          {
+            "key": "fence:group:0:0",
+            "line_id": "SL-071c37cbbc629242",
+            "supplier_key": "name:Fencing Warehouse",
+            "supplier": {
+              "id": null,
+              "name": "Fencing Warehouse",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Metroll Trimclad infill sheets 1790mm (3 a bay)",
+            "quantity": 9,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 128,
+            "line_cost_ex_gst": 1152,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "fence:group:0:1",
+            "line_id": "SL-39981aad2f5f9804",
+            "supplier_key": "name:Fencing Warehouse",
+            "supplier": {
+              "id": null,
+              "name": "Fencing Warehouse",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Metroll fence rails 2365mm (2 a bay)",
+            "quantity": 6,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 130,
+            "line_cost_ex_gst": 780,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "fence:group:0:2",
+            "line_id": "SL-9e453dbf8875d1cc",
+            "supplier_key": "name:Fencing Warehouse",
+            "supplier": {
+              "id": null,
+              "name": "Fencing Warehouse",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Metroll fence posts 2400mm (2 a bay)",
+            "quantity": 6,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 154,
+            "line_cost_ex_gst": 924,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "fence:concrete",
+            "line_id": "SL-29647d01dc54030d",
+            "supplier_key": "name:Fencing Warehouse",
+            "supplier": {
+              "id": null,
+              "name": "Fencing Warehouse",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Concrete 20kg bag (Kwikset)",
+            "quantity": 9,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 33,
+            "line_cost_ex_gst": 297,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "fence:tekScrewBox",
+            "line_id": "SL-3b3ca2e870f6f714",
+            "supplier_key": "name:Fencing Warehouse",
+            "supplier": {
+              "id": null,
+              "name": "Fencing Warehouse",
+              "code": null
+            },
+            "kind": "item",
+            "description": "Tek screws, pack of 100",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 34,
+            "line_cost_ex_gst": 34,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          },
+          {
+            "key": "fence:delivery|Delivery (Fencing Warehouse)",
+            "line_id": "SL-a66fa620aa85a8ec",
+            "supplier_key": "name:Fencing Warehouse",
+            "supplier": {
+              "id": null,
+              "name": "Fencing Warehouse",
+              "code": null
+            },
+            "kind": "delivery",
+            "description": "Delivery (Fencing Warehouse)",
+            "quantity": 1,
+            "unit": "each",
+            "cut": null,
+            "unit_cost_ex_gst": 101,
+            "line_cost_ex_gst": 101,
+            "in_total": true,
+            "cost_from": "supplier_price",
+            "note_to_supplier": null
+          }
+        ],
+        "by_supplier": [
+          {
+            "key": "name:Fencing Warehouse",
+            "supplier": {
+              "id": null,
+              "name": "Fencing Warehouse"
+            },
+            "lines_ex_gst": 3187,
+            "surcharge_ex_gst": 0,
+            "delivery_ex_gst": 101,
+            "total_ex_gst": 3288
+          }
+        ],
+        "total_ex_gst": 3288
+      },
+      "labour": {
+        "pay": "group_work_order",
+        "amount_ex_gst": 312.18,
+        "hourly": null,
+        "lines": [
+          {
+            "key": "labour:base-1",
+            "task": "Fence install",
+            "people": null,
+            "days": null,
+            "day_rate_ex_gst": null,
+            "amount_ex_gst": 312.18,
+            "in_total": true
+          }
+        ],
+        "work_order_amount_ex_gst": 312.18
+      },
+      "other": [
+        {
+          "lane": "buffer",
+          "lines": [
+            {
+              "key": "fence:jobBuffer",
+              "description": "Misc job buffer (internal cost)",
+              "quantity": 1,
+              "unit": "each",
+              "cost_ex_gst": 100,
+              "in_total": true,
+              "paid_to": "office",
+              "supplier": null
+            }
+          ],
+          "total_ex_gst": 100
+        }
+      ],
+      "commission": {
+        "salesperson": {
+          "staff_id": "22222222-2222-4222-8222-222222222222",
+          "name": "ZZTEST Scope Checker"
+        },
+        "rule_id": "Staff table",
+        "pct": 15,
+        "basis": "gross_profit",
+        "amount_ex_gst": 45.24
+      },
+      "totals": {
+        "cost_before_commission_ex_gst": 3700.18,
+        "gross_profit_ex_gst": 301.62,
+        "gross_profit_pct": 7.54,
+        "commission_ex_gst": 45.24,
+        "profit_after_commission_ex_gst": 256.38,
+        "profit_after_commission_pct": 6.41
+      },
+      "complete": false,
+      "gaps": [
+        {
+          "where": "materials",
+          "key": "fence:group:0:0",
+          "code": "no_supplier_id",
+          "what": "Supplier not on the list"
+        },
+        {
+          "where": "materials",
+          "key": "fence:group:0:1",
+          "code": "no_supplier_id",
+          "what": "Supplier not on the list"
+        },
+        {
+          "where": "materials",
+          "key": "fence:group:0:2",
+          "code": "no_supplier_id",
+          "what": "Supplier not on the list"
+        },
+        {
+          "where": "materials",
+          "key": "fence:concrete",
+          "code": "no_supplier_id",
+          "what": "Supplier not on the list"
+        },
+        {
+          "where": "materials",
+          "key": "fence:tekScrewBox",
+          "code": "no_supplier_id",
+          "what": "Supplier not on the list"
+        },
+        {
+          "where": "materials",
+          "key": "fence:delivery|Delivery (Fencing Warehouse)",
+          "code": "no_supplier_id",
+          "what": "Supplier not on the list"
+        }
+      ]
+    }
+  }
+}

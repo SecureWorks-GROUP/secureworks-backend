@@ -1151,6 +1151,20 @@ async function readWorkOrderLines(
   return out;
 }
 
+/**
+ * Every line on these jobs, on any trade's invoice, with its invoice status
+ * and cost lane. work_order_total_cap.ts decides which count against the
+ * work order and adds them up per job.
+ */
+export async function readJobTradeLines(
+  client: any,
+  jobIds: string[],
+): Promise<WorkOrderLine[]> {
+  const ids = [...new Set(jobIds.filter(Boolean))];
+  if (ids.length === 0) return [];
+  return await readWorkOrderLines(client, ids);
+}
+
 const VARIATION_COLUMNS =
   "id, job_id, work_order_id, trade_invoice_id, description, amount_ex, created_at";
 const VARIATION_STAFF_COLUMNS =

@@ -8,8 +8,11 @@
 // submit. Keep the merge rules in step with
 // secureworks-ux modules/trade-invoice-running-draft.js.
 //
-// Screen flag: users.trade_details.runningInvoiceDraft === true.
-// my_hours reports that as running_invoice_draft.
+// Screen flag: users.trade_details.runningInvoiceDraft. On unless it is
+// literally false (Marnin, 11 Nov 2026: the saved weekly draft is on for
+// everyone; the office can still switch one trade off with false).
+// my_hours reports that as running_invoice_draft; the save gate reads the same
+// helper, runningInvoiceDraftEnabled, so the two never disagree.
 
 import {
   hideRetiredCrewWorkOrder,
@@ -67,9 +70,9 @@ const AGENT_ONLY =
   "An agent can only save a draft. It cannot submit, send, authorise, pay, or create a Xero bill.";
 
 export function runningInvoiceDraftEnabled(tradeDetails: unknown): boolean {
-  return !!(tradeDetails && typeof tradeDetails === "object" &&
-    (tradeDetails as { runningInvoiceDraft?: unknown }).runningInvoiceDraft ===
-      true);
+  if (!tradeDetails || typeof tradeDetails !== "object") return true;
+  return (tradeDetails as { runningInvoiceDraft?: unknown })
+    .runningInvoiceDraft !== false;
 }
 
 export function sourceKey(

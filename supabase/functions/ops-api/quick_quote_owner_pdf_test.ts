@@ -18,6 +18,7 @@ import {
   quotePdfBase64,
   unapprovedSendKeyForQuickQuote,
 } from "../_shared/scope_freeze/owner_price_approval.ts";
+import { customerSiteLine } from "../_shared/customer_site_line.ts";
 
 const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
 const marker = "async function sendQuickQuoteEmail(client: any, body: any) {";
@@ -35,6 +36,7 @@ const handler = new AsyncFunction(
   "startNamedScopeRevisionRead", "sealedSendSource", "quoteSendBuildSource",
   "ownerPriceBeforeSend", "unapprovedSendKeyForQuickQuote", "approvedQuotePdf", "quotePdfBase64",
   "assertLegacySesMoneyActionAllowedForJob", "Deno", "ApiError", "getClientReplyTo", "fetch",
+  "customerSiteLine",
   handlerBody,
 );
 
@@ -136,7 +138,7 @@ async function run(opts: {
         startNamedScopeRevisionRead, sealedSendSource, quoteSendBuildSource,
         ownerPriceBeforeSend, unapprovedSendKeyForQuickQuote, approvedQuotePdf, quotePdfBase64,
         () => Promise.resolve(), { env: { get: () => "synthetic-only" } }, ApiError,
-        () => "admin@example.invalid", localFetch,
+        () => "admin@example.invalid", localFetch, customerSiteLine,
       );
     let error: any = null;
     try {
