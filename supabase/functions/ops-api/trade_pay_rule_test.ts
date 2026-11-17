@@ -10,10 +10,11 @@ import { TRADE_INVOICE_INCLUSIVE_SUPER_BASIS } from "./trade_invoice_money.ts";
 import {
   readTradePayRule,
   resolveTradePayBasisForPreview,
-  resolveTradePayBasisForSubmit,
+  resolveTradePayBasis,
   TRADE_PAY_INCLUSIVE_FLAG,
   tradePayBasisFor,
   TradePayRuleUnreadable,
+  tradePayStoredBasis,
 } from "./trade_pay_rule.ts";
 
 const INCLUSIVE = TRADE_INVOICE_INCLUSIVE_SUPER_BASIS;
@@ -86,9 +87,9 @@ Deno.test("pay rule: spec test 8, an unreadable rule refuses a submit and shows 
       fakeClient({ throws: true }),
     ]
   ) {
-    const err = await assertRejects(() => resolveTradePayBasisForSubmit(client, FROM), TradePayRuleUnreadable);
+    const err = await assertRejects(() => resolveTradePayBasis(client, null, FROM), TradePayRuleUnreadable);
     assertEquals((err as TradePayRuleUnreadable).code, "pay_rule_unreadable");
-    assertEquals(await resolveTradePayBasisForPreview(client, FROM), { basis: null, unavailable: true });
+    assertEquals(await resolveTradePayBasisForPreview(client, null, FROM), { basis: null, unavailable: true });
   }
 });
 
@@ -101,8 +102,8 @@ Deno.test("pay rule: with the switch off, a fault reading the start date still p
   ) {
     const client = () => fakeClient({ feature_flags: { data: [{ enabled: false }], error: null }, trade_pay_settings: settings });
     assertEquals(await readTradePayRule(client()), { ok: true, on: false, from: null });
-    assertEquals(await resolveTradePayBasisForSubmit(client(), FROM), null);
-    assertEquals(await resolveTradePayBasisForPreview(client(), FROM), { basis: null, unavailable: false });
+    assertEquals(await resolveTradePayBasis(client(), null, FROM), null);
+    assertEquals(await resolveTradePayBasisForPreview(client(), null, FROM), { basis: null, unavailable: false });
   }
 });
 
@@ -112,7 +113,43 @@ Deno.test("pay rule: a readable rule prices a submit and a preview the same way"
       feature_flags: { data: [{ enabled: true }], error: null },
       trade_pay_settings: { data: [{ inclusive_super_from: FROM }], error: null },
     });
-  assertEquals(await resolveTradePayBasisForSubmit(client(), "2026-12-14"), INCLUSIVE);
-  assertEquals(await resolveTradePayBasisForSubmit(client(), "2026-11-30"), null);
-  assertEquals(await resolveTradePayBasisForPreview(client(), "2026-12-14"), { basis: INCLUSIVE, unavailable: false });
+  assertEquals(await resolveTradePayBasis(client(), null, "2026-12-14"), INCLUSIVE);
+  assertEquals(await resolveTradePayBasis(client(), null, "2026-11-30"), null);
+  assertEquals(await resolveTradePayBasisForPreview(client(), null, "2026-12-14"), { basis: INCLUSIVE, unavailable: false });
+});
+
+Deno.test("pay rule: a priced stored invoice keeps its basis; only a new or unpriced one reads the switch", async () => {
+  let reads = 0;
+  const counting = {
+    from(table: string) {
+      reads += 1;
+      const rows = table === "feature_flags"
+        ? [{ enabled: true }]
+        : [{ inclusive_super_from: FROM }];
+      const query: any = {
+        select: () => query,
+        eq: () => query,
+        limit: () => Promise.resolve({ data: rows, error: null }),
+      };
+      return query;
+    },
+  };
+  const day = "2026-12-14";
+  const cases: Array<[unknown, string | null, number]> = [
+    [null, INCLUSIVE, 2],
+    [{ gross_earned: null, super_basis: null }, INCLUSIVE, 2],
+    [{ gross_earned: 100, super_basis: null }, null, 0],
+    [{ gross_earned: 100, super_basis: INCLUSIVE }, INCLUSIVE, 0],
+  ];
+  for (const [prior, basis, expectedReads] of cases) {
+    reads = 0;
+    assertEquals(await resolveTradePayBasis(counting, prior as any, day), basis);
+    assertEquals(reads, expectedReads);
+  }
+  assertEquals(tradePayStoredBasis({ gross_earned: 0, super_basis: null }), { priced: true, basis: null });
+  const err = await assertRejects(
+    () => resolveTradePayBasis(counting, { gross_earned: 100, super_basis: "made_up_v9" }, day),
+    TradePayRuleUnreadable,
+  );
+  assertEquals(err.code, "pay_rule_unreadable");
 });

@@ -14,13 +14,21 @@
 // read, retry and Xero check follows the stamp and never this switch, so an
 // invoice keeps the rule it was priced under and earlier weeks never move.
 // A group share keeps its group's own basis: callers pass
-// groupBasis ?? resolve(...).
+// groupBasis ?? resolveTradePayBasis(...).
 //
-// A submit refuses (503, nothing saved) when the switch or the start date
+// resolveTradePayBasis is the one decision for every money door. Given the
+// stored invoice the save replaces (a draft, or a retried draft) it returns
+// that invoice's stored basis whenever it is priced, a stored null being the
+// old rule, and reads the switch only for a new or unpriced invoice. So a
+// draft saved again after the switch moves keeps its rule and split. A door
+// reads the prior with TRADE_PAY_PRIOR_INVOICE_COLUMNS.
+//
+// A save refuses (503, nothing saved) when the switch or the start date
 // cannot be read: pricing a week under the wrong rule is a wrong pay. A
 // preview shows no money figures (money_unavailable).
 
 import {
+  TRADE_INVOICE_EMPLOYER_SUPER_BASIS,
   TRADE_INVOICE_INCLUSIVE_SUPER_BASIS,
   type TradeInvoiceSuperBasis,
 } from "./trade_invoice_money.ts";
@@ -100,25 +108,67 @@ export function tradePayBasisFor(
   return day >= read.from ? TRADE_INVOICE_INCLUSIVE_SUPER_BASIS : null;
 }
 
-/** For a write that saves an invoice: refuses when the rule is unreadable. */
-export async function resolveTradePayBasisForSubmit(
+/** The columns a door reads from the stored invoice its save replaces. */
+export const TRADE_PAY_PRIOR_INVOICE_COLUMNS = "gross_earned, super_basis, super_base_ex";
+
+/** The stored invoice a save replaces, as read with those columns. */
+export type TradePayPriorInvoice = {
+  gross_earned?: unknown;
+  super_basis?: unknown;
+  super_base_ex?: unknown;
+} | null | undefined;
+
+/**
+ * The stored rule of a priced invoice. Priced means it carries a split
+ * (gross_earned set); a stored null basis is the old rule. A basis this code
+ * does not know is unreadable, never a guess.
+ */
+export function tradePayStoredBasis(
+  prior: TradePayPriorInvoice,
+): { priced: false } | { priced: true; basis: TradeInvoiceSuperBasis | null } {
+  if (!prior || prior.gross_earned === null || prior.gross_earned === undefined) {
+    return { priced: false };
+  }
+  const stored = prior.super_basis ?? null;
+  if (stored === null) return { priced: true, basis: null };
+  if (
+    stored === TRADE_INVOICE_EMPLOYER_SUPER_BASIS ||
+    stored === TRADE_INVOICE_INCLUSIVE_SUPER_BASIS
+  ) {
+    return { priced: true, basis: stored };
+  }
+  throw new TradePayRuleUnreadable("stored basis not recognised");
+}
+
+/**
+ * The one decision for a write that saves an invoice. A priced prior keeps
+ * its stored basis; a new or unpriced invoice takes the current rule for its
+ * pay day. Refuses (TradePayRuleUnreadable) when the rule it needs cannot be
+ * read.
+ */
+export async function resolveTradePayBasis(
   client: any,
+  prior: TradePayPriorInvoice,
   payDay: unknown,
 ): Promise<TradeInvoiceSuperBasis | null> {
+  const stored = tradePayStoredBasis(prior);
+  if (stored.priced) return stored.basis;
   const read = await readTradePayRule(client);
   if (!read.ok) throw new TradePayRuleUnreadable(read.error);
   return tradePayBasisFor(read, payDay);
 }
 
-/** For a read that only shows money: unavailable instead of a guess. */
+/** The same decision for a read that only shows money: unavailable, not a guess. */
 export async function resolveTradePayBasisForPreview(
   client: any,
+  prior: TradePayPriorInvoice,
   payDay: unknown,
 ): Promise<{ basis: TradeInvoiceSuperBasis | null; unavailable: boolean }> {
-  const read = await readTradePayRule(client);
-  if (!read.ok) {
-    console.error("[ops-api] pay rule unreadable, preview shows no money:", read.error);
+  try {
+    return { basis: await resolveTradePayBasis(client, prior, payDay), unavailable: false };
+  } catch (error) {
+    if (!(error instanceof TradePayRuleUnreadable)) throw error;
+    console.error("[ops-api] pay rule unreadable, preview shows no money:", error.message);
     return { basis: null, unavailable: true };
   }
-  return { basis: tradePayBasisFor(read, payDay), unavailable: false };
 }
