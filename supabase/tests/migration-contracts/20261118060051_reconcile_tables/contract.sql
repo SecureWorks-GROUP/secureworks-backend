@@ -4,7 +4,7 @@ SET LOCAL statement_timeout='120s';
 -- inside this rollback transaction, then restore this case's objects.
 \ir main_lines_reader.sql
 CREATE TEMP TABLE reader_definition AS SELECT pg_get_viewdef('public.v_job_cost_events'::regclass,true) def;
-\ir ../../../migrations/20261118023939_reconcile_tables.sql
+\ir ../../../migrations/20261118060051_reconcile_tables.sql
 
 CREATE FUNCTION pg_temp.expect_failure(command text, expected text) RETURNS void
 LANGUAGE plpgsql AS $expect$
