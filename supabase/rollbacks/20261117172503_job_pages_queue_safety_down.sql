@@ -1,3 +1,6 @@
+DROP FUNCTION IF EXISTS public.job_page_ack(uuid,bigint,timestamptz,bigint[]);
+DROP FUNCTION IF EXISTS public.job_pages_next_due();
+DROP FUNCTION IF EXISTS public.job_change_marks_fold(integer);
 -- Undo the safety follow-up without throwing away pending append-only marks.
 SET LOCAL lock_timeout='5s';
 DO $undo$ BEGIN
@@ -5,6 +8,7 @@ DO $undo$ BEGIN
   CREATE TEMP TABLE job_marks_rollback AS SELECT * FROM public.job_change_marks;
   DROP VIEW public.job_change_marks;
   ALTER TABLE public.job_change_marks_base RENAME TO job_change_marks;
+  ALTER TABLE public.job_change_marks DROP COLUMN folded_event_count, DROP COLUMN page_pending;
   INSERT INTO public.job_change_marks AS m
    SELECT * FROM job_marks_rollback
    ON CONFLICT(job_id) DO UPDATE SET mark_version=EXCLUDED.mark_version,
@@ -118,3 +122,63 @@ BEGIN
  RETURN jsonb_build_object('outcome',v_outcome,'build_ms',v_ms);
 END $fn$;
 
+
+CREATE OR REPLACE FUNCTION public.job_pages_refresh_due(p_limit integer DEFAULT 5) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $fn$
+DECLARE v_start timestamptz := clock_timestamp(); v_id uuid; v_result jsonb; v_left bigint;
+BEGIN
+ IF NOT pg_try_advisory_xact_lock(20261118,1) THEN RETURN '{"outcome":"busy"}'::jsonb; END IF;
+ -- One job per call and therefore per scheduled transaction, even for a legacy limit of 5.
+ -- Never start another build with a nearly spent 45-second cron statement budget.
+ SELECT m.job_id INTO v_id FROM public.job_change_marks m
+ LEFT JOIN public.job_page_marks_seen s ON s.job_id=m.job_id
+ WHERE s.mark_version IS DISTINCT FROM m.mark_version
+ ORDER BY m.first_marked_at,m.job_id LIMIT CASE WHEN coalesce(p_limit,1)>0 THEN 1 ELSE 0 END;
+ IF v_id IS NOT NULL AND clock_timestamp()-v_start < interval '5 seconds' THEN
+  v_result := public.job_page_refresh(v_id);
+ END IF;
+ SELECT count(*) INTO v_left FROM public.job_change_marks m
+ LEFT JOIN public.job_page_marks_seen s ON s.job_id=m.job_id
+ WHERE s.mark_version IS DISTINCT FROM m.mark_version;
+ RETURN jsonb_build_object('outcome','ran','refreshed',CASE WHEN v_result->>'outcome'='built' THEN 1 ELSE 0 END,
+  'failed',CASE WHEN v_result->>'outcome'='failed' THEN 1 ELSE 0 END,'left',v_left);
+END $fn$;
+
+CREATE OR REPLACE FUNCTION public.job_pages_nightly(p_limit integer DEFAULT 200) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $fn$
+DECLARE v_id uuid; v_marked integer := 0; v_deleted integer;
+BEGIN
+ FOR v_id IN SELECT k.id FROM public.job_pages_keep_ready_set() AS k(id)
+  LEFT JOIN public.job_pages p ON p.job_id=k.id
+  WHERE p.job_id IS NULL OR p.page_version < public.job_page_version() OR p.status='failed'
+  ORDER BY k.id LIMIT greatest(0,least(coalesce(p_limit,200),200))
+ LOOP
+  PERFORM public.job_mark_changed(v_id,'status');
+  v_marked := v_marked + 1;
+ END LOOP;
+ DELETE FROM public.job_pages WHERE job_id NOT IN (SELECT public.job_pages_keep_ready_set())
+  AND built_at < now() - interval '7 days';
+ GET DIAGNOSTICS v_deleted = ROW_COUNT;
+ RETURN jsonb_build_object('marked',v_marked,'deleted',v_deleted);
+END $fn$;
+
+CREATE OR REPLACE FUNCTION public.job_mark_changed_trg() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $fn$
+DECLARE
+ v_source text := TG_ARGV[0];
+ v_col text := coalesce(TG_ARGV[1], 'job_id');
+ v_new jsonb; v_old jsonb; v_new_id uuid; v_old_id uuid;
+ c_skip constant text[] := ARRAY['updated_at','created_at','synced_at','last_synced_at','raw_json'];
+BEGIN
+ IF TG_OP <> 'DELETE' THEN v_new := to_jsonb(NEW); v_new_id := nullif(v_new ->> v_col, '')::uuid; END IF;
+ IF TG_OP <> 'INSERT' THEN v_old := to_jsonb(OLD); v_old_id := nullif(v_old ->> v_col, '')::uuid; END IF;
+ IF TG_OP = 'UPDATE' AND (v_new - c_skip) IS NOT DISTINCT FROM (v_old - c_skip) THEN RETURN NULL; END IF;
+ IF TG_TABLE_NAME = 'xero_invoices' AND TG_OP = 'UPDATE'
+    AND ((v_new ->> 'status') IS DISTINCT FROM (v_old ->> 'status')
+      OR (v_new ->> 'amount_paid') IS DISTINCT FROM (v_old ->> 'amount_paid')) THEN
+  v_source := 'payment';
+ END IF;
+ PERFORM public.job_mark_changed(v_new_id, v_source);
+ IF v_old_id IS DISTINCT FROM v_new_id THEN PERFORM public.job_mark_changed(v_old_id, v_source); END IF;
+ RETURN NULL;
+END $fn$;

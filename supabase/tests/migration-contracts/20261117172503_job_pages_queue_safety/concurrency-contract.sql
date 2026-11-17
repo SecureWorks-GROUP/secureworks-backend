@@ -22,6 +22,8 @@ RETURNS jsonb LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path=public,pg_t
  SELECT '{"loops":[],"now":{}}'::jsonb
 $card$;
 SELECT public.job_page_refresh('00000000-0000-4000-8000-000000000454');
+-- Fold the committed handled mark while a lower sequence remains uncommitted.
+SELECT public.job_change_marks_fold(10000);
 SELECT dblink_exec('mark_a','COMMIT');
 DO $c$
 BEGIN
@@ -30,7 +32,9 @@ BEGIN
   RAISE EXCEPTION 'queue safety: lower sequence committed late was lost';
  END IF;
  IF (SELECT count(*) FROM public.job_change_mark_events WHERE job_id IN
-  ('00000000-0000-4000-8000-000000000454','00000000-0000-4000-8000-000000000455'))<>4 THEN
+  ('00000000-0000-4000-8000-000000000454','00000000-0000-4000-8000-000000000455'))
+  +coalesce((SELECT sum(folded_event_count) FROM public.job_change_marks_base WHERE job_id IN
+  ('00000000-0000-4000-8000-000000000454','00000000-0000-4000-8000-000000000455')),0)<>4 THEN
   RAISE EXCEPTION 'queue safety: opposite-order writer lost a mark';
  END IF;
 END $c$;

@@ -2,7 +2,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 
 const root = new URL("../../", import.meta.url);
-const version = "20261117172102_job_pages_queue_safety";
+const version = "20261117172503_job_pages_queue_safety";
 const migration = Deno.readTextFileSync(new URL(`supabase/migrations/${version}.sql`, root));
 const caseDir = new URL(`supabase/tests/migration-contracts/${version}/`, root);
 
@@ -21,11 +21,11 @@ Deno.test("job pages safety: append writer has no shared row or parent-lock depe
   assert(!/\b(?:UPDATE|DELETE|ON CONFLICT|FOR UPDATE|FOR KEY SHARE|pg_advisory|pg_try_advisory)\b/i.test(writer));
   const heap = migration.split("CREATE TABLE IF NOT EXISTS public.job_change_mark_events (")[1].split(");")[0];
   assert(!/\b(?:PRIMARY KEY|UNIQUE|REFERENCES)\b/i.test(heap));
-  assert(migration.includes("+coalesce(e.n,0) AS mark_version"));
+  assert(migration.includes("+coalesce(b.folded_event_count,0)+e.n AS mark_version"));
 });
 
 Deno.test("job pages safety: the registered behavioral proof and rollback artifacts are complete", () => {
-  for (const name of ["setup.sql", "contract.sql", "concurrency-contract.sql", "break-contract.sql", "break-contract.expected", "rollback-contract.sql"]) {
+  for (const name of ["setup.sql", "contract.sql", "concurrency-contract.sql", "break-contract.sql", "break-contract.expected", "rollback-contract.sql", "index-contract.sql", "timeout-contract.sql"]) {
     const sql = Deno.readTextFileSync(new URL(name, caseDir));
     assert(sql.trim().length > 0, name);
     for (const match of sql.matchAll(/^\\ir (.+)$/gm)) {
@@ -42,7 +42,18 @@ Deno.test("job pages safety: the registered behavioral proof and rollback artifa
 Deno.test("job pages safety: failure acknowledges the captured coordinate and catches cancellation", () => {
   const failure = migration.split("EXCEPTION WHEN OTHERS OR query_canceled THEN")[1];
   assert(failure);
-  assert(failure.includes("VALUES(p_job_id,v_version,v_covers,v_covers)"));
-  assert(!/SELECT\s+mark_version/i.test(failure));
+  assert(failure.includes("public.job_page_ack(p_job_id,v_version,v_covers,v_events)"));
   assert(migration.includes("ON CONFLICT (job_id) DO UPDATE SET status='failed'"));
+});
+
+Deno.test("job pages safety: due probes, indexed version and bounded nightly fold are registered", () => {
+  assert(!migration.includes("FULL JOIN"));
+  const due = migration.split("AS $due$")[1].split("$due$;")[0];
+  assert(due.includes("WHERE e.page_pending"));
+  assertEquals([...due.matchAll(/LIMIT 1/g)].length, 3);
+  assert(migration.includes("FROM public.job_change_mark_events x WHERE x.job_id=j.id"));
+  assert(migration.includes("v_folded:=public.job_change_marks_fold(10000)"));
+  const contract = Deno.readTextFileSync(new URL("index-contract.sql", caseDir));
+  for (const proof of ["generate_series(1,10000)", "EXPLAIN (FORMAT JSON)", "fold changed a version", "fold exceeded its bound"])
+    assert(contract.includes(proof));
 });

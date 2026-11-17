@@ -1,7 +1,7 @@
 -- Stand the historical mark/build contract back up; the successor has its own proofs.
 SELECT to_regclass('public.job_change_marks_base') IS NOT NULL AS queue_safety_live \gset
 \if :queue_safety_live
-\ir ../../../rollbacks/20261117172102_job_pages_queue_safety_down.sql
+\ir ../../../rollbacks/20261117172503_job_pages_queue_safety_down.sql
 \endif
 -- P0-01.2: keep-ready population, missing/current pages and bounded retention.
 BEGIN;
@@ -104,4 +104,4 @@ END $c$;
 ROLLBACK;
 
 -- Restore the successor for the remaining registered cases.
-\ir ../../../migrations/20261117172102_job_pages_queue_safety.sql
+\ir ../../../migrations/20261117172503_job_pages_queue_safety.sql

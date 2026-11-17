@@ -1,5 +1,5 @@
 -- Stand the historical mark/build contract back up; the successor has its own proofs.
-\ir ../../../rollbacks/20261117172102_job_pages_queue_safety_down.sql
+\ir ../../../rollbacks/20261117172503_job_pages_queue_safety_down.sql
 -- Remove the promised behaviour: a mark after the page is done no longer starts a new run of changes, so the
 -- contract's step (c) must fail.
 CREATE OR REPLACE FUNCTION public.job_mark_changed(p_job_id uuid, p_source text) RETURNS void

@@ -81,3 +81,5 @@ BEGIN
 END $c$;
 ROLLBACK;
 \ir concurrency-contract.sql
+\ir index-contract.sql
+\ir timeout-contract.sql
