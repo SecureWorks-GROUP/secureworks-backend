@@ -11719,7 +11719,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'scope_availability': return json(await scopeAvailability(client, url.searchParams))
       case 'dismiss_alert': return json(await dismissAlert(client, body))
       case 'annotations': return json(await getAnnotations(client, url.searchParams))
-      case 'resolve_annotation': return json(await resolveAnnotation(client, body))
+      case 'resolve_annotation': return json(await resolveAnnotation(client, body, {
+        authMode, role: authUser?.role, requestActor,
+      }))
       case 'set_availability': return json(await setAvailability(client, body))
       case 'confirm_assignment': return json(await confirmAssignment(client, body))
       case 'bulk_confirm': return json(await bulkConfirm(client, body))
@@ -63003,8 +63005,11 @@ async function getAnnotations(client: any, params: URLSearchParams) {
 }
 
 // POST: Resolve an annotation with response
-async function resolveAnnotation(client: any, body: any) {
-  const { annotation_id, response_value, response_text, operator_email } = body
+export async function resolveAnnotation(client: any, body: any, caller?: {
+  authMode: string; role?: string; requestActor: ReturnType<typeof resolveRequestActor>;
+}) {
+  const { annotation_id, response_value, response_text } = body
+  let operator_email = body.operator_email
   if (!annotation_id) throw new Error('annotation_id required')
 
   // Fetch annotation
@@ -63015,10 +63020,27 @@ async function resolveAnnotation(client: any, body: any) {
     .single()
   if (fetchErr || !ann) throw new Error('Annotation not found or already resolved')
 
+  let guardedLink = false
+  if (ann.annotation_type === 'unlinked_invoice') {
+    try {
+      const flag = await client.from('feature_flags').select('enabled')
+        .eq('flag_name', 'inbox_link_v1').maybeSingle()
+      guardedLink = !flag.error && flag.data?.enabled === true
+    } catch { /* Missing or unreadable switch keeps the legacy path. */ }
+    if (guardedLink) {
+      if (caller?.authMode !== 'jwt' || !_opsApiStaffOperatorRole(caller.role) ||
+          caller.requestActor.source !== 'jwt' || caller.requestActor.missing) {
+        throw new ApiError('person_session_required', 403)
+      }
+      operator_email = caller.requestActor.actor
+      await applyGuardedAnnotationInvoiceLink(client, ann, body)
+    }
+  }
+
   // F8 sibling preflight: an annotation must remain active when a forbidden
   // sealed-SES link is refused, and neither the invoice nor annotation may be
   // changed before the typed fence result is returned.
-  if (ann.annotation_type === 'unlinked_invoice') {
+  if (ann.annotation_type === 'unlinked_invoice' && !guardedLink) {
     if (response_value === 'link' && ann.structured_data?.job_id) {
       await assertLegacySesMoneyActionAllowedForJob(
         client,
@@ -63064,6 +63086,7 @@ async function resolveAnnotation(client: any, body: any) {
   // Type-specific dispatch
   switch (ann.annotation_type) {
     case 'unlinked_invoice': {
+      if (guardedLink) break
       if (response_value === 'link' && ann.structured_data?.job_id) {
         // Link the invoice(s) to the job
         const candidateIds = (ann.structured_data.candidate_invoices || []).map((c: any) => c.id).filter(Boolean)
@@ -63247,6 +63270,65 @@ async function resolveAnnotation(client: any, body: any) {
   } catch { /* non-blocking */ }
 
   return { success: true, annotation_id, action }
+}
+
+// Switch-on Inbox Link validates every candidate before changing any invoice.
+async function applyGuardedAnnotationInvoiceLink(client: any, ann: any, body: any) {
+  const response = body.response_value
+  const sd = ann.structured_data || {}
+  let targetJobId: string
+  let invoices: any[]
+  if (response === 'link' && sd.job_id) {
+    targetJobId = sd.job_id
+    const ids = collectUniqueStringIds((sd.candidate_invoices || []).map((row: any) => row.id))
+    const read = await client.from('xero_invoices')
+      .select('id,invoice_type,job_id,invoice_obligation_revision_id,ses_external_token').in('id', ids)
+    if (read.error) throw new ApiError(read.error.message, 500)
+    if (!ids.length || read.data?.length !== ids.length) throw new ApiError('invoice_not_found', 404)
+    invoices = read.data
+  } else if (typeof response === 'string' && response.startsWith('link:')) {
+    targetJobId = response.slice(5)
+    const read = await client.from('xero_invoices')
+      .select('id,invoice_type,job_id,invoice_obligation_revision_id,ses_external_token')
+      .eq('xero_invoice_id', sd.xero_invoice_id).maybeSingle()
+    if (read.error) throw new ApiError(read.error.message, 500)
+    if (!read.data) throw new ApiError('invoice_not_found', 404)
+    invoices = [read.data]
+  } else {
+    return // Dismiss still resolves, under the signed-in staff identity.
+  }
+  if (invoices.some((invoice) => invoice.invoice_type === 'ACCPAY')) {
+    throw new ApiError('use_reconcile', 409, { error: 'use_reconcile', message: 'Bills are placed in Reconcile.' })
+  }
+  const target = await client.from('jobs').select('id,job_number,status').eq('id', targetJobId).maybeSingle()
+  if (target.error) throw new ApiError(target.error.message, 500)
+  if (!target.data || ['cancelled', 'lost'].includes(target.data.status)) throw new ApiError('job_not_live', 409)
+  for (const invoice of invoices) {
+    if (invoice.invoice_obligation_revision_id || invoice.ses_external_token) {
+      throw new SesActionError(409, sealedSesMoneyRefusal('resolve_annotation invoice link', {
+        job_id: invoice.job_id || null,
+        invoice_obligation_revision_id: invoice.invoice_obligation_revision_id || null,
+        has_ses_external_token: !!invoice.ses_external_token,
+      }))
+    }
+    await assertNoSyntheticLivefireJobs(client, [targetJobId, invoice.job_id], 'resolve_annotation invoice link')
+    if (invoice.job_id && invoice.job_id !== targetJobId && body.confirm_replace !== true) {
+      const current = await client.from('jobs').select('job_number').eq('id', invoice.job_id).maybeSingle()
+      if (current.error) throw new ApiError(current.error.message, 500)
+      const currentNumber = current.data?.job_number || invoice.job_id
+      throw new ApiError('link_would_replace', 409, {
+        error: 'link_would_replace', current_job_number: currentNumber, new_job_number: target.data.job_number,
+        message: `This invoice is on ${currentNumber}. Move it to ${target.data.job_number}?`,
+      })
+    }
+  }
+  for (const invoice of invoices) {
+    let update = client.from('xero_invoices').update({ job_id: targetJobId }).eq('id', invoice.id)
+    update = invoice.job_id ? update.eq('job_id', invoice.job_id) : update.is('job_id', null)
+    const result = await update.select('id')
+    if (result.error) throw new ApiError(result.error.message, 500)
+    if (!result.data?.length) throw new ApiError('invoice_link_changed', 409)
+  }
 }
 
 // Dedup helper: check if source_ref already exists as active, insert if not
