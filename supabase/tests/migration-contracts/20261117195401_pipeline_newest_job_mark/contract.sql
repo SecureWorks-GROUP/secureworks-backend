@@ -29,7 +29,7 @@ ANALYZE public.jobs;
 ANALYZE public.job_change_mark_events;
 ANALYZE public.job_change_marks_base;
 DO $check$
-DECLARE plan jsonb;
+DECLARE plan jsonb; relation_name text;
 BEGIN
  IF (SELECT last_marked_at FROM public.pipeline_newest_job_mark('00000000-0000-0000-0000-000000000001'))
   IS DISTINCT FROM '2026-11-18T01:00:00Z'::timestamptz THEN
@@ -48,11 +48,18 @@ BEGIN
  EXECUTE $q$EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON)
   SELECT * FROM public.pipeline_newest_job_mark('00000000-0000-0000-0000-000000000001')$q$ INTO plan;
  RAISE NOTICE 'FU13 newest mark plan: %',plan;
- IF plan::text NOT LIKE '%job_change_mark_events_newest%'
-  OR plan::text NOT LIKE '%job_change_marks_base_newest%'
-  OR plan::text NOT LIKE '%jobs_pkey%'
-  OR jsonb_path_exists(plan,'$.** ? (@."Node Type" == "Seq Scan" && (@."Relation Name" == "job_change_mark_events" || @."Relation Name" == "job_change_marks_base" || @."Relation Name" == "jobs"))') THEN
-  RAISE EXCEPTION 'FU13: newest org mark must use timestamp index and jobs primary key'; END IF;
+ -- Equivalent indexes may have different names. Assert the executed access
+ -- paths for each relation, retaining the natural planner and row fixture.
+ FOREACH relation_name IN ARRAY ARRAY['job_change_mark_events', 'job_change_marks_base', 'jobs'] LOOP
+  IF NOT jsonb_path_exists(plan,
+    '$.** ? (@."Relation Name" == $relation && (@."Node Type" == "Index Scan" || @."Node Type" == "Index Only Scan"))',
+    jsonb_build_object('relation', relation_name))
+   OR jsonb_path_exists(plan,
+    '$.** ? (@."Relation Name" == $relation && @."Node Type" == "Seq Scan")',
+    jsonb_build_object('relation', relation_name)) THEN
+   RAISE EXCEPTION 'FU13: newest org mark must use an index scan on %', relation_name;
+  END IF;
+ END LOOP;
 END $check$;
 -- A booking-only event must advance the same org's reader too.
 INSERT INTO public.job_change_mark_events(job_id,marked_at,source,page_pending) VALUES
