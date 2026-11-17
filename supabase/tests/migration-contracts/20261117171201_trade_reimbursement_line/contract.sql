@@ -1,4 +1,11 @@
 BEGIN;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.trade_invoice_lines'::regclass AND tgname = 'trade_invoice_lines_reimbursement_once') THEN
+    RAISE EXCEPTION 'ZZTEST migration installed the receipt guard before director release';
+  END IF;
+END $$;
+SELECT public.install_trade_invoice_reimbursement_guard();
+SELECT public.install_trade_invoice_reimbursement_guard();
 -- Lift unrelated fixture guards only. The reimbursement guards stay enabled.
 DO $$ DECLARE t text; c record; BEGIN
   FOREACH t IN ARRAY ARRAY['users', 'jobs', 'trade_invoices', 'trade_invoice_lines', 'expense_receipts'] LOOP
@@ -52,4 +59,11 @@ DO $$ DECLARE n int; BEGIN
 END $$;
 UPDATE public.trade_invoices SET status = 'ops-reject' WHERE id = '03000000-0000-4000-8000-000000000004';
 INSERT INTO public.trade_invoice_lines(trade_invoice_id,line_type,line_total_ex,expense_receipt_id) VALUES ('03000000-0000-4000-8000-000000000005','reimbursement',80,'03000000-0000-4000-8000-000000000003');
+SELECT public.remove_trade_invoice_reimbursement_guard();
+SELECT public.remove_trade_invoice_reimbursement_guard();
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.trade_invoice_lines'::regclass AND tgname = 'trade_invoice_lines_reimbursement_once') THEN
+    RAISE EXCEPTION 'ZZTEST director removal left the receipt guard installed';
+  END IF;
+END $$;
 ROLLBACK;
