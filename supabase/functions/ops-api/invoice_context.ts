@@ -1396,8 +1396,8 @@ export async function debtContextCoverage(
   sources.live_read = liveReads.status;
   sources.conversation = conv.status;
 
-  // Rule 1 holds on every row: a false flag always carries a blocker, and an
-  // unreadable source is never reported as an empty one.
+  // Retired facts are no longer a prerequisite. Every remaining missing
+  // source still carries a blocker; an unreadable source is never empty.
   const factsOk = facts.status.ok;
   const conversationOk = conv.status.ok;
   const jobsOk = jobsRead.status.ok;
@@ -1462,7 +1462,7 @@ export async function debtContextCoverage(
     const dueDays = daysBetween(str(inv.due_date), now);
     const overdue = dueDays !== null && dueDays > 0;
     const complete = Boolean(jobId) && Boolean(job) && contactKnown &&
-      factsPresent && conversationPresent && xeroFresh;
+      (facts.facts_retired || factsPresent) && conversationPresent && xeroFresh;
     totals.amount_due += num(inv.amount_due) ?? 0;
     if (overdue) totals.overdue += 1;
     if (link.status === "linked") totals.linked += 1;

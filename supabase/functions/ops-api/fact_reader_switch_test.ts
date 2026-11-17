@@ -17,6 +17,7 @@ const RETIRED =
 
 function stub(flag: boolean | null | "error" | "throw") {
   const reads: string[] = [];
+  const failures = new Set<string>();
   const tables: Record<string, any[]> = {
     feature_flags: flag === null
       ? []
@@ -27,6 +28,7 @@ function stub(flag: boolean | null | "error" | "throw") {
       org_id: ORG,
       type: "fencing",
       status: "accepted",
+      ghl_contact_id: "fixture-contact",
     }],
     current_job_context_facts: [{
       id: "fact-401",
@@ -43,11 +45,15 @@ function stub(flag: boolean | null | "error" | "throw") {
       invoice_type: "ACCREC",
       status: "AUTHORISED",
       job_id: JOB,
+      xero_contact_id: "fixture-xero-contact",
+      synced_at: new Date().toISOString(),
     }],
+    ghl_conversation_cache: [{ job_id: JOB, message_count: 1 }],
   };
   return {
     reads,
     tables,
+    failures,
     rpc: () => Promise.resolve({ data: [], error: null }),
     from(table: string) {
       reads.push(table);
@@ -101,7 +107,7 @@ function stub(flag: boolean | null | "error" | "throw") {
           filters.every((f) => f(r))
         );
         return Promise.resolve(
-          table === "feature_flags" && flag === "error"
+          failures.has(table) || (table === "feature_flags" && flag === "error")
             ? { data: null, error: { message: "unavailable" } }
             : { data: single ? rows[0] ?? null : rows, error: null },
         ).then(resolve, reject);
@@ -150,6 +156,9 @@ Deno.test("fact readers: retirement, T24 dossier, enabled fallback and minute ca
       assertEquals(dossier.diagnostics.warnings.includes(RETIRED), retired);
       assertEquals(invoice.facts.length, retired ? 0 : 1);
       assertEquals(coverage.rows[0].facts_count, retired ? 0 : 1);
+      assertEquals(coverage.rows[0].complete, true);
+      assertEquals(coverage.totals.complete, 1);
+      assertEquals(coverage.totals.facts_present, retired ? 0 : 1);
       if (retired) {
         assertEquals(
           client.reads.filter((r) => r === "current_job_context_facts").length,
@@ -191,7 +200,37 @@ Deno.test("fact readers: retirement, T24 dossier, enabled fallback and minute ca
       (await _getJobContextFactsForTest(client, { job_uuids: [JOB] })).rows,
       [],
     );
-    assertEquals(client.reads.filter((r) => r === "feature_flags").length, 2);
+    const deps = {
+      client, orgId: ORG, isCurrentContextFact,
+      getJobConversation: async () => ({ messages: [] }),
+    };
+    const missing = await debtContextCoverage(new URLSearchParams(), deps);
+    assertEquals(missing.rows[0].complete, false);
+    assert(missing.rows[0].blockers.includes("facts_missing"));
+    client.tables.feature_flags[0].enabled = false;
+    now += 60_001;
+    const retiredCoverage = () => debtContextCoverage(new URLSearchParams(), deps);
+    assertEquals((await retiredCoverage()).rows[0].complete, true);
+    // Retirement waives only facts. Missing conversation and failed reads
+    // still refuse completeness, including a repeated read after the fault.
+    client.tables.ghl_conversation_cache = [];
+    const noConversation = await retiredCoverage();
+    assertEquals(noConversation.rows[0].complete, false);
+    assert(noConversation.rows[0].blockers.includes("conversation_missing"));
+    client.tables.ghl_conversation_cache = [{ job_id: JOB, message_count: 1 }];
+    client.failures.add("ghl_conversation_cache");
+    for (let retry = 0; retry < 2; retry++) {
+      const failed = await retiredCoverage();
+      assertEquals(failed.rows[0].complete, false);
+      assert(failed.rows[0].blockers.includes("conversation_unreadable"));
+    }
+    client.failures.clear();
+    assertEquals((await retiredCoverage()).rows[0].complete, true);
+    client.tables.xero_invoices[0].synced_at = null;
+    const officeChange = await retiredCoverage();
+    assertEquals(officeChange.rows[0].complete, false);
+    assert(officeChange.rows[0].blockers.includes("xero_stale"));
+    assertEquals(client.reads.filter((r) => r === "feature_flags").length, 3);
   } finally {
     Date.now = realNow;
   }
