@@ -42,6 +42,9 @@ export type TradeRecurringDeductionRule = {
   first_week_start: string;
   last_week_start: string | null;
   active: boolean;
+  kind?: "recurring" | "repayment";
+  balance_total?: number | null;
+  xero_account_code?: string | null;
 };
 
 // A submitted invoice that has no invoice week: why, and the day it is for.
@@ -79,6 +82,7 @@ export type TradeRecurringDeductionDecision = {
   // The plain reason for the office when a deduction was due and not taken.
   // null otherwise.
   note: string | null;
+  balance_left_after?: number;
 };
 
 const NO_DEDUCTION: TradeRecurringDeductionDecision = {
@@ -155,6 +159,9 @@ export function tradeRecurringDeductionRulesCovering(
       first_week_start: first,
       last_week_start: last,
       active: true,
+      ...(row.kind === "repayment" ? { kind: "repayment" as const,
+        balance_total: Number(row.balance_total),
+        xero_account_code: String(row.xero_account_code ?? "").trim() } : {}),
     });
   }
   return covering;
@@ -198,19 +205,24 @@ export function decideTradeRecurringDeduction(input: {
   // Other invoices of this trade and week carrying a deduction:
   // { id, status, invoice_number }. Released ones never hold the week.
   carriers?: unknown;
+  repaymentsOn?: boolean;
+  balanceLeft?: unknown;
   // Only for a submitted invoice with no invoice week. A draft passes none.
   weekless?: TradeRecurringDeductionWeekless | null;
 }): TradeRecurringDeductionDecision {
+  const enabledRules = Array.isArray(input.rules)
+    ? input.rules.filter((rule) => rule?.kind !== "repayment" || input.repaymentsOn === true)
+    : input.rules;
   const week = dateOnly(input.weekStart);
   if (!week) {
     return decideWeeklessTradeRecurringDeduction(
-      input.rules,
+      enabledRules,
       input.userId,
       input.weekless,
     );
   }
   const rules = tradeRecurringDeductionRulesCovering(
-    input.rules,
+    enabledRules,
     input.userId,
     week,
   );
@@ -226,13 +238,25 @@ export function decideTradeRecurringDeduction(input: {
         }). Nothing was taken off. The office to leave one row covering the week and recover it another way.`,
     };
   }
-  const rule = rules[0];
+  const rule = { ...rules[0] };
+  let balanceAfter: number | undefined;
+  if (rule.kind === "repayment") {
+    const left = typeof input.balanceLeft === "number" ? input.balanceLeft : NaN;
+    if (!Number.isFinite(left) || left < 0 || !rule.xero_account_code) {
+      return { ...NO_DEDUCTION, outcome: "nothing_payable", note:
+        "The repayment balance could not be read, so nothing was taken this week." };
+    }
+    if (toCents(left) === 0) return NO_DEDUCTION;
+    rule.amount = Math.min(toCents(rule.amount), toCents(left)) / 100;
+    balanceAfter = (toCents(left) - toCents(rule.amount)) / 100;
+  }
 
   const covering = {
     id: rule.id,
     label: rule.label,
     amount: rule.amount,
     week_start: week,
+    ...(rule.kind === "repayment" ? { kind: rule.kind, xero_account_code: rule.xero_account_code } : {}),
   };
   const holder = (Array.isArray(input.carriers) ? input.carriers : [])
     .map((raw) =>
@@ -280,7 +304,9 @@ export function decideTradeRecurringDeduction(input: {
   return {
     outcome: "applied",
     rule: covering,
-    applied: { id: rule.id, label: rule.label, amount: rule.amount },
+    applied: { id: rule.id, label: rule.label, amount: rule.amount,
+      ...(rule.kind === "repayment" ? { kind: rule.kind, xero_account_code: rule.xero_account_code } : {}) },
+    ...(balanceAfter === undefined ? {} : { balance_left_after: balanceAfter }),
     note: null,
   };
 }
@@ -312,7 +338,7 @@ export async function loadTradeRecurringDeductionDecision(
 
   const rulesRead = await client.from("trade_recurring_deductions")
     .select(
-      "id, user_id, label, amount, first_week_start, last_week_start, active",
+      "id, user_id, label, amount, first_week_start, last_week_start, active, kind, balance_total, xero_account_code",
     )
     .eq("user_id", input.userId)
     .eq("active", true) as QueryResult;
@@ -323,8 +349,23 @@ export async function loadTradeRecurringDeductionDecision(
     console.error("[ops-api] " + message);
     return NO_DEDUCTION;
   }
+  const rows = Array.isArray(rulesRead.data) ? rulesRead.data : [];
+  let repaymentsOn = false;
+  let balanceLeft: number | undefined;
+  if (rows.some((row: TradeRecurringDeductionRule) => row.kind === "repayment")) {
+    try {
+      const flag = await client.from("feature_flags").select("enabled").eq("flag_name", "trade_repayments_v1").maybeSingle();
+      repaymentsOn = !flag.error && flag.data?.enabled === true;
+      const covering = tradeRecurringDeductionRulesCovering(rows, input.userId, week);
+      if (repaymentsOn && covering.length === 1 && covering[0].kind === "repayment") {
+        const balance = await client.rpc("trade_repayment_balance", { p_id: covering[0].id });
+        if (!balance.error && balance.data !== null && Number.isFinite(Number(balance.data))) balanceLeft = Number(balance.data);
+      }
+    } catch { /* The decision records an unreadable balance and takes nothing. */ }
+  }
   const decided = decideTradeRecurringDeduction({
     rules: rulesRead.data,
+    repaymentsOn, balanceLeft,
     userId: input.userId,
     weekStart: week,
     payable: input.payable,
@@ -348,6 +389,7 @@ export async function loadTradeRecurringDeductionDecision(
 
   return decideTradeRecurringDeduction({
     rules: rulesRead.data,
+    repaymentsOn, balanceLeft,
     userId: input.userId,
     weekStart: week,
     payable: input.payable,
@@ -381,6 +423,10 @@ export function tradeRecurringDeductionResponse(
 ): Record<string, unknown> {
   if (decision.outcome === "none" || !decision.rule) return {};
   return {
+    ...(decision.applied?.kind === "repayment" ? { repayment: {
+      label: decision.applied.label, amount: decision.applied.amount,
+      balance_left: decision.balance_left_after,
+    } } : {}),
     recurring_deduction_week: {
       label: decision.rule.label,
       amount: decision.rule.amount,
@@ -412,4 +458,21 @@ export function withTradeRecurringDeductionOfficeNote<
     ...invoice,
     query_note: [stored, reason].filter(Boolean).join(" | "),
   };
+}
+
+/** Rehydrate the rule identity for an already stored invoice before its Xero split.
+ * The set/stop doors never change a row's kind or account. No balance is re-taken.
+ */
+export async function withStoredTradeRepaymentRule(
+  // deno-lint-ignore no-explicit-any
+  client: any, invoice: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!invoice.recurring_deduction_id || !invoice.recurring_deduction_amount) return invoice;
+  const read = await client.from("trade_recurring_deductions").select("kind, xero_account_code")
+    .eq("id", invoice.recurring_deduction_id).maybeSingle();
+  if (read.error || !read.data) throw new Error("Could not read the stored deduction rule");
+  if (read.data.kind !== "repayment") return invoice;
+  if (!String(read.data.xero_account_code ?? "").trim()) throw new Error("Could not read the repayment account");
+  return { ...invoice, recurring_deduction_kind: "repayment",
+    recurring_deduction_xero_account_code: read.data.xero_account_code };
 }

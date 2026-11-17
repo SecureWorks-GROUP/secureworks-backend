@@ -179,6 +179,7 @@ export type SupplierCreditSyncResult =
     modified_since: string | null;
     full_reread: boolean;
     captured_at: string;
+    cost_lines: { results: unknown[]; error?: string };
   };
 
 export async function syncSupplierCreditNotes(
@@ -237,6 +238,7 @@ export async function syncSupplierCreditNotes(
   }
 
   // Only after the whole read: each note and its list in one transaction.
+  const writtenIds: string[] = [];
   let written = 0;
   let stale = 0;
   let allocations = 0;
@@ -249,7 +251,7 @@ export async function syncSupplierCreditNotes(
     if (error) {
       throw new Error(`Supplier credit note write failed for ${one.note.xero_credit_note_id}: ${error.message}`);
     }
-    if (data === "written") written++;
+    if (data === "written") { written++; writtenIds.push(one.note.xero_credit_note_id); }
     else if (data === "stale") stale++;
     else throw new Error(`Supplier credit note write for ${one.note.xero_credit_note_id} answered ${String(data)}`);
     allocations += one.allocations?.length ?? 0;
@@ -262,6 +264,20 @@ export async function syncSupplierCreditNotes(
     ...(since ? [] : [{ key: fullKey, cursor_at: started, updated_at: updatedAt, note }]),
   ], { onConflict: "key" });
   if (error) throw new Error(`Supplier credit note cursor write failed: ${error.message}`);
+  const costLines: { results: unknown[]; error?: string } = { results: [] };
+  for (let i = 0; i < writtenIds.length; i += 200) {
+    try {
+      const { data, error } = await sb.rpc("job_cost_lines_sync_credit_notes", {
+        p_credit_note_ids: writtenIds.slice(i, i + 200),
+      });
+      if (error) throw new Error(error.message);
+      costLines.results.push(data);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error("[xero-sync] Credit cost lines failed:", message);
+      costLines.error = costLines.error ? `${costLines.error}; ${message}` : message;
+    }
+  }
   return {
     ran: true,
     notes: parsed.length,
@@ -272,5 +288,6 @@ export async function syncSupplierCreditNotes(
     modified_since: since ?? null,
     full_reread: !since,
     captured_at: started,
+    cost_lines: costLines,
   };
 }

@@ -1,0 +1,1 @@
+DO $$ BEGIN IF to_regprocedure('public.trade_repayment_balance(uuid)') IS NOT NULL OR EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='trade_recurring_deductions' AND column_name='kind') THEN RAISE EXCEPTION 'repayment rollback incomplete'; END IF; END $$;

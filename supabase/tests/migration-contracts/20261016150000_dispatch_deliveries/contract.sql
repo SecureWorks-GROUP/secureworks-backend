@@ -1,6 +1,6 @@
 -- Contract: 20261016150000_dispatch_deliveries. Six nullable columns, a sighting always names a
 -- person, both "by" columns point at users, existing orders are untouched, and nothing else is
--- added to purchase_orders (still one trigger).
+-- added by this slice to purchase_orders (its own update trigger remains).
 \set ON_ERROR_STOP on
 CREATE OR REPLACE FUNCTION pg_temp.dd_assert(ok boolean, message text) RETURNS void
 LANGUAGE plpgsql AS $$ BEGIN IF NOT coalesce(ok, false) THEN
@@ -23,8 +23,9 @@ SELECT pg_temp.dd_assert((SELECT count(*) FROM pg_constraint c
     AND a.attname IN ('confirmed_delivery_set_by', 'delivery_sighted_by')) = 2,
  'both set_by and sighted_by must reference users(id)');
 SELECT pg_temp.dd_assert((SELECT count(*) FROM pg_trigger
-  WHERE tgrelid = 'public.purchase_orders'::regclass AND NOT tgisinternal) = 1,
- 'purchase_orders must still carry exactly one trigger');
+  WHERE tgrelid = 'public.purchase_orders'::regclass AND NOT tgisinternal
+    AND tgname = 'trg_po_updated') = 1,
+ 'purchase_orders must retain its trg_po_updated trigger');
 
 BEGIN;
 INSERT INTO public.users (id, org_id, name) VALUES
