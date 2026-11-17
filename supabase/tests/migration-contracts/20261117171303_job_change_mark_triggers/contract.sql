@@ -1,20 +1,13 @@
+-- Keep the historical rollback and every assertion inside one transaction.
+-- Rolling it back preserves all later table indexes and function bodies.
+BEGIN;
 -- Stand the historical mark/build contract back up; the successor has its own proofs.
--- The rollback drops the raw marks table outside this contract's transaction.
--- Keep every installed index definition so restoring the table also restores
--- later read optimizations, without reapplying/healing a later migration.
-CREATE TEMP TABLE job_trigger_saved_raw_indexes AS
-SELECT format('%I.%I', n.nspname, c.relname) AS index_name,
- pg_get_indexdef(i.indexrelid) AS definition
-FROM pg_index i
-JOIN pg_class c ON c.oid = i.indexrelid
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE i.indrelid = to_regclass('public.job_change_mark_events');
 SELECT to_regclass('public.job_change_marks_base') IS NOT NULL AS queue_safety_live \gset
 \if :queue_safety_live
 \ir ../../../rollbacks/20261117172503_job_pages_queue_safety_down.sql
 \endif
 -- P0-02.2: observable changes and housekeeping writes, rolled back.
-BEGIN;
+SAVEPOINT fixture;
 SELECT public.job_change_mark_triggers_install();
 SELECT public.job_change_mark_triggers_install();
 SELECT set_config('request.jwt.claims','{"role":"service_role"}',true);
@@ -80,26 +73,7 @@ BEGIN
   RAISE EXCEPTION 'job mark triggers: document delete must mark job';
  END IF;
 END $c$;
+ROLLBACK TO SAVEPOINT fixture;
+
+-- Restore the exact incoming schema, including all successor objects.
 ROLLBACK;
-
--- Restore the successor for the remaining registered cases.
-\ir ../../../migrations/20261117172503_job_pages_queue_safety.sql
-DO $restore$
-DECLARE saved record;
-BEGIN
- FOR saved IN SELECT * FROM job_trigger_saved_raw_indexes ORDER BY index_name LOOP
-  IF to_regclass(saved.index_name) IS NULL THEN EXECUTE saved.definition; END IF;
-  IF pg_get_indexdef(to_regclass(saved.index_name)) IS DISTINCT FROM saved.definition THEN
-   RAISE EXCEPTION 'job mark triggers: raw mark index was not restored: %', saved.index_name;
-  END IF;
- END LOOP;
-END $restore$;
-DROP TABLE job_trigger_saved_raw_indexes;
-
--- Restore the installed record-close/speed successor after the historical queue
--- reapply. This case also runs without the page/schedule cases on CI shard 2.
-SELECT to_regprocedure('public.job_page_yield(uuid)') IS NOT NULL AS page_retry_successor_live \gset
-\if :page_retry_successor_live
-\ir ../../../migrations/20261117195203_job_page_refresh_record_close.sql
-\ir ../../../migrations/20261117215801_job_page_speed_and_retry.sql
-\endif
