@@ -1,15 +1,17 @@
 # Stored job story read: P0-02.3 and P0-02.4
 
 The backend's current job story reads use `job_page_get` only while
-`feature_flags.job_story_stored_page_v1` is true. Migration
-`20261117195601` seeds this separate read switch off and preserves an existing
+`feature_flags.job_page_stored_read_v1` is true. Migration
+`20261117195601` seeds this spec read switch off and preserves an existing
 setting. Nothing installs a trigger or timer or changes a worker on merge.
 
 With the switch off, missing or unreadable, `readJobStory` calls the existing
 `context_job_story` with the same arguments and returns the same answer.
 Explicit `as_of`, `since` and `generation_id` requests always retain that reader.
 The current stored card carries `meta.stored_page` with its build time and stale
-flag. A failed, absent or wrong-job page is unavailable, never a clean empty card.
+flag. A stored miss (error, absent page, not ready, wrong job or bad shape) falls
+back to the existing `context_job_story` call with the same arguments, including
+when the stored RPC throws. A ready page is still served without a live call.
 The existing `job_page_get` can build a missing page on demand; an existing stale
 page is returned with its stale flag. Both the story door and Job Overview use
 this shared reader. Saved prose, notes, files and client stories keep their
@@ -26,7 +28,7 @@ new schedule, Xero call or money write is added.
 - P0-02.3 backend: `deno test --no-check --allow-env --allow-read
   supabase/functions/ops-api/job_story_stored_page_test.ts
   supabase/functions/ops-api/job_story_door_test.ts
-  supabase/functions/ops-api/job_overview_read_test.ts`: 31 pass, zero fail.
+  supabase/functions/ops-api/job_overview_read_test.ts`: 32 pass, zero fail.
   The focused switch guard failed before the implementation.
 - Migration: the single `20261117195601_job_story_stored_page_read` contract
   prints `PASS: P0-02.3 stored story read seeded off; two reapplies preserve setting`.

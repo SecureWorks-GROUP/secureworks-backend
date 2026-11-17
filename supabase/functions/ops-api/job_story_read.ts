@@ -192,15 +192,30 @@ export async function readJobStory(
       try {
         // feature_flags_pkey: one switch, no table scan. Missing/unreadable is off.
         const flag = await client.from("feature_flags").select("enabled")
-          .eq("flag_name", "job_story_stored_page_v1").maybeSingle();
+          .eq("flag_name", "job_page_stored_read_v1").maybeSingle();
         stored = !flag.error && flag.data?.enabled === true;
       } catch {
         stored = false;
       }
     }
-    const { data: payload, error } = await client.rpc(
-      stored ? "job_page_get" : "context_job_story", args,
-    );
+    let page: any = null;
+    if (stored) {
+      try {
+        const { data, error } = await client.rpc("job_page_get", args);
+        if (
+          !error && data?.version === "job-page-v1" &&
+          data.status === "ready" && data.card?.version === "job-story-v1" &&
+          data.card?.job?.id === input.jobId && !Array.isArray(data.card)
+        ) {
+          page = data;
+        }
+      } catch {
+        // A stored miss must not take away the live story.
+      }
+    }
+    const { data, error } = page
+      ? { data: page.card, error: null }
+      : await client.rpc("context_job_story", args);
     if (error) {
       return {
         story: null,
@@ -210,11 +225,6 @@ export async function readJobStory(
         ),
       };
     }
-    if (stored && (payload?.version !== "job-page-v1" ||
-      payload.status !== "ready" || payload.card?.job?.id !== input.jobId)) {
-      return { story: null, status: failed("stored_page_unavailable") };
-    }
-    const data = stored ? payload.card : payload;
     if (!data || typeof data !== "object") {
       return { story: null, status: failed("empty_payload") };
     }
@@ -222,18 +232,20 @@ export async function readJobStory(
       return { story: null, status: failed("invalid_shape") };
     }
     return {
-      story: stored ? {
-        ...data,
-        meta: {
-          ...data.meta,
-          stored_page: {
-            as_at: payload.as_at,
-            stale: payload.stale,
-            kept_ready: payload.kept_ready,
-            page_version: payload.page_version,
+      story: page
+        ? {
+          ...data,
+          meta: {
+            ...data.meta,
+            stored_page: {
+              as_at: page.as_at,
+              stale: page.stale,
+              kept_ready: page.kept_ready,
+              page_version: page.page_version,
+            },
           },
-        },
-      } : data,
+        }
+        : data,
       status: {
         ok: true,
         state: "ok",

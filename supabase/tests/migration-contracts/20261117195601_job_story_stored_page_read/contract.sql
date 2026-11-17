@@ -1,16 +1,16 @@
 BEGIN;
 DO $$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM public.feature_flags
-  WHERE flag_name='job_story_stored_page_v1' AND enabled=false) THEN
+  WHERE flag_name='job_page_stored_read_v1' AND enabled=false) THEN
   RAISE EXCEPTION 'stored story read must be seeded off';
  END IF;
 END $$;
-UPDATE public.feature_flags SET enabled=true WHERE flag_name='job_story_stored_page_v1';
+UPDATE public.feature_flags SET enabled=true WHERE flag_name='job_page_stored_read_v1';
 \ir ../../../migrations/20261117195601_job_story_stored_page_read.sql
 \ir ../../../migrations/20261117195601_job_story_stored_page_read.sql
 DO $$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM public.feature_flags
-  WHERE flag_name='job_story_stored_page_v1' AND enabled=true) THEN
+  WHERE flag_name='job_page_stored_read_v1' AND enabled=true) THEN
   RAISE EXCEPTION 'stored story read replay changed the operator setting';
  END IF;
 END $$;
