@@ -527,3 +527,12 @@ handlerTest("work-order door, switch on: a backed work order is paid, its Xero b
   assertEquals(bill(on), bill(off));
   assertEquals(on.body.send.held_ex, 0);
 });
+
+handlerTest("line hold: an extra line with no job number is still refused at entry, as today", async () => {
+  // Input checks are not work order, cap or commission refusals (spec step 2:
+  // "build the lines as today"); nothing is saved and nothing is raised.
+  const out = await send([line(BACKED_JOB, "ZZF-5001", "Materials", 4, 50), line(null, null, "Travel", 1, 30)], { lineHold: true, agreed: 4000 });
+  assertEquals(out.status, 422, JSON.stringify(out.body));
+  assertEquals(out.invoices, []);
+  assertEquals(out.raises, []);
+});
