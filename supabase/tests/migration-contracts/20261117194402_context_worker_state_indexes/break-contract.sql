@@ -1,0 +1,1 @@
+DROP INDEX public.business_events_worker_facts_present;
