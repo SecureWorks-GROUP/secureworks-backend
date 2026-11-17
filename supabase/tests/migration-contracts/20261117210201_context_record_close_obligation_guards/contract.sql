@@ -15,9 +15,6 @@ UPDATE public.context_ledger_items SET closes_on='payment',about_key='payment:ba
  WHERE id='00000000-0000-4000-8000-000000000410';
 -- These job-linked receivables stand for the only deposit available. The guard
 -- does not guess final/deposit from words, amounts or a missing deposit marker.
-INSERT INTO public.job_events(job_id,event_type,created_at,detail_json)
-SELECT id,'acceptance_invoice_sent','2026-11-06T10:00:00+08','{}'::jsonb
-FROM public.jobs WHERE job_number IN ('ZZTEST-402','ZZTEST-410');
 DO $c$
 DECLARE v jsonb; s text;
 BEGIN
@@ -28,6 +25,12 @@ BEGIN
  END LOOP;
  v:=public.context_ledger_close_on_records('00000000-0000-4000-8000-000000000410',false);
  IF v->>'closed'<>'0' THEN RAISE EXCEPTION 'FU19: paid deposit closed balance'; END IF;
+ -- Test event bypass separately: the first probes above have ONLY a deposit.
+ INSERT INTO public.job_events(job_id,event_type,created_at,detail_json)
+ SELECT id,'acceptance_invoice_sent','2026-11-06T10:00:00+08','{}'::jsonb
+ FROM public.jobs WHERE job_number IN ('ZZTEST-402','ZZTEST-410');
+ v:=public.context_ledger_close_on_records('00000000-0000-4000-8000-000000000402',false);
+ IF v->>'closed'<>'0' THEN RAISE EXCEPTION 'FU19: unnumbered email event closed final invoice'; END IF;
  -- An exact invoice is an obligation the record can answer.
  UPDATE public.context_ledger_items SET about_key='invoice:inv-9002' WHERE id='00000000-0000-4000-8000-000000000402';
  v:=public.context_ledger_close_on_records('00000000-0000-4000-8000-000000000402',false);
