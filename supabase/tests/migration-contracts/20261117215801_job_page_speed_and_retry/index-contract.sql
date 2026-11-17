@@ -17,7 +17,14 @@ BEGIN
  query:=replace(query,'p_job_id',quote_literal(md5('ZZTEST-page-plan-1')::uuid)||'::uuid');
  EXECUTE 'EXPLAIN (FORMAT JSON) '||query INTO plan;
  IF jsonb_path_exists(plan,'$.** ? (@."Node Type" == "Seq Scan" && @."Relation Name" == "job_change_mark_events")')
-  OR NOT (plan::text LIKE '%job_change_mark_events_job%' OR plan::text LIKE '%job_change_mark_events_due%')
+  OR NOT (EXISTS (
+   SELECT 1 FROM jsonb_path_query(plan, '$.** ? (exists(@."Index Name"))') AS p(node)
+   JOIN pg_class c ON c.relname = p.node->>'Index Name'
+   JOIN pg_index i ON i.indexrelid = c.oid
+    AND i.indrelid = 'public.job_change_mark_events'::regclass
+   JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+   WHERE a.attname = 'job_id' AND position('job_id =' IN p.node->>'Index Cond') > 0
+  ) OR plan::text LIKE '%job_change_mark_events_due%')
   OR NOT (plan::text LIKE '%job_change_marks_pkey%' OR plan::text LIKE '%job_change_marks_base_due%') THEN
   RAISE EXCEPTION 'page retry: one-job yield did not use its indexes: %',plan;
  END IF;
@@ -33,7 +40,16 @@ BEGIN
  SELECT prosrc INTO query FROM pg_proc WHERE oid='public.job_page_yield(uuid)'::regprocedure;
  query:=replace(query,'p_job_id',quote_literal(md5('ZZTEST-page-plan-1')::uuid)||'::uuid');
  EXECUTE 'EXPLAIN (FORMAT JSON) '||query INTO plan;
- IF NOT plan::text LIKE '%job_change_mark_events_job%'
+ -- Match the keyed access, including main's newer job-leading covering index.
+ IF jsonb_path_exists(plan,'$.** ? (@."Node Type" == "Seq Scan" && @."Relation Name" == "job_change_mark_events")')
+  OR NOT EXISTS (
+   SELECT 1 FROM jsonb_path_query(plan, '$.** ? (exists(@."Index Name"))') AS p(node)
+   JOIN pg_class c ON c.relname = p.node->>'Index Name'
+   JOIN pg_index i ON i.indexrelid = c.oid
+    AND i.indrelid = 'public.job_change_mark_events'::regclass
+   JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+   WHERE a.attname = 'job_id' AND position('job_id =' IN p.node->>'Index Cond') > 0
+  )
   OR NOT plan::text LIKE '%job_change_marks_pkey%' THEN
   RAISE EXCEPTION 'page retry: dense queue yield did not use job-leading indexes: %',plan;
  END IF;

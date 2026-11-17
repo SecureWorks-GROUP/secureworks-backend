@@ -139,11 +139,25 @@ office closure and isolated close-read failure. Existing queue fairness checks
 still prove both yields. A planted unexpected refresh body must refuse the
 migration, and rollback verifies the exact record-close predecessor md5. No
 proof test was deleted; the renamed folder retains every original assertion.
+The index proof now checks the actual job-leading key and keyed condition,
+including main's newer covering index, rather than insisting on one equivalent
+index name. It still refuses an unbounded raw-table scan.
 Historical page, schedule and record-close tests restore the installed successor
 after exercising their own body, so subsequent cases cannot silently test an
 obsolete refresh definition.
 
-Fresh fix validation is recorded after the focused named-case run below.
+Fresh fix gate after merging current main: 22 positive cases, 7 rollback cases,
+22 planted breaks rejected for their expected reasons, and one unexpected
+pre-image refused; zero unexpected failures. The stock `run.sh` was invoked
+with the 22 case names found by searching for both replaced functions. It
+builds all registered schema prerequisites but runs only those selected
+behavior/proof cases. The successful log ends
+`PostgreSQL migration contracts passed`. The function body pin also proves
+record-close differs from main only at the two yield sites. No TypeScript
+entry point changed; PostgreSQL compiled and executed the changed SQL.
+The exact selection and command are retained in the task's scratch report
+and ready-to-post PR body. The owned disposable server was stopped afterward.
+Migration transaction-statement grep and diff whitespace check both pass.
 
 Director, on live after review and merge: measure deployed build times and
 observe that pending changed/busy jobs no longer monopolize successive turns.
