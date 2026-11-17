@@ -21,8 +21,8 @@ $stub$;
 INSERT INTO cron.job(jobid,jobname,command,active,schedule) VALUES
  (11,'job-pages-refresh',$cmd$SET LOCAL statement_timeout = '45s'; SELECT public.job_pages_refresh_due(1);$cmd$,false,'* * * * *'),
  (12,'job-pages-nightly','SELECT public.job_pages_nightly(200);',true,'10 18 * * *');
-\ir ../../../migrations/20261118062158_job_pages_timer_three.sql
-\ir ../../../migrations/20261118062158_job_pages_timer_three.sql
+\ir ../../../migrations/20261118063847_job_pages_timer_three.sql
+\ir ../../../migrations/20261118063847_job_pages_timer_three.sql
 DO $timer$ BEGIN
  IF NOT EXISTS(SELECT FROM cron.job WHERE jobid=11 AND NOT active AND schedule='* * * * *'
   AND command=$cmd$SET LOCAL statement_timeout = '100s'; SELECT public.job_pages_refresh_due(3);$cmd$
@@ -75,7 +75,7 @@ DO $failure$ DECLARE r jsonb; BEGIN
  OR NOT EXISTS(SELECT FROM public.job_pages WHERE job_id=md5('fu33timer1')::uuid AND status='failed' AND error LIKE '57014 %')
  THEN RAISE EXCEPTION 'bad cancellation isolation %',r; END IF;
 END $failure$;
-\ir ../../../rollbacks/20261118062158_job_pages_timer_three_down.sql
+\ir ../../../rollbacks/20261118063847_job_pages_timer_three_down.sql
 DO $down$ BEGIN
  IF NOT EXISTS(SELECT FROM cron.job WHERE jobid=11 AND NOT active AND
    command=$cmd$SET LOCAL statement_timeout = '45s'; SELECT public.job_pages_refresh_due(1);$cmd$
@@ -86,7 +86,7 @@ END $down$;
 UPDATE cron.job SET command='SELECT 1' WHERE jobid=11;
 SAVEPOINT drift;
 \set ON_ERROR_STOP off
-\ir ../../../migrations/20261118062158_job_pages_timer_three.sql
+\ir ../../../migrations/20261118063847_job_pages_timer_three.sql
 \set drift_state :SQLSTATE
 \set ON_ERROR_STOP on
 ROLLBACK TO drift;
@@ -98,7 +98,7 @@ DO $drift$ BEGIN
  THEN RAISE EXCEPTION 'hand-edited timer or installer was overwritten'; END IF;
 END $drift$;
 DELETE FROM cron.job WHERE jobid=11;
-\ir ../../../migrations/20261118062158_job_pages_timer_three.sql
+\ir ../../../migrations/20261118063847_job_pages_timer_three.sql
 DO $missing$ BEGIN
  IF EXISTS(SELECT FROM cron.job WHERE jobname='job-pages-refresh') THEN RAISE EXCEPTION 'removed timer recreated'; END IF;
 END $missing$;
