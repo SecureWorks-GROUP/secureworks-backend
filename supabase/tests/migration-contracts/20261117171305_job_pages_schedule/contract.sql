@@ -1,10 +1,13 @@
+-- Keep the historical rollback and every assertion inside one transaction.
+-- Rolling it back preserves all later table indexes and function bodies.
+BEGIN;
 -- Stand the historical mark/build contract back up; the successor has its own proofs.
 SELECT to_regclass('public.job_change_marks_base') IS NOT NULL AS queue_safety_live \gset
 \if :queue_safety_live
 \ir ../../../rollbacks/20261117172503_job_pages_queue_safety_down.sql
 \endif
 -- P0-01.2: keep-ready population, missing/current pages and bounded retention.
-BEGIN;
+SAVEPOINT fixture;
 -- The migration itself must leave the busy tables and cron untouched.
 DO $c$
 BEGIN
@@ -124,7 +127,7 @@ BEGIN
   RAISE EXCEPTION 'job pages schedule: deletion did not respect keep-ready set and seven days';
  END IF;
 END $c$;
-ROLLBACK;
+ROLLBACK TO SAVEPOINT fixture;
 
--- Restore the successor for the remaining registered cases.
-\ir ../../../migrations/20261117172503_job_pages_queue_safety.sql
+-- Restore the exact incoming schema, including all successor objects.
+ROLLBACK;
