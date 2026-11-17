@@ -17,7 +17,9 @@
 //     list_work_orders        GET   kind=job lists job work orders with figures
 //     create_work_order       POST  kind=job opens (or edits) the job's draft
 //     update_work_order       POST  edits a job DRAFT (approved ones are sealed)
-//     approve_work_order      POST  approver only (see resolveWorkOrderApprover);
+//     approve_work_order      POST  a named approver (see resolveWorkOrderApprover),
+//                                   or a server-secret agent caller
+//                                   (see resolveWorkOrderAgentCaller);
 //                                   seals only the draft as it was read
 //                                   (expected_updated_at is required)
 //     backfill_job_work_orders POST ops key only; dry run unless apply:true AND
@@ -191,6 +193,17 @@ function requireUuid(value: unknown, field: string): string {
 export type WorkOrderApprover = { userId: string; via: "session" | "terminal" };
 
 /**
+ * A server-secret caller that names itself `agent:<account>` (the SecureSuite
+ * MCP sends `agent:jarvis-mcp`, or whatever SW_ACTOR that deployment sets).
+ * This is not a users.id and it is not the terminal impersonation path.
+ */
+export type WorkOrderAgentCaller = { actor: string };
+
+/** agent:<account>, the same character set as the request-actor header. */
+export const WORK_ORDER_AGENT_ACTOR =
+  /^agent:[A-Za-z0-9_.:@-]{1,120}$/;
+
+/**
  * The human behind an approve call, or null.
  *   session   a verified staff JWT: the signed-in user.
  *   terminal  a server-secret call (SecureSuite) whose x-sw-actor header
@@ -222,6 +235,86 @@ export function resolveWorkOrderApprover(input: {
     }
   }
   return null;
+}
+
+/**
+ * The agent behind an approve call, or null.
+ * Only a server secret counts. The actor must be `agent:<account>` from a
+ * trusted x-sw-actor header. A browser key, a routine key, a seat name and a
+ * `user:<id>` header are not this caller: the last of those stays on the
+ * terminal path above, which still needs its flag and a named approver.
+ * Other approval doors do not read this. They keep resolveWorkOrderApprover.
+ */
+export function resolveWorkOrderAgentCaller(input: {
+  authMode: string;
+  serverSecretPresented: boolean;
+  actor?: { actor: string; source: string } | null;
+}): WorkOrderAgentCaller | null {
+  if (input.authMode !== "api_key" || !input.serverSecretPresented) return null;
+  if (input.actor?.source !== "header") return null;
+  const actor = input.actor.actor || "";
+  if (!WORK_ORDER_AGENT_ACTOR.test(actor)) return null;
+  return { actor };
+}
+
+/**
+ * The name an agent caller passed. `approved_by_name` wins; `approved_by` is
+ * accepted when it is text (who asked). It is never read as a users.id.
+ * An empty value is null so the caller can be refused for a missing name.
+ */
+export function workOrderAgentApprovedByName(body: any): string | null {
+  const raw = body?.approved_by_name !== undefined && body?.approved_by_name !== null
+    ? body.approved_by_name
+    : body?.approved_by;
+  if (raw === undefined || raw === null || raw === "") return null;
+  if (typeof raw !== "string") {
+    fail(
+      400,
+      "invalid_approved_by_name",
+      "approved_by_name must be the approver's name, as text.",
+    );
+  }
+  const name = raw.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ")
+    .trim();
+  if (!name) return null;
+  if (name.length > 200) {
+    fail(
+      400,
+      "invalid_approved_by_name",
+      "approved_by_name must be at most 200 characters.",
+    );
+  }
+  return name;
+}
+
+/** An agent approval has no audit trail without a readable name. */
+export function requireWorkOrderAgentApprovedByName(body: any): string {
+  const name = workOrderAgentApprovedByName(body);
+  if (!name) {
+    fail(
+      400,
+      "approver_name_required",
+      "Pass the approver's name as approved_by_name (or as text approved_by).",
+    );
+  }
+  return name;
+}
+
+/** The approval facts the office read and the job work-order list show. */
+export function workOrderApprovalRecord(wo: any): {
+  approved_at: string | null;
+  approved_by_name: string | null;
+  approved_by_actor: string | null;
+  approved_by: string | null;
+  approved_via: string | null;
+} {
+  return {
+    approved_at: wo?.approved_at ?? null,
+    approved_by_name: wo?.approved_by_name ?? null,
+    approved_by_actor: wo?.approved_by_actor ?? null,
+    approved_by: wo?.approved_by ?? null,
+    approved_via: wo?.approved_via ?? null,
+  };
 }
 
 // ── Pure: running figures and rules ──────────────────────────────────────────
@@ -1027,7 +1120,7 @@ export function buildVariationEmails(
 const JOB_COLUMNS =
   "id, org_id, job_number, client_name, type, status, site_address, site_suburb, work_order_id";
 const WO_COLUMNS =
-  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_via, sealed_content_hash, origin, quote_filled_at, quote_filled_scope_revision_id, hand_edited_at, created_at, updated_at";
+  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_by_actor, approved_by_name, approved_via, sealed_content_hash, origin, quote_filled_at, quote_filled_scope_revision_id, hand_edited_at, created_at, updated_at";
 
 async function readJob(client: any, jobId: string) {
   const { data, error } = await client.from("jobs").select(JOB_COLUMNS).eq(
@@ -1648,6 +1741,7 @@ export async function readJobWorkOrder(
       autoIssueOn,
       quoteFill,
     ),
+    approval: workOrderApprovalRecord(live || draft),
   };
 }
 
@@ -1708,6 +1802,7 @@ export async function listJobWorkOrders(client: any, params: URLSearchParams) {
       job_type: job?.type ?? null,
       job_status: job?.status ?? null,
       site_suburb: job?.site_suburb ?? null,
+      approval: workOrderApprovalRecord(wo),
       figures: isLive
         ? figuresFor(r, jobLines, jobVariations, jobCustomerVariations)
         : null,
@@ -1906,13 +2001,17 @@ export function splitOwnerApprovalResult(data: any): {
  * what the issue waits for (owner_approval.issue.missing).
  */
 /** orgId is the caller's verified company (the signed-in user's, or the
- *  server's own for a terminal call). A work order in another company is
- *  answered as not found, and the database checks the company again. */
+ *  server's own for a terminal or agent call). A work order in another
+ *  company is answered as not found, and the database checks the company
+ *  again. agentCaller is used only when there is no named person: a
+ *  server-secret `agent:<account>` seals as itself and is recorded on the
+ *  row. It does not open any other approval door. */
 export async function approveJobWorkOrder(
   client: any,
   body: any,
   approver: WorkOrderApprover | null,
   orgId: string | null,
+  agentCaller: WorkOrderAgentCaller | null = null,
 ) {
   const id = requireUuid(body?.work_order_id, "work_order_id");
   if (!orgId) {
@@ -1922,7 +2021,10 @@ export async function approveJobWorkOrder(
       "Approving needs a signed-in session in this company.",
     );
   }
-  if (!approver) {
+  // A named person wins. The agent path is only the caller the person path
+  // does not recognise (agent:<account> on a server secret).
+  const agent = approver ? null : agentCaller;
+  if (!approver && !agent) {
     fail(
       403,
       "approver_identity_missing",
@@ -1930,7 +2032,7 @@ export async function approveJobWorkOrder(
     );
   }
   if (
-    approver.via === "terminal" &&
+    approver?.via === "terminal" &&
     !(await readFlag(client, WORK_ORDER_TERMINAL_APPROVAL_FLAG))
   ) {
     fail(
@@ -1939,14 +2041,19 @@ export async function approveJobWorkOrder(
       "Approving from the terminal is switched off (feature flag work_order_terminal_approval_v1). Approve from the approver's signed-in session.",
     );
   }
-  const authority = await readOwnerApprovalAuthority(client, approver.userId);
-  if (!authority) {
-    fail(
-      403,
-      "approver_required",
-      "Only the owner or an approver named in the work order settings approves job work orders",
-    );
+  if (approver) {
+    const authority = await readOwnerApprovalAuthority(client, approver.userId);
+    if (!authority) {
+      fail(
+        403,
+        "approver_required",
+        "Only the owner or an approver named in the work order settings approves job work orders",
+      );
+    }
   }
+  const approvedByName = agent
+    ? requireWorkOrderAgentApprovedByName(body)
+    : null;
   const expected = body?.expected_updated_at;
   if (typeof expected !== "string" || !Number.isFinite(Date.parse(expected))) {
     fail(
@@ -1965,19 +2072,43 @@ export async function approveJobWorkOrder(
   if (wo.status !== "draft") {
     fail(409, "not_a_draft", `This work order is ${wo.status}`);
   }
-  const { data, error } = await client.rpc("approve_job_work_order", {
-    p_work_order_id: id,
-    p_approver: approver.userId,
-    p_via: approver.via,
-    p_expected_updated_at: expected,
-    p_org_id: orgId,
-  });
+  const { data, error } = agent
+    ? await client.rpc("approve_job_work_order_by_agent", {
+      p_work_order_id: id,
+      p_actor: agent.actor,
+      p_approved_by_name: approvedByName,
+      p_expected_updated_at: expected,
+      p_org_id: orgId,
+    })
+    : await client.rpc("approve_job_work_order", {
+      p_work_order_id: id,
+      p_approver: approver!.userId,
+      p_via: approver!.via,
+      p_expected_updated_at: expected,
+      p_org_id: orgId,
+    });
   if (error) {
+    if (String(error.message || "").includes("approver_name_required")) {
+      fail(
+        400,
+        "approver_name_required",
+        "Pass the approver's name as approved_by_name (or as text approved_by).",
+      );
+    }
     if (
       String(error.code || "") === "42501" &&
-      String(error.message || "").includes("scope_owner_approval_job_forbidden")
+      (String(error.message || "").includes("scope_owner_approval_job_forbidden") ||
+        String(error.message || "").includes("agent_actor_required"))
     ) {
-      fail(404, "work_order_not_found", "Work order not found");
+      fail(
+        String(error.message || "").includes("agent_actor_required") ? 403 : 404,
+        String(error.message || "").includes("agent_actor_required")
+          ? "approver_identity_missing"
+          : "work_order_not_found",
+        String(error.message || "").includes("agent_actor_required")
+          ? "Approving needs the approver's own signed-in session."
+          : "Work order not found",
+      );
     }
     const mapped = APPROVE_ERRORS[String(error.code || "")];
     if (mapped) {
@@ -1987,12 +2118,27 @@ export async function approveJobWorkOrder(
   }
   const { workOrder, ownerApproval, issued } = splitOwnerApprovalResult(data);
   if (issued) {
-    await logJobEvent(client, wo.job_id, "job_work_order_approved", {
-      work_order_id: id,
-      wo_number: wo.wo_number,
-      approved_by: approver.userId,
-      via: approver.via,
-    }, approver.userId);
+    await logJobEvent(
+      client,
+      wo.job_id,
+      "job_work_order_approved",
+      agent
+        ? {
+          work_order_id: id,
+          wo_number: wo.wo_number,
+          approved_by_actor: agent.actor,
+          approved_by_name: approvedByName,
+          approved_at: workOrder?.approved_at ?? null,
+          via: "agent",
+        }
+        : {
+          work_order_id: id,
+          wo_number: wo.wo_number,
+          approved_by: approver!.userId,
+          via: approver!.via,
+        },
+      agent ? null : approver!.userId,
+    );
   }
   // Switch off the database answers with the work order alone, as before;
   // the reply keeps that shape.

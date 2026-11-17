@@ -18,7 +18,11 @@ import {
   redactJobDetailWorkOrderForTrade,
   reportWorkOrderVariation,
   resendWorkOrderVariationEmails,
+  requireWorkOrderAgentApprovedByName,
+  resolveWorkOrderAgentCaller,
   resolveWorkOrderApprover,
+  workOrderAgentApprovedByName,
+  workOrderApprovalRecord,
   sendOutlookVariationEmail,
   tradeJobWorkOrderRead,
   updateJobWorkOrderDraft,
@@ -449,6 +453,108 @@ Deno.test("approver: the shared browser key, an untrusted header or a seat name 
     }),
     null,
   );
+  // An agent account is not a person. Other doors read only this function,
+  // so they stay closed for that caller.
+  assertEquals(
+    resolveWorkOrderApprover({
+      authMode: "api_key",
+      serverSecretPresented: true,
+      actor: { actor: "agent:hugo-grok", source: "header" },
+    }),
+    null,
+  );
+});
+
+Deno.test("agent caller: a server-secret agent:<account> may approve; a browser key, a seat and a user header may not", () => {
+  assertEquals(
+    resolveWorkOrderAgentCaller({
+      authMode: "api_key",
+      serverSecretPresented: true,
+      actor: { actor: "agent:hugo-grok", source: "header" },
+    }),
+    { actor: "agent:hugo-grok" },
+  );
+  assertEquals(
+    resolveWorkOrderAgentCaller({
+      authMode: "api_key",
+      serverSecretPresented: true,
+      actor: { actor: "agent:jarvis-mcp", source: "header" },
+    }),
+    { actor: "agent:jarvis-mcp" },
+  );
+  assertEquals(
+    resolveWorkOrderAgentCaller({
+      authMode: "api_key",
+      serverSecretPresented: false,
+      actor: { actor: "agent:hugo-grok", source: "header" },
+    }),
+    null,
+  );
+  assertEquals(
+    resolveWorkOrderAgentCaller({
+      authMode: "routine",
+      serverSecretPresented: false,
+      actor: { actor: "agent:hugo-grok", source: "header" },
+    }),
+    null,
+  );
+  assertEquals(
+    resolveWorkOrderAgentCaller({
+      authMode: "api_key",
+      serverSecretPresented: true,
+      actor: { actor: "seat:rayleigh", source: "header" },
+    }),
+    null,
+  );
+  assertEquals(
+    resolveWorkOrderAgentCaller({
+      authMode: "api_key",
+      serverSecretPresented: true,
+      actor: { actor: `user:${SHAUN}`, source: "header" },
+    }),
+    null,
+  );
+  assertEquals(
+    resolveWorkOrderAgentCaller({
+      authMode: "api_key",
+      serverSecretPresented: true,
+      actor: { actor: "agent:hugo-grok", source: "header_untrusted" },
+    }),
+    null,
+  );
+  assertEquals(workOrderAgentApprovedByName({ approved_by_name: " Hugo " }), "Hugo");
+  assertEquals(
+    workOrderAgentApprovedByName({ approved_by: "Hugo's Grok bot" }),
+    "Hugo's Grok bot",
+  );
+  assertEquals(workOrderAgentApprovedByName({}), null);
+  assertEquals(
+    ((): string => {
+      try {
+        requireWorkOrderAgentApprovedByName({});
+        return "allowed";
+      } catch (e) {
+        return (e as JobWorkOrderError).code;
+      }
+    })(),
+    "approver_name_required",
+  );
+  assertEquals(
+    workOrderApprovalRecord({
+      approved_at: "2026-11-17T01:00:00Z",
+      approved_by_name: "Hugo",
+      approved_by_actor: "agent:hugo-grok",
+      approved_by: null,
+      approved_via: "agent",
+    }),
+    {
+      approved_at: "2026-11-17T01:00:00Z",
+      approved_by_name: "Hugo",
+      approved_by_actor: "agent:hugo-grok",
+      approved_by: null,
+      approved_via: "agent",
+    },
+  );
 });
 
 // ── Figures and rules ────────────────────────────────────────────────────────
@@ -647,12 +753,17 @@ function draftDb(extra: Partial<Tables> = {}) {
     ...extra,
   });
   db.rpcImpl = (fn, args) =>
-    fn === "approve_job_work_order"
+    fn === "approve_job_work_order" || fn === "approve_job_work_order_by_agent"
       ? {
         data: {
           id: args.p_work_order_id,
           status: "approved",
           sealed_content_hash: "h",
+          approved_via: fn === "approve_job_work_order_by_agent" ? "agent" : args.p_via,
+          approved_by: args.p_approver ?? null,
+          approved_by_actor: args.p_actor ?? null,
+          approved_by_name: args.p_approved_by_name ?? null,
+          approved_at: "2026-11-17T00:40:00.000Z",
         },
         error: null,
       }
@@ -707,6 +818,168 @@ Deno.test("approve: only Shaun, and only with a named identity", async () => {
     approved_by: SHAUN,
     via: "session",
   });
+});
+
+Deno.test("approve: an agent caller seals the draft and records who and when", async () => {
+  const db = draftDb();
+  const out = await approveJobWorkOrder(db, {
+    work_order_id: DRAFT,
+    expected_updated_at: READ_AT,
+    approved_by_name: "Hugo",
+  }, null, ORG, { actor: "agent:hugo-grok" });
+  assertEquals(out.work_order.status, "approved");
+  assertEquals(out.work_order.approved_via, "agent");
+  assertEquals(out.work_order.approved_by, null);
+  assertEquals(out.work_order.approved_by_actor, "agent:hugo-grok");
+  assertEquals(out.work_order.approved_by_name, "Hugo");
+  assertEquals(out.work_order.approved_at, "2026-11-17T00:40:00.000Z");
+  assertEquals(db.authorityCalls, []);
+  assertEquals(db.rpcCalls, [{
+    fn: "approve_job_work_order_by_agent",
+    args: {
+      p_work_order_id: DRAFT,
+      p_actor: "agent:hugo-grok",
+      p_approved_by_name: "Hugo",
+      p_expected_updated_at: READ_AT,
+      p_org_id: ORG,
+    },
+  }]);
+  const event = db.tables.job_events.at(-1);
+  assertEquals(event.user_id, null);
+  assertEquals(event.detail_json, {
+    work_order_id: DRAFT,
+    wo_number: "WO-SWF-26123",
+    approved_by_actor: "agent:hugo-grok",
+    approved_by_name: "Hugo",
+    approved_at: "2026-11-17T00:40:00.000Z",
+    via: "agent",
+  });
+
+  // A name passed as approved_by is recorded, and it is not a user id.
+  const named = draftDb();
+  await approveJobWorkOrder(named, {
+    work_order_id: DRAFT,
+    expected_updated_at: READ_AT,
+    approved_by: "Hugo's Grok bot",
+  }, null, ORG, { actor: "agent:jarvis-mcp" });
+  assertEquals(named.rpcCalls[0].args.p_approved_by_name, "Hugo's Grok bot");
+  assertEquals(named.rpcCalls[0].args.p_actor, "agent:jarvis-mcp");
+
+  // A real approver is unchanged when an agent identity is also supplied.
+  const person = draftDb();
+  await approveJobWorkOrder(person, {
+    work_order_id: DRAFT,
+    expected_updated_at: READ_AT,
+  }, { userId: SHAUN, via: "session" }, ORG, { actor: "agent:hugo-grok" });
+  assertEquals(person.rpcCalls[0].fn, "approve_job_work_order");
+  assertEquals(person.rpcCalls[0].args.p_approver, SHAUN);
+
+  // A name is required. The actor alone is not an audit trail.
+  const unnamed = draftDb();
+  assertEquals(
+    (await assertRejects(
+      () =>
+        approveJobWorkOrder(unnamed, {
+          work_order_id: DRAFT,
+          expected_updated_at: READ_AT,
+        }, null, ORG, { actor: "agent:hugo-grok" }),
+      JobWorkOrderError,
+    ) as JobWorkOrderError).code,
+    "approver_name_required",
+  );
+  assertEquals(unnamed.rpcCalls.length, 0);
+  const blankName = draftDb();
+  assertEquals(
+    (await assertRejects(
+      () =>
+        approveJobWorkOrder(blankName, {
+          work_order_id: DRAFT,
+          expected_updated_at: READ_AT,
+          approved_by_name: "   ",
+        }, null, ORG, { actor: "agent:hugo-grok" }),
+      JobWorkOrderError,
+    ) as JobWorkOrderError).code,
+    "approver_name_required",
+  );
+  assertEquals(blankName.rpcCalls.length, 0);
+
+  // The same data-quality refusals still apply, and a non-agent caller stays out.
+  const missingStamp = draftDb();
+  assertEquals(
+    (await assertRejects(
+      () =>
+        approveJobWorkOrder(missingStamp, {
+          work_order_id: DRAFT,
+          approved_by_name: "Hugo",
+        }, null, ORG, {
+          actor: "agent:hugo-grok",
+        }),
+      JobWorkOrderError,
+    ) as JobWorkOrderError).code,
+    "expected_updated_at_required",
+  );
+  assertEquals(missingStamp.rpcCalls.length, 0);
+
+  const notReady = draftDb();
+  notReady.rpcImpl = () => ({
+    data: null,
+    error: { code: "23514", message: "add the scope before approving" },
+  });
+  assertEquals(
+    (await assertRejects(
+      () =>
+        approveJobWorkOrder(notReady, {
+          work_order_id: DRAFT,
+          expected_updated_at: READ_AT,
+          approved_by_name: "Hugo",
+        }, null, ORG, { actor: "agent:hugo-grok" }),
+      JobWorkOrderError,
+    ) as JobWorkOrderError).code,
+    "work_order_not_ready",
+  );
+
+  const held = draftDb();
+  held.rpcImpl = () => ({
+    data: null,
+    error: { code: "WO428", message: "owner_approval_required" },
+  });
+  assertEquals(
+    (await assertRejects(
+      () =>
+        approveJobWorkOrder(held, {
+          work_order_id: DRAFT,
+          expected_updated_at: READ_AT,
+          approved_by_name: "Hugo",
+        }, null, ORG, { actor: "agent:hugo-grok" }),
+      JobWorkOrderError,
+    ) as JobWorkOrderError).code,
+    "owner_approval_required",
+  );
+
+  const nobody = draftDb();
+  assertEquals(
+    (await assertRejects(
+      () => approveJobWorkOrder(nobody, { work_order_id: DRAFT }, null, ORG, null),
+      JobWorkOrderError,
+    ) as JobWorkOrderError).code,
+    "approver_identity_missing",
+  );
+  assertEquals(nobody.rpcCalls.length, 0);
+
+  const longName = draftDb();
+  assertEquals(
+    (await assertRejects(
+      () =>
+        approveJobWorkOrder(longName, {
+          work_order_id: DRAFT,
+          expected_updated_at: READ_AT,
+          approved_by_name: "H".repeat(201),
+        }, null, ORG, { actor: "agent:hugo-grok" }),
+      JobWorkOrderError,
+    ) as JobWorkOrderError).code,
+    "invalid_approved_by_name",
+  );
+  assertEquals(longName.rpcCalls.length, 0);
 });
 
 Deno.test("events: what this module writes to job_events carries no price, amount or seal hash", async () => {
@@ -1349,6 +1622,28 @@ Deno.test("needs checking: why a draft has not gone to the trades, and which lin
     flags: ["labour_or_material_unknown"],
   }]);
   assertEquals(jobWorkOrderNeedsChecking(null, true), null);
+});
+
+Deno.test("office read and list show the approver name, actor and time", async () => {
+  const db = baseDb();
+  db.tables.work_orders[0].approved_by_name = "Hugo";
+  db.tables.work_orders[0].approved_by_actor = "agent:hugo-grok";
+  db.tables.work_orders[0].approved_via = "agent";
+  db.tables.work_orders[0].approved_at = "2026-11-17T01:00:00Z";
+  const read = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(read.approval, {
+    approved_at: "2026-11-17T01:00:00Z",
+    approved_by_name: "Hugo",
+    approved_by_actor: "agent:hugo-grok",
+    approved_by: null,
+    approved_via: "agent",
+  });
+  assertEquals(read.work_order.approved_by_name, "Hugo");
+  assertEquals(read.work_order.approved_by_actor, "agent:hugo-grok");
+  const listed = await listJobWorkOrders(db, new URLSearchParams());
+  assertEquals(listed.work_orders[0].approval, read.approval);
+  assertEquals(listed.work_orders[0].approved_by_name, "Hugo");
+  assertEquals(listed.work_orders[0].approved_at, "2026-11-17T01:00:00Z");
 });
 
 Deno.test("trade read: a draft is never shown", async () => {

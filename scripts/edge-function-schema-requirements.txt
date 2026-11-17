@@ -1264,3 +1264,7 @@ ops-api|supabase/migrations/20261116011500_trade_pay_run_check.sql|function|trad
 send-quote|supabase/migrations/20261116114500_quote_send_sealed_revision_guard.sql|table|quote_send_sealed_revision_misses
 send-quote|supabase/migrations/20261116114500_quote_send_sealed_revision_guard.sql|column|job_documents.scope_revision_id
 ghl-proxy|supabase/migrations/20261116114500_quote_send_sealed_revision_guard.sql|column|job_documents.scope_revision_id
+# Agent job-work-order approval records the caller, the required name and the time.
+ops-api|supabase/migrations/20261117010000_job_work_order_agent_approval.sql|column|work_orders.approved_by_actor
+ops-api|supabase/migrations/20261117010000_job_work_order_agent_approval.sql|column|work_orders.approved_by_name
+ops-api|supabase/migrations/20261117010000_job_work_order_agent_approval.sql|function|approve_job_work_order_by_agent
