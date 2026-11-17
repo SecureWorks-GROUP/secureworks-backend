@@ -417,6 +417,13 @@ import {
 import { postgrestReplyPdfReader } from './dispatch_v2_reply_pdf.ts'
 import { postgrestRepliesStore } from './dispatch_v2_replies_store.ts'
 import { postgrestDispatchRepliesSources } from './dispatch_v2_replies_sources.ts'
+import {
+  addTrayAttachments,
+  openTrayAttachment,
+  postgrestTrayAttachmentStore,
+  saveTrayAttachmentsToJob,
+  TrayAttachmentError,
+} from './dispatch_v2_tray_attachments.ts'
 // Dispatch v2 slices 5 and 6: draft list, supplier boxes and supplier order
 // emails sent from admin@ through send-outlook-email.
 import {
@@ -7771,7 +7778,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }
           : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
         try {
-          return json(await runDispatchV2RepliesAction(action, url.searchParams, body, {
+          const repliesAnswer: any = await runDispatchV2RepliesAction(action, url.searchParams, body, {
             orgId: DEFAULT_ORG_ID,
             actor: repliesActor,
             via: authMode === 'jwt' ? 'screen' : 'terminal',
@@ -7790,9 +7797,45 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 acceptedEmailId: i.emailId,
               }, dispatchOrderConfirmedDeps(client)),
             },
-          }))
+          })
+          // Item 16 part 1 (contract section 3i): the tray lists each email's
+          // files, and Put on job saves them to the job's documents, office
+          // only. Neither changes the answer's other fields; a failure here
+          // never fails the read or the press.
+          if (action === 'dispatch_v2_replies_unmatched') {
+            return json(await addTrayAttachments(postgrestTrayAttachmentStore(client), DEFAULT_ORG_ID, repliesAnswer))
+          }
+          if (action === 'dispatch_v2_replies_assign' && repliesAnswer?.ok === true && repliesAnswer?.email?.job_id) {
+            repliesAnswer.documents = await saveTrayAttachmentsToJob(postgrestTrayAttachmentStore(client), {
+              orgId: DEFAULT_ORG_ID,
+              emailId: String(repliesAnswer.email.id),
+              jobId: String(repliesAnswer.email.job_id),
+              operatorUserId: repliesActor.userId,
+              operatorEmail: repliesActor.email,
+              via: authMode === 'jwt' ? 'screen' : 'terminal',
+            })
+          }
+          return json(repliesAnswer)
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // Dispatch v2 item 16 part 1: Open one file of a supplier email, through
+      // a link that works for two minutes (contract section 3i;
+      // dispatch_v2_tray_attachments.ts). One read (GET), gated as the other
+      // Dispatch actions. Absent from ROUTINE_ALLOWED_ACTIONS,
+      // AGENT_READ_ALLOWED_ACTIONS and LEAD_INSTALLER_READ_ACTIONS. Writes
+      // nothing; the link is made on each press and never stored.
+      case 'dispatch_v2_tray_attachment_open': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'GET') throw new ApiError(`${action} requires GET`, 405)
+        try {
+          return json(await openTrayAttachment(postgrestTrayAttachmentStore(client), DEFAULT_ORG_ID, url.searchParams))
+        } catch (e) {
+          if (e instanceof TrayAttachmentError) throw new ApiError(e.message, e.status, e.body)
           throw e
         }
       }

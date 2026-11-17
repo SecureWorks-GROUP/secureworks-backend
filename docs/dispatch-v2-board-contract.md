@@ -1808,6 +1808,119 @@ Full rules: docs/dispatch-v2-emails-contract.md, section "Tweak 4".
    is now "BD Metals" (section 3c.1's on-account list is the same five
    suppliers).
 
+## 3i. The files on an Unmatched supplier email (item 16 part 1, approved by Shaun 16 Nov 2026)
+
+Code: `supabase/functions/ops-api/dispatch_v2_tray_attachments.ts`, tests in
+`dispatch_v2_tray_attachments_test.ts`. The test case Shaun named: the four
+Ampelite "FW: Scanned Document" emails of 16 Nov 2026, 11:51 to 11:55 Perth,
+from warwick@ampelite.com.au, one scanned PDF each (165 to 188 KB).
+
+The rules in business words:
+
+1. **Each tray card lists the email's files**, every type, as
+   "PDF: name, size, Open". Pictures inside the email itself (signature
+   logos, `skipped_inline`) are not listed. A file the capture reader did not
+   keep (over 15 MB, not a file, failed) is listed with its reason and has no
+   Open.
+2. **Open** shows the file in a new tab through a link that works for two
+   minutes. The files stay in the private bucket `context-email-attachments`;
+   the link is made fresh on each press and never stored. Staff only.
+3. **Put on job** (`dispatch_v2_replies_assign`, from the job picker or a
+   "Could be" button) also saves the email's kept files to that job's
+   documents:
+   - type `material_order`, so the job page lists them under Material
+     Documents and Dispatch Sources lists them;
+   - **office only**: `visible_to_trades` false. The crew sees one only once
+     someone ticks it on in Sources;
+   - **once only**: a file whose SHA-256 is already on the job (any
+     `job_documents.metadata.content_sha256`, or a `dispatch_v2_order_documents`
+     claim) is not saved again;
+   - named "<Supplier> <file name as sent>", for example
+     "Ampelite 16112026124402-0001.pdf";
+   - copied into `job-documents` under `<job_id>/dispatch-tray/`, the same
+     public bucket every job document (and every supplier PDF of 3e.2) uses.
+   "Yes, this job" on a best guess is not Put on job and saves nothing here.
+4. Nothing else changes: no job status, stage, order, supplier, Xero, GHL,
+   SMS or email. A failed file read never fails the tray or the press.
+
+### 3i.1 The tray read: `attachments` on each email
+
+`dispatch_v2_replies_unmatched` answers as before, plus:
+
+```json
+{
+  "attachments_read": "ok",
+  "emails": [{
+    "id": "61c8124d-...",
+    "attachments": [{
+      "id": "<context_email_attachments.id>",
+      "file_name": "16112026124402-0001.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 192853,
+      "size_label": "188 KB",
+      "kind_label": "PDF",
+      "openable": true,
+      "status": "stored",
+      "not_kept_reason": null
+    }]
+  }]
+}
+```
+
+- `kind_label`: `PDF`, `Image`, `Word`, `Excel` or `File`.
+- `attachments` is `[]` for an email with no files and `null` for every email
+  when the files could not be read (`attachments_read: "failed"`); the screen
+  then says the files could not be read, never "no files".
+- The join: `dispatch_v2_supplier_emails.provider_message_id` to
+  `context_email_attachments.provider_message_id`. A `skipped_duplicate` row
+  has no copy of its own and opens (and saves) through the `stored` row with
+  the same `sha256`.
+
+### 3i.2 `dispatch_v2_tray_attachment_open` (new, GET)
+
+`GET ?action=dispatch_v2_tray_attachment_open&email_id=<uuid>&attachment_id=<uuid>`
+
+Staff only (the privileged ops key or a staff session, as every Dispatch
+action). Absent from `ROUTINE_ALLOWED_ACTIONS`, `AGENT_READ_ALLOWED_ACTIONS`
+and `LEAD_INSTALLER_READ_ACTIONS`. Writes nothing.
+
+```json
+{ "ok": true, "url": "<signed link>", "expires_in": 120, "file_name": "16112026124402-0001.pdf", "content_type": "application/pdf" }
+```
+
+Refusals: 400 `bad_request` (an id is not a uuid), 404 `email_not_found`,
+404 `attachment_not_found` (the file is not on that email, or is an inline
+picture), 409 `attachment_not_kept` (with the reason in words), 500
+`link_failed`.
+
+### 3i.3 `dispatch_v2_replies_assign`: `documents` on the answer
+
+The answer is as before, plus:
+
+```json
+{
+  "documents": {
+    "read": "ok",
+    "saved": [{ "job_document_id": "<uuid>", "name": "Ampelite 16112026124402-0001.pdf", "sha256": "<hex>" }],
+    "skipped": [{ "file_name": "huge.pdf", "reason": "not_kept" }]
+  }
+}
+```
+
+`skipped[].reason`: `not_kept`, `same_file_twice`, `already_on_job`,
+`download_failed`, `hash_mismatch`, `upload_failed`, `document_failed`.
+`read: "failed"`: the files could not be read and nothing was saved; the
+email is still put on the job. Each file saved writes one `job_events` row,
+`dispatch_v2_tray_file_saved`.
+
+### 3i.4 Not in this build
+
+- **Reading the scans to suggest a job (Q4).** A scanned PDF has no
+  `context_document_texts` row, so there are no words to match on. It needs a
+  reader (OCR) first. A follow-up.
+- A later order confirmation of the same email (3e.2) may still save the same
+  PDF again as a crew-visible copy: the 3e.2 path checks its own claims only.
+
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 
 A purchase order with `source = 'dispatch'` is refused, before any job,
