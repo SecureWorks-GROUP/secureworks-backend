@@ -1,4 +1,10 @@
 BEGIN;
+-- Re-establish our objects after any earlier contract rollback (rule 17).
+\ir ../../../migrations/20261117215101_group_claim_crew.sql
+DO $$ BEGIN
+  IF current_setting('lock_timeout')<>'5s' OR current_setting('statement_timeout')<>'2min' THEN
+    RAISE EXCEPTION 'ZZTEST users index build timeouts missing'; END IF;
+END $$;
 \ir ../20261117171901_group_inclusive_pay_basis/fixture.sql
 DO $$ DECLARE
   grp uuid;
@@ -13,6 +19,7 @@ DO $$ DECLARE
   failed boolean;
   deadline timestamptz;
   ev_count integer;
+  regressions text[] := '{}';
   BEGIN
   grp := pg_temp.zztest_group_fixture();
   UPDATE public.feature_flags SET enabled=true WHERE flag_name='group_work_order_v1';
@@ -40,11 +47,63 @@ DO $$ DECLARE
   BEGIN PERFORM public.group_claim_update_crew(grp,d,'join');
   EXCEPTION WHEN check_violation THEN failed:=SQLERRM='group_not_on_job'; END;
   IF NOT failed THEN RAISE EXCEPTION 'ZZTEST off-job join accepted'; END IF;
+  -- A stray historical clock is not a booking and cannot enroll or reset approval.
   INSERT INTO public.job_events(id,job_id,user_id,event_type) VALUES(gen_random_uuid(),job,d,'clock.clock_on');
-  PERFORM public.group_claim_update_crew(grp,d,'sync');
-  IF NOT EXISTS(SELECT 1 FROM public.group_work_order_participants WHERE group_id=grp AND user_id=d) THEN
-    RAISE EXCEPTION 'ZZTEST clock-only crew not enrolled'; END IF;
+  UPDATE public.group_work_orders SET claim_state='waiting_approval',claim_deadline_at=now()-interval '1 hour' WHERE id=grp;
+  SELECT claim_deadline_at INTO deadline FROM public.group_work_orders WHERE id=grp;
+  failed:=false;
+  BEGIN PERFORM public.group_claim_update_crew(grp,d,'sync');
+  EXCEPTION WHEN check_violation THEN failed:=SQLERRM='group_not_on_job'; END;
+  IF NOT failed OR public.group_claim_on_job(job,d)
+    OR EXISTS(SELECT 1 FROM public.group_work_order_participants WHERE group_id=grp AND user_id=d)
+    OR EXISTS(SELECT 1 FROM public.group_work_orders WHERE id=grp
+      AND (claim_state<>'waiting_approval' OR claim_deadline_at IS DISTINCT FROM deadline)) THEN
+    regressions:=array_append(regressions,'clock without live booking enrolls or resets approval'); END IF;
   DELETE FROM public.group_work_order_participants WHERE group_id=grp AND user_id=d;
+  -- liveAssignment compares both status and role without regard to capitals.
+  INSERT INTO public.job_assignments(id,job_id,user_id,scheduled_date,status)
+    VALUES(gen_random_uuid(),job,d,'2026-11-16','CaNcElLeD');
+  UPDATE public.job_assignments SET role='ObSeRvEr' WHERE job_id=job AND user_id=b;
+  DELETE FROM public.group_work_order_participants WHERE group_id=grp AND user_id=b;
+  IF public.group_claim_on_job(job,d) OR public.group_claim_on_job(job,b) THEN
+    regressions:=array_append(regressions,'mixed-case cancelled or observer booking admitted'); END IF;
+  PERFORM public.group_claim_update_crew(grp,a,'sync');
+  IF EXISTS(SELECT 1 FROM public.group_work_order_participants WHERE group_id=grp AND user_id IN (b,d)) THEN
+    regressions:=array_append(regressions,'sync admitted cancelled clock or observer'); END IF;
+  -- Cancelled and observer bookings are not shown as allocated or self-added.
+  INSERT INTO public.group_work_order_participants(group_id,user_id) VALUES(grp,b),(grp,d)
+    ON CONFLICT(group_id,user_id) DO NOTHING;
+  UPDATE public.job_assignments SET added_by='self',self_added_status='added',self_added_at=now(),is_lead=false WHERE job_id=job AND user_id=d;
+  IF EXISTS(SELECT 1 FROM public.group_claim_crew_sources(grp) WHERE user_id IN (b,d) AND how IN ('allocated','added_self')) THEN
+    regressions:=array_append(regressions,'mixed-case dead booking shown as live provenance'); END IF;
+  DELETE FROM public.group_work_order_participants WHERE group_id=grp AND user_id IN (b,d);
+  UPDATE public.job_assignments SET role='installer' WHERE job_id=job AND user_id=b;
+  UPDATE public.job_assignments SET status=NULL,added_by='office',self_added_status=NULL,self_added_at=NULL WHERE job_id=job AND user_id=d;
+  -- Sync, clock retries and joins keep the exact waiting approval/deadline.
+  UPDATE public.group_work_orders SET claim_state='waiting_approval',claim_deadline_at=deadline WHERE id=grp;
+  PERFORM public.group_claim_update_crew(grp,a,'sync');
+  IF NOT EXISTS(SELECT 1 FROM public.group_work_order_participants WHERE group_id=grp AND user_id=d)
+    OR EXISTS(SELECT 1 FROM public.group_work_orders WHERE id=grp
+      AND (claim_state<>'waiting_approval' OR claim_deadline_at IS DISTINCT FROM deadline)) THEN
+    regressions:=array_append(regressions,'automatic addition resets approval'); END IF;
+  DELETE FROM public.group_work_order_participants WHERE group_id=grp AND user_id=d;
+  UPDATE public.group_work_orders SET claim_state='waiting_approval',claim_deadline_at=deadline WHERE id=grp;
+  PERFORM public.group_claim_update_crew(grp,d,'join');
+  IF EXISTS(SELECT 1 FROM public.group_work_orders WHERE id=grp
+      AND (claim_state<>'waiting_approval' OR claim_deadline_at IS DISTINCT FROM deadline)) THEN
+    regressions:=array_append(regressions,'join resets approval'); END IF;
+  -- Office cancellation after a clock cannot re-enroll on either join or sync.
+  UPDATE public.job_assignments SET status='cancelled' WHERE job_id=job AND user_id=d;
+  DELETE FROM public.group_work_order_participants WHERE group_id=grp AND user_id=d;
+  failed:=false;
+  BEGIN PERFORM public.group_claim_update_crew(grp,d,'join');
+  EXCEPTION WHEN check_violation THEN failed:=SQLERRM='group_not_on_job'; END;
+  IF NOT failed THEN regressions:=array_append(regressions,'cancelled clock retry joins again'); END IF;
+  DELETE FROM public.group_work_order_participants WHERE group_id=grp AND user_id=d;
+  PERFORM public.group_claim_update_crew(grp,a,'sync');
+  IF EXISTS(SELECT 1 FROM public.group_work_order_participants WHERE group_id=grp AND user_id=d) THEN
+    regressions:=array_append(regressions,'cancelled clock re-enrolled by another member'); END IF;
+  IF cardinality(regressions)>0 THEN RAISE EXCEPTION 'ZZTEST switch-on regressions: %',array_to_string(regressions,'; '); END IF;
   DELETE FROM public.job_events WHERE job_id=job AND user_id=d;
   UPDATE public.group_work_orders SET claim_state='waiting_approval',claim_deadline_at=now()-interval '1 hour' WHERE id=grp;
   PERFORM public.group_claim_update_crew(grp,a,'name',ARRAY[d]);
@@ -113,8 +172,12 @@ INSERT INTO public.trade_invoices(id,org_id,user_id,status,created_at,gst_on,sup
 SELECT md5('ZZTEST claim plan invoice '||n)::uuid,'00000000-0000-0000-0000-000000000001',
   md5('ZZTEST claim plan user '||n)::uuid,'acknowledged',now(),false,.12,0,0,0,0,0,0,'employer_12_v2','ZZTEST-CLAIM-PLAN-'||n
 FROM generate_series(1,2000) n;
+INSERT INTO public.jobs(id,org_id,type,status,job_number)
+SELECT md5('ZZTEST claim plan job '||n)::uuid,'00000000-0000-0000-0000-000000000001',
+  'patio','draft','ZZTEST-CLAIM-PLAN-'||n FROM generate_series(2,2000) n;
 INSERT INTO public.job_events(id,job_id,user_id,event_type)
-SELECT gen_random_uuid(), 'f1171901-0000-4000-8000-000000000101',md5('ZZTEST claim plan user '||n)::uuid,'clock.clock_on'
+SELECT gen_random_uuid(), CASE WHEN n=1 THEN 'f1171901-0000-4000-8000-000000000101'::uuid
+  ELSE md5('ZZTEST claim plan job '||n)::uuid END,md5('ZZTEST claim plan user '||n)::uuid,'clock.clock_on'
 FROM generate_series(1,2000) n;
 INSERT INTO public.job_assignments(id,job_id,user_id,scheduled_date)
 SELECT gen_random_uuid(), 'f1171901-0000-4000-8000-000000000101',md5('ZZTEST claim plan user '||n)::uuid,'2026-11-16'::date
@@ -124,16 +187,32 @@ ANALYZE public.trade_rates;
 ANALYZE public.trade_invoices;
 ANALYZE public.job_events;
 ANALYZE public.job_assignments;
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) SELECT id FROM public.users WHERE id=md5('ZZTEST claim plan user 1')::uuid;
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) SELECT user_id FROM public.trade_rates
-WHERE user_id=md5('ZZTEST claim plan user 1')::uuid AND effective_to IS NULL;
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) SELECT user_id FROM public.trade_invoices
-WHERE user_id=md5('ZZTEST claim plan user 1')::uuid AND created_at>=now()-interval '8 weeks' AND status NOT IN ('draft','ops-reject');
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) SELECT user_id FROM public.job_events
-WHERE job_id='f1171901-0000-4000-8000-000000000101' AND user_id=md5('ZZTEST claim plan user 1')::uuid AND event_type='clock.clock_on';
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) SELECT user_id FROM public.job_assignments
+-- Rule 16: assert the plan's behavior, not a particular index name.
+DO $plans$ DECLARE
+  query text;
+  plan jsonb;
+BEGIN
+  FOREACH query IN ARRAY ARRAY[
+$query$SELECT id FROM public.users WHERE id=md5('ZZTEST claim plan user 1')::uuid$query$,
+$query$SELECT user_id FROM public.trade_rates
+WHERE user_id=md5('ZZTEST claim plan user 1')::uuid AND effective_to IS NULL$query$,
+$query$SELECT user_id FROM public.trade_invoices
+WHERE user_id=md5('ZZTEST claim plan user 1')::uuid AND created_at>=now()-interval '8 weeks' AND status NOT IN ('draft','ops-reject')$query$,
+$query$SELECT user_id FROM public.job_events
+WHERE job_id='f1171901-0000-4000-8000-000000000101' AND user_id=md5('ZZTEST claim plan user 1')::uuid AND event_type='clock.clock_on'$query$,
+$query$SELECT user_id FROM public.job_assignments
 WHERE job_id='f1171901-0000-4000-8000-000000000101' AND user_id=md5('ZZTEST claim plan user 1')::uuid
- AND NOT coalesce(is_ghost,false) AND coalesce(role,'')<>'observer' AND coalesce(status,'')<>'cancelled';
+ AND NOT coalesce(is_ghost,false) AND lower(coalesce(role,''))<>'observer' AND lower(coalesce(status,''))<>'cancelled'$query$
+  ] LOOP
+    EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,FORMAT JSON) '||query INTO plan;
+    RAISE NOTICE 'ZZTEST point-read plan: %',plan;
+    IF jsonb_path_exists(plan,'$.** ? (@."Node Type" == "Seq Scan")')
+      OR NOT jsonb_path_exists(plan,'$.** ? (@."Node Type" == "Index Scan" || @."Node Type" == "Index Only Scan" || @."Node Type" == "Bitmap Index Scan")')
+      OR (plan->0->'Plan'->>'Actual Rows')::integer<>1 THEN
+      RAISE EXCEPTION 'ZZTEST point read is not index bound to one row: %',query;
+    END IF;
+  END LOOP;
+END $plans$;
 -- Explain the actual function's SQL body, so this check cannot drift into a
 -- separate search implementation. Assert plan behavior, never an index name.
 DO $plan$ DECLARE

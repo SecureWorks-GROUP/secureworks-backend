@@ -1,11 +1,10 @@
 -- P1-13.5. Dormant functions only; no trigger, schedule or switch activation.
 -- Active trade is P1-02.2's definition: an open rate or a live invoice in eight weeks.
+SET LOCAL lock_timeout='5s';
+SET LOCAL statement_timeout='120s';
 CREATE INDEX IF NOT EXISTS group_claim_people_search_idx
   ON public.users(org_id, name COLLATE "C", id);
-CREATE INDEX IF NOT EXISTS group_claim_recent_invoice_user_idx
-  ON public.trade_invoices(user_id, created_at) WHERE status NOT IN ('draft','ops-reject');
-CREATE INDEX IF NOT EXISTS group_claim_clock_user_idx
-  ON public.job_events(job_id, user_id) WHERE event_type = 'clock.clock_on';
+-- Reuse idx_trade_inv_user and idx_job_events_job; no big-table index builds.
 
 CREATE OR REPLACE FUNCTION public.group_claim_active_trade(p_org uuid, p_user uuid)
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
@@ -20,12 +19,11 @@ $fn$;
 CREATE OR REPLACE FUNCTION public.group_claim_on_job(p_job uuid, p_user uuid)
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
 AS $fn$
-  -- job_assignments_job_user_date_key and group_claim_clock_user_idx.
+  -- job_assignments_job_user_date_key. A clock only counts while its booking
+  -- is live, so a historical clock adds no authority beyond the live booking.
   SELECT EXISTS (SELECT 1 FROM public.job_assignments a WHERE a.job_id=p_job AND a.user_id=p_user
-    AND NOT coalesce(a.is_ghost,false) AND coalesce(a.role,'') <> 'observer'
-    AND coalesce(a.status,'') <> 'cancelled')
-    OR EXISTS (SELECT 1 FROM public.job_events e WHERE e.job_id=p_job AND e.user_id=p_user
-      AND e.event_type='clock.clock_on');
+    AND NOT coalesce(a.is_ghost,false) AND lower(coalesce(a.role,'')) <> 'observer'
+    AND lower(coalesce(a.status,'')) <> 'cancelled');
 $fn$;
 
 CREATE OR REPLACE FUNCTION public.group_claim_update_crew(
@@ -93,9 +91,11 @@ AS $fn$ DECLARE
     -- One job only, never an estate read. Bookings use the existing job/user/date key.
     SELECT array_agg(DISTINCT user_id) INTO candidates FROM (
       SELECT a.user_id FROM public.job_assignments a WHERE a.job_id=g.job_id
-        AND NOT coalesce(a.is_ghost,false) AND coalesce(a.role,'')<>'observer'
-        AND coalesce(a.status,'')<>'cancelled'
+        AND NOT coalesce(a.is_ghost,false) AND lower(coalesce(a.role,''))<>'observer'
+        AND lower(coalesce(a.status,''))<>'cancelled'
+      -- idx_job_events_job bounds clocks; the same live-booking rule gates retries.
       UNION SELECT e.user_id FROM public.job_events e WHERE e.job_id=g.job_id AND e.event_type='clock.clock_on'
+        AND public.group_claim_on_job(g.job_id,e.user_id)
       UNION SELECT p_actor
     ) crew;
   ELSE RAISE EXCEPTION 'group_claim_action_invalid' USING ERRCODE='23514'; END IF;
@@ -124,15 +124,13 @@ AS $fn$ DECLARE
     GET DIAGNOSTICS affected = ROW_COUNT;
     IF affected>0 THEN added:=array_append(added,target); END IF;
   END LOOP;
-  IF cardinality(added)>0 THEN
+  IF cardinality(added)>0 AND p_action='name' THEN
     was_waiting := g.claim_state='waiting_approval';
     UPDATE public.group_work_orders SET claim_state=CASE WHEN was_waiting THEN 'waiting_hours' ELSE claim_state END,
       claim_deadline_at=CASE WHEN was_waiting THEN clock_timestamp()+interval '48 hours' ELSE claim_deadline_at END
       WHERE id=g.id;
-    IF p_action='name' THEN
-      INSERT INTO public.group_work_order_events(group_id,job_id,action,actor_user_id,detail)
-        VALUES(g.id,g.job_id,'name_crew',p_actor,jsonb_build_object('user_ids',added));
-    END IF;
+    INSERT INTO public.group_work_order_events(group_id,job_id,action,actor_user_id,detail)
+      VALUES(g.id,g.job_id,'name_crew',p_actor,jsonb_build_object('user_ids',added));
   END IF;
   RETURN jsonb_build_object('ok',true,'group_id',g.id);
 END; $fn$;
@@ -142,10 +140,10 @@ RETURNS TABLE(user_id uuid, how text) LANGUAGE sql STABLE SECURITY DEFINER SET s
 AS $fn$
   SELECT p.user_id, CASE
     WHEN EXISTS(SELECT 1 FROM public.job_assignments a WHERE a.job_id=g.job_id AND a.user_id=p.user_id
-      AND a.added_by='self' AND coalesce(a.role,'')<>'observer' AND NOT coalesce(a.is_ghost,false) AND coalesce(a.status,'')<>'cancelled') THEN 'added_self'
+      AND a.added_by='self' AND lower(coalesce(a.role,''))<>'observer' AND NOT coalesce(a.is_ghost,false) AND lower(coalesce(a.status,''))<>'cancelled') THEN 'added_self'
     WHEN p.named_by IS NOT NULL THEN 'added'
     WHEN EXISTS(SELECT 1 FROM public.job_assignments a WHERE a.job_id=g.job_id AND a.user_id=p.user_id
-      AND NOT coalesce(a.is_ghost,false) AND coalesce(a.role,'')<>'observer' AND coalesce(a.status,'')<>'cancelled') THEN 'allocated'
+      AND NOT coalesce(a.is_ghost,false) AND lower(coalesce(a.role,''))<>'observer' AND lower(coalesce(a.status,''))<>'cancelled') THEN 'allocated'
     ELSE 'clocked_on' END
   FROM public.group_work_order_participants p JOIN public.group_work_orders g ON g.id=p.group_id
   WHERE p.group_id=p_group_id;
