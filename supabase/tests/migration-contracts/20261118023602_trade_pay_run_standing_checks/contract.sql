@@ -1,5 +1,5 @@
 BEGIN;
-\ir ../../../migrations/20261118013908_trade_pay_run_standing_checks.sql
+\ir ../../../migrations/20261118023602_trade_pay_run_standing_checks.sql
 CREATE FUNCTION pg_temp.zztest_assert(ok boolean, words text) RETURNS void
 LANGUAGE plpgsql AS $$ BEGIN
  IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'ZZTEST %',words; END IF;
@@ -68,6 +68,56 @@ BEGIN
  END LOOP;
  c := pg_temp.zztest_check(r,'pay_equals_job_cost');
  PERFORM pg_temp.zztest_assert((c->>'expected')::numeric=672 AND (c->>'actual')::numeric=672,'clean cost does not read the three stored amounts');
+ -- Old 6/6 and full employer-share invoices are still eligible for runs.
+ INSERT INTO public.feature_flags(flag_name,enabled) VALUES('job_cost_employer_super_v1',true)
+ ON CONFLICT(flag_name) DO UPDATE SET enabled=true;
+ UPDATE public.trade_invoices SET super_basis=NULL,super_amount=13.44,net_pay=105.28 WHERE id=i1;
+ r := public.trade_pay_run_standing_checks(org,ids,'after_xero');
+ c := pg_temp.zztest_check(r,'pay_equals_job_cost');
+ PERFORM pg_temp.zztest_assert(r->'stopped_invoices'='[]' AND r->'run_blocked'='false'
+  AND (c->>'expected')::numeric=678.72 AND (c->>'actual')::numeric=678.72,'old 6/6 employer super must pass both invoice and clean run costs');
+ UPDATE public.trade_invoices SET net_pay=112 WHERE id=i1;
+ r := public.trade_pay_run_standing_checks(org,ids,'after_xero');
+ c := pg_temp.zztest_check(r,'pay_equals_job_cost');
+ PERFORM pg_temp.zztest_assert(r->'stopped_invoices'='[]' AND r->'run_blocked'='false'
+  AND (c->>'expected')::numeric=685.44 AND (c->>'actual')::numeric=685.44,'old full employer share must pass');
+ UPDATE public.feature_flags SET enabled=false WHERE flag_name='job_cost_employer_super_v1';
+ r := public.trade_pay_run_standing_checks(org,ids,'after_xero');
+ PERFORM pg_temp.zztest_assert((pg_temp.zztest_check(r,'pay_equals_job_cost')->>'expected')::numeric=672
+  AND r->'stopped_invoices'='[]' AND r->'run_blocked'='false','employer switch off must exclude company rows on both sides');
+ UPDATE public.trade_invoices SET super_basis='inclusive_12_112_v1',super_amount=12,net_pay=100 WHERE id=i1;
+ -- The cap consumes the same status catalogue and office amount as the sorter.
+ UPDATE public.work_orders SET agreed_labour_ex=112 WHERE id='08030000-0000-4000-8000-000000000201';
+ UPDATE public.trade_invoice_lines SET override_amount=112.01 WHERE trade_invoice_id=i1;
+ r := public.trade_pay_run_standing_checks(org,ids,'before_xero');
+ PERFORM pg_temp.zztest_assert(r#>>'{stopped_invoices,0,invoice_id}'=i1::text
+  AND r#>>'{stopped_invoices,0,stops,0,code}'='standing_nobody_above_work_order','office override above cap must count');
+ UPDATE public.trade_invoice_lines SET override_amount=111 WHERE trade_invoice_id=i1;
+ UPDATE public.work_orders SET agreed_labour_ex=111 WHERE id='08030000-0000-4000-8000-000000000201';
+ PERFORM pg_temp.zztest_assert(public.trade_pay_run_standing_checks(org,ids,'before_xero')->'stopped_invoices'='[]','office override at cap must pass');
+ UPDATE public.trade_invoice_lines SET override_amount=NULL WHERE trade_invoice_id=i1;
+ UPDATE public.work_orders SET agreed_labour_ex=112 WHERE id='08030000-0000-4000-8000-000000000201';
+ INSERT INTO public.trade_invoices(id,org_id,invoice_number,status,invoice_kind)
+ VALUES('08030000-0000-4000-8000-000000000399',org,'ZZTEST-HISTORY','voided','standard');
+ INSERT INTO public.trade_invoice_lines(trade_invoice_id,job_id,line_type,line_total_ex,office_review_status)
+ VALUES('08030000-0000-4000-8000-000000000399','08030000-0000-4000-8000-000000000101','labour',.01,'rejected');
+ PERFORM pg_temp.zztest_assert(public.trade_pay_run_standing_checks(org,ids,'before_xero')->'stopped_invoices'='[]','non-catalogue invoice must not count against cap');
+ UPDATE public.trade_invoices SET status='queried',submitted_at='2026-11-15 01:00Z' WHERE id='08030000-0000-4000-8000-000000000399';
+ r := public.trade_pay_run_standing_checks(org,ids,'before_xero');
+ PERFORM pg_temp.zztest_assert(r#>>'{stopped_invoices,0,invoice_id}'=i1::text,'office-rejected historical standard line counts against cap');
+ DELETE FROM public.trade_invoice_lines WHERE trade_invoice_id='08030000-0000-4000-8000-000000000399';
+ DELETE FROM public.trade_invoices WHERE id='08030000-0000-4000-8000-000000000399';
+ -- Two live orders are unresolved, not two copies of the same billed history.
+ INSERT INTO public.work_orders(id,org_id,job_id,kind,status,agreed_labour_ex)
+ VALUES('08030000-0000-4000-8000-000000000299',org,'08030000-0000-4000-8000-000000000101','job','draft',1000);
+ r := public.trade_pay_run_standing_checks(org,ids,'before_xero');
+ c := pg_temp.zztest_check(r,'nobody_above_work_order');
+ PERFORM pg_temp.zztest_assert(jsonb_array_length(r->'stopped_invoices')=1
+  AND r#>>'{stopped_invoices,0,invoice_id}'=i1::text AND (c->>'actual')::numeric=672
+  AND c->>'words' LIKE '%more than one live work order%' AND r->'run_blocked'='false','multiple work orders must isolate one invoice without multiplying sums');
+ DELETE FROM public.work_orders WHERE id='08030000-0000-4000-8000-000000000299';
+ PERFORM pg_temp.zztest_assert(public.trade_pay_run_standing_checks(org,ids,'before_xero')->'stopped_invoices'='[]','office correction must clear ambiguous work order on retry');
+ UPDATE public.work_orders SET agreed_labour_ex=1000 WHERE id='08030000-0000-4000-8000-000000000201';
  -- A one-cent super fault holds only the affected invoice.
  UPDATE public.trade_invoices SET super_amount=24.01 WHERE id=i2;
  r := public.trade_pay_run_standing_checks(org,ids,'before_xero');
@@ -162,8 +212,7 @@ INSERT INTO public.trade_invoices(id,org_id,invoice_number,status)
 ANALYZE public.trade_invoices;
 DO $$ DECLARE p jsonb; n jsonb; q text; BEGIN
  FOREACH q IN ARRAY ARRAY[
-  $q$SELECT id FROM public.trade_invoices WHERE id='08030000-0000-4000-8000-000000000301'$q$,
-  $q$SELECT id FROM public.trade_invoices WHERE id::text='08030000-0000-4000-8000-000000000301'$q$
+  $q$SELECT id FROM public.trade_invoices WHERE id='08030000-0000-4000-8000-000000000301'$q$
  ] LOOP
   EXECUTE 'EXPLAIN (ANALYZE,FORMAT JSON) '||q INTO p;
   FOR n IN SELECT value FROM jsonb_path_query(p,'$.** ? (@."Relation Name" == "trade_invoices")') value LOOP
@@ -172,8 +221,20 @@ DO $$ DECLARE p jsonb; n jsonb; q text; BEGIN
   END LOOP;
  END LOOP;
 END $$;
-\ir ../../../rollbacks/20261118013908_trade_pay_run_standing_checks_down.sql
+-- This is the actual after_xero cost read, through the registered view on CI
+-- (the explicitly declared stand-in only on a standalone database). Record
+-- the plan, including materialised trade scans, rather than claim index use
+-- from an isolated cast query. The full legacy scan is an accepted read cost
+-- pending director production measurement; no ineffective index is created.
+EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON)
+ WITH inv AS MATERIALIZED (
+  SELECT id FROM public.trade_invoices
+  WHERE id=ANY(ARRAY['08030000-0000-4000-8000-000000000301'::uuid])
+   AND org_id='00000000-0000-0000-0000-000000000001')
+ SELECT sum(c.amount_ex) FROM public.v_job_cost_events c JOIN inv i ON c.document_id=i.id::text
+ WHERE c.is_actual AND c.source IN ('trade_line','trade_employer_super');
+\ir ../../../rollbacks/20261118023602_trade_pay_run_standing_checks_down.sql
 SELECT pg_temp.zztest_assert(to_regprocedure('public.trade_pay_run_standing_checks(uuid,uuid[],text)') IS NULL,'rollback left the function');
-SELECT pg_temp.zztest_assert(to_regclass('public.trade_pay_standing_document_idx') IS NULL,'rollback left the index');
+
 ROLLBACK;
 SELECT 'PASS: P1-08.3 six standing checks, invoice stops, whole-run stop and rollback' AS result;

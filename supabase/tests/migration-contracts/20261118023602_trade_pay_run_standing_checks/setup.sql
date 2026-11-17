@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS public.trade_invoices(
  to_be_paid_ex numeric, recurring_deduction_amount numeric, xero_bill_id text, xero_pushed_at timestamptz);
 CREATE TABLE IF NOT EXISTS public.trade_invoice_lines(
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), trade_invoice_id uuid, job_id uuid,
- line_type text, line_total_ex numeric, job_work_order_id uuid, office_review_status text,
+ line_type text, line_total_ex numeric, override_amount numeric, job_work_order_id uuid, office_review_status text,
  group_share_id uuid, description text, job_number text);
 CREATE TABLE IF NOT EXISTS public.work_orders(
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id uuid, job_id uuid, kind text,
@@ -42,12 +42,28 @@ SELECT to_regprocedure('public.work_order_amount_change_total(uuid)') IS NULL AS
 \ir ../../../migrations/20261117171802_work_order_amount_changes.sql
 \endif
 -- A standalone run has no Job Profit stack. This fixture models its documented
--- trade_line projection. GitHub uses the actual registered v_job_cost_events.
+-- trade_line and employer-super projection. GitHub uses the actual registered v_job_cost_events.
 SELECT to_regclass('public.v_job_cost_events') IS NULL AS need_costs \gset
 \if :need_costs
 CREATE VIEW public.v_job_cost_events AS
- SELECT l.job_id,l.line_total_ex amount_ex,'trade_line'::text source,
+ WITH trade AS MATERIALIZED (SELECT l.job_id,l.line_total_ex amount_ex,'trade_line'::text source,
  l.id::text source_id,i.id::text document_id,true is_actual
  FROM public.trade_invoices i JOIN public.trade_invoice_lines l ON l.trade_invoice_id=i.id
- WHERE l.job_id IS NOT NULL;
+ WHERE l.job_id IS NOT NULL)
+ SELECT * FROM trade
+ UNION ALL
+ SELECT t.job_id,round(t.amount_ex*(i.super_amount-(i.subtotal_ex-i.net_pay))/i.subtotal_ex,6),
+ 'trade_employer_super',t.source_id||':employer_super',t.document_id,t.is_actual
+ FROM trade t JOIN public.trade_invoices i ON i.id::text=t.document_id
+ WHERE i.subtotal_ex>0 AND i.super_amount-(i.subtotal_ex-i.net_pay)>0.005 AND t.amount_ex<>0
+ AND EXISTS(SELECT 1 FROM public.feature_flags WHERE flag_name='job_cost_employer_super_v1' AND enabled);
+\endif
+
+-- Standalone-only copy of main's immutable status catalogue. The registered
+-- stack keeps the real function. No production function is replaced here.
+SELECT to_regprocedure('public.job_work_order_billed_invoice_statuses()') IS NULL AS need_statuses \gset
+\if :need_statuses
+CREATE FUNCTION public.job_work_order_billed_invoice_statuses() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
+ SELECT ARRAY['pending_acknowledgment','queried','acknowledged','pending_ops_review','approved','pushed_to_xero','paid']::text[]
+$$;
 \endif

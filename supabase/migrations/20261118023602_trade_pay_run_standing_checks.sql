@@ -1,8 +1,8 @@
 -- P1-08.3. An uncalled read only; no switch, trigger, schedule or money write.
 -- Follow-up 27(5): whole cents billed > whole cents allowed stops the invoice.
--- Job Profit publishes document_id as text. No existing invoice index serves
--- that expression; this keeps its legacy trade branch bounded by document ids.
-CREATE INDEX IF NOT EXISTS trade_pay_standing_document_idx ON public.trade_invoices ((id::text));
+-- The legacy cost view materialises its trade CTE. A text-id index cannot
+-- bound that read; after_xero retains the view's full legacy cost (recorded in
+-- the contract plan), rather than adding an ineffective production index.
 CREATE OR REPLACE FUNCTION public.trade_pay_run_standing_checks(
  p_org_id uuid, p_invoice_ids uuid[], p_stage text
 ) RETURNS jsonb
@@ -41,24 +41,37 @@ DECLARE
 
  WITH inv AS MATERIALIZED (
   SELECT i.id,i.invoice_number,i.user_id,i.week_start,i.super_basis,i.super_amount,
-   i.net_pay,i.gross_earned,i.send_id
+   i.net_pay,i.gross_earned,i.send_id,i.subtotal_ex
   FROM public.trade_invoices i WHERE i.id=ANY(v_ids) AND i.org_id=p_org_id
  ), ln AS MATERIALIZED (
   SELECT l.* FROM public.trade_invoice_lines l JOIN inv i ON i.id=l.trade_invoice_id
   WHERE l.office_review_status IS NULL OR l.office_review_status='approved'
  ), job AS MATERIALIZED (
-  SELECT j.id,j.job_number,j.status,w.id work_order_id,
-   w.agreed_labour_ex + coalesce((v_changes->>w.id::text)::numeric,0)
-    + coalesce((SELECT sum(v.trade_allocation_ex) FROM public.work_order_customer_variations v
-      WHERE v.work_order_id=w.id AND v.status='approved'),0) allowed
+  -- One row per job. Multiple live orders are an invoice-level question,
+  -- never multiplied historical lines or an arbitrary LIMIT 1 allowance.
+  SELECT j.id,j.job_number,j.status,w.work_order_count,w.has_amount,w.allowed
   FROM public.jobs j
-  LEFT JOIN public.work_orders w ON w.job_id=j.id AND w.org_id=p_org_id
-   AND w.kind='job' AND w.status IN ('draft','approved')
+  LEFT JOIN LATERAL (
+   SELECT count(*) work_order_count,bool_or(wo.agreed_labour_ex IS NOT NULL) has_amount,
+    CASE WHEN count(*)=1 THEN max(wo.agreed_labour_ex
+     + coalesce((v_changes->>wo.id::text)::numeric,0)
+     + coalesce((SELECT sum(v.trade_allocation_ex) FROM public.work_order_customer_variations v
+       WHERE v.work_order_id=wo.id AND v.status='approved'),0)) END allowed
+   FROM public.work_orders wo WHERE wo.job_id=j.id AND wo.org_id=p_org_id
+    AND wo.kind='job' AND wo.status IN ('draft','approved')
+  ) w ON true
   WHERE j.id IN (SELECT job_id FROM ln WHERE job_id IS NOT NULL) AND j.org_id=p_org_id
  ), sums AS (
   SELECT i.id,coalesce(sum(l.line_total_ex) FILTER (WHERE lower(btrim(l.line_type)) IS DISTINCT FROM 'reimbursement'),0) super_base,
    coalesce(sum(l.line_total_ex) FILTER (WHERE l.job_id IS NOT NULL
-    AND lower(btrim(l.line_type)) IS DISTINCT FROM 'reimbursement'),0) expected_cost
+    AND lower(btrim(l.line_type)) IS DISTINCT FROM 'reimbursement'),0)
+   + coalesce(sum(CASE WHEN l.job_id IS NOT NULL
+     AND lower(btrim(l.line_type)) IS DISTINCT FROM 'reimbursement'
+     AND i.subtotal_ex>0 AND i.super_amount-(i.subtotal_ex-i.net_pay)>0.005
+     AND EXISTS(SELECT 1 FROM public.feature_flags f
+      WHERE f.flag_name='job_cost_employer_super_v1' AND f.enabled)
+    THEN round(l.line_total_ex*(i.super_amount-(i.subtotal_ex-i.net_pay))/i.subtotal_ex,6)
+    ELSE 0 END),0) expected_cost
   FROM inv i LEFT JOIN ln l ON l.trade_invoice_id=i.id GROUP BY i.id
  ), costs AS MATERIALIZED (
   -- Consume Job Profit's read, not a second cost derivation. Both its legacy
@@ -79,12 +92,11 @@ DECLARE
   -- idx_inv_lines_job bounds all historical lines to these jobs; invoice PK
   -- and the existing (job_id,work_order_id) group key serve the joins.
   SELECT l.job_id,i.id,coalesce((to_jsonb(i)->>'pay_run_id') IS NOT NULL,false) in_run,
-   i.submitted_at,sum(l.line_total_ex) amount
+   i.submitted_at,sum(coalesce(l.override_amount,l.line_total_ex)) amount
   FROM job j JOIN public.trade_invoice_lines l ON l.job_id=j.id
   JOIN public.trade_invoices i ON i.id=l.trade_invoice_id AND i.org_id=p_org_id
-  WHERE i.status IS DISTINCT FROM 'draft' AND i.status IS DISTINCT FROM 'ops-reject'
+  WHERE i.status=ANY(public.job_work_order_billed_invoice_statuses())
    AND i.invoice_kind IN ('standard','follow_on')
-   AND (l.office_review_status IS NULL OR l.office_review_status='approved')
    AND lower(btrim(coalesce(l.line_type,''))) NOT IN ('commission','reimbursement')
    AND (lower(btrim(coalesce(l.line_type,''))) <> 'group share' OR EXISTS (
     SELECT 1 FROM public.group_work_orders g WHERE g.job_id=l.job_id
@@ -96,7 +108,7 @@ DECLARE
    sum(amount) OVER (PARTITION BY job_id) billed_total
   FROM billed b
  ), cap AS (
-  SELECT r.*,j.job_number,j.allowed,
+  SELECT r.*,j.job_number,j.allowed,j.work_order_count,
    bool_or(round(running*100)>round(j.allowed*100)) OVER (PARTITION BY r.job_id
      ORDER BY in_run DESC,submitted_at NULLS LAST,r.id ROWS UNBOUNDED PRECEDING) crossed
   FROM running r JOIN job j ON j.id=r.job_id
@@ -112,8 +124,8 @@ DECLARE
   FROM inv i JOIN sums s ON s.id=i.id JOIN invoice_costs c ON c.id=i.id
   UNION ALL
   SELECT 'nobody_above_work_order',i.id,c.job_number,c.allowed,c.billed_total,
-   coalesce(c.crossed,false),c.allowed IS NULL,'no work order amount',
-   'Job '||c.job_number||' is billed '||round(c.billed_total-c.allowed,2)::text||' above its work order. This invoice waits until the amount is raised or the invoice is corrected.'
+   c.work_order_count>1 OR coalesce(c.crossed,false),c.allowed IS NULL AND c.work_order_count<=1,'no work order amount',
+   CASE WHEN c.work_order_count>1 THEN 'Job '||c.job_number||' has more than one live work order. The office must resolve the work order before this invoice is paid.' ELSE 'Job '||c.job_number||' is billed '||round(c.billed_total-c.allowed,2)::text||' above its work order. This invoice waits until the amount is raised or the invoice is corrected.' END
   FROM inv i JOIN cap c ON c.id=i.id
   UNION ALL
   SELECT 'super_is_12_over_112',i.id,NULL,round(s.super_base*12/112,2),i.super_amount,
@@ -124,8 +136,8 @@ DECLARE
   FROM inv i JOIN sums s ON s.id=i.id
   UNION ALL
   SELECT 'no_paid_line_without_work_order',i.id,j.job_number,1,
-   CASE WHEN j.allowed IS NOT NULL OR (l.not_job_work_type_id IS NOT NULL AND l.office_review_status='approved') THEN 1 ELSE 0 END,
-   j.allowed IS NULL AND NOT coalesce(l.not_job_work_type_id IS NOT NULL AND l.office_review_status='approved',false)
+   CASE WHEN coalesce(j.has_amount,false) OR (l.not_job_work_type_id IS NOT NULL AND l.office_review_status='approved') THEN 1 ELSE 0 END,
+   NOT coalesce(j.has_amount,false) AND NOT coalesce(l.not_job_work_type_id IS NOT NULL AND l.office_review_status='approved',false)
     AND NOT coalesce(j.status IN ('complete','completed','closed','archived','cancelled','lost'),false),
    coalesce(j.status IN ('complete','completed','closed','archived','cancelled','lost'),false),'job closed before the rule',
    'Invoice '||i.invoice_number||' has a line on job '||coalesce(j.job_number,'not recorded')||', which has no work order amount.'
