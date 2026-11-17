@@ -773,6 +773,9 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_client_story(uui
 BEGIN;
 \if :client_story_saved_live
 \ir ../../../rollbacks/20261117090000_context_client_story_saved_down.sql
+-- the down's own time limits would otherwise hold for this whole fixture transaction
+RESET statement_timeout;
+RESET lock_timeout;
 \endif
 SET LOCAL session_replication_role = replica;
 -- The fixtures are read as of Wed 7 Oct 2026 10:00 Perth: a fixture row that names no capture
