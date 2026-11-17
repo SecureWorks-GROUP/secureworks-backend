@@ -21,6 +21,7 @@ import {
   type DispatchV2OutlookPayload,
   type DispatchV2SendOutcome,
   projectDispatchV2Email,
+  readDispatchOrderQuoteRefSwitch,
   runDispatchV2Action,
 } from "./dispatch_v2_store.ts";
 import { DispatchMaterialsError } from "./dispatch_materials_store.ts";
@@ -2628,6 +2629,94 @@ Deno.test("make email: fencing main supplier, To and CC from the approved list p
   );
   assertEquals(metroll.cc, ["fencing@secureworkswa.com.au"]);
   assertOnlyV2Writes(db);
+});
+
+// P2-10.4: the "please quote this reference" line follows the switch
+// dispatch_order_quote_ref_line_v1, read where the email is made. A stand-in
+// supplier address; the sender is a fake, so nothing leaves the test.
+const QUOTE_REF_LINE = "Please quote this reference on your invoice: SWF-900001";
+async function quoteRefJob(flag: boolean | null) {
+  const db = makeDb();
+  const approved = db.tables.dispatch_approved_supplier_emails.find((e) =>
+    e.id === APPROVED.stratco
+  )!;
+  approved.to_emails = ["orders@supplier.example"];
+  approved.cc_emails = [];
+  if (flag !== null) {
+    db.tables.feature_flags.push({ flag_name: "dispatch_order_quote_ref_line_v1", enabled: flag });
+  }
+  await fencingJob(db);
+  return db;
+}
+
+Deno.test("quote reference line: switch missing or off, the email is made and sent exactly as before", async () => {
+  for (const flag of [null, false]) {
+    const db = await quoteRefJob(flag);
+    const { sent, sender } = fakeSender();
+    const email = (await makeEmail(db, JOB.fence, SUP.stratco)).email;
+    assert(!email.body_text.includes("Please quote this reference"));
+    assert(!email.body_text.includes("SWF-900001"));
+    assert(email.body_text.endsWith("\n\n\nPlease confirm when you can, thank you."));
+    assertEquals(email.subject, "Material Order Ref SWF-900001");
+    await call(db, "dispatch_v2_send_email", {
+      email_id: email.id,
+      expected_updated_at: email.updated_at,
+    }, ctx(sender));
+    assertEquals(sent.length, 1);
+    assertEquals(sent[0].to, ["orders@supplier.example"]);
+    assert(!sent[0].htmlBody.includes("Please quote this reference"));
+  }
+});
+
+Deno.test("quote reference line: switch on, the line is the body's last, once, and goes out; no $, subject unchanged", async () => {
+  const db = await quoteRefJob(true);
+  // The budget switch is its own row: reading this line never reads it.
+  db.tables.feature_flags.push({ flag_name: "dispatch_budget_cost_v1", enabled: false });
+  const { sent, sender } = fakeSender();
+  const made = await makeEmail(db, JOB.fence, SUP.stratco);
+  const email = made.email;
+  assert(email.body_text.endsWith(
+    `Please confirm when you can, thank you.\n\n${QUOTE_REF_LINE}`,
+  ));
+  assertEquals(email.body_text.split(QUOTE_REF_LINE).length - 1, 1);
+  assertEquals(email.body_text.split("SWF-900001").length - 1, 1);
+  assert(!email.body_text.includes("$"));
+  assertEquals(email.subject, "Material Order Ref SWF-900001");
+  assertEquals(email.empty_detail_lines, []);
+  assertEquals(email.edited, false);
+  assertEquals(made.missing, []);
+  await call(db, "dispatch_v2_send_email", {
+    email_id: email.id,
+    expected_updated_at: email.updated_at,
+  }, ctx(sender));
+  assertEquals(sent.length, 1);
+  assertEquals(sent[0].to, ["orders@supplier.example"]);
+  assertEquals(sent[0].subject, "Material Order Ref SWF-900001");
+  assert(sent[0].htmlBody.includes(QUOTE_REF_LINE));
+  assert(!sent[0].htmlBody.includes("$"));
+});
+
+Deno.test("quote reference line: the switch reader is on only for an explicit true; no row, false, an error or a throw is off", async () => {
+  const reader = (answer: () => unknown) => ({
+    from(table: string) {
+      assertEquals(table, "feature_flags");
+      const q: any = {
+        select: () => q,
+        eq: (c: string, v: unknown) => {
+          assertEquals([c, v], ["flag_name", "dispatch_order_quote_ref_line_v1"]);
+          return q;
+        },
+        limit: () => Promise.resolve(answer()),
+      };
+      return q;
+    },
+  });
+  assertEquals(await readDispatchOrderQuoteRefSwitch(reader(() => ({ data: [{ enabled: true }], error: null }))), true);
+  assertEquals(await readDispatchOrderQuoteRefSwitch(reader(() => ({ data: [{ enabled: false }], error: null }))), false);
+  assertEquals(await readDispatchOrderQuoteRefSwitch(reader(() => ({ data: [{ enabled: "true" }], error: null }))), false);
+  assertEquals(await readDispatchOrderQuoteRefSwitch(reader(() => ({ data: [], error: null }))), false);
+  assertEquals(await readDispatchOrderQuoteRefSwitch(reader(() => ({ data: null, error: { message: "boom" } }))), false);
+  assertEquals(await readDispatchOrderQuoteRefSwitch(reader(() => { throw new Error("boom"); })), false);
 });
 
 Deno.test("make email: a recognise-only address (Solarspan on Bondor, 11 Nov 2026) is never sent to or copied", async () => {

@@ -27,6 +27,7 @@ import {
 import {
   calculateTradeInvoiceMoney,
   reimbursementLinesTotalEx,
+  resolveTradeInvoiceSuperBasis,
   TradeInvoiceMoneyError,
   type TradeInvoiceSuperBasis,
 } from "./trade_invoice_money.ts";
@@ -263,7 +264,7 @@ async function loadWeekDrafts(
 ) {
   const { data, error } = await client.from("trade_invoices")
     .select(
-      "id, created_by_agent, draft_builder, draft_origin, agent_label, dismissed_source_keys, notes, gst_on, gst, gross_earned, super_rate, super_amount, net_pay, total_inc, invoice_source, created_at",
+      "id, created_by_agent, draft_builder, draft_origin, agent_label, dismissed_source_keys, notes, gst_on, gst, gross_earned, super_rate, super_amount, super_basis, super_base_ex, net_pay, total_inc, invoice_source, created_at",
     )
     .eq("user_id", userId)
     .eq("org_id", orgId)
@@ -1149,16 +1150,28 @@ export async function saveRunningInvoiceDraft(
   const origin = mode === "agent"
     ? "agent"
     : (prior?.draft_origin || (mode === "auto" ? "auto" : "staff"));
-  // One super rule (P1-01.3). The draft is saved with a split, so an
-  // unreadable rule refuses it (503, nothing saved). A draft carrying a
-  // group share keeps today's draft pricing; its submit prices it on the
-  // group's basis.
+  // One super rule (P1-01.3). A draft carrying a group share keeps today's
+  // draft pricing; its submit prices it on the group's basis. A draft
+  // already priced keeps the rule it was priced under (its stored basis,
+  // null being the old rule), so turning the switch off or moving the start
+  // date never re-prices it. Only a new or unpriced draft reads the switch,
+  // and an unreadable rule refuses that save (503, nothing saved).
   const carriesGroupShare = lines.some((line: Record<string, unknown>) =>
     Boolean(line?.group_share_id) ||
     String(line?.line_type ?? "").trim().toLowerCase() === "group share"
   );
+  const priorPriced = prior != null && prior.gross_earned != null;
   let superBasis: TradeInvoiceSuperBasis | null = null;
-  if (!carriesGroupShare) {
+  if (!carriesGroupShare && priorPriced) {
+    try {
+      superBasis = resolveTradeInvoiceSuperBasis(prior.super_basis);
+    } catch (error) {
+      if (error instanceof TradeInvoiceMoneyError) {
+        throw new RunningDraftError(error.message, 422, error.code);
+      }
+      throw error;
+    }
+  } else if (!carriesGroupShare) {
     try {
       superBasis = await resolveTradePayBasisForSubmit(client, weekStart || weekEnd);
     } catch (error) {
