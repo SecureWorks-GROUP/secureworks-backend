@@ -690,6 +690,7 @@ class Query {
   is(col: string,value:unknown): this { this.filters.push({op:"is",col,value}); return this; }
   order(col:string, options:{ascending?:boolean}={}): this { this.sorts.push({col,ascending:options.ascending!==false});return this; }
   range(start:number,end:number): this { this.bounds=[start,end]; return this; }
+  limit(n:number): this { this.bounds=[0,n-1]; return this; }
   insert(row: unknown): this {
     this.op = "insert";
     this.payload = row;

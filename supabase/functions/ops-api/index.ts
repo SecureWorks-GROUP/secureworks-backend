@@ -37,6 +37,7 @@ import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engi
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
+import { readSwitches } from '../_shared/switch_cache.ts'
 import { salesPerformanceAction, salesPerformanceStore } from './sales_performance.ts'
 // ════════════════════════════════════════════════════════════
 // SecureWorks — Ops API Edge Function
@@ -10536,6 +10537,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (req.method !== 'POST') {
           return json({ error: 'auto_issue_job_work_orders is POST only', code: 'method_not_allowed' }, 405)
         }
+        // P0-07.2: every switch this sweep reads, in one feature_flags call; the
+        // readers below then answer from the 45-second memory.
+        await readSwitches(client, ['group_work_order_auto_patio_v1', 'group_work_order_auto_fence_v1', 'patio_pay_group_only_v1', 'job_work_order_auto_issue_v1', 'group_work_order_v1'])
         let issued: Record<string, unknown> = {}
         let issueError: unknown = null
         // WO-6: open patio jobs with 2+ crew and no work order get their

@@ -1,4 +1,5 @@
 // deno-lint-ignore-file no-explicit-any no-import-prefix require-await
+import { _resetSwitchCacheForTest } from "../_shared/switch_cache.ts";
 import {
   assert,
   assertEquals,
@@ -368,6 +369,8 @@ Deno.test("all-types flag: a make-safe is listed and read only while the flag is
     flag_name: "job_work_order_all_types_v1",
     enabled: true,
   });
+  // A switch answer is remembered for 45 seconds (P0-07.2): forget it.
+  _resetSwitchCacheForTest();
   const listed = await listJobWorkOrders(
     db,
     new URLSearchParams({ type: "makesafe" }),

@@ -68,6 +68,7 @@
 // labour-lane lines count against the agreed labour; the rest are listed.
 
 import { readWorkOrderScopeIdentity } from "./job_work_order_scope_identity.ts";
+import { readSwitch } from "../_shared/switch_cache.ts";
 import {
   fillJobWorkOrderDraftFromQuote,
   JOB_WORK_ORDER_OPEN_STATUSES,
@@ -2567,14 +2568,7 @@ export type VariationEmailSender = (
 >;
 
 export async function readFlag(client: any, flag: string): Promise<boolean> {
-  try {
-    const { data, error } = await client.from("feature_flags").select("enabled")
-      .eq("flag_name", flag).limit(1);
-    if (error) return false;
-    return data?.[0]?.enabled === true;
-  } catch {
-    return false;
-  }
+  return readSwitch(client, flag);
 }
 
 function parseVariationDescription(value: unknown): string {

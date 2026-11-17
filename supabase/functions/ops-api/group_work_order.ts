@@ -33,6 +33,7 @@
 import { clientSignoffForm, hasOfficeClientConfirmation, validSignoffDay, SIGNED_CLIENT_COPY_COLUMNS } from "./client_signoff_form_data.ts";
 import { GOOGLE_REVIEW_URL as SEEDED_GOOGLE_REVIEW_URL } from "../_shared/google_review_link.ts";
 import { signatureDataUrl } from "../_shared/signature_image.ts";
+import { readSwitch } from "../_shared/switch_cache.ts";
 import { calculateTradeInvoiceMoney, TRADE_INVOICE_EMPLOYER_SUPER_BASIS, TRADE_INVOICE_WORKER_WITHHOLD_RATE } from "./trade_invoice_money.ts";
 import { resolveTradeInvoiceTimeEntry } from "./trade_invoice_time_entry.ts";
 
@@ -1074,10 +1075,7 @@ function groupIsSigned(group: Record<string, unknown>): boolean {
 }
 
 export async function groupFeatureOn(client: any): Promise<boolean> {
-  const { data, error } = await client.from("feature_flags").select("enabled")
-    .eq("flag_name", GROUP_WORK_ORDER_FLAG).maybeSingle();
-  if (error || data?.enabled !== true) return false;
-  return true;
+  return await readSwitch(client, GROUP_WORK_ORDER_FLAG);
 }
 
 async function assertGroupEnabled(client: any): Promise<void> {
