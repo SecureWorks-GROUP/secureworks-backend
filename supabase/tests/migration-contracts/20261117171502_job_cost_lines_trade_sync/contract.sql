@@ -1,4 +1,15 @@
 BEGIN;
+DO $$ BEGIN
+ IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname LIKE 'job_cost_lines_trade_%') THEN
+   RAISE EXCEPTION 'trade sync: migration installed business triggers'; END IF;
+END $$;
+SELECT public.job_cost_lines_install_trade_triggers();
+SELECT public.job_cost_lines_remove_trade_triggers();
+DO $$ BEGIN
+ IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname LIKE 'job_cost_lines_trade_%') THEN
+   RAISE EXCEPTION 'trade sync: remove left business triggers'; END IF;
+END $$;
+SELECT public.job_cost_lines_install_trade_triggers();
 -- Lift unrelated historical fixture guards only in this rolled-back transaction.
 -- Keep the four cost-line triggers being exercised enabled.
 DO $$ DECLARE t text; c record; BEGIN
@@ -32,6 +43,21 @@ DO $$ BEGIN
  IF EXISTS (SELECT 1 FROM public.job_cost_lines WHERE document_id='30000000-0000-4000-8000-000000000003') THEN
    RAISE EXCEPTION 'trade sync: off wrote a line'; END IF;
 END $$;
+-- An unreadable shadow switch must not reject the business write.
+SAVEPOINT unreadable_switch;
+DROP TABLE public.feature_flags;
+UPDATE public.trade_invoice_lines SET description='Work without shadow switch'
+  WHERE id='30000000-0000-4000-8000-000000000004';
+UPDATE public.trade_invoices SET super_amount=80
+  WHERE id='30000000-0000-4000-8000-000000000003';
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM public.trade_invoice_lines
+   WHERE id='30000000-0000-4000-8000-000000000004' AND description='Work without shadow switch') THEN
+   RAISE EXCEPTION 'trade sync: shadow failure rejected business write'; END IF;
+ IF EXISTS (SELECT 1 FROM public.job_cost_lines WHERE document_id='30000000-0000-4000-8000-000000000003') THEN
+   RAISE EXCEPTION 'trade sync: failed shadow left partial lines'; END IF;
+END $$;
+ROLLBACK TO SAVEPOINT unreadable_switch;
 UPDATE public.feature_flags SET enabled=true WHERE flag_name='job_cost_lines_sync_v1';
 -- UPDATE statement trigger drives the real view and writer, not a mocked cost document.
 UPDATE public.trade_invoice_lines SET description='Work updated' WHERE id='30000000-0000-4000-8000-000000000004';
