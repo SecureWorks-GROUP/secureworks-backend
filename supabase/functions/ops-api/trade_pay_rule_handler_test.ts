@@ -65,6 +65,7 @@ type Captured = {
   writes: string[];
   invoiceRows: any[];
   lineRows: any[];
+  rpcArgs: Array<{ name: string; args: any }>;
 };
 
 function filterValues(url: URL, column: string): string[] | null {
@@ -83,12 +84,16 @@ type World = {
   payRuleFrom?: string | null;
   failPaySettings?: boolean;
   weekStart?: string;
+  // The stored draft a save replaces (returned for a draft lookup).
+  priorDraft?: Record<string, unknown>;
+  action?: string;
 };
 
 async function submit(extra_items: any[], world: World = {}): Promise<Captured> {
   const writes: string[] = [];
   const invoiceRows: any[] = [];
   const lineRows: any[] = [];
+  const rpcArgs: Array<{ name: string; args: any }> = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = ((input: Request | URL | string, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
@@ -104,7 +109,9 @@ async function submit(extra_items: any[], world: World = {}): Promise<Captured> 
       return Promise.resolve(Response.json({ id: TRADE_ID, email: "", aud: "authenticated" }));
     }
     if (url.pathname.startsWith("/rest/v1/rpc/")) {
-      writes.push("RPC " + url.pathname.slice("/rest/v1/rpc/".length));
+      const name = url.pathname.slice("/rest/v1/rpc/".length);
+      writes.push("RPC " + name);
+      rpcArgs.push({ name, args: typeof init?.body === "string" ? JSON.parse(init.body) : null });
       return Promise.resolve(Response.json("6c2f0a52-0000-4000-8000-00000000d001"));
     }
     const table = url.pathname.match(/^\/rest\/v1\/(.+)$/)?.[1] || "";
@@ -183,13 +190,15 @@ async function submit(extra_items: any[], world: World = {}): Promise<Captured> 
       if (method === "PATCH" || method === "DELETE") {
         return reply([{ id: "6c2f0a52-0000-4000-8000-00000000d001" }]);
       }
+      const statuses = filterValues(url, "status");
+      if (world.priorDraft && statuses?.includes("draft")) return reply([world.priorDraft]);
       return reply([]);
     }
     return reply([]);
   }) as typeof fetch;
   try {
     const url = new URL("https://example.invalid/ops-api");
-    url.searchParams.set("action", "generate_trade_invoice");
+    url.searchParams.set("action", world.action ?? "generate_trade_invoice");
     const res = await _opsApiRequestHandlerForTest(new Request(url, {
       method: "POST",
       headers: { authorization: "Bearer trade-jwt", "content-type": "application/json" },
@@ -202,7 +211,7 @@ async function submit(extra_items: any[], world: World = {}): Promise<Captured> 
     } catch {
       parsed = { raw: text };
     }
-    return { status: res.status, body: parsed, writes, invoiceRows, lineRows };
+    return { status: res.status, body: parsed, writes, invoiceRows, lineRows, rpcArgs };
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -346,4 +355,88 @@ handlerTest("pay rule: an agreed work order on the new rule bills its total, sup
     assertEquals(refused.body.code, code);
     assertEquals(refused.invoiceRows, []);
   }
+});
+
+// ── a saved invoice keeps the rule it was priced under (money review) ───────
+//
+// Every door that replaces a stored draft takes the stored basis when the
+// draft is priced, and the current rule only for a new or unpriced one. One
+// table over the doors that re-save: the ordinary draft save and the weekly
+// submit (this harness, the real handler). The running weekly draft runs the
+// same rows in trade_invoice_running_draft_test.ts; the work order retry is
+// pinned to the same helper below.
+//
+// 20 x 56 = 1,120. Inclusive: the fund gets 1,120 x 12/112 = 120, the person
+// 1,000. Old rule: super 134.40 (12%), the person 1,052.80 (6% withheld).
+
+const PRIOR_ID = "6c2f0a52-0000-4000-8000-00000000e001";
+const INCLUSIVE_SPLIT = ["inclusive_12_112_v1", 1120, 120, 1000];
+const OLD_SPLIT = [null, 1120, 134.4, 1052.8];
+
+const priorDraft = (superBasis: string | null) => ({
+  id: PRIOR_ID,
+  status: "draft",
+  week_start: WEEK_START,
+  xero_bill_id: null,
+  xero_pushed_at: null,
+  gross_earned: 1120,
+  super_basis: superBasis,
+  super_base_ex: null,
+});
+
+// The invoice header each door saved.
+const savedHeader: Record<string, (out: Captured) => any> = {
+  save_trade_invoice_draft: (out) =>
+    out.rpcArgs.find((call) => call.name === "persist_weekly_trade_invoice_v3")?.args?.p_invoice,
+  generate_trade_invoice: (out) => out.invoiceRows[0],
+};
+
+const RE_SAVE_CASES = [
+  {
+    name: "stored inclusive draft, switch off",
+    prior: priorDraft("inclusive_12_112_v1"),
+    world: { payRuleOn: false, payRuleFrom: WEEK_START },
+    expected: INCLUSIVE_SPLIT,
+  },
+  {
+    name: "stored old-rule draft, switch on from its week",
+    prior: priorDraft(null),
+    world: ON_FROM,
+    expected: OLD_SPLIT,
+  },
+  {
+    name: "unpriced stored draft, switch on: the current rule",
+    prior: { ...priorDraft(null), gross_earned: null },
+    world: ON_FROM,
+    expected: INCLUSIVE_SPLIT,
+  },
+];
+
+for (const action of ["save_trade_invoice_draft", "generate_trade_invoice"]) {
+  for (const row of RE_SAVE_CASES) {
+    handlerTest(`pay rule: ${action} over a ${row.name}: basis and split as stored`, async () => {
+      const out = await submit(
+        [plainLine(OPEN_JOB, "ZZF-2002", "Materials", 20, 56)],
+        { ...row.world, priorDraft: row.prior, action },
+      );
+      assert(out.status === 200, `status ${out.status}: ${JSON.stringify(out.body)}`);
+      const inv = savedHeader[action](out);
+      assert(inv, `no saved header: ${out.writes.join(", ")}`);
+      assertEquals(
+        [inv.super_basis ?? null, inv.gross_earned, inv.super_amount, inv.net_pay],
+        row.expected,
+      );
+    });
+  }
+}
+
+handlerTest("pay rule: every save door and the work order retry use the one decision", async () => {
+  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  // Nothing in ops-api reads the current rule except through the helper.
+  assertEquals(src.match(/resolveTradePayBasis\(/g)?.length, 1);
+  assertEquals(src.match(/tradePayBasisForSave\(/g)?.length, 4); // definition + three doors
+  assertStringIncludes(src, "tradePayBasisForSave(client, retryDrafts[0] ?? null, woInvoiceDate)");
+  assertStringIncludes(src, "tradePayBasisForSave(client, existingDraft, draftWeekStart || draftWeekEnd)");
+  assertStringIncludes(src, "tradePayBasisForSave(client, priorDraft, week_start || invoiceEarningsDate)");
+  assertStringIncludes(src, ".select(`id, user_id, status, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)");
 });
