@@ -1056,10 +1056,9 @@ export function buildTradeInvoiceAuditModel(
       );
     }
     return {
-      description: withTradeIdentityOnXeroDescription(
-        line.Description || "Trade invoice line",
-        tradeName,
-      ),
+      description: isTradeInvoiceReimbursementXeroLine(line)
+        ? String(line.Description)
+        : withTradeIdentityOnXeroDescription(line.Description || "Trade invoice line", tradeName),
       quantity,
       unit_amount: unitAmount,
       line_total: round2(quantity * unitAmount),
@@ -1083,7 +1082,9 @@ export function buildTradeInvoiceAuditModel(
       !(superBase >= 0 && superBase < money.gross_earned)) ||
     !closeMoney(
       money.super_amount,
-      round2((superBase ?? money.gross_earned) * money.super_rate),
+      money.super_basis === TRADE_INVOICE_INCLUSIVE_SUPER_BASIS
+        ? tradeInvoiceInclusiveSuper(superBase ?? money.gross_earned)
+        : round2((superBase ?? money.gross_earned) * money.super_rate),
     )
   ) {
     throw new TradeInvoiceMoneyError(
@@ -1184,7 +1185,7 @@ export function splitTradeInvoiceXeroLines(
       Description: submitted.description,
       Quantity: submitted.quantity,
       UnitAmount: submitted.unit_amount,
-      TaxType: taxType,
+      TaxType: isTradeInvoiceReimbursementXeroLine(line) ? "NONE" : taxType,
     };
   });
 
@@ -1268,6 +1269,10 @@ export function normaliseXeroTaxType(value: unknown): string {
   return t === "BASEXCLUDED" ? "NONE" : t;
 }
 
+export function isTradeInvoiceReimbursementXeroLine(line: TradeInvoiceXeroLine): boolean {
+  return /^reimbursement - /i.test(String(line.Description || ""));
+}
+
 export function assertReturnedTradeInvoiceXeroSplit(
   value: unknown,
   money: TradeInvoiceMoney,
@@ -1284,7 +1289,9 @@ export function assertReturnedTradeInvoiceXeroSplit(
   const deductionLines = lines.filter((line) =>
     isTradeInvoiceRecurringDeductionXeroLine(line)
   );
+  const reimbursementLines = lines.filter(isTradeInvoiceReimbursementXeroLine);
   const labourLines = lines.filter((line) =>
+    !isTradeInvoiceReimbursementXeroLine(line) &&
     !isTradeInvoiceSuperXeroLine(line) &&
     !isTradeInvoiceRecurringDeductionXeroLine(line)
   );
@@ -1324,12 +1331,13 @@ export function assertReturnedTradeInvoiceXeroSplit(
   if (
     superLines.length !== 1 ||
     deductionLines.length !== (money.recurring_deduction ? 1 : 0) ||
-    Math.abs(labourCents - expectedGrossCents) > 1 ||
+    Math.abs(labourCents + reimbursementLines.reduce((sum, line) => sum + lineGrossCents(line), 0) - expectedGrossCents) > 1 ||
     Math.abs(superCents - expectedWithholdCents) > 1 ||
     Math.abs(deductionCents - expectedDeductionCents) > 1 ||
     Math.abs(totalCents - expectedNetCents) > 1 ||
     superLines.some((line) => taxTypeOf(line) !== "NONE") ||
     deductionLines.some((line) => taxTypeOf(line) !== "NONE") ||
+    reimbursementLines.some((line) => taxTypeOf(line) !== "NONE") ||
     labourLines.some((line) => taxTypeOf(line) !== expectedLabourTaxType)
   ) {
     throw new TradeInvoiceMoneyError(

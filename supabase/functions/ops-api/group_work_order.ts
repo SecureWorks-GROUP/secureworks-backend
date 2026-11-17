@@ -106,6 +106,7 @@ const STAFF_ROLES = new Set(["admin", "owner", "ops_manager"]);
 // lock, and outside this fence. Keys are lower case with "_" and spaces
 // removed, matching group_work_order_line_is_normal_pay.
 const NOT_PAY_KEYS = new Set([
+  "reimbursement",
   "groupshare",
   "commission",
   "travel",

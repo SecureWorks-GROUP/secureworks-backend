@@ -1,6 +1,7 @@
 // JWT flag: --no-verify-jwt. Keep this line at the top: the deploy workflow reads
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
+import { REIMBURSEMENT_FLAG, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
 import { setCouncilRequired } from './council_mark.ts'
 import { JobLabourPayReadError, readHourlyCappedJobs, readHourlyLabourLimits } from './job_labour_cap.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
@@ -701,6 +702,7 @@ import {
   assertExistingTradeInvoiceXeroBill,
   assertTradeInvoiceSuperBaseMatchesLines,
   calculateTradeInvoiceMoney,
+  reimbursementLinesTotalEx,
   checkpointAndAssertReturnedTradeInvoiceXeroSplit,
   presentTradeInvoiceMoney,
   resolvePersistedTradeInvoiceLineAmount,
@@ -2325,12 +2327,37 @@ function tradeInvoiceMoney(
   // The invoice's commission lines, ex GST (commissionLinesTotalEx): no super
   // on commission (Marnin, 12 Nov 2026). 0 leaves super on the whole gross.
   commissionEx: unknown = 0,
+  reimbursementEx: unknown = 0,
 ): TradeInvoiceMoney {
   try {
-    return calculateTradeInvoiceMoney({ grossEarned, gstOn, earningsDate, superBasis, commissionEx })
+    return calculateTradeInvoiceMoney({ grossEarned, gstOn, earningsDate, superBasis, commissionEx, reimbursementEx })
   } catch (error) {
     return tradeInvoiceMoneyApiError(error)
   }
+}
+
+async function invoiceReimbursements(client: any, userId: string, items: any[], day: string, priorBasis: unknown = null) {
+  const requested = (items || []).filter(isReimbursementItem)
+  if (!requested.length) return { lines: [], skipped_items: [], basis: priorBasis }
+  const { data: flag } = await client.from('feature_flags').select('enabled').eq('flag_name', REIMBURSEMENT_FLAG).maybeSingle()
+  const rule = flag?.enabled === true ? await client.rpc('trade_pay_rule_on', { p_day: day }) : { data: false }
+  const basis = !rule.error && rule.data === true ? 'inclusive_12_112_v1' : priorBasis
+  return { ...await resolveReimbursementExtras(client, { userId, items: requested, flagOn: flag?.enabled === true, basis }), basis }
+}
+
+async function markTradeInvoiceJobsChanged(client: any, lines: any[]) {
+  for (const jobId of new Set(lines.map((line: any) => String(line.job_id || '')).filter(Boolean))) {
+    try { await client.rpc('job_mark_changed', { p_job_id: jobId, p_source: 'phase1:trade_invoice' }) } catch { /* The owning phase may not be installed yet. */ }
+  }
+}
+
+async function reimbursementXeroAccount(client: any, lines: any[]): Promise<string | null> {
+  if (!lines.some(isReimbursementItem)) return null
+  const { data, error } = await client.from('trade_pay_settings').select('reimbursement_account_code').eq('id', 1).maybeSingle()
+  if (error) throw new ApiError('Could not read the account for reimbursements.', 503, { code: 'reimbursement_account_unreadable' })
+  const code = String(data?.reimbursement_account_code || '').trim()
+  if (!code) throw new ApiError('The account for reimbursements has not been set, so this invoice was not sent to Xero.', 409, { code: 'reimbursement_account_not_set' })
+  return code
 }
 
 function persistedTradeInvoiceMoney(value: unknown): TradeInvoiceMoney {
@@ -2715,11 +2742,13 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
   // A stored super base must still be the lines less their commission. An
   // invoice with none was priced with super on its whole gross and keeps it.
   try {
-    assertTradeInvoiceSuperBaseMatchesLines(invMoney, commissionLinesTotalEx(reviewLines))
+    assertTradeInvoiceSuperBaseMatchesLines(invMoney, commissionLinesTotalEx(reviewLines), reimbursementLinesTotalEx(reviewLines))
   } catch (error) {
     tradeInvoiceMoneyApiError(error)
   }
   const xeroTax = _tradeInvoiceXeroTax(invMoney.gst_amount)
+
+  const reimbursementAccount = await reimbursementXeroAccount(client, reviewLines)
 
   // Past the guard. From here side effects are allowed.
   const { accessToken, tenantId } = await getToken(client)
@@ -2754,11 +2783,11 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
     }
     const lineTracking = tracking && trackingOption ? [{ Name: 'Business Unit', Option: trackingOption }] : []
     return {
-      Description: desc,
-      Quantity: recovered.quantity,
-      UnitAmount: recovered.unitAmount,
-      AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // 306 Internal Subcontractors
-      TaxType: xeroTax.taxType,
+      Description: isReimbursementItem(line) ? (String(line.description || "").startsWith("Reimbursement - ") ? line.description : "Reimbursement - " + (line.description || "")) : desc,
+      Quantity: isReimbursementItem(line) ? 1 : recovered.quantity,
+      UnitAmount: isReimbursementItem(line) ? recovered.lineTotalEx : recovered.unitAmount,
+      AccountCode: isReimbursementItem(line) ? reimbursementAccount! : TRADE_INVOICE_XERO_ACCOUNT_CODE, // 306 Internal Subcontractors
+      TaxType: isReimbursementItem(line) ? "NONE" : xeroTax.taxType,
       Tracking: lineTracking,
     }
   })
@@ -11664,7 +11693,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'submit_expense': return json(await submitExpense(client, body, { mode: authModeLegacy, user: authUser ?? undefined }))
       case 'approve_expense': return json(await approveExpense(client, body, { mode: authModeLegacy, user: authUser ?? undefined }))
       case 'push_expense_to_xero': return json(await pushExpenseToXero(client, body, { mode: authModeLegacy, user: authUser ?? undefined }))
-      case 'list_expenses': return json(await listExpenses(client, url.searchParams))
+      case 'list_expenses': return json(await listExpenses(client, url.searchParams, authUser ?? undefined))
       case 'list_unreconciled_transactions': return json(await listUnreconciledTransactions(client, url.searchParams))
       case 'suggest_job_for_expense': return json(await suggestJobForExpense(client, body, { mode: authModeLegacy, user: authUser ?? undefined }))
       case 'update_expense': return json(await updateExpense(client, body, { mode: authModeLegacy, user: authUser ?? undefined }))
@@ -14004,10 +14033,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 return true
               })
               : []
+            const draftReimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(draftExtras) ? draftExtras : [], draftWeekEnd)
             const draftShareShaped = (item: any) =>
               isGroupShareInvoiceItem(item) || Boolean(item?.group_share_id)
             const plainLabour = labourLines.filter((line: any) => !draftShareShaped(line))
-            const plainExtras = extras.filter((extra: any) => !draftShareShaped(extra))
+            const plainExtras = extras.filter((extra: any) => !draftShareShaped(extra) && !isReimbursementItem(extra))
             // Ordinary pay on a job that already has a group is 409 even while
             // the switch is off. The line trigger does not read the flag.
             await assertGroupJobDraftUsesShare(client, [
@@ -14059,12 +14089,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             for (const share of resolvedShares) {
               extraTotal += roundMoney(Number(share.line_total_ex || 0))
             }
-            const draftSubtotal = weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)
+            let draftReimbursementEx = reimbursementLinesTotalEx(draftReimbursements.lines)
+            let draftSubtotal = (weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)) + draftReimbursementEx
             // Recurring deduction: a dated draft shows what the submitted
             // invoice will carry, so the trade sees it before submitting.
-            const { money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(
+            let { money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(
               client,
-              tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd),
+              tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd, draftReimbursements.basis, 0, draftReimbursementEx),
               { userId: tradeUser.id, weekStart: draftWeekStart || null },
             )
 
@@ -14139,6 +14170,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     : tradeInvoiceTimeEntryColumns(null)),
                 }
               }),
+              ...draftReimbursements.lines.map(reimbursementDbLine),
               ...resolvedShares.map((share) => ({
                 job_id: share.job_id || null,
                 job_number: share.job_number || null,
@@ -14179,7 +14211,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               notes: draftNotes || null,
               status: 'draft',
             }
-            const draftId = weeklyInvoice
+            const draftId = await retryReimbursementClaims(client, draftReimbursements, async () => weeklyInvoice
               ? await _persistWeeklyTradeInvoice(
                 client,
                 {
@@ -14195,13 +14227,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   ...tradeInvoiceMoneyFields(draftMoney),
                   ...tradeRecurringDeductionInvoiceFields(draftRecurringDeduction),
                   invoice_source: 'weekly_work_order',
-                  job_grand_total_ex: weeklyInvoice.grand_total,
+                  job_grand_total_ex: weeklyInvoice.grand_total + draftReimbursementEx,
                   final_deductions_total_ex: weeklyInvoice.final_deductions_total,
-                  to_be_paid_ex: weeklyInvoice.to_be_paid,
+                  to_be_paid_ex: weeklyInvoice.to_be_paid + draftReimbursementEx,
                   notes: draftNotes || null,
                   status: 'draft',
                 },
-                weeklyInvoice,
+                weeklyInvoiceWithReimbursements(weeklyInvoice, draftReimbursements.lines),
                 existingDraftId,
               )
               : draftWeekStart
@@ -14253,10 +14285,19 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   tradeUser.id,
                   draftAssignmentIds,
                 ),
-              }, existingDraftId)
+              }, existingDraftId), async (removed) => {
+                const removedIds = new Set(removed.map((line: any) => line.expense_receipt_id))
+                for (let i = hourlyDraftLineRows.length - 1; i >= 0; i--) if (removedIds.has(hourlyDraftLineRows[i].expense_receipt_id)) hourlyDraftLineRows.splice(i, 1)
+                draftReimbursementEx = reimbursementLinesTotalEx(draftReimbursements.lines)
+                draftSubtotal = (weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)) + draftReimbursementEx
+                ;({ money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(client, tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd, draftReimbursements.basis, 0, draftReimbursementEx), { userId: tradeUser.id, weekStart: draftWeekStart || null }))
+                Object.assign(hourlyDraftPayload, tradeInvoiceMoneyFields(draftMoney), { subtotal_ex: draftMoney.gross_earned, gst: draftMoney.gst_amount, total_inc: draftMoney.total_inc }, tradeRecurringDeductionInvoiceFields(draftRecurringDeduction))
+              })
+            await markTradeInvoiceJobsChanged(client, hourlyDraftLineRows)
             return json({
               success: true,
               draft_id: draftId,
+              skipped_items: draftReimbursements.skipped_items,
               ...tradeInvoiceMoneyResponse(draftMoney),
               ...tradeRecurringDeductionResponse(draftRecurringDeduction),
               ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
@@ -14500,6 +14541,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 body,
               )
               : null
+            const reimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(extra_items) ? extra_items : [], weekEnd || new Date().toISOString().slice(0, 10), groupInvoiceBasis.superBasis)
             const invoiceExtraItems = weeklyInvoice
               ? weeklyInvoiceLineRows(weeklyInvoice).map((line: any) => ({
                 ...line,
@@ -14507,7 +14549,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 rate: line.unit_rate,
                 date: line.line_date,
               }))
-              : extra_items
+              : (Array.isArray(extra_items) ? extra_items.filter((item: any) => !isReimbursementItem(item)) : extra_items)
 
             // Time entries (trade_invoice_time_entry.ts): is a time line refused
             // when it does not say when it was worked? Weekly work-order lines
@@ -15233,6 +15275,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               }
             }
 
+            extraLineItems.push(...reimbursements.lines)
+            let reimbursementEx = reimbursementLinesTotalEx(reimbursements.lines)
+            extraSubtotal += reimbursementEx
+
             // A job is either a normal work-order / hours claim or a group
             // share, never both. Travel and other extras are not a claim.
             await assertGroupWorkOrderInvoiceFence(client, {
@@ -15287,7 +15333,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             }
 
             const labourSubtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
-            const subtotal = labourSubtotal + extraSubtotal
+            let subtotal = labourSubtotal + extraSubtotal
             const invoiceEarningsDate = weekEnd || new Date().toISOString().slice(0, 10)
             // No super on commission (Marnin, 12 Nov 2026): the commission lines
             // stay in gross but come out of the super base.
@@ -15300,17 +15346,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // subtotal, super and GST below are untouched by it. An invoice
             // with no week carries none; it is marked for the office when the
             // trade has a deduction that week.
-            const { money, decision: recurringDeduction } = await applyTradeRecurringDeduction(
+            let { money, decision: recurringDeduction } = await applyTradeRecurringDeduction(
               client,
-              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, groupInvoiceBasis.superBasis, invoiceCommissionEx),
+              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, reimbursements.basis, invoiceCommissionEx, reimbursementEx),
               {
                 userId: tradeUser.id,
                 weekStart: week_start || null,
                 weekless: { kind: 'no_invoice_week', day: invoiceEarningsDate },
               },
             )
-            const gst = money.gst_amount
-            const totalInc = money.total_inc
+            let gst = money.gst_amount
+            let totalInc = money.total_inc
 
             // ── M0 CAPTURE ENFORCEMENT (2026-06-12) ──────────────────────────
             // Reject zero-line submissions, unattributed lines, and missing
@@ -15318,7 +15364,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // UX: normal job-centric cards pass untouched — the guard only
             // kills the lump-sum/zero-line class of submission.
             {
-              const NON_JOB_TYPES = new Set(['adjustment', 'final_payout_deduction']) // narrow allowlist — no job attribution required
+              const NON_JOB_TYPES = new Set(['adjustment', 'final_payout_deduction', 'reimbursement']) // narrow allowlist — no job attribution required
               const allLines = [...lineItems, ...extraLineItems]
 
               // 1. Zero-line check: sum of per-line totals must match invoice subtotal
@@ -15487,9 +15533,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               ...tradeInvoiceMoneyFields(money),
               ...tradeRecurringDeductionInvoiceFields(recurringDeduction),
               invoice_source: weeklyInvoice ? 'weekly_work_order' : 'hourly',
-              job_grand_total_ex: weeklyInvoice?.grand_total ?? null,
+              job_grand_total_ex: weeklyInvoice ? weeklyInvoice.grand_total + reimbursementEx : null,
               final_deductions_total_ex: weeklyInvoice?.final_deductions_total ?? null,
-              to_be_paid_ex: weeklyInvoice?.to_be_paid ?? null,
+              to_be_paid_ex: weeklyInvoice ? weeklyInvoice.to_be_paid + reimbursementEx : null,
               has_manual_overrides: weeklyInvoice
                 ? weeklyInvoice.final_deductions_total > 0 || weeklyInvoice.lines.some((line) => line.line_total_ex < 0)
                 : hasOverrides,
@@ -15534,6 +15580,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 acknowledgment_status: dbLine.acknowledgment_status || 'pending',
                 query_note: dbLine.query_note || null,
                 line_type: dbLine.line_type || 'labour',
+                expense_receipt_id: dbLine.expense_receipt_id || null,
+                office_review_note: isReimbursementItem(dbLine) ? dbLine.office_review_note : null,
                 description: dbLine.description || null,
                 quantity: dbLine.quantity ?? null,
                 unit: dbLine.unit || null,
@@ -15548,7 +15596,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 // Only the server-priced group lane adds this hold. Ordinary
                 // invoices retain the existing flag-controlled review policy.
                 // A held typed rate (B14) starts awaiting office review.
-                office_review_status: isGroupShareInvoiceItem(dbLine) || (line?._rateHold as ExtraRateHold | null)?.held ? 'awaiting' : null,
+                office_review_status: isReimbursementItem(dbLine) ? dbLine.office_review_status : isGroupShareInvoiceItem(dbLine) || (line?._rateHold as ExtraRateHold | null)?.held ? 'awaiting' : null,
                 source_trade_invoice_line_id: dbLine.source_trade_invoice_line_id || null,
                 deduction_user_id: dbLine.deduction_user_id || null,
                 deduction_assignment_id: dbLine.deduction_assignment_id || null,
@@ -15650,7 +15698,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // is not refused. An unreadable read refuses rather than invoicing.
             const jobWorkOrderRefusal = await loadCrewInvoiceJobWorkOrderRefusal(
               client,
-              [...lineItems, ...extraLineItems],
+              [...lineItems, ...extraLineItems].filter((line: any) => !isReimbursementItem(line)),
             )
             if (jobWorkOrderRefusal) {
               throw new ApiError(
@@ -15714,11 +15762,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }
               }
             }
-            const invoiceId = await persistWithFreeNumber(() => weeklyInvoice
+            const invoiceId = await retryReimbursementClaims(client, reimbursements, async () => await persistWithFreeNumber(() => weeklyInvoice
               ? _persistWeeklyTradeInvoice(
                 client,
                 invoicePayload,
-                weeklyInvoice,
+                weeklyInvoiceWithReimbursements(weeklyInvoice, reimbursements.lines),
                 priorDraftId,
               )
               : replaceTradeInvoiceDraftKeepingPrior({
@@ -15765,8 +15813,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 if (!capCode) throw error
                 const message = 'This invoice was not saved. The commission on this job changed while you were submitting. Reload and check the commission line, or ask the office.'
                 throw new ApiError(message, 409, { ok: false, success: false, saved: false, code: capCode, error: message, userMessage: message })
+              }), async (removed) => {
+                const removedIds = new Set(removed.map((line: any) => line.expense_receipt_id))
+                for (let i = extraLineItems.length - 1; i >= 0; i--) if (removedIds.has(extraLineItems[i].expense_receipt_id)) extraLineItems.splice(i, 1)
+                extraSubtotal -= removed.reduce((sum: number, line: any) => sum + Number(line.line_total_ex), 0)
+                subtotal = roundMoney(labourSubtotal + extraSubtotal)
+                reimbursementEx = reimbursementLinesTotalEx(reimbursements.lines)
+                ;({ money, decision: recurringDeduction } = await applyTradeRecurringDeduction(client, tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, reimbursements.basis, invoiceCommissionEx, reimbursementEx), { userId: tradeUser.id, weekStart: week_start || null, weekless: { kind: 'no_invoice_week', day: invoiceEarningsDate } }))
+                gst = money.gst_amount
+                totalInc = money.total_inc
+                Object.assign(invoicePayload, tradeInvoiceMoneyFields(money), { subtotal_ex: money.gross_earned, gst, total_inc: totalInc }, tradeRecurringDeductionInvoiceFields(recurringDeduction))
+                if (weeklyInvoice) Object.assign(invoicePayload, { job_grand_total_ex: weeklyInvoice.grand_total + reimbursementEx, to_be_paid_ex: weeklyInvoice.to_be_paid + reimbursementEx })
               })
             const invoice = { id: invoiceId }
+            await markTradeInvoiceJobsChanged(client, [...lineItems, ...extraLineItems])
 
             // B14: one audit event per held typed rate. No amounts in the
             // reason; the line itself carries them.
@@ -16001,6 +16061,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   week_start,
                   total_hours: totalHours,
                   ...tradeInvoiceMoneyResponse(money),
+                skipped_items: reimbursements.skipped_items,
                   ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
                   client_priced_lines: clientPricedExtraCount,
                   possible_duplicate_extra_lines: duplicateExtraCount,
@@ -16085,6 +16146,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let createdXeroBillId = ''
             let pdfAttached = false
             if (!officeReviewHold && !officeReviewUnreadable) try {
+              const reimbursementAccount = await reimbursementXeroAccount(client, extraLineItems)
               const { accessToken, tenantId } = await getToken(client)
               const tradeEmail = tradeUser.email || ''
 
@@ -16162,6 +16224,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   Tracking: xeroTracking(l.job_number || ''),
                   }
                 }), ...extraLineItems.map((e: any) => {
+                  if (isReimbursementItem(e)) return { Description: e.description, Quantity: 1, UnitAmount: e.line_total_ex, AccountCode: reimbursementAccount!, TaxType: "NONE", Tracking: e.job_number ? xeroTracking(e.job_number) : divToTracking(e.division || "") }
                   return {
                     Description: [
                       e.job_number ? e.job_number + ' | ' + (trackingCategoryForJob(e.job_number || '') || '') : (e.division || 'General'),
@@ -16370,6 +16433,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 invoice_number: invoiceNumber,
                 total_hours: totalHours,
                 ...tradeInvoiceMoneyResponse(money),
+                skipped_items: reimbursements.skipped_items,
                 ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
                 line_count: lineItems.length + extraLineItems.length,
@@ -16393,6 +16457,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 invoice_number: invoiceNumber,
                 total_hours: totalHours,
                 ...tradeInvoiceMoneyResponse(money),
+                skipped_items: reimbursements.skipped_items,
                 ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
                 line_count: lineItems.length + extraLineItems.length,
@@ -16414,6 +16479,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               invoice_number: invoiceNumber,
               total_hours: totalHours,
               ...tradeInvoiceMoneyResponse(money),
+                skipped_items: reimbursements.skipped_items,
               ...tradeRecurringDeductionResponse(recurringDeduction),
               ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
               line_count: lineItems.length + extraLineItems.length,
@@ -17990,6 +18056,11 @@ function weeklyInvoiceResponse(invoice: WeeklyWorkOrderInvoice) {
     final_deductions_total: invoice.final_deductions_total,
     to_be_paid: invoice.to_be_paid,
   }
+}
+
+function weeklyInvoiceWithReimbursements(invoice: WeeklyWorkOrderInvoice, lines: any[]): WeeklyWorkOrderInvoice {
+  const amount = reimbursementLinesTotalEx(lines)
+  return { ...invoice, grand_total: roundMoney(invoice.grand_total + amount), to_be_paid: roundMoney(invoice.to_be_paid + amount), lines: [...invoice.lines, ...lines.map(reimbursementDbLine)] as any }
 }
 
 function weeklyInvoiceLineRows(invoice: WeeklyWorkOrderInvoice): any[] {
@@ -63944,6 +64015,10 @@ async function pushExpenseToXero(
   if (!expense) throw new ApiError('Expense not found', 404)
   if (expense.status !== 'approved') throw new ApiError('Expense must be approved before pushing to Xero', 409)
 
+  if (await receiptHasLiveTradeInvoice(client, expense_id)) {
+    throw new ApiError("This receipt is being paid back on a trade invoice, so it is not sent to Xero on its own.", 409, { code: "expense_on_trade_invoice" })
+  }
+
   // Preflight gate — prevent junk OCR from creating junk Xero drafts.
   const preflight = preflightExpense(expense)
   if (!preflight.ok) {
@@ -63987,7 +64062,7 @@ async function pushExpenseToXero(
   return { success: true, xero_bill_id: xeroBillId, xero_status: 'draft' }
 }
 
-async function listExpenses(client: any, params: URLSearchParams) {
+async function listExpenses(client: any, params: URLSearchParams, caller?: { id: string; role?: string }) {
   const jobId = params.get('job_id')
   const status = params.get('status')
   const limit = Number(params.get('limit') || 50)
@@ -63997,12 +64072,20 @@ async function listExpenses(client: any, params: URLSearchParams) {
     .order('created_at', { ascending: false })
     .limit(limit)
 
+  const tradeCaller = caller && !['admin', 'owner', 'ops_manager'].includes(String(caller.role || '').toLowerCase())
+  if (tradeCaller) query = query.eq('submitted_by', caller.id)
   if (jobId) query = query.eq('job_id', jobId)
   if (status) query = query.eq('status', status)
 
   const { data, error } = await query
   if (error) throw error
-  return { expenses: data || [] }
+  if (!tradeCaller) return { expenses: data || [] }
+  const expenses = []
+  for (const row of data || []) {
+    const result = await invoiceReimbursements(client, caller.id, [{ type: 'reimbursement', expense_receipt_id: row.id }], new Date().toISOString().slice(0, 10))
+    expenses.push({ ...row, reimbursement: { claimable: result.lines.length > 0, reason: result.skipped_items[0]?.code || null } })
+  }
+  return { expenses }
 }
 
 async function listUnreconciledTransactions(client: any, params: URLSearchParams) {

@@ -62,6 +62,7 @@ import {
  */
 export const NOT_AGAINST_WORK_ORDER_LINE_TYPES: ReadonlySet<string> = new Set([
   "commission",
+  "reimbursement",
 ]);
 
 export function countsAgainstWorkOrder(lineType: unknown): boolean {
