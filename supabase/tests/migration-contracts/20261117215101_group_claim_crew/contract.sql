@@ -15,11 +15,12 @@ DO $$ DECLARE
   ev_count integer;
   BEGIN
   grp := pg_temp.zztest_group_fixture();
+  UPDATE public.feature_flags SET enabled=true WHERE flag_name='group_work_order_v1';
   DELETE FROM public.group_work_order_time_entries WHERE group_id=grp;
   DELETE FROM public.group_work_order_participants WHERE group_id=grp;
   INSERT INTO public.users(id,org_id,role,name) VALUES(d,org,'crew','ZZTEST missing crew'),(inactive,org,'crew','ZZTEST inactive crew');
-  INSERT INTO public.trade_rates(org_id,user_id,hourly_rate,effective_from) VALUES(org,d,20,'2026-01-01');
-  INSERT INTO public.job_assignments(job_id,user_id,scheduled_date) VALUES(job,a,'2026-11-16'),(job,b,'2026-11-16'),(job,c,'2026-11-16');
+  INSERT INTO public.trade_rates(id,org_id,user_id,hourly_rate,effective_from) VALUES(gen_random_uuid(),org,d,20,'2026-01-01');
+  INSERT INTO public.job_assignments(id,job_id,user_id,scheduled_date) VALUES(gen_random_uuid(),job,a,'2026-11-16'),(gen_random_uuid(),job,b,'2026-11-16'),(gen_random_uuid(),job,c,'2026-11-16');
   -- Switch off: no mutation, including a direct privileged RPC call.
   failed:=false;
   BEGIN PERFORM public.group_claim_update_crew(grp,a,'sync');
@@ -39,7 +40,7 @@ DO $$ DECLARE
   BEGIN PERFORM public.group_claim_update_crew(grp,d,'join');
   EXCEPTION WHEN check_violation THEN failed:=SQLERRM='group_not_on_job'; END;
   IF NOT failed THEN RAISE EXCEPTION 'ZZTEST off-job join accepted'; END IF;
-  INSERT INTO public.job_events(job_id,user_id,event_type) VALUES(job,d,'clock.clock_on');
+  INSERT INTO public.job_events(id,job_id,user_id,event_type) VALUES(gen_random_uuid(),job,d,'clock.clock_on');
   PERFORM public.group_claim_update_crew(grp,d,'sync');
   IF NOT EXISTS(SELECT 1 FROM public.group_work_order_participants WHERE group_id=grp AND user_id=d) THEN
     RAISE EXCEPTION 'ZZTEST clock-only crew not enrolled'; END IF;
@@ -75,7 +76,8 @@ DO $$ DECLARE
   PERFORM public.group_claim_update_crew(grp,d,'leave');
   PERFORM public.group_claim_update_crew(grp,d,'leave');
   IF EXISTS(SELECT 1 FROM public.group_work_order_participants WHERE group_id=grp AND user_id=d)
-    OR EXISTS(SELECT 1 FROM public.group_work_order_crew(ARRAY[job]) WHERE user_id=d) THEN
+    OR EXISTS(SELECT 1 FROM public.group_work_order_crew(ARRAY[job]) WHERE user_id=d)
+    OR (SELECT count(*) FROM public.group_work_order_events WHERE group_id=grp AND action='leave_claim')<>1 THEN
     RAISE EXCEPTION 'ZZTEST departed person still required'; END IF;
   INSERT INTO public.group_work_order_time_entries(group_id,user_id,work_date,start_time,finish_time,break_minutes,hours)
     VALUES(grp,a,'2026-11-16','07:00','08:00',0,1);
@@ -104,18 +106,18 @@ END $$;
 INSERT INTO public.users(id,org_id,name,role)
 SELECT md5('ZZTEST claim plan user '||n)::uuid,'00000000-0000-0000-0000-000000000001','ZZTEST plan crew','crew'
 FROM generate_series(1,2000) n;
-INSERT INTO public.trade_rates(org_id,user_id,hourly_rate,effective_from)
-SELECT '00000000-0000-0000-0000-000000000001',md5('ZZTEST claim plan user '||n)::uuid,1,'2026-01-01'
+INSERT INTO public.trade_rates(id,org_id,user_id,hourly_rate,effective_from)
+SELECT gen_random_uuid(), '00000000-0000-0000-0000-000000000001',md5('ZZTEST claim plan user '||n)::uuid,1,'2026-01-01'
 FROM generate_series(1,2000) n;
-INSERT INTO public.trade_invoices(id,org_id,user_id,status,created_at)
+INSERT INTO public.trade_invoices(id,org_id,user_id,status,created_at,gst_on,super_rate,super_amount,gross_earned,net_pay,subtotal_ex,gst,total_inc,super_basis,invoice_number)
 SELECT md5('ZZTEST claim plan invoice '||n)::uuid,'00000000-0000-0000-0000-000000000001',
-  md5('ZZTEST claim plan user '||n)::uuid,'acknowledged',now()
+  md5('ZZTEST claim plan user '||n)::uuid,'acknowledged',now(),false,.12,0,0,0,0,0,0,'employer_12_v2','ZZTEST-CLAIM-PLAN-'||n
 FROM generate_series(1,2000) n;
-INSERT INTO public.job_events(job_id,user_id,event_type)
-SELECT 'f1171901-0000-4000-8000-000000000101',md5('ZZTEST claim plan user '||n)::uuid,'clock.clock_on'
+INSERT INTO public.job_events(id,job_id,user_id,event_type)
+SELECT gen_random_uuid(), 'f1171901-0000-4000-8000-000000000101',md5('ZZTEST claim plan user '||n)::uuid,'clock.clock_on'
 FROM generate_series(1,2000) n;
-INSERT INTO public.job_assignments(job_id,user_id,scheduled_date)
-SELECT 'f1171901-0000-4000-8000-000000000101',md5('ZZTEST claim plan user '||n)::uuid,'2026-11-16'::date
+INSERT INTO public.job_assignments(id,job_id,user_id,scheduled_date)
+SELECT gen_random_uuid(), 'f1171901-0000-4000-8000-000000000101',md5('ZZTEST claim plan user '||n)::uuid,'2026-11-16'::date
 FROM generate_series(1,2000) n;
 ANALYZE public.users;
 ANALYZE public.trade_rates;
@@ -132,10 +134,22 @@ WHERE job_id='f1171901-0000-4000-8000-000000000101' AND user_id=md5('ZZTEST clai
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) SELECT user_id FROM public.job_assignments
 WHERE job_id='f1171901-0000-4000-8000-000000000101' AND user_id=md5('ZZTEST claim plan user 1')::uuid
  AND NOT coalesce(is_ghost,false) AND coalesce(role,'')<>'observer' AND coalesce(status,'')<>'cancelled';
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) SELECT u.id,u.name
-FROM public.users a JOIN public.users u ON u.org_id=a.org_id
-WHERE a.id='f1171901-0000-4000-8000-000000000002'
- AND strpos(lower(u.name),'zztest')>0 AND public.group_claim_active_trade(a.org_id,u.id)
-ORDER BY u.name COLLATE "C",u.id LIMIT 10;
+-- Explain the actual function's SQL body, so this check cannot drift into a
+-- separate search implementation. Assert plan behavior, never an index name.
+DO $plan$ DECLARE
+  query text;
+  plan jsonb;
+  BEGIN
+  SELECT prosrc INTO query FROM pg_proc
+    WHERE oid='public.group_claim_search_trades(uuid,text)'::regprocedure;
+  query:=replace(query,'p_actor',quote_literal('f1171901-0000-4000-8000-000000000002')||'::uuid');
+  query:=replace(query,'p_query',quote_literal('ZZTEST'));
+  EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,FORMAT JSON) '||query INTO plan;
+  RAISE NOTICE 'ZZTEST actual claim search plan: %',plan;
+  IF jsonb_path_exists(plan,'$.** ? (@."Node Type" == "Seq Scan" && @."Relation Name" == "users")')
+    OR (plan->0->'Plan'->>'Actual Rows')::integer<>10 THEN
+    RAISE EXCEPTION 'ZZTEST claim search is not index bound with ten results';
+  END IF;
+END $plan$;
 ROLLBACK;
 \echo ZZTEST group claim crew: PASS

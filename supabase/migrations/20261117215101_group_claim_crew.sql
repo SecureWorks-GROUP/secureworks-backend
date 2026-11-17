@@ -77,7 +77,7 @@ AS $fn$ DECLARE
     RETURN jsonb_build_object('ok',true,'group_id',g.id);
   ELSIF p_action='name' THEN
     IF NOT member AND NOT office THEN RAISE EXCEPTION 'group_not_on_job' USING ERRCODE='23514'; END IF;
-    IF cardinality(p_users) IS NULL OR cardinality(p_users) NOT BETWEEN 1 AND 100 THEN
+    IF cardinality(p_users) IS NULL OR cardinality(p_users)=0 THEN
       RAISE EXCEPTION 'group_person_not_a_trade' USING ERRCODE='23514';
     END IF;
     candidates := p_users;
@@ -154,11 +154,12 @@ $fn$;
 CREATE OR REPLACE FUNCTION public.group_claim_search_trades(p_actor uuid,p_query text)
 RETURNS TABLE(user_id uuid,name text) LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp
 AS $fn$
-  SELECT u.id,u.name FROM public.users a JOIN public.users u ON u.org_id=a.org_id
-    WHERE a.id=p_actor AND char_length(btrim(p_query))>=2
+  SELECT u.id,u.name FROM public.users u
+    WHERE u.org_id=(SELECT a.org_id FROM public.users a WHERE a.id=p_actor)
+      AND char_length(btrim(p_query))>=2
       AND EXISTS(SELECT 1 FROM public.feature_flags WHERE flag_name='group_claim_flow_v1' AND enabled)
       AND strpos(lower(u.name),lower(btrim(p_query)))>0
-      AND public.group_claim_active_trade(a.org_id,u.id)
+      AND public.group_claim_active_trade(u.org_id,u.id)
     ORDER BY u.name COLLATE "C",u.id LIMIT 10;
 $fn$;
 REVOKE ALL ON FUNCTION public.group_claim_crew_sources(uuid), public.group_claim_active_trade(uuid,uuid), public.group_claim_on_job(uuid,uuid),
