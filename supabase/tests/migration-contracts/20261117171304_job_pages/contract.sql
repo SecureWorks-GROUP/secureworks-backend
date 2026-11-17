@@ -1,4 +1,14 @@
 -- Stand the historical mark/build contract back up; the successor has its own proofs.
+-- The rollback drops the raw marks table outside this contract's transaction.
+-- Keep every installed index definition so restoring the table also restores
+-- later read optimizations, without reapplying/healing a later migration.
+CREATE TEMP TABLE job_page_saved_raw_indexes AS
+SELECT format('%I.%I', n.nspname, c.relname) AS index_name,
+ pg_get_indexdef(i.indexrelid) AS definition
+FROM pg_index i
+JOIN pg_class c ON c.oid = i.indexrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE i.indrelid = to_regclass('public.job_change_mark_events');
 SELECT to_regclass('public.job_change_marks_base') IS NOT NULL AS queue_safety_live \gset
 \if :queue_safety_live
 \ir ../../../rollbacks/20261117172503_job_pages_queue_safety_down.sql
@@ -86,3 +96,14 @@ ROLLBACK;
 
 -- Restore the successor for the remaining registered cases.
 \ir ../../../migrations/20261117172503_job_pages_queue_safety.sql
+DO $restore$
+DECLARE saved record;
+BEGIN
+ FOR saved IN SELECT * FROM job_page_saved_raw_indexes ORDER BY index_name LOOP
+  IF to_regclass(saved.index_name) IS NULL THEN EXECUTE saved.definition; END IF;
+  IF pg_get_indexdef(to_regclass(saved.index_name)) IS DISTINCT FROM saved.definition THEN
+   RAISE EXCEPTION 'job pages: raw mark index was not restored: %', saved.index_name;
+  END IF;
+ END LOOP;
+END $restore$;
+DROP TABLE job_page_saved_raw_indexes;

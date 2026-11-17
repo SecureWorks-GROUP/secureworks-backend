@@ -2,6 +2,8 @@
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
 import { REIMBURSEMENT_FLAG, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
+import { listExpenseReceipts } from './expense_list.ts'
+import { rejectTradeInvoiceStorage } from './trade_invoice_rejection.ts'
 import { syncConversationCache } from './conversation_cache_write.ts'
 import { isMoneyAction, moneyActionGate, readMoneyActionFlags } from "./money_actions.ts"
 import { agentProposalAction } from "./agent_proposals.ts"
@@ -11621,13 +11623,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (tradeInvoiceHasExternalXeroIdentity(rejInv) || rejInv.status === 'pushed_to_xero' || rejInv.status === 'paid') {
           throw new ApiError('Cannot reject an invoice already in Xero/paid', 400)
         }
-        const { data: rejected, error: rejErr } = await client.from('trade_invoices')
-          .update({ status: 'ops-reject', query_note: officeSentBackNote(rejNote) })
-          .eq('id', rejInvId)
-          .is('xero_bill_id', null)
-          .is('xero_pushed_at', null)
-          .select('id')
-          .maybeSingle()
+        const { data: rejected, error: rejErr } = await rejectTradeInvoiceStorage(client, rejInvId, officeSentBackNote(rejNote))
         if (rejErr) throw new Error('Failed to reject: ' + rejErr.message)
         if (rejected?.id !== rejInvId) {
           throw new ApiError('Cannot reject an invoice while its Xero identity is being recorded', 409)
@@ -64323,31 +64319,8 @@ async function pushExpenseToXero(
 }
 
 async function listExpenses(client: any, params: URLSearchParams, caller?: { id: string; role?: string }) {
-  const jobId = params.get('job_id')
-  const status = params.get('status')
-  const limit = Number(params.get('limit') || 50)
-
-  let query = client.from('expense_receipts')
-    .select('*, jobs:job_id(client_name, job_number)')
-    .order('created_at', { ascending: false })
-    .limit(limit)
-
-  const tradeCaller = caller && !['admin', 'owner', 'ops_manager'].includes(String(caller.role || '').toLowerCase())
-  if (jobId) query = query.eq('job_id', jobId)
-  if (status) query = query.eq('status', status)
-
-  const { data, error } = await query
-  if (error) throw error
-  if (!tradeCaller) return { expenses: data || [] }
-  const { data: flag } = await client.from('feature_flags').select('enabled').eq('flag_name', REIMBURSEMENT_FLAG).maybeSingle()
-  if (flag?.enabled !== true) return { expenses: data || [] }
-  const basis = await tradePayBasisForSave(client, null, new Date().toISOString().slice(0, 10))
-  const expenses = []
-  for (const row of data || []) {
-    const result = await resolveReimbursementExtras(client, { userId: caller.id, items: [{ type: 'reimbursement', expense_receipt_id: row.id }], flagOn: true, basis })
-    expenses.push({ ...row, reimbursement: { claimable: result.lines.length > 0, reason: result.skipped_items[0]?.code || null } })
-  }
-  return { expenses }
+  return await listExpenseReceipts(client, params, caller, () =>
+    tradePayBasisForSave(client, null, new Date().toISOString().slice(0, 10)))
 }
 
 async function listUnreconciledTransactions(client: any, params: URLSearchParams) {

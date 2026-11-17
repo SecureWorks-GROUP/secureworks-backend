@@ -1,0 +1,1 @@
+DROP INDEX public.job_change_mark_events_worker_notes;

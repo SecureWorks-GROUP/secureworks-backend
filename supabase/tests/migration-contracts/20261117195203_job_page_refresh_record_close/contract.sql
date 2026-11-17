@@ -32,6 +32,10 @@ BEGIN
  RAISE EXCEPTION 'refresh record close: T1 page not settled: %',v; END IF;
  IF NOT EXISTS(SELECT 1 FROM public.job_change_marks WHERE job_id='00000000-0000-4000-8000-000000000401' AND page_done_at=last_marked_at) THEN
  RAISE EXCEPTION 'refresh record close: closure mark left due'; END IF;
+ UPDATE public.context_ledger_items SET closes_on='quote_sent' WHERE id='00000000-0000-4000-8000-000000000404';
+ INSERT INTO public.job_documents(job_id,type,quote_number,sent_at) VALUES
+ ('00000000-0000-4000-8000-000000000404','quote','Q-9004','2026-11-04T10:00:00+08'),
+ ('00000000-0000-4000-8000-000000000404','quote','Q-9005','2026-11-05T10:00:00+08');
  v:=public.job_page_refresh('00000000-0000-4000-8000-000000000404');
  IF v#>>'{record_close,ambiguous}'<>'1' OR v#>>'{record_close,closed}'<>'0' THEN
  RAISE EXCEPTION 'refresh record close: T4 first ambiguity'; END IF;
