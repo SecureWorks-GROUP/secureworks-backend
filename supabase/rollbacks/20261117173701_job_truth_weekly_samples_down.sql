@@ -1,0 +1,10 @@
+SELECT public.job_truth_weekly_remove();
+DROP VIEW public.job_truth_weekly_scores;
+DROP FUNCTION public.job_truth_weekly_install();
+DROP FUNCTION public.job_truth_weekly_remove();
+DROP FUNCTION public.job_truth_weekly_record(date,uuid,uuid,jsonb,jsonb);
+DROP FUNCTION public.job_truth_weekly_set_candidate(date,uuid,jsonb,uuid);
+DROP FUNCTION public.job_truth_weekly_draw(date,integer);
+DROP FUNCTION public.job_truth_notes_of(uuid);
+DROP FUNCTION public.job_truth_story_sentences(jsonb);
+DROP TABLE public.job_truth_weekly_samples;
