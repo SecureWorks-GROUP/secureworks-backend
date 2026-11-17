@@ -13,8 +13,9 @@ INSERT INTO public.jobs(id,org_id,job_number,type,status)
 -- The draw must refuse ZZTEST. Rename only these 30 disposable rows within this
 -- transaction to exercise the real draw predicate; no business rows are present.
 UPDATE public.jobs SET job_number='SWTEST-' || f.n FROM weekly_fixture f WHERE jobs.id=f.id AND f.n<=430;
-INSERT INTO public.job_change_marks(job_id,last_marked_at)
- SELECT id,CASE WHEN n=432 THEN now()-interval '29 days' ELSE now() END FROM weekly_fixture;
+-- job_change_marks is the canonical read view over append-only mark events.
+INSERT INTO public.job_change_mark_events(job_id,marked_at,source)
+ SELECT id,CASE WHEN n=432 THEN now()-interval '29 days' ELSE now() END,'weekly-fixture' FROM weekly_fixture;
 INSERT INTO public.job_pages(job_id,page,built_at,build_ms,status)
  SELECT id,'{}',now(),0,CASE WHEN n=433 THEN 'failed' ELSE 'ready' END FROM weekly_fixture;
 -- Stand-ins isolate weekly snapshot custody from expensive story construction.
@@ -33,8 +34,8 @@ END $$;
 INSERT INTO public.context_ledger_generations(id,job_id,kind,status,reader,promoted_at)
  SELECT id,id,'rebuild','live','weekly-fixture',now() FROM weekly_fixture;
 INSERT INTO public.context_ledger_items(generation_id,job_id,item_key,item_type,status,from_role,what,opened_at,opened_by,written_by)
- SELECT f.id,f.id,'note:' || n,'claim','open','unknown','Note ' || n,now(),'[{"table":"job_events","id":"fixture","excerpt":"Note"}]','model:fixture'
- FROM weekly_fixture f CROSS JOIN generate_series(1,10) n;
+ SELECT f.id,f.id,'note:' || notes.n,'claim','open','unknown','Note ' || notes.n,now(),'[{"table":"job_events","id":"fixture","excerpt":"Note"}]','model:fixture'
+ FROM weekly_fixture f CROSS JOIN generate_series(1,10) AS notes(n);
 
 DO $c$
 DECLARE r jsonb; split jsonb; BEGIN
