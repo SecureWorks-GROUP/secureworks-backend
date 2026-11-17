@@ -3548,3 +3548,34 @@ Deno.test("ZZTEST people history: office removal and restore each append once wi
     group_id: GROUP, user_id: USER_C, reason: "ZZTEST retry" });
   assertEquals(stillRemoved.removed, true);
 });
+
+Deno.test("ZZTEST changed work order pot reaches participant and office with switch controls", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("jobs")[0].job_number = "ZZTEST-POT";
+  db.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 2 },
+    { group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 2 },
+  );
+  const base = db.client();
+  const client = { ...base, rpc(fn: string, args: Record<string, unknown> = {}) {
+    if (fn === "work_order_amount_change_total") {
+      assertEquals(args.p_work_order_id, WO);
+      return Promise.resolve({ data: "17.85", error: null });
+    }
+    return base.rpc(fn, args);
+  }};
+  const read = async (expected: number) => {
+    assertEquals((await readGroupWorkOrderMyShare(client, trade(USER_A), {group_id: GROUP})).pot_total, expected);
+    assertEquals((await readGroupWorkOrderOffice(client, trade(USER_A, true), {group_id: GROUP})).pot_total, expected);
+  };
+  await read(482.15);
+  const flag = {flag_name: "work_order_amount_change_v1", enabled: true};
+  db.rows("feature_flags").push(flag);
+  await read(500);
+  db.rows("group_work_orders")[0].approved_budget_ex = 450;
+  await read(450);
+  db.rows("group_work_orders")[0].approved_budget_ex = null;
+  flag.enabled = false;
+  await read(482.15);
+});
