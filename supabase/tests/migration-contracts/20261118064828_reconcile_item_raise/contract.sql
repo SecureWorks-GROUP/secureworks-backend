@@ -8,6 +8,7 @@ SELECT to_regclass('public.reconcile_items') IS NULL AS raise_contract_needs_tab
 \ir ../../../migrations/20261118060051_reconcile_tables.sql
 \endif
 \ir ../../../migrations/20261118064828_reconcile_item_raise.sql
+SET LOCAL statement_timeout = '120s';
 
 CREATE FUNCTION pg_temp.expect_failure(command text, expected text) RETURNS void
 LANGUAGE plpgsql AS $expect$
@@ -30,6 +31,7 @@ CREATE TABLE public.zztest_recon_subject(id uuid PRIMARY KEY, org_id uuid);
 CREATE TABLE public.zztest_recon_noorg(id bigint PRIMARY KEY, note text);
 INSERT INTO public.zztest_recon_subject VALUES
  ('32020000-0000-4000-8000-0000000005b1', '00000000-0000-0000-0000-0000000000b1'),
+ ('32020000-0000-4000-8000-0000000005a1', '00000000-0000-0000-0000-0000000000a1'),
  ('32020000-0000-4000-8000-000000000500', NULL);
 INSERT INTO public.zztest_recon_noorg VALUES (1, 'subject without an organisation column');
 INSERT INTO public.job_cost_lines(org_id, kind, document_kind, document_id, line_key, lane, source_hash, state)
@@ -56,54 +58,52 @@ DECLARE v uuid;
  IF (SELECT org_id FROM public.reconcile_items WHERE id = v) IS DISTINCT FROM
     '00000000-0000-0000-0000-0000000000b1' THEN
   RAISE EXCEPTION 'P2-03.2 a job subject must take the job''s organisation'; END IF;
- -- A subject with no organisation column: from its jobs.
- v := public.reconcile_item_raise('open_item_check', 'zztest_recon_noorg', '1',
+ -- Jobs named with a subject only confirm its organisation.
+ v := public.reconcile_item_raise('open_item_check', 'zztest_recon_subject',
+  '32020000-0000-4000-8000-0000000005a1',
   ARRAY['32020000-0000-4000-8000-0000000000a1', '32020000-0000-4000-8000-0000000000a2']::uuid[],
   NULL, '{"reason":"zz_jobs"}'::jsonb, 'migration');
  IF (SELECT org_id FROM public.reconcile_items WHERE id = v) IS DISTINCT FROM
     '00000000-0000-0000-0000-0000000000a1' THEN
-  RAISE EXCEPTION 'P2-03.2 a subject without an organisation must take its jobs'' organisation'; END IF;
- -- A subject row whose org_id is NULL also falls to its jobs.
- v := public.reconcile_item_raise('open_item_check', 'zztest_recon_subject',
-  '32020000-0000-4000-8000-000000000500', ARRAY['32020000-0000-4000-8000-0000000000a1']::uuid[],
-  NULL, '{"reason":"zz_null_subject_org"}'::jsonb, 'migration');
- IF (SELECT org_id FROM public.reconcile_items WHERE id = v) IS DISTINCT FROM
-    '00000000-0000-0000-0000-0000000000a1' THEN
-  RAISE EXCEPTION 'P2-03.2 a NULL subject organisation must take its jobs'' organisation'; END IF;
+  RAISE EXCEPTION 'P2-03.2 jobs in the subject''s organisation must be accepted'; END IF;
 END $subject_org$;
 
--- Refusals: none found, or more than one. Each writes nothing.
-CREATE TEMP TABLE raise_before AS SELECT count(*) n FROM public.reconcile_items;
-SELECT pg_temp.expect_failure($sql$SELECT public.reconcile_item_raise('open_item_check','zztest_recon_noorg','1',
- ARRAY['32020000-0000-4000-8000-0000000000a1','32020000-0000-4000-8000-0000000000b1']::uuid[],NULL,
- '{"reason":"zz_two_orgs"}'::jsonb,'migration')$sql$, 'reconcile_org_ambiguous');
-SELECT pg_temp.expect_failure($sql$SELECT public.reconcile_item_raise('open_item_check','zztest_recon_subject',
- '32020000-0000-4000-8000-0000000005b1',ARRAY['32020000-0000-4000-8000-0000000000a1']::uuid[],NULL,
- '{"reason":"zz_subject_vs_job"}'::jsonb,'migration')$sql$, 'reconcile_org_ambiguous');
-SELECT pg_temp.expect_failure($sql$SELECT public.reconcile_item_raise('bill','cost_document','xero_bill:ZZTEST-3202-TWO',
- NULL,NULL,'{"reason":"zz_doc_two_orgs"}'::jsonb,'matcher:v1')$sql$, 'reconcile_org_ambiguous');
-SELECT pg_temp.expect_failure($sql$SELECT public.reconcile_item_raise('open_item_check','zztest_recon_noorg','1',
- NULL,NULL,'{"reason":"zz_none"}'::jsonb,'migration')$sql$, 'reconcile_org_unknown');
-SELECT pg_temp.expect_failure($sql$SELECT public.reconcile_item_raise('open_item_check','zztest_recon_noorg','1',
- ARRAY['32020000-0000-4000-8000-00000000dead']::uuid[],NULL,'{"reason":"zz_unknown_job"}'::jsonb,'migration')$sql$,
- 'reconcile_org_unknown');
-SELECT pg_temp.expect_failure($sql$SELECT public.reconcile_item_raise('open_item_check','zztest_recon_subject',
- '32020000-0000-4000-8000-00000000beef',NULL,NULL,'{"reason":"zz_missing_row"}'::jsonb,'migration')$sql$,
- 'reconcile_org_unknown');
-SELECT pg_temp.expect_failure($sql$SELECT public.reconcile_item_raise('open_item_check','zztest_recon_subject',
- 'not-a-uuid',NULL,NULL,'{"reason":"zz_bad_id"}'::jsonb,'migration')$sql$, 'reconcile_org_unknown');
-SELECT pg_temp.expect_failure($sql$SELECT public.reconcile_item_raise('open_item_check','zztest_recon_subject',
- '32020000-0000-4000-8000-000000000500',NULL,NULL,'{"reason":"zz_null_org_no_jobs"}'::jsonb,'migration')$sql$,
- 'reconcile_org_unknown');
-SELECT pg_temp.expect_failure($sql$SELECT public.reconcile_item_raise('bill','cost_document','xero_bill:ZZTEST-3202-NONE',
- NULL,NULL,'{"reason":"zz_doc_none"}'::jsonb,'matcher:v1')$sql$, 'reconcile_org_unknown');
-SELECT pg_temp.expect_failure($sql$SELECT public.reconcile_item_raise('bill','cost_document','no-colon',
- NULL,NULL,'{"reason":"zz_doc_shape"}'::jsonb,'matcher:v1')$sql$, 'reconcile_org_unknown');
-SELECT pg_temp.expect_failure($sql$SELECT public.reconcile_item_raise('zztest_not_a_kind','zztest_recon_noorg','1',
- NULL,NULL,'{"reason":"zz"}'::jsonb,'migration')$sql$, 'reconcile_kind_unknown');
+-- Refusals. The subject alone decides the organisation: a subject that does
+-- not resolve refuses whatever jobs are passed, and every job must exist in that
+-- organisation. Each refusal leaves the list exactly as it was.
+CREATE TEMP TABLE raise_before AS
+ SELECT coalesce(jsonb_agg(to_jsonb(i) ORDER BY i.id), '[]') list FROM public.reconcile_items i;
+SELECT pg_temp.expect_failure(format($sql$SELECT public.reconcile_item_raise(%L,%L,%L,%L::uuid[],NULL,
+ jsonb_build_object('reason','zz_refused'),'migration')$sql$, k, t, i, j), e)
+FROM (VALUES
+ -- A missing cost document plus a valid job (HOLD 1).
+ ('bill','cost_document','xero_bill:ZZTEST-3202-NONE','{32020000-0000-4000-8000-0000000000a1}','reconcile_org_unknown'),
+ ('bill','cost_document','xero_bill:ZZTEST-3202-NONE',NULL,'reconcile_org_unknown'),
+ ('bill','cost_document','no-colon','{32020000-0000-4000-8000-0000000000a1}','reconcile_org_unknown'),
+ -- A subject that carries no organisation, with or without jobs.
+ ('open_item_check','zztest_recon_noorg','1','{32020000-0000-4000-8000-0000000000a1}','reconcile_org_unknown'),
+ ('open_item_check','zztest_recon_noorg','1','{32020000-0000-4000-8000-0000000000a1,32020000-0000-4000-8000-0000000000b1}','reconcile_org_unknown'),
+ ('open_item_check','zztest_recon_noorg','1',NULL,'reconcile_org_unknown'),
+ ('open_item_check','zztest_no_such_table','1','{32020000-0000-4000-8000-0000000000a1}','reconcile_org_unknown'),
+ -- A subject row that is missing, malformed or has no organisation, plus a valid job.
+ ('open_item_check','zztest_recon_subject','32020000-0000-4000-8000-00000000beef','{32020000-0000-4000-8000-0000000000a1}','reconcile_org_unknown'),
+ ('open_item_check','zztest_recon_subject','not-a-uuid',NULL,'reconcile_org_unknown'),
+ ('open_item_check','zztest_recon_subject','32020000-0000-4000-8000-000000000500','{32020000-0000-4000-8000-0000000000a1}','reconcile_org_unknown'),
+ ('open_item_check','zztest_recon_subject','32020000-0000-4000-8000-000000000500',NULL,'reconcile_org_unknown'),
+ -- A valid job does not mask a second, missing one (HOLD 1), nor a null id.
+ ('bill','cost_document','xero_bill:ZZTEST-3202-BILL','{32020000-0000-4000-8000-0000000000a1,32020000-0000-4000-8000-00000000dead}','reconcile_job_unknown'),
+ ('open_item_check','zztest_recon_subject','32020000-0000-4000-8000-0000000005b1','{32020000-0000-4000-8000-0000000000b1,32020000-0000-4000-8000-00000000dead}','reconcile_job_unknown'),
+ ('open_item_check','zztest_recon_subject','32020000-0000-4000-8000-0000000005b1','{32020000-0000-4000-8000-0000000000b1,NULL}','reconcile_job_unknown'),
+ -- A job in another organisation than the subject, and a document spanning two.
+ ('open_item_check','zztest_recon_subject','32020000-0000-4000-8000-0000000005b1','{32020000-0000-4000-8000-0000000000a1}','reconcile_org_ambiguous'),
+ ('bill','cost_document','xero_bill:ZZTEST-3202-BILL','{32020000-0000-4000-8000-0000000000b1}','reconcile_org_ambiguous'),
+ ('bill','cost_document','xero_bill:ZZTEST-3202-TWO',NULL,'reconcile_org_ambiguous'),
+ ('zztest_not_a_kind','zztest_recon_subject','32020000-0000-4000-8000-0000000005b1',NULL,'reconcile_kind_unknown')
+) v(k, t, i, j, e);
 DO $none_written$ /* block */ BEGIN
- IF (SELECT count(*) FROM public.reconcile_items) <> (SELECT n FROM raise_before) THEN
-  RAISE EXCEPTION 'P2-03.2 a refused raise must write nothing'; END IF;
+ IF (SELECT coalesce(jsonb_agg(to_jsonb(i) ORDER BY i.id), '[]') FROM public.reconcile_items i)
+    IS DISTINCT FROM (SELECT list FROM raise_before) THEN
+  RAISE EXCEPTION 'P2-03.2 a refused raise must leave the list unchanged'; END IF;
 END $none_written$;
 
 -- The ticket's cases on a cost document (organisation from its lines).
@@ -186,10 +186,10 @@ DECLARE j uuid[] := ARRAY['32020000-0000-4000-8000-0000000000a1']::uuid[];
  h := md5(ev::text || '' || j::text);
  FOR act, who IN VALUES ('place','matcher:v1'), ('undo','person:00000000-0000-4000-8000-000000000001'),
    ('leave','person:00000000-0000-4000-8000-000000000001') LOOP
-  PERFORM public.reconcile_item_withdraw('open_item_check','zztest_recon_noorg','1','zz_reset');
+  PERFORM public.reconcile_item_withdraw('open_item_check','zztest_recon_subject','32020000-0000-4000-8000-0000000005a1','zz_reset');
   INSERT INTO public.reconcile_decisions(org_id,subject_kind,subject_id,action,shown_hash,"by")
-  VALUES('00000000-0000-0000-0000-0000000000a1','zztest_recon_noorg','1',act,h,who);
-  v := public.reconcile_item_raise('open_item_check','zztest_recon_noorg','1',j,NULL,ev,'migration');
+  VALUES('00000000-0000-0000-0000-0000000000a1','zztest_recon_subject','32020000-0000-4000-8000-0000000005a1',act,h,who);
+  v := public.reconcile_item_raise('open_item_check','zztest_recon_subject','32020000-0000-4000-8000-0000000005a1',j,NULL,ev,'migration');
   IF v IS NULL THEN RAISE EXCEPTION 'P2-03.2 a % by % must not keep the item off', act, who; END IF;
  END LOOP;
 END $not_blocking_jobs$;
@@ -199,14 +199,14 @@ DO $retry$
 DECLARE before_row jsonb;
 /* block */ BEGIN
  SELECT to_jsonb(i) INTO before_row FROM public.reconcile_items i
- WHERE kind='open_item_check' AND subject_table='zztest_recon_noorg' AND subject_id='1' AND status='open';
+ WHERE kind='open_item_check' AND subject_table='zztest_recon_subject' AND subject_id='32020000-0000-4000-8000-0000000005a1' AND status='open';
  FOR n IN 1..2 LOOP
-  PERFORM pg_temp.expect_failure($f$SELECT public.reconcile_item_raise('open_item_check','zztest_recon_noorg','1',
+  PERFORM pg_temp.expect_failure($f$SELECT public.reconcile_item_raise('open_item_check','zztest_recon_subject','32020000-0000-4000-8000-0000000005a1',
    ARRAY['32020000-0000-4000-8000-0000000000a1','32020000-0000-4000-8000-0000000000b1']::uuid[],NULL,
    '{"reason":"zz_changed"}'::jsonb,'migration')$f$, 'reconcile_org_ambiguous');
  END LOOP;
  IF (SELECT to_jsonb(i) FROM public.reconcile_items i
-   WHERE kind='open_item_check' AND subject_table='zztest_recon_noorg' AND subject_id='1' AND status='open')
+   WHERE kind='open_item_check' AND subject_table='zztest_recon_subject' AND subject_id='32020000-0000-4000-8000-0000000005a1' AND status='open')
    IS DISTINCT FROM before_row THEN
   RAISE EXCEPTION 'P2-03.2 a refused raise must leave the open item unchanged'; END IF;
 END $retry$;
@@ -237,6 +237,13 @@ DECLARE v uuid;
    AND reason='group_no_answer_48h' FROM public.reconcile_items WHERE id=v) IS NOT TRUE THEN
   RAISE EXCEPTION 'P2-03.2 the group-claim call shape must raise with a null amount'; END IF;
 END $group_claim$;
+
+-- The list's table comment names this function as its only inserter.
+DO $sole_inserter$ /* block */ BEGIN
+ IF position('Only reconcile_item_raise inserts items' IN
+    coalesce(obj_description('public.reconcile_items'::regclass, 'pg_class'), '')) = 0 THEN
+  RAISE EXCEPTION 'P2-03.2 reconcile_items must name reconcile_item_raise as its only inserter'; END IF;
+END $sole_inserter$;
 
 -- Service role only.
 DO $grants$ /* block */ BEGIN
@@ -300,5 +307,5 @@ DECLARE plan jsonb; q text; rel text;
 END $plan$;
 ROLLBACK TO plan_fixture;
 
-SELECT 'PASS P2-03.2: one open item per kind and subject, organisation from subject or jobs or refused, person decisions respected, withdraw, refusals write nothing, indexed reads';
+SELECT 'PASS P2-03.2: one open item per kind and subject, organisation from the subject alone, jobs confirmed, unresolved subjects and missing jobs refused, person decisions respected, withdraw, refusals write nothing, indexed reads';
 ROLLBACK;

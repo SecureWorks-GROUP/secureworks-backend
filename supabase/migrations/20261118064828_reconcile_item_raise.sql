@@ -9,16 +9,38 @@
 -- Another phase may wrap reconcile_item_raise but must end in exactly this call.
 --
 -- Organisation (director ruling, Follow-up 34 item 8). An item's org_id is
--- never passed in and never guessed:
+-- never passed in and never guessed. It comes from the subject alone:
 --   * subject_table 'cost_document' (subject_id '<document_kind>:<document_id>'):
 --     the org_id of that document's job_cost_lines rows;
---   * any other subject_table that is a public table with an org_id column and a
---     single-column primary key: that row's own org_id ('jobs' is one of these);
---   * any other subject: the org_id of the jobs in p_job_ids.
--- The jobs in p_job_ids are always read as well. If no organisation is found,
--- or the subject and the jobs name more than one, the raise refuses
--- (reconcile_org_unknown / reconcile_org_ambiguous) and writes nothing.
+--   * any other subject_table: a public table with a uuid org_id column and a
+--     single-column primary key, and that row's own org_id ('jobs' is one of
+--     these, so a job subject takes its own job's organisation).
+-- A subject that does not resolve (no such document or row, no organisation
+-- column, a NULL org_id) refuses reconcile_org_unknown whatever jobs are passed;
+-- jobs never supply the organisation. Every id in p_job_ids must be a job
+-- (reconcile_job_unknown) in that same organisation (reconcile_org_ambiguous).
+-- A refusal writes nothing.
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
+
+-- Install guard: these functions are new. Refuse to overwrite any other body
+-- or any other signature of the same names; this file's own bodies re-apply.
+DO $guard$
+DECLARE r record;
+/* block */ BEGIN
+  FOR r IN SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS body
+    FROM pg_catalog.pg_proc p
+    WHERE p.pronamespace = 'public'::regnamespace
+      AND p.proname IN ('reconcile_item_org', 'reconcile_item_raise', 'reconcile_item_withdraw')
+  LOOP
+    IF (r.sig, r.body) NOT IN (
+         ('reconcile_item_org(text,text,uuid[])', 'fa85b3c742dd44faf0d8f9fe1716597f'),
+         ('reconcile_item_raise(text,text,text,uuid[],jsonb,jsonb,text)', '24c912f38faed264b7bf1f42073778f6'),
+         ('reconcile_item_withdraw(text,text,text,text)', '3f2ea89136350b54fc6b23f8cb29ed93')) THEN
+      RAISE EXCEPTION 'P2-03.2: % already exists with another body; refusing to replace it', r.sig;
+    END IF;
+  END LOOP;
+END $guard$;
 
 -- Returns the one organisation of a subject, or raises. Index use:
 -- job_cost_lines_document_idx (document_kind, document_id); the subject table's
@@ -30,15 +52,19 @@ RETURNS uuid
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = '' AS $fn$
 DECLARE
   v_orgs uuid[] := '{}';
+  v_org uuid;
   v_subject_org uuid;
   v_rel regclass;
   v_key name;
   v_key_type text;
-  v_found boolean;
+  v_row_found boolean;
   v_kind text;
   v_doc text;
   v_cut int;
+  v_jobs_found int;
+  v_jobs_foreign int;
 /* block */ BEGIN
+  -- 1. The subject, and only the subject, decides the organisation.
   IF p_subject_table = 'cost_document' THEN
     v_cut := position(':' IN coalesce(p_subject_id, ''));
     IF v_cut > 1 THEN
@@ -48,71 +74,97 @@ DECLARE
       FROM public.job_cost_lines l
       WHERE l.document_kind = v_kind AND l.document_id = v_doc;
     END IF;
+    IF cardinality(v_orgs) = 0 THEN
+      RAISE EXCEPTION 'reconcile_org_unknown'
+        USING DETAIL = format('no cost lines for %s', p_subject_id);
+    END IF;
   ELSE
     v_rel := to_regclass(format('public.%I', p_subject_table));
-    IF v_rel IS NOT NULL
-       AND EXISTS (SELECT 1 FROM pg_catalog.pg_class c
-                   WHERE c.oid = v_rel AND c.relkind IN ('r', 'p'))
-       AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
-                   WHERE a.attrelid = v_rel AND a.attname = 'org_id'
-                     AND NOT a.attisdropped AND a.atttypid = 'uuid'::regtype) THEN
-      SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod)
-        INTO v_key, v_key_type
-      FROM pg_catalog.pg_index i
-      JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
-      WHERE i.indrelid = v_rel AND i.indisprimary AND i.indnkeyatts = 1;
-      IF v_key IS NULL THEN
-        RAISE EXCEPTION 'reconcile_org_unknown'
-          USING DETAIL = format('%s has no single-column primary key', p_subject_table);
-      END IF;
-      /* block */ BEGIN
-        EXECUTE format('SELECT true, t.org_id FROM public.%I t WHERE t.%I = $1::%s',
-                       p_subject_table, v_key, v_key_type)
-          INTO v_found, v_subject_org USING p_subject_id;
-      EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
-                  OR invalid_datetime_format OR datetime_field_overflow THEN
-        v_found := NULL;
-      END;
-      IF v_found IS NULL THEN
-        RAISE EXCEPTION 'reconcile_org_unknown'
-          USING DETAIL = format('%s row %s not found', p_subject_table, p_subject_id);
-      END IF;
-      IF v_subject_org IS NOT NULL THEN
-        v_orgs := ARRAY[v_subject_org];
-      END IF;
+    IF v_rel IS NULL
+       OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c
+                      WHERE c.oid = v_rel AND c.relkind IN ('r', 'p'))
+       OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                      WHERE a.attrelid = v_rel AND a.attname = 'org_id'
+                        AND NOT a.attisdropped AND a.atttypid = 'uuid'::regtype) THEN
+      RAISE EXCEPTION 'reconcile_org_unknown'
+        USING DETAIL = format('%s carries no organisation', p_subject_table);
     END IF;
+    SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod)
+      INTO v_key, v_key_type
+    FROM pg_catalog.pg_index i
+    JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+    WHERE i.indrelid = v_rel AND i.indisprimary AND i.indnkeyatts = 1;
+    IF v_key IS NULL THEN
+      RAISE EXCEPTION 'reconcile_org_unknown'
+        USING DETAIL = format('%s has no single-column primary key', p_subject_table);
+    END IF;
+    /* block */ BEGIN
+      EXECUTE format('SELECT true, t.org_id FROM public.%I t WHERE t.%I = $1::%s',
+                     p_subject_table, v_key, v_key_type)
+        INTO v_row_found, v_subject_org USING p_subject_id;
+    EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
+                OR invalid_datetime_format OR datetime_field_overflow THEN
+      v_row_found := NULL;
+    END;
+    IF v_row_found IS NULL THEN
+      RAISE EXCEPTION 'reconcile_org_unknown'
+        USING DETAIL = format('%s row %s not found', p_subject_table, p_subject_id);
+    END IF;
+    IF v_subject_org IS NULL THEN
+      RAISE EXCEPTION 'reconcile_org_unknown'
+        USING DETAIL = format('%s row %s has no organisation', p_subject_table, p_subject_id);
+    END IF;
+    v_orgs := ARRAY[v_subject_org];
   END IF;
-
-  IF coalesce(cardinality(p_job_ids), 0) > 0 THEN
-    SELECT coalesce(array_agg(DISTINCT o.org_id), '{}') INTO v_orgs
-    FROM (
-      SELECT unnest(v_orgs) AS org_id
-      UNION
-      SELECT j.org_id FROM public.jobs j
-      WHERE j.id = ANY(p_job_ids) AND j.org_id IS NOT NULL
-    ) o;
-  END IF;
-
-  IF cardinality(v_orgs) = 0 THEN
-    RAISE EXCEPTION 'reconcile_org_unknown'
-      USING DETAIL = format('no organisation for %s %s', p_subject_table, p_subject_id);
-  ELSIF cardinality(v_orgs) > 1 THEN
+  IF cardinality(v_orgs) > 1 THEN
     RAISE EXCEPTION 'reconcile_org_ambiguous'
       USING DETAIL = format('%s %s spans %s organisations',
                             p_subject_table, p_subject_id, cardinality(v_orgs));
   END IF;
-  RETURN v_orgs[1];
+  v_org := v_orgs[1];
+
+  -- 2. The jobs only confirm it: every one exists, in that organisation.
+  IF coalesce(cardinality(p_job_ids), 0) > 0 THEN
+    IF array_position(p_job_ids, NULL) IS NOT NULL THEN
+      RAISE EXCEPTION 'reconcile_job_unknown' USING DETAIL = 'a job id is null';
+    END IF;
+    SELECT count(*), count(*) FILTER (WHERE j.org_id IS DISTINCT FROM v_org)
+      INTO v_jobs_found, v_jobs_foreign
+    FROM public.jobs j WHERE j.id = ANY(p_job_ids);
+    IF v_jobs_found < (SELECT count(DISTINCT x) FROM unnest(p_job_ids) x) THEN
+      RAISE EXCEPTION 'reconcile_job_unknown'
+        USING DETAIL = format('%s of the jobs named for %s %s do not exist',
+          (SELECT count(DISTINCT x) FROM unnest(p_job_ids) x) - v_jobs_found,
+          p_subject_table, p_subject_id);
+    END IF;
+    IF v_jobs_foreign > 0 THEN
+      RAISE EXCEPTION 'reconcile_org_ambiguous'
+        USING DETAIL = format('a job named for %s %s is in another organisation',
+                              p_subject_table, p_subject_id);
+    END IF;
+  END IF;
+  RETURN v_org;
 END $fn$;
 
 -- The one way onto the list. Index use: reconcile_items_one_open (kind,
 -- subject_table, subject_id WHERE open); reconcile_decisions_subject_idx
 -- (subject_kind, subject_id, decided_at DESC, id DESC) for the newest decision.
+-- Positional parameters, named by ALIAS inside: the P1-13.9 contract replaces
+-- this function with a positional stand-in inside its rolled-back transaction,
+-- and PostgreSQL refuses a replacement that renames an input parameter.
+-- Callers pass arguments by position (the P1-13.9 sweep does).
 CREATE OR REPLACE FUNCTION public.reconcile_item_raise(
-  p_kind text, p_subject_table text, p_subject_id text, p_job_ids uuid[],
-  p_suggestion jsonb, p_evidence jsonb, p_raised_by text)
+  text, text, text, uuid[], jsonb, jsonb, text)
 RETURNS uuid
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = '' AS $fn$
 DECLARE
+  p_kind ALIAS FOR $1;
+  p_subject_table ALIAS FOR $2;
+  p_subject_id ALIAS FOR $3;
+  p_job_ids ALIAS FOR $4;
+  p_suggestion ALIAS FOR $5;
+  p_evidence ALIAS FOR $6;
+  p_raised_by ALIAS FOR $7;
   v_reason text;
   v_amount numeric(12,2);
   v_date date;
@@ -232,7 +284,7 @@ DECLARE v_count int;
 END $fn$;
 
 COMMENT ON FUNCTION public.reconcile_item_raise(text,text,text,uuid[],jsonb,jsonb,text) IS
-  'P2-03.2: the only writer that inserts reconcile_items. One open item per kind and subject; NULL when a person already decided on the same evidence hash. Organisation from the subject row or its jobs; refuses rather than guesses.';
+  'P2-03.2: the only writer that inserts reconcile_items. One open item per kind and subject; NULL when a person already decided on the same evidence hash. Organisation from the subject alone (cost document lines or the subject row); every named job must exist in it; refuses rather than guesses.';
 COMMENT ON FUNCTION public.reconcile_item_withdraw(text,text,text,text) IS
   'P2-03.2: closes the open item of a kind and subject without a person; true when a row changed.';
 

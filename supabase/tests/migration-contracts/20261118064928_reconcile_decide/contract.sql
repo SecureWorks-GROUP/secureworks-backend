@@ -8,6 +8,7 @@ SELECT to_regclass('public.reconcile_items') IS NULL AS decide_contract_needs_ta
 \endif
 \ir ../../../migrations/20261118064828_reconcile_item_raise.sql
 \ir ../../../migrations/20261118064928_reconcile_decide.sql
+SET LOCAL statement_timeout = '120s';
 
 CREATE FUNCTION pg_temp.expect_failure(command text, expected text, code text DEFAULT NULL) RETURNS void
 LANGUAGE plpgsql AS $expect$
@@ -26,6 +27,7 @@ INSERT INTO public.jobs(id, org_id, job_number, type, status) VALUES
  ('32030000-0000-4000-8000-0000000000a1', '00000000-0000-0000-0000-0000000000a1', 'ZZTEST-3203-A1', 'fencing', 'accepted'),
  ('32030000-0000-4000-8000-0000000000a2', '00000000-0000-0000-0000-0000000000a1', 'ZZTEST-3203-A2', 'fencing', 'accepted'),
  ('32030000-0000-4000-8000-0000000000c1', '00000000-0000-0000-0000-0000000000a1', 'ZZTEST-3203-C1', 'fencing', 'accepted'),
+ ('32030000-0000-4000-8000-0000000000d1', '00000000-0000-0000-0000-0000000000a1', 'ZZTEST-3203-D1', 'fencing', 'accepted'),
  ('32030000-0000-4000-8000-0000000000b1', '00000000-0000-0000-0000-0000000000b1', 'ZZTEST-3203-B1', 'fencing', 'accepted');
 UPDATE public.jobs SET status = 'cancelled' WHERE id = '32030000-0000-4000-8000-0000000000c1';
 INSERT INTO public.users(id, org_id, name, role) VALUES
@@ -39,6 +41,17 @@ SELECT '00000000-0000-0000-0000-0000000000a1', 'supplier_bill', 'xero_bill', 'ZZ
 FROM (VALUES ('PLACE','1',1,2000.00), ('SPLIT','1',1,1000.00), ('OVER','1',1,100.00), ('DIV','1',1,50.00),
   ('DUP','1',1,10.00), ('DUP','2',2,20.00), ('LEAVE','1',1,5.00), ('NOTDUP','1',1,7.00),
   ('CANC','1',1,9.00), ('RETRY','1',1,11.00)) v(d, k, n, amt);
+-- A held possible duplicate whose line already sits on a job (job D1, which no
+-- other case touches), and another organisation's document.
+INSERT INTO public.job_cost_lines(org_id, kind, document_kind, document_id, line_key, line_no, lane, amount_ex,
+  source_hash, state)
+VALUES ('00000000-0000-0000-0000-0000000000a1', 'supplier_bill', 'xero_bill', 'ZZTEST-3203-NOTDUPJ', '1', 1,
+  'materials', 8.00, 'zz', 'on_job'),
+ ('00000000-0000-0000-0000-0000000000b1', 'supplier_bill', 'xero_bill', 'ZZTEST-3203-BDOC', '1', 1,
+  'materials', 10.00, 'zz', 'needs_person');
+INSERT INTO public.job_cost_line_parts(line_id, part_no, target, job_id, lane, amount_ex)
+SELECT id, 1, 'job', '32030000-0000-4000-8000-0000000000d1', 'materials', 8.00
+FROM public.job_cost_lines WHERE document_id = 'ZZTEST-3203-NOTDUPJ';
 
 -- One open item per document, raised through the one door.
 CREATE FUNCTION pg_temp.item(d text) RETURNS uuid LANGUAGE sql AS $f$
@@ -152,12 +165,22 @@ END $nothing_written$;
 
 -- split: the parts of each line must add up to it exactly.
 DO $split$
-DECLARE i uuid := pg_temp.item('SPLIT'); l public.job_cost_lines; s jsonb;
+DECLARE i uuid := pg_temp.item('SPLIT'); l public.job_cost_lines; s jsonb; dt text;
 /* block */ BEGIN
  l := pg_temp.line('SPLIT');
  PERFORM pg_temp.expect_failure(format($f$SELECT pg_temp.decide(%L,'split',%L)$f$, i, jsonb_build_array(
   jsonb_build_object('line_id', l.id, 'target', 'job', 'job_id', '32030000-0000-4000-8000-0000000000a1', 'amount_ex', 600),
   jsonb_build_object('line_id', l.id, 'target', 'overhead', 'amount_ex', 300))), 'reconcile_parts_do_not_add_up');
+ -- The refusal names the line only: no proposed sum and no line amount.
+ /* block */ BEGIN
+  PERFORM pg_temp.decide(i, 'split', jsonb_build_array(
+   jsonb_build_object('line_id', l.id, 'target', 'overhead', 'amount_ex', 700)));
+  RAISE EXCEPTION 'P2-03.3 a split that does not add up must refuse';
+ EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS dt = PG_EXCEPTION_DETAIL;
+  IF SQLERRM <> 'reconcile_parts_do_not_add_up' OR dt IS DISTINCT FROM 'line ' || l.id::text THEN
+   RAISE EXCEPTION 'P2-03.3 a split refusal must carry the line id only: % / %', SQLERRM, dt; END IF;
+ END;
  PERFORM pg_temp.expect_failure(format($f$SELECT pg_temp.decide(%L,'split',%L)$f$, i, jsonb_build_array(
   jsonb_build_object('line_id', l.id, 'target', 'division_stock', 'division', 'roofing', 'amount_ex', 1000))),
   'reconcile_division_unknown');
@@ -185,7 +208,7 @@ END $split$;
 
 -- overhead, division_stock and duplicate.
 DO $states$
-DECLARE i uuid; l public.job_cost_lines;
+DECLARE i uuid; l public.job_cost_lines; n_decisions bigint; dup_lines jsonb;
 /* block */ BEGIN
  i := pg_temp.item('OVER');
  PERFORM pg_temp.decide(i, 'overhead', NULL);
@@ -205,6 +228,20 @@ DECLARE i uuid; l public.job_cost_lines;
  i := pg_temp.item('DUP');
  PERFORM pg_temp.expect_failure(format($f$SELECT pg_temp.decide(%L,'duplicate','[]')$f$, i),
   'reconcile_duplicate_needs_other');
+ -- The other document must be a different document with lines in this
+ -- organisation: its own id, a missing one, another organisation's or a bare
+ -- id all refuse and leave the lines and the log as they were.
+ SELECT count(*) INTO n_decisions FROM public.reconcile_decisions;
+ SELECT jsonb_agg(to_jsonb(dl) ORDER BY dl.line_key) INTO dup_lines
+ FROM public.job_cost_lines dl WHERE dl.document_id = 'ZZTEST-3203-DUP';
+ PERFORM pg_temp.expect_failure(format($f$SELECT pg_temp.decide(%L,'duplicate',%L)$f$, i,
+  jsonb_build_array(jsonb_build_object('other_document_id', o))), 'reconcile_duplicate_needs_other')
+ FROM unnest(ARRAY['xero_bill:ZZTEST-3203-DUP', ' xero_bill : ZZTEST-3203-DUP ', 'xero_bill:ZZTEST-3203-NOPE',
+  'xero_bill:ZZTEST-3203-BDOC', 'ZZTEST-3203-PLACE', ':ZZTEST-3203-PLACE', 'xero_bill:']) o;
+ IF (SELECT count(*) FROM public.reconcile_decisions) <> n_decisions
+  OR (SELECT jsonb_agg(to_jsonb(dl) ORDER BY dl.line_key) FROM public.job_cost_lines dl
+      WHERE dl.document_id = 'ZZTEST-3203-DUP') IS DISTINCT FROM dup_lines THEN
+  RAISE EXCEPTION 'P2-03.3 a refused duplicate must write nothing'; END IF;
  PERFORM pg_temp.decide(i, 'duplicate', '[{"other_document_id":"xero_bill:ZZTEST-3203-PLACE"}]');
  IF EXISTS(SELECT 1 FROM public.job_cost_lines WHERE document_id = 'ZZTEST-3203-DUP'
      AND (state IS NOT NULL OR not_counted_reason IS DISTINCT FROM 'duplicate_document' OR decided_by_kind <> 'person'))
@@ -250,6 +287,24 @@ DECLARE i uuid := pg_temp.dup_item('NOTDUP'); r jsonb; before_line jsonb;
   RAISE EXCEPTION 'P2-03.3 must not call or stub a requeue'; END IF;
 END $not_duplicate$;
 
+-- not_duplicate on a held document whose line already has a job part marks
+-- neither Job Profit nor the job page: the decision changes no cost.
+DO $not_duplicate_marks$
+DECLARE i uuid := pg_temp.dup_item('NOTDUPJ'); dirty jsonb; page_marks bigint;
+/* block */ BEGIN
+ SELECT to_jsonb(d) INTO dirty FROM public.job_profit_dirty d WHERE d.job_id = '32030000-0000-4000-8000-0000000000d1';
+ SELECT count(*) INTO page_marks FROM public.job_change_mark_events
+ WHERE job_id = '32030000-0000-4000-8000-0000000000d1';
+ PERFORM pg_temp.decide(i, 'not_duplicate', NULL);
+ IF (SELECT to_jsonb(d) FROM public.job_profit_dirty d WHERE d.job_id = '32030000-0000-4000-8000-0000000000d1')
+    IS DISTINCT FROM dirty
+  OR (SELECT count(*) FROM public.job_change_mark_events WHERE job_id = '32030000-0000-4000-8000-0000000000d1')
+    <> page_marks THEN
+  RAISE EXCEPTION 'P2-03.3 not_duplicate must mark neither Job Profit nor the job page'; END IF;
+ IF (SELECT state FROM public.job_cost_lines WHERE document_id = 'ZZTEST-3203-NOTDUPJ') <> 'on_job' THEN
+  RAISE EXCEPTION 'P2-03.3 not_duplicate must leave a placed line where it is'; END IF;
+END $not_duplicate_marks$;
+
 -- resolve: items that are not cost documents; a note is required.
 DO $resolve$
 DECLARE i uuid; r jsonb;
@@ -280,7 +335,10 @@ SELECT '00000000-0000-0000-0000-0000000000a1', 'supplier_bill', 'xero_bill', 'ZZ
  'materials', 1, 'zz', 'overhead' FROM generate_series(1, 4000) g;
 INSERT INTO public.job_cost_line_parts(line_id, part_no, target, lane, amount_ex)
 SELECT id, 1, 'overhead', 'materials', 1 FROM public.job_cost_lines WHERE document_id LIKE 'ZZTEST-3203-PLAN-%';
-ANALYZE public.job_cost_lines, public.job_cost_line_parts;
+INSERT INTO public.reconcile_decisions(org_id, subject_kind, subject_id, action, "by")
+SELECT '00000000-0000-0000-0000-0000000000a1', 'cost_document', 'xero_bill:ZZTEST-3203-PLAN-' || g, 'place', 'matcher:v1'
+FROM generate_series(1, 4000) g;
+ANALYZE public.job_cost_lines, public.job_cost_line_parts, public.reconcile_decisions;
 DO $plan$
 DECLARE plan jsonb; q text; rel text;
 /* block */ BEGIN
@@ -288,11 +346,20 @@ DECLARE plan jsonb; q text; rel text;
   ('job_cost_lines', $q$SELECT l.id FROM public.job_cost_lines l WHERE l.document_kind = 'xero_bill'
     AND l.document_id = 'ZZTEST-3203-PLAN-17' AND l.org_id = '00000000-0000-0000-0000-0000000000a1'$q$),
   ('job_cost_line_parts', $q$SELECT p.amount_ex FROM public.job_cost_line_parts p WHERE p.line_id =
-    (SELECT id FROM public.job_cost_lines WHERE document_kind = 'xero_bill' AND document_id = 'ZZTEST-3203-PLAN-17')$q$)
+    (SELECT id FROM public.job_cost_lines WHERE document_kind = 'xero_bill' AND document_id = 'ZZTEST-3203-PLAN-17')$q$),
+  -- duplicate's other-document check.
+  ('job_cost_lines', $q$SELECT 1 FROM public.job_cost_lines l WHERE l.document_kind = 'xero_bill'
+    AND l.document_id = 'ZZTEST-3203-PLAN-18' AND l.org_id = '00000000-0000-0000-0000-0000000000a1' LIMIT 1$q$),
+  -- The subject's newest decision in the item's organisation (supersedes).
+  ('reconcile_decisions', $q$SELECT d.id FROM public.reconcile_decisions d
+    WHERE d.subject_kind = 'cost_document' AND d.subject_id = 'xero_bill:ZZTEST-3203-PLAN-17'
+      AND d.org_id = '00000000-0000-0000-0000-0000000000a1'
+    ORDER BY d.decided_at DESC, d.id DESC LIMIT 1$q$)
  LOOP
   EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON) ' || q INTO plan;
   IF EXISTS(SELECT 1 FROM jsonb_path_query(plan, 'strict $.**') node
-     WHERE node->>'Relation Name' IN ('job_cost_lines','job_cost_line_parts') AND node->>'Node Type' = 'Seq Scan')
+     WHERE node->>'Relation Name' IN ('job_cost_lines','job_cost_line_parts','reconcile_decisions')
+       AND node->>'Node Type' = 'Seq Scan')
   OR NOT EXISTS(SELECT 1 FROM jsonb_path_query(plan, 'strict $.**') node
      WHERE node->>'Relation Name' = rel AND node->>'Node Type' IN ('Index Scan','Index Only Scan','Bitmap Heap Scan'))
   OR EXISTS(SELECT 1 FROM jsonb_path_query(plan, 'strict $.**') node
@@ -303,5 +370,5 @@ DECLARE plan jsonb; q text; rel text;
 END $plan$;
 ROLLBACK TO plan_fixture;
 
-SELECT 'PASS P2-03.3: staff only, stale evidence refused, place, split, overhead, division_stock, duplicate, leave, not_duplicate closes without requeue, resolve, refusals write nothing, indexed reads';
+SELECT 'PASS P2-03.3: staff only, stale evidence refused, place, split, overhead, division_stock, duplicate needs another document of the organisation, leave, not_duplicate closes without requeue or marks, split refusal names the line only, resolve, refusals write nothing, indexed reads';
 ROLLBACK;

@@ -12,6 +12,25 @@
 -- The actor is always 'person:<p_user_id>'; no caller-supplied name is accepted.
 -- No Xero, legacy table or xero_invoices.job_id write.
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
+
+-- Install guard: these functions are new. Refuse to overwrite any other body
+-- or any other signature of the same names; this file's own bodies re-apply.
+DO $guard$
+DECLARE r record;
+/* block */ BEGIN
+  FOR r IN SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS body
+    FROM pg_catalog.pg_proc p
+    WHERE p.pronamespace = 'public'::regnamespace
+      AND p.proname IN ('reconcile_decide', 'reconcile_decide_live_job')
+  LOOP
+    IF (r.sig, r.body) NOT IN (
+         ('reconcile_decide(uuid,text,text,jsonb,text,boolean,uuid)', '5eb8d0b43f1a2b8339d3f739a6d05433'),
+         ('reconcile_decide_live_job(uuid,uuid)', '0d870e9052672617b74ab853504abd9d')) THEN
+      RAISE EXCEPTION 'P2-03.3: % already exists with another body; refusing to replace it', r.sig;
+    END IF;
+  END LOOP;
+END $guard$;
 
 CREATE OR REPLACE FUNCTION public.reconcile_decide(
   p_item_id uuid, p_shown_hash text, p_action text, p_parts jsonb, p_note text,
@@ -40,6 +59,10 @@ DECLARE
   v_clues bigint[];
   v_jobs uuid[] := '{}';
   v_status text;
+  v_other text;
+  v_other_kind text;
+  v_other_id text;
+  v_writes_lines boolean;
 /* block */ BEGIN
   -- 1. Staff only, in the item's organisation (read after the item, below).
   IF p_user_id IS NULL OR NOT EXISTS (SELECT 1 FROM public.users u WHERE u.id = p_user_id
@@ -173,8 +196,9 @@ DECLARE
       FROM jsonb_array_elements(p_parts) p WHERE p ->> 'line_id' = v_line.l ->> 'id';
       IF v_count = 0 OR (v_line.l ->> 'amount_ex') IS NULL
          OR v_sum IS DISTINCT FROM (v_line.l ->> 'amount_ex')::numeric THEN
+        -- The line id only: a trade-cost line's amount is pay, never logged.
         RAISE EXCEPTION 'reconcile_parts_do_not_add_up'
-          USING DETAIL = format('line %s: parts %s, line %s', v_line.l ->> 'id', v_sum, v_line.l ->> 'amount_ex');
+          USING DETAIL = format('line %s', v_line.l ->> 'id');
       END IF;
     END LOOP;
   ELSIF p_action = 'division_stock' THEN
@@ -187,6 +211,22 @@ DECLARE
     IF jsonb_typeof(p_parts) IS DISTINCT FROM 'array' OR jsonb_array_length(p_parts) <> 1
        OR nullif(btrim(coalesce(p_parts -> 0 ->> 'other_document_id', '')), '') IS NULL THEN
       RAISE EXCEPTION 'reconcile_duplicate_needs_other';
+    END IF;
+    -- The other document is '<document_kind>:<document_id>', another document
+    -- with cost lines in this item's organisation. job_cost_lines_document_idx.
+    v_other := btrim(p_parts -> 0 ->> 'other_document_id');
+    v_cut := position(':' IN v_other);
+    IF v_cut > 1 THEN
+      v_other_kind := btrim(left(v_other, v_cut - 1));
+      v_other_id := btrim(substr(v_other, v_cut + 1));
+    END IF;
+    IF v_other_kind IS NULL OR v_other_id = ''
+       OR (v_other_kind = v_doc_kind AND v_other_id = v_doc_id)
+       OR NOT EXISTS (SELECT 1 FROM public.job_cost_lines l
+         WHERE l.document_kind = v_other_kind AND l.document_id = v_other_id
+           AND l.org_id = v_item.org_id) THEN
+      RAISE EXCEPTION 'reconcile_duplicate_needs_other'
+        USING DETAIL = 'the other document must be a different document of this organisation';
     END IF;
   END IF;
   IF p_action IN ('place', 'overhead', 'division_stock') AND EXISTS (
@@ -214,7 +254,8 @@ DECLARE
   RETURNING id INTO v_decision;
 
   -- 4b/5. Apply to the lines, through the one cost-line writer (which refollows).
-  IF v_is_cost AND p_action IN ('place', 'split', 'overhead', 'division_stock', 'duplicate') THEN
+  v_writes_lines := v_is_cost AND p_action IN ('place', 'split', 'overhead', 'division_stock', 'duplicate');
+  IF v_writes_lines THEN
     FOR v_line IN SELECT l FROM jsonb_array_elements(v_lines) l
       WHERE l ->> 'state' IS NOT NULL ORDER BY l ->> 'id' LOOP
       IF p_action = 'place' THEN
@@ -262,9 +303,11 @@ DECLARE
     v_status := 'decided';
   END IF;
 
-  -- 8. Mark the old and new jobs for Job Profit and the job page, when present.
+  -- 8. Mark the old and new jobs for Job Profit and the job page, when present,
+  -- only when step 4b wrote the lines: not_duplicate, leave and resolve change
+  -- no cost, so they mark nothing.
   SELECT coalesce(array_agg(DISTINCT j), '{}') INTO v_jobs FROM unnest(v_jobs) j WHERE j IS NOT NULL;
-  IF cardinality(v_jobs) > 0 THEN
+  IF v_writes_lines AND cardinality(v_jobs) > 0 THEN
     IF to_regprocedure('public.job_profit_mark(uuid,text)') IS NOT NULL THEN
       PERFORM public.job_profit_mark(j, 'person') FROM unnest(v_jobs) j;
     END IF;
@@ -298,7 +341,7 @@ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = '' AS $fn$
 END $fn$;
 
 COMMENT ON FUNCTION public.reconcile_decide(uuid,text,text,jsonb,text,boolean,uuid) IS
-  'P2-03.3: a signed-in staff member''s decision on one Reconcile item, recorded in reconcile_decisions and applied to the cost lines. not_duplicate records and closes; no requeue until match_requeue exists.';
+  'P2-03.3: a signed-in staff member''s decision on one Reconcile item, recorded in reconcile_decisions and applied to the cost lines. not_duplicate records and closes; no requeue until match_requeue exists. Job Profit and job page marks only when the lines were written.';
 
 REVOKE ALL ON FUNCTION public.reconcile_decide(uuid,text,text,jsonb,text,boolean,uuid),
   public.reconcile_decide_live_job(uuid,uuid) FROM PUBLIC, anon, authenticated;
