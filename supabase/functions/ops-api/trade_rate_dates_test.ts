@@ -181,7 +181,10 @@ Deno.test("Set Rate refuses a scheduled future row before changing any rate", ()
       ApiError,
     );
     assertEquals(error.status, 409);
-    assertEquals(error.message, `This trade has a new rate starting ${changeDay}. Nothing was changed. Tell the director if the rate needs to change before then.`);
+    assertEquals(
+      error.message,
+      `This trade has a new rate starting ${changeDay}. Nothing was changed. Tell the director if the rate needs to change before then.`,
+    );
     assertEquals(s.tables.trade_rates, before);
     assertEquals(s.writes, []);
   }));
@@ -291,9 +294,13 @@ Deno.test("Ops rate panel keeps only the newest effective row per person", () =>
       nextRate(),
       { ...oldRate(), user_id: "second-trade-fixture" },
     ]);
-    const out = await _listTradeInvoicesForTest(s.client, new URLSearchParams());
+    const out = await _listTradeInvoicesForTest(
+      s.client,
+      new URLSearchParams(),
+    );
     assertEquals(out.rates.map((row: Row) => [row.user_id, row.hourly_rate]), [
-      ["trade-fixture", 31], ["second-trade-fixture", 23],
+      ["trade-fixture", 31],
+      ["second-trade-fixture", 23],
     ]);
     assertEquals(s.writes, []);
   }));
@@ -325,7 +332,10 @@ for (const [label, screen] of Object.entries(costScreens)) {
       assertEquals(out.trades[0].cost, 108);
       assertEquals(out.trades[0].rate, 27);
       assertEquals(out.total_labour_cost ?? out.total_cost, 108);
-      assertEquals(s.reads.filter((table) => table === "trade_rates").length, 1);
+      assertEquals(
+        s.reads.filter((table) => table === "trade_rates").length,
+        1,
+      );
       assertEquals(s.writes, []);
     }));
 
@@ -368,19 +378,30 @@ for (const [label, screen] of Object.entries(costScreens)) {
   Deno.test(`${label} labour screen reads once per trade and respects gaps in rate history`, () =>
     onDay(today, async () => {
       const s = store([
-        { ...oldRate(), effective_to: "2031-02-10" }, nextRate(),
+        { ...oldRate(), effective_to: "2031-02-10" },
+        nextRate(),
         { ...oldRate(), user_id: "second-trade-fixture", hourly_rate: 17 },
       ]);
       s.tables.job_assignments = [
-        attendance(today), attendance(changeDay),
+        attendance(today),
+        attendance(changeDay),
         { ...attendance(today), user_id: "second-trade-fixture" },
         { ...attendance(changeDay), user_id: "second-trade-fixture" },
       ];
       const out = await screen(s);
-      assertEquals(out.trades.map((row: Row) => ({ user_id: row.user_id, cost: row.cost })), [
-        { user_id: "trade-fixture", cost: 62 },
-        { user_id: "second-trade-fixture", cost: 68 },
-      ]);
-      assertEquals(s.reads.filter((table) => table === "trade_rates").length, 2);
+      assertEquals(
+        out.trades.map((row: Row) => ({
+          user_id: row.user_id,
+          cost: row.cost,
+        })),
+        [
+          { user_id: "trade-fixture", cost: 62 },
+          { user_id: "second-trade-fixture", cost: 68 },
+        ],
+      );
+      assertEquals(
+        s.reads.filter((table) => table === "trade_rates").length,
+        2,
+      );
     }));
 }
