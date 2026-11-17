@@ -31,6 +31,7 @@ import {
   normaliseExtraItem,
 } from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
+import { divisionTrackingOption } from '../_shared/xero_draft_standard.ts'
 import { commissionCapCodeFromDbError, commissionCapRefusal, readJobCommissionRecords } from './job_commission.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
@@ -42840,59 +42841,14 @@ async function addPOEvent(client: any, body: any) {
 }
 
 // ── Tracking category helper ──
-// Maps a job to its Xero "Business Unit" tracking option.
-//
-// SWR- IS NOW AMBIGUOUS, AND THIS FUNCTION REFUSES TO GUESS.
-//
-// The prefix was already shared by renovation and roofing; repair makes it three
-// ways. An insurance repair is SES insurance work and books where the make-safe /
-// SES insurance work books — NOT 'SW - PRIVATE ROOFING', which is private
-// roofing revenue. So a bare SWR- number can no longer decide a business unit,
-// and returning a wrong category is worse than returning none: every caller
-// already handles the empty answer (they skip Tracking, or fall back to
-// 'Construction' in a description), whereas a wrong one silently misfiles
-// revenue and nobody notices until month end.
-//
-// Pass the job type wherever a job row is in hand and the answer is exact.
-// Callers holding only a job-number string (supplier bills, WO cost lines) get
-// '' for SWR-. Every OTHER prefix is untouched and answers exactly as before.
-//
-// The pre-merge premise (PR #771) was that production held zero renovation
-// jobs, zero roofing jobs and zero SWR- job numbers, so no existing row changed
-// answer. That premise is spent: the repair SWR- mint lane went live 2026-08-28,
-// which is exactly why a bare SWR- number must keep resolving to '' rather than
-// being taught a default. Re-measure production before assuming any count here.
-//
-// 'SW - MAKESAFE' for repair is inherited from the make-safe route, and the
-// captain confirmed the intent behind it on 2026-08-31: repair revenue books as
-// make-safe / insurance work, so it tracks where SES insurance work already
-// tracks. Read that intent, not the string — a future tracking split follows the
-// insurance work, not the 'repair' label. (Closes what this comment carried as
-// OPEN RISK #2; OPEN RISK #1, captain signoff on the money-seal path, is a
-// different question and stays open in the 20260826000001 migration header.)
+// Maps a job to its Xero "Business Unit" tracking option. The rule, and why a
+// bare SWR- number answers '', live in divisionTrackingOption
+// (_shared/xero_draft_standard.ts), the one copy both phases call.
 // The only Business Unit options ensure_xero_tracking_option may add.
 const XERO_TRACKING_OPTIONS_WE_MAY_ADD = ['SW - RESTORATION']
 
 function trackingCategoryForJob(jobNumber: string, jobType?: string | null): string {
-  // An explicit type always wins, including when the job has no number yet.
-  const type = String(jobType || '').trim().toLowerCase()
-  // Granny-flat accounting is unresolved. Never infer a division from its retained number.
-  if (type === 'granny_flat') return ''
-  if (type === 'repair') return 'SW - MAKESAFE'
-  if (type === 'roofing' || type === 'renovation') return 'SW - PRIVATE ROOFING'
-  if (!jobNumber) return ''
-  const upper = jobNumber.toUpperCase()
-  // SWRESTO- (restoration) has its own Business Unit option (owner, 12 Nov
-  // 2026); it must be read before the 'SWR' slice below, which answers ''.
-  if (upper.startsWith('SWRESTO-')) return 'SW - RESTORATION'
-  if (upper.startsWith('SWMS-') || upper.startsWith('AJBR') || upper.startsWith('MS1') || upper.startsWith('BWCWA') || upper.startsWith('WB6')) return 'SW - MAKESAFE'
-  const prefix = upper.slice(0, 3)
-  if (prefix === 'SWP') return 'SW - PATIOS'
-  if (prefix === 'SWF') return 'SW - FENCING'
-  if (prefix === 'SWD') return 'SW - DECKING'
-  if (prefix === 'SWI') return 'SW - INSURANCE WORK'
-  // 'SWR' deliberately falls through to '': renovation | roofing | repair.
-  return ''
+  return divisionTrackingOption({ job_number: jobNumber, job_type: jobType })
 }
 
 // Builds Xero Tracking array for a line item
