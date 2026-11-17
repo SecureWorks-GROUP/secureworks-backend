@@ -12,6 +12,7 @@ import {
   applyOwnerCommand,
   getRunningInvoiceDraft,
   mergeApproved,
+  requireRunningDraftAgentCaller,
   RunningDraftError,
   runningInvoiceDraftEnabled,
   saveRunningInvoiceDraft,
@@ -217,6 +218,7 @@ class FakeDb {
       dismissed_source_keys: args.p_dismissed,
       notes: invoice.notes,
       gst_on: invoice.gst_on,
+      gst: invoice.gst,
       subtotal_ex: invoice.subtotal_ex,
       gross_earned: invoice.gross_earned,
       net_pay: invoice.net_pay,
@@ -838,6 +840,7 @@ Deno.test("ops-api wires the three trade actions and keeps the agent action off 
   assert(profile.includes("'get_running_invoice_draft'"));
   assert(profile.includes("'sync_running_invoice_draft'"));
   assert(!profile.includes("agent_save_running_invoice_draft"));
+  assert(!profile.includes("agent_get_running_invoice_draft"));
 
   const outer = INDEX_SRC.match(
     /case 'my_jobs':[\s\S]*?case 'submit_makesafe_report': \{/,
@@ -847,6 +850,7 @@ Deno.test("ops-api wires the three trade actions and keeps the agent action off 
   assert(outer[0].includes("case 'get_running_invoice_draft':"));
   assert(outer[0].includes("case 'sync_running_invoice_draft':"));
   assert(!outer[0].includes("agent_save_running_invoice_draft"));
+  assert(!outer[0].includes("agent_get_running_invoice_draft"));
 
   const agentRead = setBody(
     INDEX_SRC,
@@ -858,6 +862,8 @@ Deno.test("ops-api wires the three trade actions and keeps the agent action off 
   );
   assert(!agentRead.includes("running_invoice_draft"));
   assert(!routine.includes("running_invoice_draft"));
+  assert(!agentRead.includes("agent_get_running_invoice_draft"));
+  assert(!routine.includes("agent_get_running_invoice_draft"));
 
   const agentCase = INDEX_SRC.slice(
     INDEX_SRC.indexOf("case 'agent_save_running_invoice_draft'"),
@@ -868,6 +874,17 @@ Deno.test("ops-api wires the three trade actions and keeps the agent action off 
   assert(agentCase.includes("'agent'"));
   assert(!agentCase.includes("authModeLegacy"));
   assert(!agentCase.includes("generate_trade_invoice"));
+
+  const getCase = INDEX_SRC.slice(
+    INDEX_SRC.indexOf("case 'agent_get_running_invoice_draft'"),
+    INDEX_SRC.indexOf("case 'agent_get_running_invoice_draft'") + 900,
+  );
+  assert(getCase.includes("requireRunningDraftAgentCaller"));
+  assert(getCase.includes("serverSecretPresented"));
+  assert(getCase.includes("getRunningInvoiceDraft"));
+  assert(!getCase.includes("authMode === 'api_key'"));
+  assert(!getCase.includes("generate_trade_invoice"));
+  assert(!getCase.includes("saveRunningInvoiceDraft"));
 
   assert(INDEX_SRC.includes(
     "running_invoice_draft: runningInvoiceDraftEnabled(userRow?.trade_details)",
@@ -1141,4 +1158,249 @@ Deno.test("an agent edit or delete does not need a lines array, and it stays a d
     false,
   );
   assertEquals((lastRpc(db).args.p_invoice as Row).xero_bill_id, undefined);
+});
+
+Deno.test("agent_get_running_invoice_draft allows only a server-secret agent actor", () => {
+  assertEquals(
+    requireRunningDraftAgentCaller({
+      authMode: "api_key",
+      serverSecretPresented: true,
+      actor: { actor: "agent:jarvis-mcp", source: "header" },
+    }).actor,
+    "agent:jarvis-mcp",
+  );
+  const refused = [
+    {
+      authMode: "api_key",
+      serverSecretPresented: false,
+      actor: { actor: "agent:jarvis-mcp", source: "header" },
+    },
+    {
+      authMode: "jwt",
+      serverSecretPresented: false,
+      actor: { actor: "agent:jarvis-mcp", source: "header" },
+    },
+    {
+      authMode: "routine",
+      serverSecretPresented: false,
+      actor: { actor: "agent:jarvis-mcp", source: "header" },
+    },
+    {
+      authMode: "api_key",
+      serverSecretPresented: true,
+      actor: { actor: "user:" + USER, source: "header" },
+    },
+    {
+      authMode: "api_key",
+      serverSecretPresented: true,
+      actor: null,
+    },
+  ];
+  for (const input of refused) {
+    let code = "";
+    let status = 0;
+    try {
+      requireRunningDraftAgentCaller(input);
+    } catch (error) {
+      if (error instanceof RunningDraftError) {
+        code = error.code;
+        status = error.status;
+      }
+    }
+    assertEquals(code, "agent_actor_required");
+    assertEquals(status, 403);
+  }
+});
+
+Deno.test("an agent draft is what the Trade App opens, and a sync does not drop the lines", async () => {
+  const db = baseDb();
+  db.tables.job_assignments.push(assignment({ id: AS_HOURS }));
+  const saved = await saveRunningInvoiceDraft(db, USER, {
+    action: "agent_save_running_invoice_draft",
+    week_start: WEEK,
+    agent_label: "Jarvis",
+    gst_on: false,
+    lines: [{
+      assignment_id: AS_HOURS,
+      job_id: JOB,
+      job_number: "SW-3331",
+      client_name: "Ada Quartermain",
+      site_suburb: "Fremantle",
+      scheduled_date: "2026-10-20",
+      start_time: "07:00",
+      finish_time: "09:00",
+      break_minutes: 0,
+      hours: 2,
+      rate: 50,
+      description: "Bot filled the fence",
+    }, {
+      job_id: JOB_B,
+      job_number: "SW-3332",
+      client_name: "Ada Quartermain",
+      scheduled_date: "2026-10-22",
+      start_time: "10:00",
+      finish_time: "12:00",
+      break_minutes: 0,
+      hours: 2,
+      rate: 40,
+      description: "Bot added a searched job",
+    }],
+  }, "agent");
+
+  const cards = (saved.draft_builder as Row).jobCards as Row[];
+  const fence = cards.find((card) => card.assignment_id === AS_HOURS);
+  assertEquals(fence?.description, "Bot filled the fence");
+  assertEquals(fence?.start_time, "07:00");
+  assertEquals(fence?.finish_time, "09:00");
+  assertEquals(fence?.work_date, "2026-10-20");
+  assertEquals(fence?.hours, 2);
+  assertEquals(fence?.rate, 50);
+  assertEquals(fence?.added_by_agent, true);
+  assertEquals(fence?.added_by_label, "Jarvis");
+  assertEquals(fence?.auto, false);
+  assertEquals(
+    keysOf(cards).filter((key) => key === "as:" + AS_HOURS).length,
+    1,
+  );
+  const searched = cards.find((card) =>
+    card.description === "Bot added a searched job"
+  );
+  assertEquals(searched?.added_by_agent, true);
+  assertEquals(searched?.added_by_label, "Jarvis");
+  assertEquals(searched?.hours, 2);
+  assertEquals(saved.status, "draft");
+  assertEquals(saved.submitted, false);
+  assertEquals(saved.xero, false);
+  assertEquals((saved.draft_builder as Row).manualLock, true);
+
+  const expected = calculateTradeInvoiceMoney({
+    grossEarned: 180,
+    gstOn: false,
+    earningsDate: WEEK_END,
+  });
+  const invoice = lastRpc(db).args.p_invoice as Row;
+  assertEquals(invoice.status, "draft");
+  assertEquals(invoice.gross_earned, expected.gross_earned);
+  assertEquals(invoice.super_rate, expected.super_rate);
+  assertEquals(invoice.super_amount, expected.super_amount);
+  assertEquals(invoice.gst, expected.gst_amount);
+  assertEquals(invoice.net_pay, expected.net_pay);
+  assertEquals(invoice.total_inc, expected.total_inc);
+  assertEquals("recurring_deduction_amount" in invoice, false);
+  assertEquals(invoice.xero_bill_id, undefined);
+
+  const loaded = await getRunningInvoiceDraft(db, USER, WEEK);
+  assertEquals(loaded.draft_id, saved.draft_id);
+  assertEquals(loaded.created_by_agent, true);
+  assertEquals(loaded.draft_origin, "agent");
+  assertEquals(loaded.agent_label, "Jarvis");
+  assertEquals(loaded.xero, false);
+  assertEquals(loaded.status, "draft");
+  assertEquals(loaded.draft_builder, saved.draft_builder);
+  const money = loaded.money as Row;
+  assertEquals(money.gross_earned, expected.gross_earned);
+  assertEquals(money.gst_on, false);
+  assertEquals(money.gst, expected.gst_amount);
+  assertEquals(money.super_rate, expected.super_rate);
+  assertEquals(money.super_amount, expected.super_amount);
+  assertEquals(money.net_pay, expected.net_pay);
+  assertEquals(money.total_inc, expected.total_inc);
+  assertEquals(money.recurring_deduction, null);
+  assertEquals(money.pay_unconfirmed, true);
+
+  const synced = await saveRunningInvoiceDraft(db, USER, {
+    action: "sync_running_invoice_draft",
+    week_start: WEEK,
+    draft_builder: {
+      version: 1,
+      jobCards: [],
+      dismissedKeys: [],
+      notes: "",
+      gst_on: false,
+      weekStart: WEEK,
+      weekEnd: WEEK_END,
+    },
+  }, "auto");
+  const syncedCards = (synced.draft_builder as Row).jobCards as Row[];
+  assertEquals(
+    syncedCards.find((card) => card.assignment_id === AS_HOURS)?.description,
+    "Bot filled the fence",
+  );
+  assertEquals(
+    syncedCards.find((card) => card.assignment_id === AS_HOURS)?.finish_time,
+    "09:00",
+  );
+  assertEquals(
+    syncedCards.find((card) => card.assignment_id === AS_HOURS)
+      ?.added_by_label,
+    "Jarvis",
+  );
+  assertEquals(
+    syncedCards.some((card) => card.description === "Bot added a searched job"),
+    true,
+  );
+  assertEquals(synced.created_by_agent, true);
+  assertEquals(synced.submitted, false);
+  assertEquals(synced.xero, false);
+  const syncedInvoice = lastRpc(db).args.p_invoice as Row;
+  assertEquals(syncedInvoice.status, "draft");
+  assertEquals(syncedInvoice.gross_earned, expected.gross_earned);
+  assertEquals(syncedInvoice.xero_bill_id, undefined);
+
+  const rebuilt = await saveRunningInvoiceDraft(db, USER, {
+    action: "sync_running_invoice_draft",
+    week_start: WEEK,
+    resync: true,
+    draft_builder: {
+      version: 1,
+      jobCards: [],
+      dismissedKeys: [],
+      gst_on: false,
+      weekStart: WEEK,
+      weekEnd: WEEK_END,
+    },
+  }, "auto");
+  const rebuiltCards = (rebuilt.draft_builder as Row).jobCards as Row[];
+  assertEquals(
+    rebuiltCards.find((card) => card.assignment_id === AS_HOURS)?.description,
+    "Bot filled the fence",
+  );
+  assertEquals(
+    rebuiltCards.find((card) => card.assignment_id === AS_HOURS)?.start_time,
+    "07:00",
+  );
+  assertEquals(
+    rebuiltCards.find((card) => card.assignment_id === AS_HOURS)?.finish_time,
+    "09:00",
+  );
+  assertEquals(
+    rebuiltCards.some((card) => card.description === "Bot added a searched job"),
+    true,
+  );
+
+  const staff = await saveRunningInvoiceDraft(db, USER, {
+    action: "save_running_invoice_draft",
+    week_start: WEEK,
+    gst_on: false,
+    draft_builder: rebuilt.draft_builder,
+  }, "staff");
+  assertEquals(staff.created_by_agent, true);
+  assertEquals(staff.draft_origin, "agent");
+  assertEquals(staff.submitted, false);
+  assertEquals(staff.xero, false);
+  assertEquals(
+    ((staff.draft_builder as Row).jobCards as Row[]).find((card) =>
+      card.assignment_id === AS_HOURS
+    )?.added_by_label,
+    "Jarvis",
+  );
+  const again = await getRunningInvoiceDraft(db, USER, WEEK);
+  assertEquals(
+    ((again.draft_builder as Row).jobCards as Row[]).map((card) =>
+      card.description
+    ).sort(),
+    ["Bot added a searched job", "Bot filled the fence"],
+  );
+  assertEquals((again.money as Row).gross_earned, expected.gross_earned);
+  assertEquals((again.money as Row).recurring_deduction, null);
 });

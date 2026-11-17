@@ -1,7 +1,9 @@
 // Running weekly invoice draft.
 //
 // Save stores one hourly draft per person per week. It never submits,
-// authorises, pays, or creates a Xero bill. The header uses the same GST and
+// authorises, pays, or creates a Xero bill. A line a bot adds is marked
+// added_by_agent and kept when the week is synced, so the Trade App opens
+// the same cards a person saved. The header uses the same GST and
 // super split as every other trade invoice (trade_invoice_money.ts), because
 // trade_invoices_super_gst_split_check rejects a super rate of 0. The weekly
 // deduction is not applied here; generate_trade_invoice still takes it on
@@ -18,7 +20,10 @@ import {
   hideRetiredCrewWorkOrder,
   RETIRE_CREW_WORK_ORDERS_FLAG,
 } from "./crew_invoice_job_work_order.ts";
-import { readFlag } from "./job_work_orders.ts";
+import {
+  readFlag,
+  resolveWorkOrderAgentCaller,
+} from "./job_work_orders.ts";
 import {
   calculateTradeInvoiceMoney,
   TradeInvoiceMoneyError,
@@ -64,6 +69,7 @@ const DRAFT_ACTIONS = [
   "get_running_invoice_draft",
   "sync_running_invoice_draft",
   "agent_save_running_invoice_draft",
+  "agent_get_running_invoice_draft",
 ];
 
 const AGENT_ONLY =
@@ -250,7 +256,7 @@ async function loadWeekDrafts(
 ) {
   const { data, error } = await client.from("trade_invoices")
     .select(
-      "id, created_by_agent, draft_builder, draft_origin, agent_label, dismissed_source_keys, notes, gst_on, invoice_source, created_at",
+      "id, created_by_agent, draft_builder, draft_origin, agent_label, dismissed_source_keys, notes, gst_on, gst, gross_earned, super_rate, super_amount, net_pay, total_inc, invoice_source, created_at",
     )
     .eq("user_id", userId)
     .eq("org_id", orgId)
@@ -742,6 +748,179 @@ export function applyOwnerCommand(state: {
   };
 }
 
+/**
+ * Who may call agent_get_running_invoice_draft. The same caller as a work
+ * order agent approval: a server secret, and x-sw-actor `agent:<account>`.
+ * A public SW_API_KEY, the routine key, a staff session and a `user:<id>`
+ * header are not this caller.
+ */
+export function requireRunningDraftAgentCaller(input: {
+  authMode: string;
+  serverSecretPresented: boolean;
+  actor?: { actor: string; source: string } | null;
+}): { actor: string } {
+  const caller = resolveWorkOrderAgentCaller(input);
+  if (!caller) {
+    throw new RunningDraftError(
+      "Reading a weekly invoice draft this way needs the server secret and an agent:<account> actor.",
+      403,
+      "agent_actor_required",
+    );
+  }
+  return caller;
+}
+
+function moneyOrNull(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+// The Trade App derives a card's hours from start, finish and break, and
+// shows an assigned job at the person's usual rate. A line the bot adds
+// keeps those times so the open invoice matches a draft the person typed.
+// added_by_label is the bot name. trade.html's banner already reads
+// created_by_agent; a per-line "Added by <name>" is printed there, not here.
+function stampAgentLine(
+  raw: Record<string, unknown>,
+  label: string,
+): Record<string, unknown> {
+  const card = JSON.parse(JSON.stringify(raw || {})) as Record<string, unknown>;
+  const key = sourceKey(card);
+  if (key) card.source_key = key;
+  if (!card.work_date && card.scheduled_date) {
+    card.work_date = String(card.scheduled_date).slice(0, 10);
+  }
+  const times = draftTradeInvoiceTimeEntry({
+    work_date: card.work_date,
+    start_time: card.start_time ?? null,
+    finish_time: card.finish_time ?? null,
+    break_minutes: card.break_minutes ?? null,
+  });
+  if (times.columns.work_date) card.work_date = times.columns.work_date;
+  if (times.columns.start_time) card.start_time = times.columns.start_time;
+  if (times.columns.finish_time) card.finish_time = times.columns.finish_time;
+  if (times.columns.break_minutes != null) {
+    card.break_minutes = times.columns.break_minutes;
+  }
+  if (times.hours != null && times.hours > 0) card.hours = times.hours;
+  card.added_by_agent = true;
+  card.added_by_label = label.slice(0, 80);
+  card.auto = false;
+  if (card.included == null) card.included = true;
+  return card;
+}
+
+// An agent line is the card. An empty suggestion for the same job does not
+// replace it, and a line the person already edited is left as they left it.
+function placeAgentLines(
+  cards: Array<Record<string, unknown>>,
+  adds: Array<Record<string, unknown>>,
+  label: string,
+): { cards: Array<Record<string, unknown>>; added: string[] } {
+  const next = JSON.parse(JSON.stringify(cards || [])) as Array<
+    Record<string, unknown>
+  >;
+  const added: string[] = [];
+  for (const raw of adds) {
+    const line = stampAgentLine(raw, label);
+    const key = sourceKey(line);
+    if (!key) continue;
+    const index = next.findIndex((card) => sourceKey(card) === key);
+    if (index < 0) {
+      next.push(line);
+      added.push(key);
+      continue;
+    }
+    const current = next[index];
+    if (current.owner_edited === true && current.added_by_agent !== true) {
+      continue;
+    }
+    next[index] = {
+      ...current,
+      ...line,
+      job_id: line.job_id || current.job_id || null,
+      assignment_id: line.assignment_id || current.assignment_id || null,
+      work_order_id: line.work_order_id || current.work_order_id || null,
+      job_number: line.job_number || current.job_number || "",
+      client_name: line.client_name || current.client_name || "",
+      site_suburb: line.site_suburb || current.site_suburb || "",
+      job_type: line.job_type || current.job_type || "",
+      scheduled_date: line.scheduled_date || current.scheduled_date || "",
+    };
+    added.push(key);
+  }
+  return { cards: next, added };
+}
+
+function cardsOf(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value)
+    ? value.filter((card) => card && typeof card === "object") as Array<
+      Record<string, unknown>
+    >
+    : [];
+}
+
+// sync_running_invoice_draft rebuilds from this week's jobs. A line the bot
+// added stays, including when the rebuild sends an empty card list, unless
+// the person has removed that line.
+function restoreAgentCards(
+  cards: Array<Record<string, unknown>>,
+  priorCards: Array<Record<string, unknown>>,
+  dismissed: string[],
+): Array<Record<string, unknown>> {
+  const dismissedSet = new Set(dismissed.map(String));
+  const next = cards.map((card) => ({ ...card }));
+  const indexByKey = new Map<string, number>();
+  next.forEach((card, index) => {
+    const key = sourceKey(card);
+    if (key) indexByKey.set(key, index);
+  });
+  for (const prior of priorCards) {
+    if (prior?.added_by_agent !== true) continue;
+    const key = sourceKey(prior);
+    if (!key || dismissedSet.has(key)) continue;
+    const at = indexByKey.get(key);
+    if (at == null) {
+      next.push(JSON.parse(JSON.stringify(prior)));
+      indexByKey.set(key, next.length - 1);
+      continue;
+    }
+    const current = next[at];
+    if (current.owner_edited === true && current.added_by_agent !== true) {
+      continue;
+    }
+    const priorTimes = !!(prior.start_time && prior.finish_time);
+    const currentTimes = !!(current.start_time && current.finish_time);
+    if (priorTimes && !currentTimes) {
+      next[at] = {
+        ...current,
+        work_date: current.work_date || prior.work_date || null,
+        scheduled_date: current.scheduled_date || prior.scheduled_date || null,
+        start_time: prior.start_time,
+        finish_time: prior.finish_time,
+        break_minutes: prior.break_minutes ?? 0,
+        hours: prior.hours,
+        description: current.description || prior.description || "",
+        rate: current.rate != null && current.rate !== ""
+          ? current.rate
+          : prior.rate,
+        added_by_agent: true,
+        added_by_label: prior.added_by_label || current.added_by_label || null,
+        auto: false,
+        source_key: key,
+      };
+    } else if (current.added_by_agent !== true) {
+      next[at] = {
+        ...current,
+        added_by_agent: true,
+        added_by_label: prior.added_by_label || current.added_by_label || null,
+      };
+    }
+  }
+  return next;
+}
+
 export async function getRunningInvoiceDraft(
   client: any,
   userId: string,
@@ -776,6 +955,21 @@ export async function getRunningInvoiceDraft(
       builder?.dismissedKeys ||
       [],
     pay_rules: "unchanged_until_submit",
+    // Same header a hand-made draft stores. The weekly deduction is still
+    // taken only when the person submits, for both.
+    money: draft
+      ? {
+        gross_earned: moneyOrNull(draft.gross_earned),
+        gst_on: draft.gst_on ?? null,
+        gst: moneyOrNull(draft.gst),
+        super_rate: moneyOrNull(draft.super_rate),
+        super_amount: moneyOrNull(draft.super_amount),
+        net_pay: moneyOrNull(draft.net_pay),
+        total_inc: moneyOrNull(draft.total_inc),
+        recurring_deduction: null,
+        pay_unconfirmed: true,
+      }
+      : null,
   };
 }
 
@@ -860,15 +1054,25 @@ export async function saveRunningInvoiceDraft(
     ? prior.draft_builder as Record<string, any>
     : {};
   const priorLocked = priorBuilder.manualLock === true;
+  const priorCards = cardsOf(priorBuilder.jobCards);
+  const priorHasAgentLine = priorCards.some((card) =>
+    card.added_by_agent === true
+  );
+  const agentLabel = mode === "agent"
+    ? String(body?.agent_label || prior?.agent_label || "agent").slice(0, 80)
+    : (prior?.agent_label || null);
   const [suggested, claimed] = await Promise.all([
     loadSuggested(client, user, weekStart, weekEnd),
     loadClaimed(client, user.id),
   ]);
   let baseCards = Array.isArray(incoming.jobCards) ? incoming.jobCards : [];
   let dismissed = dismissedFrom(body, incoming, prior);
-  // Once the owner has edited, an automatic rebuild keeps the saved lines.
-  // It does not put a removed line back or replace an edit.
-  if (mode === "auto" && priorLocked && body?.resync !== true) {
+  // Once the owner has edited, or a bot has drafted this week, an automatic
+  // rebuild keeps the saved lines. It does not put a removed line back or
+  // replace an edit. A fresh suggestion is still added below.
+  const keepSavedOnSync = mode === "auto" && body?.resync !== true &&
+    (priorLocked || prior?.created_by_agent === true || priorHasAgentLine);
+  if (keepSavedOnSync) {
     if (Array.isArray(priorBuilder.jobCards)) baseCards = priorBuilder.jobCards;
     const savedDismissed = Array.isArray(priorBuilder.dismissedKeys)
       ? priorBuilder.dismissedKeys.map(String)
@@ -884,19 +1088,26 @@ export async function saveRunningInvoiceDraft(
     edits: mode === "auto" || !Array.isArray(body?.edits) ? [] : body.edits,
     lines: mode === "agent" && Array.isArray(body?.lines) ? body.lines : [],
   });
+  const placed = mode === "agent"
+    ? placeAgentLines(command.cards, command.adds, agentLabel || "agent")
+    : { cards: command.cards, added: [] as string[] };
   if (
     body?.resync === true && body?.restore_removed === true && mode !== "auto"
   ) {
     command.dismissed = [];
   }
   const merged = mergeApproved({
-    cards: command.cards,
+    cards: placed.cards,
     dismissed: command.dismissed,
     claimed,
-    suggested: suggested.concat(command.adds),
+    suggested,
   });
+  const jobCards = mode === "auto"
+    ? restoreAgentCards(merged.cards, priorCards, merged.dismissed)
+    : merged.cards;
   const locked = !!(incoming.manualLock || command.locked || priorLocked ||
-    body?.manual_lock === true);
+    body?.manual_lock === true || placed.added.length > 0 ||
+    jobCards.some((card) => card.added_by_agent === true));
   const gstOn = body?.gst_on != null ? !!body.gst_on : !!incoming.gst_on;
   const notes = body?.notes != null ? body.notes : (incoming.notes || "");
   const builder = {
@@ -904,7 +1115,7 @@ export async function saveRunningInvoiceDraft(
     // Persist identity only; current own group prices/acceptance are re-read before use.
     ...(Array.isArray(incoming.groupIds) && incoming.groupIds.length ? { groupIds:
       [...new Set(incoming.groupIds.map(String).filter((id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)))].slice(0, 100) } : {}),
-    jobCards: merged.cards,
+    jobCards,
     invRows: Array.isArray(incoming.invRows) ? incoming.invRows : [],
     invLumpLines: Array.isArray(incoming.invLumpLines)
       ? incoming.invLumpLines
@@ -917,14 +1128,11 @@ export async function saveRunningInvoiceDraft(
     weekEnd,
   };
   const blocked = new Set<string>([...claimed, ...merged.dismissed]);
-  const lines = linesFromCards(merged.cards, blocked);
+  const lines = linesFromCards(jobCards, blocked);
   const createdByAgent = mode === "agent" ? true : !!prior?.created_by_agent;
   const origin = mode === "agent"
     ? "agent"
     : (prior?.draft_origin || (mode === "auto" ? "auto" : "staff"));
-  const agentLabel = mode === "agent"
-    ? String(body?.agent_label || prior?.agent_label || "agent").slice(0, 80)
-    : (prior?.agent_label || null);
   const payload = {
     p_invoice: headerFor(user, weekStart, weekEnd, notes, gstOn, lines),
     p_lines: lines,
@@ -951,7 +1159,7 @@ export async function saveRunningInvoiceDraft(
     xero: false,
     submitted: false,
     draft_builder: builder,
-    added: merged.added,
+    added: [...placed.added, ...merged.added],
     removed: command.removed,
     edited: command.edited,
     missing: command.missing,
