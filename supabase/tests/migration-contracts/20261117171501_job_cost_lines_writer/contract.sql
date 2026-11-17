@@ -1,4 +1,12 @@
 BEGIN;
+-- P2-03.1 gives the fixture's existing decision ids a real parent row.
+-- No assertion changed; before that schema exists these ids remain unbound.
+DO $decision_fixture$ BEGIN
+ IF to_regclass('public.reconcile_decisions') IS NOT NULL THEN
+  EXECUTE $rows$INSERT INTO public.reconcile_decisions(id,org_id,subject_kind,subject_id,action,"by")
+   OVERRIDING SYSTEM VALUE VALUES (7,'00000000-0000-0000-0000-000000000001','cost_document','ZZTEST-prior-decision-7','place','person:00000000-0000-0000-0000-00000000c310'),(8,'00000000-0000-0000-0000-000000000001','cost_document','ZZTEST-prior-decision-8','split','person:00000000-0000-0000-0000-00000000c310');$rows$;
+ END IF;
+END $decision_fixture$;
 DO $$
 DECLARE d jsonb; r jsonb; a uuid; b uuid; credit uuid; parts jsonb;
   org uuid := '00000000-0000-0000-0000-000000000001';
