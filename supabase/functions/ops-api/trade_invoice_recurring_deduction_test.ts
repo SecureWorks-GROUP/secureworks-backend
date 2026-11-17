@@ -1703,3 +1703,37 @@ handlerTest(
     assert(Number(out.body.total_hours) > 0);
   },
 );
+
+Deno.test("ZZTEST repayment: remaining balance caps each week without changing super or GST", () => {
+  for (const [balance, expected] of [[200, [100, 100, 0]], [250, [100, 100, 50]]]) {
+    let left = balance as number;
+    for (const amount of expected as number[]) {
+      const result = decideTradeRecurringDeduction({ rules: [{ ...RULES[0],
+        label: "ZZTEST repayment", last_week_start: null, kind: "repayment",
+        balance_total: balance, xero_account_code: "ZZTEST-ACCOUNT" }],
+        userId: UTE_TRADE, weekStart: THIS_WEEK, payable: 1000,
+        repaymentsOn: true, balanceLeft: left });
+      assertEquals(result.applied?.amount ?? 0, amount);
+      if (amount) assertEquals(result.balance_left_after, left - amount);
+      left -= amount;
+    }
+  }
+  const rules = [{ ...RULES[0], label: "ZZTEST repayment", kind: "repayment",
+    balance_total: 250, xero_account_code: "ZZTEST-ACCOUNT" }];
+  assertEquals(decideTradeRecurringDeduction({ rules, userId: UTE_TRADE,
+    weekStart: THIS_WEEK, payable: 20, repaymentsOn: true, balanceLeft: 50 }).applied, null);
+  assertEquals(decideTradeRecurringDeduction({ rules, userId: UTE_TRADE,
+    weekStart: THIS_WEEK, payable: 1000, balanceLeft: 50 }).outcome, "none");
+  const result = decideTradeRecurringDeduction({ rules, userId: UTE_TRADE,
+    weekStart: THIS_WEEK, payable: 1000, repaymentsOn: true, balanceLeft: 50 });
+  const base = calculateTradeInvoiceMoney({ grossEarned: 1000, gstOn: true, earningsDate: "2026-11-16" });
+  const money = withTradeInvoiceRecurringDeduction(base, result.applied);
+  assertEquals([money.super_amount, money.gst], [base.super_amount, base.gst]);
+  const lines = splitTradeInvoiceXeroLines([{ Description: "ZZTEST work", Quantity: 1,
+    UnitAmount: 1000, AccountCode: "ZZTEST-LABOUR", TaxType: "INPUT", Tracking: [] }], money, { superAccountCode: "ZZTEST-SUPER" });
+  const repayment = lines.find((line) => line.Description.startsWith("Repayment - "))!;
+  assertEquals(repayment.AccountCode, "ZZTEST-ACCOUNT");
+  assertEquals(repayment.TaxType, "NONE");
+  assertEquals(repayment.Tracking, []);
+  assertReturnedTradeInvoiceXeroSplit(lines, money);
+});
