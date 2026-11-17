@@ -98,9 +98,11 @@ DECLARE
    AND c.source IN ('trade_line','trade_employer_super')
    AND lower(btrim(l.line_type)) IS DISTINCT FROM 'reimbursement'
  ), invoice_costs AS (
+  -- A cost resolved by job-number text still belongs to its source invoice.
+  -- Missing line job_id may stop that invoice, never become a run-only gap.
   SELECT i.id,coalesce((SELECT sum(c.amount_ex) FROM costs c
    WHERE c.document_id=i.id::text AND EXISTS(SELECT 1 FROM ln l
-    WHERE l.trade_invoice_id=i.id AND l.job_id=c.job_id
+    WHERE l.trade_invoice_id=i.id AND (l.job_id=c.job_id OR l.job_id IS NULL)
      AND l.id::text=split_part(c.source_id,':',1))),0) actual
   FROM inv i
  ), billed AS (

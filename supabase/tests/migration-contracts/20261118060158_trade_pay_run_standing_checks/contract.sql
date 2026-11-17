@@ -1,5 +1,5 @@
 BEGIN;
-\ir ../../../migrations/20261118030659_trade_pay_run_standing_checks.sql
+\ir ../../../migrations/20261118060158_trade_pay_run_standing_checks.sql
 CREATE FUNCTION pg_temp.zztest_assert(ok boolean, words text) RETURNS void
 LANGUAGE plpgsql AS $$ BEGIN
  IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'ZZTEST %',words; END IF;
@@ -193,7 +193,29 @@ BEGIN
  UPDATE public.work_orders SET agreed_labour_ex=1000 WHERE id='08030000-0000-4000-8000-000000000202';
  UPDATE public.trade_invoice_lines SET job_id=NULL,not_job_work_type_id='08030000-0000-4000-8000-000000000999',office_review_status='approved' WHERE trade_invoice_id=i2;
  PERFORM pg_temp.zztest_assert(public.trade_pay_run_standing_checks(org,ids,'before_xero')->'stopped_invoices'='[]','approved not-job-work was held');
+
+ -- Follow-up 34 item 10: Job Profit resolves the source by job-number text.
+ -- With an approved not-job-work marker no other check stops this invoice,
+ -- so losing this cost at invoice scope used to block everybody at run scope.
+ PERFORM pg_temp.zztest_assert(EXISTS(SELECT 1 FROM public.v_job_cost_events
+  WHERE document_id=i2::text AND source='trade_line'
+   AND source_id='08030000-0000-4000-8000-000000000402'
+   AND job_id='08030000-0000-4000-8000-000000000102'),'text-matched cost fixture missing');
+ r := public.trade_pay_run_standing_checks(org,ids,'after_xero');
+ c := pg_temp.zztest_check(r,'pay_equals_job_cost');
+ PERFORM pg_temp.zztest_assert(jsonb_array_length(r->'stopped_invoices')=1
+  AND r#>>'{stopped_invoices,0,invoice_id}'=i2::text
+  AND r#>>'{stopped_invoices,0,stops,0,code}'='standing_pay_equals_job_cost'
+  AND (c->>'expected')::numeric=448 AND (c->>'actual')::numeric=672
+  AND r->'run_blocked'='false','text-matched cost must stop only its source invoice');
+ UPDATE public.trade_invoice_lines SET not_job_work_type_id=NULL,office_review_status=NULL WHERE trade_invoice_id=i2;
+ r := public.trade_pay_run_standing_checks(org,ids,'after_xero');
+ PERFORM pg_temp.zztest_assert(jsonb_array_length(r->'stopped_invoices')=1
+  AND jsonb_array_length(r#>'{stopped_invoices,0,stops}')=2
+  AND r#>>'{stopped_invoices,0,invoice_id}'=i2::text AND r->'run_blocked'='false',
+  'missing job and work-order evidence must stay on the same invoice');
  UPDATE public.trade_invoice_lines SET job_id='08030000-0000-4000-8000-000000000102',not_job_work_type_id=NULL,office_review_status=NULL WHERE trade_invoice_id=i2;
+ PERFORM pg_temp.zztest_assert(public.trade_pay_run_standing_checks(org,ids,'after_xero')->'stopped_invoices'='[]','office job correction clears text-match refusal on retry');
  INSERT INTO public.zztest_suppressed_cost VALUES('08030000-0000-4000-8000-000000000402');
  r := public.trade_pay_run_standing_checks(org,ids,'after_xero');
  PERFORM pg_temp.zztest_assert(jsonb_array_length(r->'stopped_invoices')=1 AND r#>>'{stopped_invoices,0,invoice_id}'=i2::text
@@ -311,7 +333,7 @@ EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON)
    AND org_id='00000000-0000-0000-0000-000000000001')
  SELECT sum(c.amount_ex) FROM public.v_job_cost_events c JOIN inv i ON c.document_id=i.id::text
  WHERE c.is_actual AND c.source IN ('trade_line','trade_employer_super');
-\ir ../../../rollbacks/20261118030659_trade_pay_run_standing_checks_down.sql
+\ir ../../../rollbacks/20261118060158_trade_pay_run_standing_checks_down.sql
 SELECT pg_temp.zztest_assert(to_regprocedure('public.trade_pay_run_standing_checks(uuid,uuid[],text)') IS NULL,'rollback left the function');
 
 ROLLBACK;

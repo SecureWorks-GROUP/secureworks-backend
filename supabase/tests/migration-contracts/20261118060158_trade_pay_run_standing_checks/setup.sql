@@ -51,10 +51,11 @@ SELECT to_regprocedure('public.work_order_amount_change_total(uuid)') IS NULL AS
 SELECT to_regclass('public.v_job_cost_events') IS NULL AS need_costs \gset
 \if :need_costs
 CREATE VIEW public.v_job_cost_events AS
- WITH trade AS MATERIALIZED (SELECT l.job_id,l.line_total_ex amount_ex,'trade_line'::text source,
+ WITH trade AS MATERIALIZED (SELECT coalesce(l.job_id,j.id) job_id,l.line_total_ex amount_ex,'trade_line'::text source,
  l.id::text source_id,i.id::text document_id,true is_actual
  FROM public.trade_invoices i JOIN public.trade_invoice_lines l ON l.trade_invoice_id=i.id
- WHERE l.job_id IS NOT NULL)
+ LEFT JOIN public.jobs j ON l.job_id IS NULL AND j.job_number=btrim(l.job_number)
+ WHERE coalesce(l.job_id,j.id) IS NOT NULL)
  SELECT * FROM trade
  UNION ALL
  SELECT t.job_id,round(t.amount_ex*(i.super_amount-(i.subtotal_ex-i.net_pay))/i.subtotal_ex,6),
