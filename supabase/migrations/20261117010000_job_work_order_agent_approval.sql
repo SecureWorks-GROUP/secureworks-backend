@@ -6,7 +6,7 @@
 --
 -- The seal records three facts on the work order:
 --   approved_by_actor  the caller (agent:<account>)
---   approved_by_name   any name the caller passed, or null
+--   approved_by_name   the approver's name (required)
 --   approved_at        when the database sealed it
 -- approved_by stays null and approved_via is 'agent'.
 --
@@ -66,10 +66,7 @@ ALTER TABLE public.work_orders ADD CONSTRAINT work_orders_agent_approval_check
     OR (
       approved_by IS NULL
       AND approved_by_actor ~ '^agent:[A-Za-z0-9_.:@-]{1,120}$'
-      AND (
-        approved_by_name IS NULL
-        OR char_length(btrim(approved_by_name)) BETWEEN 1 AND 200
-      )
+      AND char_length(btrim(approved_by_name)) BETWEEN 1 AND 200
     )
   );
 
@@ -213,10 +210,10 @@ BEGIN
         RAISE EXCEPTION 'an agent approval records which caller approved it'
           USING ERRCODE = '23514';
       END IF;
-      IF NEW.approved_by_name IS NOT NULL
-         AND (char_length(btrim(NEW.approved_by_name)) < 1
-              OR char_length(NEW.approved_by_name) > 200) THEN
-        RAISE EXCEPTION 'approved_by_name must be 1 to 200 characters'
+      IF NEW.approved_by_name IS NULL
+         OR char_length(btrim(NEW.approved_by_name)) < 1
+         OR char_length(NEW.approved_by_name) > 200 THEN
+        RAISE EXCEPTION 'approver_name_required: an agent approval records the approver name'
           USING ERRCODE = '23514';
       END IF;
       IF v_required THEN
@@ -303,7 +300,11 @@ BEGIN
     RAISE EXCEPTION 'agent_actor_required' USING ERRCODE = '42501';
   END IF;
   v_name := NULLIF(btrim(p_approved_by_name), '');
-  IF v_name IS NOT NULL AND char_length(v_name) > 200 THEN
+  IF v_name IS NULL THEN
+    RAISE EXCEPTION 'approver_name_required: pass the approver name as approved_by_name'
+      USING ERRCODE = '22023';
+  END IF;
+  IF char_length(v_name) > 200 THEN
     RAISE EXCEPTION 'approved_by_name must be at most 200 characters' USING ERRCODE = '22023';
   END IF;
 
@@ -353,7 +354,7 @@ BEGIN
 END $$;
 
 COMMENT ON FUNCTION public.approve_job_work_order_by_agent(uuid, text, text, timestamptz, uuid) IS
-  'Job work order agent approval (20261117010000): a server-secret agent caller seals a draft and records its actor, any approved_by name, and approved_at. Not an owner decision.';
+  'Job work order agent approval (20261117010000): a server-secret agent caller seals a draft and records its actor, the required approver name, and approved_at. Not an owner decision.';
 
 REVOKE ALL ON FUNCTION public.approve_job_work_order_by_agent(uuid, text, text, timestamptz, uuid)
   FROM PUBLIC, anon, authenticated;

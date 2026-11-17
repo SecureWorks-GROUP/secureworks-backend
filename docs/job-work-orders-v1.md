@@ -74,10 +74,11 @@ An agent caller is a different door (`20261117010000`). A server secret whose
 `x-sw-actor` is `agent:<account>` (the SecureSuite MCP sends `agent:jarvis-mcp`,
 or the deployment's `SW_ACTOR`) may approve a job work order as that account.
 It is not written down as Shaun. The row stores `approved_via = 'agent'`,
-`approved_by` null, `approved_by_actor` (the account), `approved_by_name` (any
-name the caller passed as `approved_by_name`, or as text `approved_by`), and
-`approved_at`. The office read (`job_work_order` / `list_work_orders` kind=job)
-returns those columns. A browser key, a routine key, a seat name and a
+`approved_by` null, `approved_by_actor` (the account), `approved_by_name`
+(required: `approved_by_name`, or text `approved_by`), and `approved_at`. A
+call with no name is 400 `approver_name_required`. The office read
+(`job_work_order`) and `list_work_orders` with `kind=job` return those three
+fields on the row and again as `approval`. A browser key, a routine key, a seat name and a
 `user:<id>` header are not this door. Customer variations, scope price
 approval and invoice approval do not read it. While
 `owner_approval_saved_revision_required_v1` is on, the agent call is refused

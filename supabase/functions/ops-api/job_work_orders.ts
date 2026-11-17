@@ -258,9 +258,9 @@ export function resolveWorkOrderAgentCaller(input: {
 }
 
 /**
- * The name an agent caller passed, if any. `approved_by_name` wins;
- * `approved_by` is accepted when it is text (the bot's name for who asked).
- * It is never read as a users.id.
+ * The name an agent caller passed. `approved_by_name` wins; `approved_by` is
+ * accepted when it is text (who asked). It is never read as a users.id.
+ * An empty value is null so the caller can be refused for a missing name.
  */
 export function workOrderAgentApprovedByName(body: any): string | null {
   const raw = body?.approved_by_name !== undefined && body?.approved_by_name !== null
@@ -285,6 +285,36 @@ export function workOrderAgentApprovedByName(body: any): string | null {
     );
   }
   return name;
+}
+
+/** An agent approval has no audit trail without a readable name. */
+export function requireWorkOrderAgentApprovedByName(body: any): string {
+  const name = workOrderAgentApprovedByName(body);
+  if (!name) {
+    fail(
+      400,
+      "approver_name_required",
+      "Pass the approver's name as approved_by_name (or as text approved_by).",
+    );
+  }
+  return name;
+}
+
+/** The approval facts the office read and the job work-order list show. */
+export function workOrderApprovalRecord(wo: any): {
+  approved_at: string | null;
+  approved_by_name: string | null;
+  approved_by_actor: string | null;
+  approved_by: string | null;
+  approved_via: string | null;
+} {
+  return {
+    approved_at: wo?.approved_at ?? null,
+    approved_by_name: wo?.approved_by_name ?? null,
+    approved_by_actor: wo?.approved_by_actor ?? null,
+    approved_by: wo?.approved_by ?? null,
+    approved_via: wo?.approved_via ?? null,
+  };
 }
 
 // ── Pure: running figures and rules ──────────────────────────────────────────
@@ -1711,6 +1741,7 @@ export async function readJobWorkOrder(
       autoIssueOn,
       quoteFill,
     ),
+    approval: workOrderApprovalRecord(live || draft),
   };
 }
 
@@ -1771,6 +1802,7 @@ export async function listJobWorkOrders(client: any, params: URLSearchParams) {
       job_type: job?.type ?? null,
       job_status: job?.status ?? null,
       site_suburb: job?.site_suburb ?? null,
+      approval: workOrderApprovalRecord(wo),
       figures: isLive
         ? figuresFor(r, jobLines, jobVariations, jobCustomerVariations)
         : null,
@@ -2019,7 +2051,9 @@ export async function approveJobWorkOrder(
       );
     }
   }
-  const approvedByName = agent ? workOrderAgentApprovedByName(body) : null;
+  const approvedByName = agent
+    ? requireWorkOrderAgentApprovedByName(body)
+    : null;
   const expected = body?.expected_updated_at;
   if (typeof expected !== "string" || !Number.isFinite(Date.parse(expected))) {
     fail(
@@ -2054,6 +2088,13 @@ export async function approveJobWorkOrder(
       p_org_id: orgId,
     });
   if (error) {
+    if (String(error.message || "").includes("approver_name_required")) {
+      fail(
+        400,
+        "approver_name_required",
+        "Pass the approver's name as approved_by_name (or as text approved_by).",
+      );
+    }
     if (
       String(error.code || "") === "42501" &&
       (String(error.message || "").includes("scope_owner_approval_job_forbidden") ||
