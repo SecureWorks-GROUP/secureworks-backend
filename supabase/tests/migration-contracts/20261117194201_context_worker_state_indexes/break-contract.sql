@@ -1,1 +1,1 @@
-DROP INDEX public.job_change_marks_newest;
+DROP INDEX public.job_change_marks_base_newest;
