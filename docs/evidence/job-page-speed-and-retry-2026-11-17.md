@@ -7,7 +7,7 @@ are unchanged. It does not install, remove or activate either. The normal page
 payload and Xero paths are unchanged. Busy and changed builds intentionally yield
 pending work to the back of the queue.
 
-## Local measurement
+## Earlier local measurement (original builder)
 
 PostgreSQL 17.11, disposable local copy of the registered schema. Synthetic data:
 2,500 added jobs, 100,000 email events, 200 calls and 200 matching transcripts on
@@ -40,6 +40,20 @@ message in repeated record reads. The scalar subquery makes it an initplan.
 The switch is STABLE, so the missing, off and on branches return the same rows
 and real story card as main at the same statement instant. The book remains a
 material part of the build; this change does not skip it or any evidence.
+
+The remaining work in that earlier attribution sample is the unchanged story
+and its evidence readers: `context_job_story` still takes 176.52 ms, including
+metadata/contact, loops, timeline, ledger and assembly reads. Separately,
+`context_job_story_text_get` takes 58.44 ms, almost all in
+`context_job_story_book` (56.96 ms) for Job Profit and the full freshness hash.
+These totals are nested and must not be added to their children. Page persistence
+and acknowledgement account for the small balance. This slice removes repeated
+placement-switch reads; it does not cache evidence or the money book.
+
+The director's one-fifth expectation against the reported 6.5 s build leaves
+roughly 5.2 s. That is an estimate, not a measured production attribution. The
+local evidence identifies the remaining paths, but cannot assign exact live
+seconds to each. A second speed slice needs a deployed profile of those paths.
 
 Retained reproducible SQL is beside the contract:
 `profile-seed.sql` creates the synthetic workload on a disposable local schema;
@@ -84,7 +98,7 @@ after their historical reapply, so later cases test the installed definitions.
 The historical identity rollback accepts the equivalent new message body as
 well as its original hash, then restores its own original predecessor.
 
-The final local gate ran the 18 cases naming either replaced function: 18
+The original builder's local gate ran the 18 cases naming either replaced function: 18
 positive cases, 4 rollback cases and 18 planted breaks rejected as expected,
 with zero unexpected failures. The stock run.sh phases were retained in a
 scratch copy selecting those 18 cases while building the registered schema
@@ -107,6 +121,29 @@ bash /Volumes/SSD/agent-scratch/cx-page-speed/run-named-cases.sh
 Pass line: `PostgreSQL migration contracts passed`. The retained profile seed
 and build scripts also ran successfully once on another fresh local copy
 (verification only, excluded from the five-sample comparison above).
+
+## Record-close preservation fix
+
+The original migration was older than the merged record-close refresh migration.
+It is now `20261117215801_job_page_speed_and_retry`, after main's
+`20261117195203_job_page_refresh_record_close`. The refresh definition is copied
+from that main body with only the busy and changed yield calls added. Its md5
+pre-image guard accepts main's exact body or its own exact body for reapply, and
+refuses any other predecessor. Rollback restores that same record-close body,
+not the older refresh. The message optimization retains its existing guard.
+
+The new case runs the existing record-close behavioral assertions directly on
+the optimized refresh, without first replacing it with the old function. It
+proves flag-off parity, record close before page/mark snapshot, ambiguity,
+office closure and isolated close-read failure. Existing queue fairness checks
+still prove both yields. A planted unexpected refresh body must refuse the
+migration, and rollback verifies the exact record-close predecessor md5. No
+proof test was deleted; the renamed folder retains every original assertion.
+Historical page, schedule and record-close tests restore the installed successor
+after exercising their own body, so subsequent cases cannot silently test an
+obsolete refresh definition.
+
+Fresh fix validation is recorded after the focused named-case run below.
 
 Director, on live after review and merge: measure deployed build times and
 observe that pending changed/busy jobs no longer monopolize successive turns.

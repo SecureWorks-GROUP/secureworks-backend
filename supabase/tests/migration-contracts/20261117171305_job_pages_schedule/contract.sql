@@ -132,5 +132,6 @@ ROLLBACK;
 -- Restore the installed speed/fairness successor after this historical reapply.
 SELECT to_regprocedure('public.job_page_yield(uuid)') IS NOT NULL AS page_retry_successor_live \gset
 \if :page_retry_successor_live
-\ir ../../../migrations/20261117194301_job_page_speed_and_retry.sql
+\ir ../../../migrations/20261117195203_job_page_refresh_record_close.sql
+\ir ../../../migrations/20261117215801_job_page_speed_and_retry.sql
 \endif

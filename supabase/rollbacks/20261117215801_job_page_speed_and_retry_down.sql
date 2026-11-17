@@ -1,8 +1,5 @@
--- P0-01.1 follow-up: page build cost and fair retry turns (cx-page-speed).
--- Definitions only: existing triggers, timers and business writers are untouched.
+-- Restore pre-follow-up definitions; no trigger or timer is changed.
 SET LOCAL lock_timeout='5s';
--- The switch is STABLE. A scalar subquery reads it once per statement rather
--- than once per projected message, without changing either flag branch.
 DO $guard$ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_record_messages(uuid[],timestamptz)'::regprocedure)
   NOT IN ('c2b73175d602d5add3cf19bceeaae7eb','4ab1e2a3ff35aa69576f80a06d7b42ba') THEN
@@ -30,7 +27,7 @@ AS $function$
          -- A person moving evidence does not make its sender the receiving customer.
          -- Use the reader's existing identity projection without changing source words,
          -- event times, source safeguards or the card's placement admission.
-         CASE WHEN (SELECT public.context_ledger_person_placement_enabled())
+         CASE WHEN public.context_ledger_person_placement_enabled()
               THEN (public.context_ledger_event_on_job(e,j.id)).metadata
               ELSE e.metadata END AS metadata,
          regexp_replace(public.context_event_text(e), '\s+', ' ', 'g') AS txt,
@@ -138,44 +135,45 @@ AS $function$
  FROM (SELECT * FROM bel UNION ALL SELECT * FROM ibl) u
 $function$;
 
--- A retry is new queue work, not proof that a page was built. Retire only the
--- visible pending marks and append one explicit retry at the back, atomically.
--- Business markers INSERT into the heap and share no updated row or advisory lock.
-CREATE OR REPLACE FUNCTION public.job_page_yield(p_job_id uuid) RETURNS void
-LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path=public,pg_temp AS $yield$
- WITH events AS (
-  -- job_change_mark_events_job bounds dense queues to one job; the sparse
-  -- job_change_mark_events_due partial index is also available.
-  UPDATE public.job_change_mark_events SET page_pending=false
-  WHERE job_id=p_job_id AND page_pending RETURNING 1
- ), base AS (
-  -- job_change_marks_pkey bounds dense queues to one row; the sparse
-  -- job_change_marks_base_due partial index is also available.
-  UPDATE public.job_change_marks_base SET page_pending=false
-  WHERE job_id=p_job_id AND page_pending RETURNING 1
- )
- INSERT INTO public.job_change_mark_events(job_id,source)
- SELECT p_job_id,'page_retry' WHERE EXISTS(SELECT 1 FROM events) OR EXISTS(SELECT 1 FROM base)
-$yield$;
-REVOKE ALL ON FUNCTION public.job_page_yield(uuid) FROM PUBLIC,anon,authenticated;
-GRANT EXECUTE ON FUNCTION public.job_page_yield(uuid) TO service_role;
-
+-- Preserve main's record-close branch; refuse an unreviewed predecessor.
+DO $guard$ BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.job_page_refresh(uuid)'::regprocedure)
+  NOT IN ('7c10bf73a85170c37f9a88051cb5ce47','9d307590b45a66132143fd5bbc241c93') THEN
+  RAISE EXCEPTION 'job_page_speed_refresh_preimage_mismatch';
+ END IF;
+END $guard$;
 CREATE OR REPLACE FUNCTION public.job_page_refresh(p_job_id uuid) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $fn$
 DECLARE
  v_t0 timestamptz; v_covers timestamptz; v_version bigint; v_card jsonb; v_text jsonb; v_page jsonb;
- v_ms integer; v_outcome text := 'built'; v_events bigint[]; v_error text;
+ v_ms integer; v_outcome text := 'built'; v_events bigint[]; v_error text; v_close jsonb; v_item jsonb; v_close_on boolean := false;
  /* build block */ BEGIN
  IF NOT EXISTS (SELECT 1 FROM public.jobs WHERE id = p_job_id) THEN
   RETURN jsonb_build_object('outcome','no_job');
  END IF;
  -- Only page builders use this nonblocking lock. Business writes never acquire it.
  IF NOT pg_try_advisory_xact_lock(20261118, hashtext(p_job_id::text)) THEN
-  PERFORM public.job_page_yield(p_job_id);
   RETURN '{"outcome":"busy"}'::jsonb;
  END IF;
  v_t0 := clock_timestamp();
  /* build block */ BEGIN
+ -- Off retains the existing page/response exactly. No candidate read or queue write.
+ /* switch block */ BEGIN
+  v_close_on := coalesce((SELECT enabled FROM public.feature_flags WHERE flag_name='context_record_close_v1'),false);
+ EXCEPTION WHEN OTHERS THEN v_close_on := false; END;
+ IF v_close_on THEN
+  /* record block */ BEGIN
+   v_close := public.context_ledger_close_on_records(p_job_id);
+  EXCEPTION WHEN OTHERS THEN v_close := jsonb_build_object('error',left(SQLERRM,200)); END;
+  IF v_close->>'wrote'='true' THEN
+   FOR v_item IN SELECT value FROM jsonb_array_elements(coalesce(v_close->'ambiguous_items','[]')) LOOP
+    /* reconcile block */ BEGIN
+     PERFORM public.context_reconcile_raise('open_item_check',p_job_id,v_item->>'item_id',
+      'An open note may already be settled: more than one record fits. Pick the record or leave it open.',v_item->'candidates');
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+   END LOOP;
+  END IF;
+ END IF;
  -- Version and visible event identities share ONE snapshot. A later low-sequence
  -- commit cannot be acknowledged by a timestamp or a max(sequence) cutoff.
  SELECT m.last_marked_at,m.mark_version,
@@ -200,10 +198,7 @@ DECLARE
    built_at=EXCLUDED.built_at,covers_marked_at=EXCLUDED.covers_marked_at,
    covers_mark_version=EXCLUDED.covers_mark_version,build_ms=EXCLUDED.build_ms,
    page_version=EXCLUDED.page_version,status=EXCLUDED.status,error=NULL;
-  IF NOT FOUND THEN
-   PERFORM public.job_page_yield(p_job_id);
-   RETURN jsonb_build_object('outcome','changed','build_ms',v_ms);
-  END IF;
+  IF NOT FOUND THEN RETURN jsonb_build_object('outcome','changed','build_ms',v_ms); END IF;
  /* build block */ BEGIN
    IF v_text ->> 'status' = 'stale' THEN
     PERFORM public.context_job_story_request(p_job_id,'job-page-refresh','job_changed');
@@ -228,5 +223,8 @@ DECLARE
 
   PERFORM public.job_page_ack(p_job_id,v_version,v_covers,v_events);
  END;
- RETURN jsonb_build_object('outcome',v_outcome,'build_ms',v_ms);
+ RETURN jsonb_build_object('outcome',v_outcome,'build_ms',v_ms)
+  || CASE WHEN v_close_on THEN jsonb_build_object('record_close',v_close-'ambiguous_items') ELSE '{}'::jsonb END;
 END $fn$;
+
+DROP FUNCTION IF EXISTS public.job_page_yield(uuid);

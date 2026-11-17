@@ -71,3 +71,16 @@ DO $c$ BEGIN
  END IF;
 END $c$;
 ROLLBACK;
+
+-- This runs the real close-before-build, off parity, ambiguity, office closure
+-- and isolated-read-fault assertions against THIS refresh body, without reapply.
+\set page_speed_record_close_test true
+\ir ../20261117195203_job_page_refresh_record_close/contract.sql
+\unset page_speed_record_close_test
+
+DO $c$ BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.job_page_refresh(uuid)'::regprocedure)
+   IS DISTINCT FROM '7c10bf73a85170c37f9a88051cb5ce47' THEN
+  RAISE EXCEPTION 'page speed: record-close predecessor changed beyond yield calls';
+ END IF;
+END $c$;
