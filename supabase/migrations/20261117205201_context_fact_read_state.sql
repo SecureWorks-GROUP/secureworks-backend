@@ -6,10 +6,10 @@ SET LOCAL statement_timeout = '30s';
 DO $migration$
 DECLARE
   definition text := pg_get_functiondef('public.context_worker_state()'::regprocedure);
-  before_text constant text := $before$'facts', CASE WHEN EXISTS (SELECT 1 FROM public.context_extraction_candidates(1)) THEN 1 ELSE 0 END$before$;
+  before_text constant text := $before$'facts', public.context_worker_facts_present()$before$;
   after_text constant text := $after$'facts', CASE WHEN coalesce((SELECT f.enabled FROM public.feature_flags f
         WHERE f.flag_name = 'context_fact_read_v1'), true)
-        THEN CASE WHEN EXISTS (SELECT 1 FROM public.context_extraction_candidates(1)) THEN 1 ELSE 0 END
+        THEN public.context_worker_facts_present()
         ELSE 0 END$after$; BEGIN
   IF strpos(definition, after_text) > 0 AND strpos(definition, before_text) = 0 THEN
     RETURN;

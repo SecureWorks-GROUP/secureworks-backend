@@ -1,8 +1,8 @@
 BEGIN;
--- A waiting fact is returned while on. Any candidate read while off throws,
--- proving that zero due is produced without entering the fact selector.
-CREATE OR REPLACE FUNCTION public.context_extraction_candidates(p_limit integer DEFAULT 400)
-RETURNS TABLE(job_id uuid) LANGUAGE plpgsql STABLE SECURITY DEFINER
+-- Waiting work wakes facts while on. Any wake read while off throws,
+-- proving that zero due is produced without entering the bounded helper.
+CREATE OR REPLACE FUNCTION public.context_worker_facts_present()
+RETURNS integer LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = public, pg_temp AS $stub$
 BEGIN
   IF EXISTS (SELECT 1 FROM public.feature_flags
@@ -12,7 +12,7 @@ BEGIN
   IF current_setting('test.fact_reader_fault', true) = 'on' THEN
     RAISE EXCEPTION 'fixture candidate read failed' USING ERRCODE = '58000';
   END IF;
-  RETURN QUERY SELECT '00000000-0000-4000-8000-000000000401'::uuid;
+  RETURN 1;
 END $stub$;
 DO $c$
 DECLARE missing jsonb; on_state jsonb; off_state jsonb; failures integer := 0;

@@ -1,4 +1,6 @@
 BEGIN;
+-- Inspect this slice before its later fact-read switch overlay.
+\ir ../../../rollbacks/20261117205201_context_fact_read_state_down.sql
 SET LOCAL session_replication_role = replica;
 -- Every fixture stays in this rolled-back transaction. No switch is changed live.
 DELETE FROM public.automation_switches;
