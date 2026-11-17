@@ -14,3 +14,10 @@ DO $$ BEGIN
     RAISE EXCEPTION 'ZZTEST held-pay rollback removed prerequisite columns';
   END IF;
 END $$;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+      WHERE conrelid = 'public.trade_invoice_lines'::regclass
+        AND conname = 'trade_invoice_lines_hold_reason_check') THEN
+    RAISE EXCEPTION 'ZZTEST held-pay rollback removed the prerequisite reason guard';
+  END IF;
+END $$;

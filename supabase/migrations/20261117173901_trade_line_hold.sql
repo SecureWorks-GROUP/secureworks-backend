@@ -42,12 +42,6 @@ ALTER TABLE public.trade_invoice_lines
   ADD COLUMN IF NOT EXISTS split_group_id uuid,
   ADD COLUMN IF NOT EXISTS not_job_work_type_id uuid;
 ALTER TABLE public.trade_invoice_lines
-  ADD CONSTRAINT trade_invoice_lines_hold_reason_check CHECK (
-    hold_reason IS NULL OR hold_reason IN (
-      'no_work_order','no_amount','over_amount','hourly_no_maximum','no_job',
-      'not_job_work','reimbursement','not_on_crew','commission_no_figure','rate_above_rule'
-    )
-  ) NOT VALID,
   ADD CONSTRAINT trade_invoice_lines_hold_status_check
     CHECK (hold_reason IS NULL OR office_review_status IS NOT NULL) NOT VALID;
 CREATE INDEX IF NOT EXISTS trade_invoice_lines_held_idx

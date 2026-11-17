@@ -24,7 +24,6 @@ DROP TABLE public.not_job_work_types;
 DROP INDEX public.trade_invoice_lines_held_idx;
 ALTER TABLE public.trade_invoice_lines
   DROP CONSTRAINT trade_invoice_lines_hold_status_check,
-  DROP CONSTRAINT trade_invoice_lines_hold_reason_check,
   DROP COLUMN not_job_work_type_id,
   DROP COLUMN split_group_id,
   DROP COLUMN office_change_reason,
