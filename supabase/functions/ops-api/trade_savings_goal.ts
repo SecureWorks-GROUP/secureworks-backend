@@ -19,7 +19,8 @@
 // Every answer is { status, body }, so the route is one json(body, status)
 // line. Input the table would refuse comes back as 400 `goal_invalid` naming
 // the field, never as a server fault. A failed read is 503 `goal_unreadable`,
-// never "no goal"; a failed write is 503 `goal_unsaved` and nothing changed.
+// never "no goal"; a failed write is 503 `goal_unsaved`. The write may still
+// have landed, so the caller is told to reload, never that nothing changed.
 // deno-lint-ignore-file no-explicit-any
 
 export const SAVINGS_GOAL_LABEL_MAX = 60;
@@ -61,21 +62,39 @@ function isIsoDay(value: string): boolean {
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
 }
 
+// numeric(12,2) in cents, so the range check is on whole cents.
+const SAVINGS_GOAL_AMOUNT_MAX_CENTS = 999999999999n;
+
 // An amount is a finite number, or a plain decimal string ("1200", "1200.50").
 // null, "", booleans, arrays and objects are not amounts: no Number() coercion.
-function readAmount(raw: unknown): number | null {
-  let n: number;
+// A negative amount is refused before any rounding, so -0.004 never reads as 0.
+// Rounding is done on the decimal digits, half away from zero, as numeric(12,2)
+// does: "1.005" and 1.005 both store 1.01 (binary Math.round would give 1.00).
+// Returns whole cents, or null when it is not an amount.
+function readAmountCents(raw: unknown): bigint | null {
+  let text: string;
   if (typeof raw === "number") {
-    n = raw;
+    if (!Number.isFinite(raw) || raw < 0) return null;
+    // The shortest decimal that names this number, which is what the JSON
+    // body carries to the database.
+    text = String(raw);
+    if (/e/i.test(text)) {
+      // Exponent form only below 1e-6 (rounds to 0 cents) or at 1e21 and up
+      // (over the column's range).
+      return raw < 1 ? 0n : SAVINGS_GOAL_AMOUNT_MAX_CENTS + 1n;
+    }
   } else if (typeof raw === "string" && /^\s*\d+(\.\d+)?\s*$/.test(raw)) {
-    n = Number(raw.trim());
+    text = raw.trim();
   } else {
     return null;
   }
-  if (!Number.isFinite(n)) return null;
-  // The column keeps cents; round as it would, so the check below sees what
-  // is stored.
-  return Math.round(n * 100) / 100;
+  const [whole, frac = ""] = text.split(".");
+  const cents = BigInt(whole + (frac + "00").slice(0, 2));
+  return frac.length > 2 && frac[2] >= "5" ? cents + 1n : cents;
+}
+
+function centsToAmount(cents: bigint): number {
+  return Number(cents) / 100;
 }
 
 /** Reads a set/clear body. Takes only the goal fields; anything else is ignored. */
@@ -86,25 +105,30 @@ export function parseSavingsGoalInput(body: unknown): ParsedGoalInput {
   if (typeof b.label !== "string") {
     return invalid("label", "Say what you are saving for, in 60 characters or fewer.");
   }
+  // PostgreSQL text cannot hold a NUL character: refuse it here, not as a 503.
+  if (b.label.includes("\u0000")) {
+    return invalid("label", "Say what you are saving for, in 60 characters or fewer.");
+  }
   const label = b.label.trim();
   const labelLength = Array.from(label).length;
   if (labelLength < 1 || labelLength > SAVINGS_GOAL_LABEL_MAX) {
     return invalid("label", "Say what you are saving for, in 60 characters or fewer.");
   }
 
-  const target = readAmount(b.target_amount);
-  if (target === null || target <= 0 || target > SAVINGS_GOAL_AMOUNT_MAX) {
+  const targetCents = readAmountCents(b.target_amount);
+  if (targetCents === null || targetCents <= 0n || targetCents > SAVINGS_GOAL_AMOUNT_MAX_CENTS) {
     return invalid("target_amount", "Enter how much you want to save, more than $0.");
   }
+  const target = centsToAmount(targetCents);
 
   // Saved so far defaults to 0, as the table does.
   let saved = 0;
   if (b.saved_amount !== undefined && b.saved_amount !== null && b.saved_amount !== "") {
-    const read = readAmount(b.saved_amount);
-    if (read === null || read < 0 || read > SAVINGS_GOAL_AMOUNT_MAX) {
+    const readCents = readAmountCents(b.saved_amount);
+    if (readCents === null || readCents > SAVINGS_GOAL_AMOUNT_MAX_CENTS) {
       return invalid("saved_amount", "Enter what you have saved so far, $0 or more.");
     }
-    saved = read;
+    saved = centsToAmount(readCents);
   }
 
   let targetDate: string | null = null;
@@ -142,7 +166,7 @@ function unreadable(): SavingsGoalAnswer {
 function unsaved(): SavingsGoalAnswer {
   return {
     status: 503,
-    body: { ok: false, code: "goal_unsaved", error: "Could not save your goal. Nothing changed. Try again." },
+    body: { ok: false, code: "goal_unsaved", error: "Could not save your goal. Reload to see what is saved, then try again." },
   };
 }
 

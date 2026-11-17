@@ -131,6 +131,9 @@ Deno.test("invalid inputs refuse 400 goal_invalid naming the field, and write no
     [{ ...GOAL, label: "   " }, "label"],
     [{ ...GOAL, label: "x".repeat(61) }, "label"],
     [{ ...GOAL, label: 42 }, "label"],
+    // PostgreSQL text refuses NUL: a 400 naming the label, never a 503.
+    [{ ...GOAL, label: "Ute\u0000fund" }, "label"],
+    [{ ...GOAL, label: "\u0000" }, "label"],
     [{ ...GOAL, target_amount: 0 }, "target_amount"],
     [{ ...GOAL, target_amount: 0.004 }, "target_amount"],
     [{ ...GOAL, target_amount: -5 }, "target_amount"],
@@ -142,6 +145,13 @@ Deno.test("invalid inputs refuse 400 goal_invalid naming the field, and write no
     [{ ...GOAL, target_amount: "1e3" }, "target_amount"],
     [{ ...GOAL, target_amount: Number.NaN }, "target_amount"],
     [{ ...GOAL, saved_amount: -0.01 }, "saved_amount"],
+    // Negative is refused before rounding: -0.004 must not pass as 0.
+    [{ ...GOAL, saved_amount: -0.004 }, "saved_amount"],
+    [{ ...GOAL, saved_amount: -1e-9 }, "saved_amount"],
+    [{ ...GOAL, saved_amount: "-0.004" }, "saved_amount"],
+    [{ ...GOAL, target_amount: -0.004 }, "target_amount"],
+    [{ ...GOAL, saved_amount: 1e21 }, "saved_amount"],
+    [{ ...GOAL, target_amount: 9999999999.995 }, "target_amount"],
     [{ ...GOAL, saved_amount: "abc" }, "saved_amount"],
     [{ ...GOAL, saved_amount: false }, "saved_amount"],
     [{ ...GOAL, target_date: "2026-02-30" }, "target_date"],
@@ -179,6 +189,22 @@ Deno.test("boundaries the table accepts are accepted", () => {
   assert(ok({ ...GOAL, saved_amount: 30000 }));
 });
 
+Deno.test("amounts round on the decimal digits, as numeric(12,2) stores them", () => {
+  const amounts = (body: any) => {
+    const parsed = parseSavingsGoalInput(body);
+    assertEquals(parsed.kind, "set", JSON.stringify(body));
+    const f = (parsed as any).fields;
+    return [f.target_amount, f.saved_amount];
+  };
+  // Binary Math.round(1.005 * 100) gives 1.00; the column stores 1.01.
+  assertEquals(amounts({ ...GOAL, target_amount: "1.005", saved_amount: "1.005" }), [1.01, 1.01]);
+  assertEquals(amounts({ ...GOAL, target_amount: 1.005, saved_amount: 1.005 }), [1.01, 1.01]);
+  assertEquals(amounts({ ...GOAL, target_amount: "2.675", saved_amount: 1.0049 }), [2.68, 1]);
+  assertEquals(amounts({ ...GOAL, target_amount: " 1200.50 ", saved_amount: "0.004" }), [1200.5, 0]);
+  assertEquals(amounts({ ...GOAL, target_amount: 9999999999.99, saved_amount: 1e-7 }), [9999999999.99, 0]);
+  assertEquals(amounts({ ...GOAL, target_amount: "0.005", saved_amount: "9999999999.994" }), [0.01, 9999999999.99]);
+});
+
 Deno.test("a refused set writes nothing and a valid retry then saves", async () => {
   const { client, rows } = fakeStore();
   await setMySavingsGoal(client, TRADE_1, GOAL, NOW);
@@ -211,6 +237,9 @@ Deno.test("a failed write is 503 goal_unsaved and the saved goal stays", async (
     const answer = await setMySavingsGoal(failing.client, TRADE_1, body, NOW);
     assertEquals(answer.status, 503);
     assertEquals((answer.body as any).code, "goal_unsaved");
+    // The write may have landed: tell the caller to reload, never "nothing changed".
+    assert(!/nothing changed/i.test((answer.body as any).error));
+    assert(/reload/i.test((answer.body as any).error));
     assertEquals(JSON.stringify(failing.rows.get(TRADE_1)), before);
   }
 });
