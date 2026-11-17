@@ -30,11 +30,12 @@ function client(row: unknown, claims: unknown[] = []) {
         eq() {
           return this;
         },
+        in() { return this; },
         maybeSingle() {
           return Promise.resolve({ data: row });
         },
         then(resolve: (r: unknown) => unknown) {
-          return Promise.resolve({ data: claims }).then(resolve);
+          return Promise.resolve({ data: claims.map((claim: any) => ({ expense_receipt_id: "ZZTEST-receipt", ...claim })) }).then(resolve);
         },
       };
     },
@@ -287,7 +288,7 @@ Deno.test("FU17 undated save keeps its own receipt through the real handler path
     let draftReads = 0, atomic = 0, legacy = 0;
     const db = { from(table: string) {
       if (table === "trade_invoices") draftReads++;
-      return { select() { return this; }, eq() { return this; },
+      return { select() { return this; }, eq() { return this; }, in() { return this; },
         maybeSingle: () => Promise.resolve({ data: table === "feature_flags" ? { enabled } : undatedDraft() }) };
     } };
     const selected = await select({ client: db, existingDraft: null, weeklyShape: false,
@@ -336,7 +337,7 @@ Deno.test("FU17 undated eligibility reuses the selected switch result; dated cal
       let flagReads = 0;
       const db = { from(table: string) {
         if (table === "feature_flags") flagReads++;
-        return { select() { return this; }, eq() { return this; },
+        return { select() { return this; }, eq() { return this; }, in() { return this; },
           maybeSingle: () => Promise.resolve(table === "feature_flags"
             ? unreadable ? { data: null, error: { message: "ZZTEST read failed" } } : { data: { enabled: true } }
             : { data: receipt() }),
