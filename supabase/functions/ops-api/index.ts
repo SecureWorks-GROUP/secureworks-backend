@@ -10591,7 +10591,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         // P0-07.2: every switch this sweep reads, in one feature_flags call; the
         // readers below then answer from the 45-second memory.
-        await readSwitches(client, ['group_work_order_auto_patio_v1', 'group_work_order_auto_fence_v1', 'patio_pay_group_only_v1', 'job_work_order_auto_issue_v1', 'group_work_order_v1'])
+        const switches = await readSwitches(client, ['group_work_order_auto_patio_v1', 'group_work_order_auto_fence_v1', 'patio_pay_group_only_v1', 'job_work_order_auto_issue_v1', 'group_work_order_v1', 'sweep_gate_v1'])
         let issued: Record<string, unknown> = {}
         let issueError: unknown = null
         // WO-6: open patio jobs with 2+ crew and no work order get their
@@ -10621,7 +10621,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         let gateConfirmed = false
         const gate = url.searchParams.get('gate')
         const token = url.searchParams.get('gate_token') || ''
-        if (gate === 'job-work-order-auto-issue' && /^[a-f0-9]{32}$/.test(token)
+        if (switches.sweep_gate_v1 && gate === 'job-work-order-auto-issue' && /^[a-f0-9]{32}$/.test(token)
           && issueError === null && !groupReleases.some(entry => entry !== null && typeof entry === 'object' && 'error' in entry)) {
           const { error: confirmError } = await client.rpc('sweep_gate_confirm', { p_name: gate, p_token: token })
           if (confirmError) console.error('[ops-api] work order sweep gate confirmation failed:', confirmError.message)
