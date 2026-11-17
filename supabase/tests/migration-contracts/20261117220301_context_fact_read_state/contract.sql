@@ -56,5 +56,19 @@ BEGIN
     RAISE EXCEPTION 'fact state: read fault or retry was hidden';
   END IF;
 END $c$;
+DO $guard$
+DECLARE original text; actual text;
+BEGIN
+  SELECT definition INTO original FROM public.fact_read_state_preimage;
+  actual := pg_get_functiondef('public.context_worker_state()'::regprocedure);
+  IF actual IS DISTINCT FROM replace(original, $before$'facts', public.context_worker_facts_present()$before$, $after$'facts', CASE WHEN coalesce((SELECT f.enabled FROM public.feature_flags f
+        WHERE f.flag_name = 'context_fact_read_v1'), true)
+        THEN public.context_worker_facts_present()
+        ELSE 0 END$after$)
+    OR position('public.context_worker_notes_due()' IN actual) = 0
+    OR position('public.context_worker_marks_newest()' IN actual) = 0 THEN
+    RAISE EXCEPTION 'fact state: full main body or optimized mark reads changed';
+  END IF;
+END $guard$;
 SELECT 'PASS: P4-04.3 off skips fact candidates; on and missing preserve reads; other state unchanged' AS result;
 ROLLBACK;

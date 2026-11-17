@@ -6,17 +6,20 @@ SET LOCAL statement_timeout = '30s';
 DO $migration$
 DECLARE
   definition text := pg_get_functiondef('public.context_worker_state()'::regprocedure);
+  body_hash text := (SELECT md5(p.prosrc) FROM pg_proc p
+    WHERE p.oid = 'public.context_worker_state()'::regprocedure);
   before_text constant text := $before$'facts', CASE WHEN coalesce((SELECT f.enabled FROM public.feature_flags f
         WHERE f.flag_name = 'context_fact_read_v1'), true)
         THEN public.context_worker_facts_present()
         ELSE 0 END$before$;
   after_text constant text := $after$'facts', public.context_worker_facts_present()$after$; BEGIN
-  IF strpos(definition, after_text) > 0 AND strpos(definition, before_text) = 0 THEN
+  -- Rule 15: exact main body after the 210101 mark-read migration.
+  -- A repeated apply accepts only this exact result, never an unrelated body.
+  IF body_hash = '7a87765bca2ee439dbf793c99989247c' THEN
     RETURN;
   END IF;
-  IF (length(definition) - length(replace(definition, before_text, ''))) / length(before_text) <> 1
-    OR strpos(definition, after_text) > 0 THEN
-    RAISE EXCEPTION 'context_worker_state: fact candidate expression differs';
+  IF body_hash IS DISTINCT FROM '02f8087bdb8e6a36ca35812faf2062fd' THEN
+    RAISE EXCEPTION 'context_worker_state: Rule 15 pre-image changed';
   END IF;
   EXECUTE replace(definition, before_text, after_text);
 END $migration$;

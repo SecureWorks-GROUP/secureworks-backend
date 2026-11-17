@@ -1,4 +1,6 @@
 BEGIN;
+-- Prove this predecessor's exact parity before the later fact-read gate.
+\ir ../../../rollbacks/20261117220301_context_fact_read_state_down.sql
 SET LOCAL session_replication_role = replica;
 TRUNCATE public.job_change_mark_events, public.job_change_marks_base,
   public.job_notes_marks_seen, public.job_page_marks_seen;

@@ -1,4 +1,10 @@
 BEGIN;
+DO $guard$ BEGIN
+  IF pg_get_functiondef('public.context_worker_state()'::regprocedure) IS DISTINCT FROM
+    (SELECT definition FROM public.fact_read_state_preimage) THEN
+    RAISE EXCEPTION 'fact state rollback: exact main body not restored';
+  END IF;
+END $guard$;
 -- Rollback restores the legacy candidate read even with the flag off.
 CREATE OR REPLACE FUNCTION public.context_worker_facts_present()
 RETURNS integer LANGUAGE sql STABLE SECURITY DEFINER

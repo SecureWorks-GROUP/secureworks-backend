@@ -1,2 +1,0 @@
--- Registered prerequisites provide context_worker_state and feature_flags.
--- The candidate stand-in below is confined to the contract transaction.
