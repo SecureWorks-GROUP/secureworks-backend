@@ -129,9 +129,7 @@ BEGIN
   RAISE EXCEPTION 'job pages schedule: deletion did not respect keep-ready set and seven days';
  END IF;
 END $c$;
-ROLLBACK TO -- Exercise this historical installer under its original timer contract.
-\ir ../../../migrations/20261117171305_job_pages_schedule.sql
-SAVEPOINT fixture;
+ROLLBACK TO SAVEPOINT fixture;
 
 -- Restore the exact incoming schema, including all successor objects.
 ROLLBACK;
