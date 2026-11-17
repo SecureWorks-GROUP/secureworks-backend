@@ -896,6 +896,7 @@ import {
 } from './job_work_order_office.ts'
 import { releaseVoidedTradeInvoice, VoidedTradeInvoiceReleaseError } from './trade_invoice_voided_release.ts'
 import { buildPayView, payViewRepayment, type PayViewOptions } from './trade_pay_view.ts'
+import { addWeekSuggestions } from './trade_week_suggestion.ts'
 import { presentTradeInvoiceBillOutcome } from './trade_invoice_bill_outcome.ts'
 import { TradeJobRateError, tradeJobRateNote, tradeTypedJobRate } from './trade_rate_per_job.ts'
 import { ExtraRateRuleError, extraLineRateHold, listExtraRateRules, loadExtraRateRules, setExtraRateRule, type ExtraRateHold } from './trade_invoice_extra_rate_rule.ts'
@@ -57754,6 +57755,7 @@ function weekStartFromEnd(weekEnd: string): string {
 export async function myHours(client: any, userId: string, params: URLSearchParams) {
   const weekEnding = params.get('week_ending') || getAWSTWeekEnd()
   const weekStart = weekStartFromEnd(weekEnding)
+  const weekAutofill = await readFlag(client, 'trade_week_autofill_v1')
 
   // Per-metre users (Henry) keep the strict complete-only filter so their
   // per-metre view never lists scheduled-but-unworked fencing jobs as
@@ -57901,12 +57903,22 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   // read fails closed: never show a group job as if it were a normal claim.
   const groupHoursJobIds = [...new Set(assignments.map((a: any) => String(a.jobs?.id || '')).filter(Boolean))]
   let groupHourRowsRead: any[] = []
+  let groupSuggestionsUnavailable = false
   const groupRouteJobs: any[] = []
   if (groupHoursJobIds.length > 0) {
-    const { data: groupHourRows, error: groupHourErr } = await client
+    let { data: groupHourRows, error: groupHourErr } = await client
       .from('group_work_orders')
-      .select('id, job_id, status')
+      .select(weekAutofill
+        ? 'id, job_id, status, claim_state, group_work_order_participants(user_id), group_work_order_time_entries(user_id, hours)'
+        : 'id, job_id, status')
       .in('job_id', groupHoursJobIds)
+    if (groupHourErr && weekAutofill) {
+      console.error('[ops-api] my_hours: group suggestions unreadable:', groupHourErr.code)
+      groupSuggestionsUnavailable = true
+      const fallback = await client.from('group_work_orders').select('id, job_id, status').in('job_id', groupHoursJobIds)
+      groupHourRows = fallback.data
+      groupHourErr = fallback.error
+    }
     if (groupHourErr) {
       throw new ApiError(
         'Could not read group work orders for these hours.',
@@ -58151,7 +58163,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   const pendingVerification = enriched.some((a: any) => a.status === 'submitted')
   const allVerified = enriched.length > 0 && enriched.every((a: any) => a.status === 'verified' || a.status === 'complete')
 
-  return {
+  const response = {
     assignments: enriched,
     rate,
     // rate_resolved=false signals the client to show a "Rate not set — contact
@@ -58189,6 +58201,13 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     // Jobs this week that are paid through a group work order, never as hours.
     group_route_jobs: groupRouteJobs,
   }
+  return addWeekSuggestions(client, response, {
+    enabled: weekAutofill && !groupSuggestionsUnavailable, userId,
+    gstRegistered: userRow?.trade_details?.gstRegistered === true,
+    groupAllJobs: weekAutofill && await readFlag(client, 'group_claim_all_jobs_v1'),
+    payRunOn: weekAutofill && await readFlag(client, 'trade_pay_run_v1'),
+    groups: groupHourRowsRead,
+  })
 }
 
 // ── submit_trade_invoice: RETIRED (Marnin, 11 Nov 2026) ──
