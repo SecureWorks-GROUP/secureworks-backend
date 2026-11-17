@@ -280,7 +280,6 @@ for (
 ) {
   Deno.test(`${label} returns the stored digest and builds nothing`, async () => {
     const m = await mod();
-    m._resetPackCheckForTest();
     await withEnv(async () => {
       const { calls } = await withSpy(
         digestRows({ webhook: true, packJobs: false }),
@@ -495,9 +494,8 @@ Deno.test("the old timer's shape (server POST, no action) still builds", async (
     }));
 });
 
-Deno.test("the stored read runs the completion pack check at most every 30 minutes per instance", async () => {
+Deno.test("every stored read runs the completion pack check, with no hold of its own", async () => {
   const m = await mod();
-  m._resetPackCheckForTest();
   const time = new FakeTime(PERTH_TUESDAY);
   try {
     await withEnv(async () => {
@@ -508,30 +506,70 @@ Deno.test("the stored read runs the completion pack check at most every 30 minut
           );
           await res.body?.cancel();
         })).calls;
-
-      const first = await read();
-      assertEquals(packCalls(first).map((c) => c.body), [{
-        job_id: PAID_UNSENT_JOB,
-      }]);
-
-      time.tick(29 * 60 * 1000);
-      const second = await read();
-      assertEquals(packCalls(second), []);
-      assertEquals(second.filter((c) => table(c.url) === "jobs"), []);
-
-      time.tick(60 * 1000);
-      const third = await read();
-      // Checked again; the fixture's sent-event list does not know about the
-      // first send, so it would trigger again here, as the old loop would.
-      assertEquals(third.filter((c) => table(c.url) === "jobs").length, 1);
-      // None of the reads built anything.
-      for (const calls of [first, second, third]) {
+      for (const gapMs of [0, 60 * 1000, 5 * 60 * 1000]) {
+        time.tick(gapMs);
+        const calls = await read();
+        // The fixture's sent-event list does not know about the earlier send,
+        // so each read triggers again, as each old request would.
+        assertEquals(packCalls(calls).map((c) => c.body), [{
+          job_id: PAID_UNSENT_JOB,
+        }]);
         assertEquals(modelCalls(calls), []);
       }
     });
   } finally {
     time.restore();
   }
+});
+
+// money14 review of 17 Nov (review-pair-p0-14.md, finding 1): two fresh staff
+// reads five minutes apart, with an invoice that becomes two whole days paid
+// between them. Before P0-14 the second request triggered the pack (base [0,1]);
+// a per-instance hold made it [0,0]. Pinned here: [0,1].
+Deno.test("two fresh staff reads straddling payment eligibility trigger as before: [0,1]", async () => {
+  const m = await mod();
+  const start = new Date("2026-11-17T03:00:00.000Z");
+  const paidOn = new Date(start.getTime() - 2 * 86_400_000 + 60_000)
+    .toISOString();
+  const rows: Rows = (url) => {
+    const p = url.searchParams;
+    if (
+      table(url) === "jobs" && p.get("status") === "eq.complete" &&
+      p.has("completed_at") && !p.has("legacy")
+    ) return [{ id: PAID_UNSENT_JOB, job_number: "ZZTEST-SE-20261117-01" }];
+    if (
+      table(url) === "xero_invoices" && p.get("status") === "eq.PAID" &&
+      p.get("fully_paid_on") === "not.is.null"
+    ) {
+      return [{
+        id: "test-invoice",
+        reference: "ZZTEST-SE-20261117-01",
+        fully_paid_on: paidOn,
+        fully_paid_on_date: paidOn,
+      }];
+    }
+    return digestRows({ packJobs: false })(url);
+  };
+  const result: number[] = [];
+  const time = new FakeTime(start);
+  try {
+    for (let i = 0; i < 2; i++) {
+      if (i) time.tick(5 * 60 * 1000);
+      const { calls } = await withEnv(() =>
+        withSpy(rows, async () => {
+          const res = await m._dailyDigestRequestHandlerForTest(
+            request({ auth: staffAuth }),
+          );
+          assertEquals(res.status, 200);
+          await res.body?.cancel();
+        })
+      );
+      result.push(packCalls(calls).length);
+    }
+  } finally {
+    time.restore();
+  }
+  assertEquals(result, [0, 1]);
 });
 
 // ── Weekly pieces and the test chats ─────────────────────────

@@ -1820,10 +1820,8 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
 
 if (import.meta.main) serve(_dailyDigestRequestHandlerForTest)
 
-// Test seams (P0-14): the bulk completion pack trigger, and the per-instance
-// 30 minute gate on the stored read.
+// Test seam (P0-14): the bulk completion pack trigger.
 export const _runCompletionPackTriggerForTest = (sb: any) => runCompletionPackTrigger(sb)
-export function _resetPackCheckForTest() { lastPackCheckAt = 0 }
 
 
 // ════════════════════════════════════════════════════════════
@@ -1832,19 +1830,14 @@ export function _resetPackCheckForTest() { lastPackCheckAt = 0 }
 
 // ── Stored read, canary run, completion packs (P0-14) ─────
 
-// Per running instance: the stored read starts the completion pack check at
-// most every 30 minutes, which is when it ran before P0-14 (open Ops pages
-// rebuilt the digest on a 30 minute cache). When a client is emailed must not
-// change; moving it to the daily timer would be the owner's decision.
-let lastPackCheckAt = 0
-const PACK_CHECK_EVERY_MS = 30 * 60 * 1000
-
+// Every stored read starts the completion pack check, as every request that
+// reached this function did before P0-14. The 30 minute limit is each page's
+// own cache, as before; the function adds no hold of its own, so whether and
+// when a client is emailed does not change. Moving it to the daily timer would
+// be the owner's decision.
 async function storedDigestRead(sb: any): Promise<Response> {
-  if (Date.now() - lastPackCheckAt >= PACK_CHECK_EVERY_MS) {
-    lastPackCheckAt = Date.now()
-    const p = runCompletionPackTrigger(sb).catch((e) => console.log('[daily-digest] completion pack trigger error:', e))
-    ;(globalThis as any).EdgeRuntime?.waitUntil?.(p)
-  }
+  const p = runCompletionPackTrigger(sb).catch((e) => console.log('[daily-digest] completion pack trigger error:', e))
+  ;(globalThis as any).EdgeRuntime?.waitUntil?.(p)
   const { data: row, error } = await sb.from('daily_digests')
     .select('digest_date, digest_json')
     .eq('org_id', DEFAULT_ORG_ID)
