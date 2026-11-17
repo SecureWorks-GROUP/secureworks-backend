@@ -29,10 +29,10 @@ actor_pid=$!
 exec 3>"$actor_input"
 printf '%s\n' 'BEGIN;' "UPDATE public.job_cost_lines SET follows_document_id='ZZTEST-FU11-after-lock' WHERE document_id='ZZTEST-FU11-concurrent';" '\echo ROW_LOCKED' >&3
 for attempt in $(seq 1 100); do
-  if rg -q ROW_LOCKED "$FU11_SCRATCH_DIR/actor.log"; then break; fi
+  if grep -q ROW_LOCKED "$FU11_SCRATCH_DIR/actor.log"; then break; fi
   sleep 0.1
 done
-rg -q ROW_LOCKED "$FU11_SCRATCH_DIR/actor.log"
+grep -q ROW_LOCKED "$FU11_SCRATCH_DIR/actor.log"
 PGAPPNAME=fu11_refollow_waiter psql "$CONTRACT_DATABASE_URL" -X -At -v ON_ERROR_STOP=1 \
   -c "SET statement_timeout='15s'; SELECT public.job_cost_lines_refollow('xero_bill','ZZTEST-FU11-before-lock');" \
   > "$FU11_SCRATCH_DIR/worker.log" 2>&1 &
@@ -51,6 +51,6 @@ actor_pid=
 wait "$worker_pid"
 worker_pid=
 [ "$waiting" = yes ] || { echo 'FU11: refollow never waited on the changed row'; exit 1; }
-rg -qx '0' "$FU11_SCRATCH_DIR/worker.log" || { cat "$FU11_SCRATCH_DIR/worker.log"; exit 1; }
+grep -qx '0' "$FU11_SCRATCH_DIR/worker.log" || { cat "$FU11_SCRATCH_DIR/worker.log"; exit 1; }
 [ "$(psql "$CONTRACT_DATABASE_URL" -X -At -v ON_ERROR_STOP=1 -c "SELECT needs_reason IS NULL AND follows_document_id='ZZTEST-FU11-after-lock' FROM public.job_cost_lines WHERE document_id='ZZTEST-FU11-concurrent';")" = t ]
 echo 'FU11 concurrent changed-coordinate recheck passed'
