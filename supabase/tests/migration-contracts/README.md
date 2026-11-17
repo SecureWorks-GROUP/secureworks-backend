@@ -109,10 +109,10 @@ only, no business names, amounts or row ids. The director refreshes that file
 from `compare-public-object-md5.ts --sql` on live, with UTC, matching
 `search_path` and PostgreSQL deparser version, then commits the new snapshot.
 Workers and CI never query live. The snapshot's date is evidence of that read,
-not proof of current production. No automatic re-snapshot or difference waiver.
+not proof of current production. No automatic re-snapshot or digest waiver.
 
 `--scope job-profit-context-pay` fails for changed, live-only or fresh-only
-objects in the union of both catalogs. Job Profit covers `job_profit`,
+objects in the union of both catalogs, except the closed unsourced inventory below. Job Profit covers `job_profit`,
 `job_cost`, job cost/revenue/expected/profit views and Bookkeeping evidence;
 context covers context-named routines, evidence-health views and the
 attribution/booking entries;
@@ -126,9 +126,17 @@ catalog and comparison report are retained in the `public-object-parity` CI
 artifact for seven days. No live switch, install, Xero payload or customer
 behaviour changes on merge. No new migration, trigger, schedule or stand-in.
 
-The cx-schema-sort report identifies two context first-apply literals and six
-live-only context evidence views with no repository producer. They are not
-waived or recreated from a digest. Strict main parity can remain red on these
-and on fixture differences until the director resolves the source definitions.
-The director must also check the refreshed snapshot after later releases. A
-passing PR shard does not establish that this strict main-only gate is green.
+The director's 18 Nov instruction classifies the 23 objects without a repository
+declaration in `live-only-unsourced.tsv` (source: `docs/evidence/cx-schema-sort-18nov.md`).
+The parity step passes `--live-only-unsourced` and lists exact live-only matches
+as **live-only-unsourced**, informational rather than failing. The report lists
+all matching objects across the full snapshot, including the six context evidence
+views and objects outside the scoped gate. This is source-recovery work for the
+director, not equality proof or permission to remove live objects.
+
+The inventory is kind/signature/hash pinned. A changed live hash, another overload,
+a changed definition present in both catalogs, a fresh-only object or any unlisted
+live-only object still fails inside the scope. Without the flag the comparator
+keeps its original full-difference behaviour. Malformed or unreadable inventories
+fail like other inputs. The two context first-apply literals and all sourced
+differences remain failures; no body is normalised or replaced by this classification.

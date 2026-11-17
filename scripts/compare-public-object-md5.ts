@@ -194,12 +194,31 @@ export function compareCatalogs(
   return differences;
 }
 
+// This closed inventory is opt-in. A changed hash, present fresh object, or
+// another overload cannot inherit an unsourced object's informational status.
+export function classifyUnsourced(
+  differences: Difference[],
+  inventory: Map<string, CatalogRow>,
+): { failures: Difference[]; unsourced: Difference[] } {
+  const failures: Difference[] = [], unsourced: Difference[] = [];
+  for (const row of differences) {
+    const recorded = inventory.get(key(row));
+    if (row.status === "live_only" && recorded?.md5 === row.live) {
+      unsourced.push(row);
+    } else {
+      failures.push(row);
+    }
+  }
+  return { failures, unsourced };
+}
+
 const cell = (value: string | null) =>
   (value ?? "absent").replaceAll("|", "\\|").replaceAll("\n", " ");
 export function renderComparison(
   differences: Difference[],
   liveCount: number,
   freshCount: number,
+  unsourced: Difference[] = [],
 ): string {
   const counts = (status: Difference["status"]) =>
     differences.filter((row) => row.status === status).length;
@@ -223,15 +242,32 @@ export function renderComparison(
       } |`
     ),
     "",
+    ...(unsourced.length
+      ? [
+        "## live-only-unsourced (informational)",
+        "",
+        `${unsourced.length} objects from the closed director inventory have no repository declaration. They do not fail parity while absent from the fresh catalog at their recorded live hash. This list covers the full snapshot, including objects outside the selected domain scope. The director owns source recovery; these objects are not proved equivalent or safe to remove.`,
+        "",
+        "| Kind | Object | Status | Live md5 |",
+        "| --- | --- | --- | --- |",
+        ...unsourced.map((row) =>
+          `| ${row.kind} | ${cell(row.name)} | live-only-unsourced | ${
+            cell(row.live)
+          } |`
+        ),
+        "",
+      ]
+      : []),
   ].join("\n");
 }
 
 const help = `Offline public view/function md5 comparison; no database access.
 Usage:
-  deno run --allow-read --allow-write scripts/compare-public-object-md5.ts --live <snapshot.tsv> --fresh <fresh.tsv> [--trace <changes.jsonl>] [--scope job-profit-context-pay] --output <report.md>
+  deno run --allow-read --allow-write scripts/compare-public-object-md5.ts --live <snapshot.tsv> --fresh <fresh.tsv> [--trace <changes.jsonl>] [--scope job-profit-context-pay] [--live-only-unsourced <inventory.tsv>] --output <report.md>
   deno run scripts/compare-public-object-md5.ts --sql
-Flags: --live, --fresh, --trace, --scope, --output, --sql, --help
-Exit: 0 equal or SQL/help; 1 differences; 2 invalid input. Never prints bodies.
+Flags: --live, --fresh, --trace, --scope, --live-only-unsourced, --output, --sql, --help
+Exit: 0 no failing differences or SQL/help; 1 failing differences; 2 invalid input. Never prints bodies.
+The optional unsourced inventory uses the same TSV format; exact live-only matches are listed separately.
 TSV: kind<TAB>name<TAB>md5; # comments allowed. Trace JSONL: kind,name,before,after,source.
 Capture using psql -X -qAt -F <tab>, with UTC and the same search_path/version.
 Trace starts at an empty public catalog; capture changes after every build file.`;
@@ -247,7 +283,14 @@ async function main(args: string[]): Promise<number> {
       return 0;
     }
     const options = new Map<string, string>();
-    const known = ["--live", "--fresh", "--trace", "--scope", "--output"];
+    const known = [
+      "--live",
+      "--fresh",
+      "--trace",
+      "--scope",
+      "--live-only-unsourced",
+      "--output",
+    ];
     for (let i = 0; i < args.length; i += 2) {
       if (
         !known.includes(args[i]) || !args[i + 1] ||
@@ -296,16 +339,28 @@ async function main(args: string[]): Promise<number> {
     const allDifferences = compareCatalogs(live, fresh, trace);
     const scopedLive = scope ? scopedCatalog(live) : live;
     const scopedFresh = scope ? scopedCatalog(fresh) : fresh;
+    const inventoryPath = options.get("--live-only-unsourced");
+    const { failures, unsourced } = inventoryPath
+      ? classifyUnsourced(
+        allDifferences,
+        parseCatalog(await Deno.readTextFile(inventoryPath)),
+      )
+      : { failures: allDifferences, unsourced: [] };
     const differences = scope
-      ? allDifferences.filter((row) => parityArea(row.name))
-      : allDifferences;
+      ? failures.filter((row) => parityArea(row.name))
+      : failures;
     await Deno.writeTextFile(
       output,
-      renderComparison(differences, scopedLive.size, scopedFresh.size),
+      renderComparison(
+        differences,
+        scopedLive.size,
+        scopedFresh.size,
+        unsourced,
+      ),
       { createNew: true },
     );
     console.log(
-      `comparison:\n  live: ${scopedLive.size}\n  fresh: ${scopedFresh.size}\n  differences: ${differences.length}\n  report: ${
+      `comparison:\n  live: ${scopedLive.size}\n  fresh: ${scopedFresh.size}\n  differences: ${differences.length}\n  live-only-unsourced: ${unsourced.length}\n  report: ${
         JSON.stringify(output)
       }`,
     );

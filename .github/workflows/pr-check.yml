@@ -1121,6 +1121,7 @@ jobs:
         run: |
           deno run --allow-read --allow-write scripts/compare-public-object-md5.ts \
             --scope job-profit-context-pay \
+            --live-only-unsourced supabase/tests/migration-contracts/live-only-unsourced.tsv \
             --live supabase/tests/migration-contracts/live-public-object-md5.tsv \
             --fresh "${{ runner.temp }}/fresh-public-object-md5.tsv" \
             --output "${{ runner.temp }}/public-object-parity.md"

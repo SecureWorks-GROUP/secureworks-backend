@@ -1,7 +1,9 @@
 import {
+  classifyUnsourced,
   compareCatalogs,
   parityArea,
   parseCatalog,
+  renderComparison,
   scopedCatalog,
 } from "../compare-public-object-md5.ts";
 
@@ -172,4 +174,94 @@ Deno.test("every omitted domain migration is inventoried once and still exists",
     omitted.join() === registry.join(),
     "omitted domain migration not inventoried",
   );
+});
+
+Deno.test("unsourced live-only objects are listed without failing an otherwise equal scope", () => {
+  const inventory = parseCatalog(`view\tv_evidence_health\t${a}`);
+  const live = fixture(`view\tv_evidence_health\t${a}`);
+  const { failures, unsourced } = classifyUnsourced(
+    compareCatalogs(scopedCatalog(live), scopedCatalog(fixture())),
+    inventory,
+  );
+  assert(failures.length === 0 && unsourced.length === 1);
+  const report = renderComparison(
+    failures,
+    live.size,
+    fixture().size,
+    unsourced,
+  );
+  assert(report.includes("Differences: 0;"));
+  assert(
+    report.includes(
+      `| view | v_evidence_health | live-only-unsourced | ${a} |`,
+    ),
+  );
+});
+
+Deno.test("unsourced inventory cannot hide changed, fresh-only or unlisted sourced objects", () => {
+  const inventory = parseCatalog(`view\tv_evidence_health\t${a}`);
+  const live = fixture(`view\tv_evidence_health\t${a}`);
+  for (const fresh of [fixture(`view\tv_evidence_health\t${b}`), live]) {
+    const diff = fresh === live
+      ? compareCatalogs(fixture(), fresh)
+      : compareCatalogs(live, fresh);
+    const result = classifyUnsourced(diff, inventory);
+    assert(result.failures.length === 1 && result.unsourced.length === 0);
+  }
+  const result = classifyUnsourced(compareCatalogs(live, new Map()), inventory);
+  assert(result.unsourced.length === 1 && result.failures.length === 3);
+});
+
+Deno.test("changed live digest and another function overload do not inherit unsourced status", () => {
+  const inventory = parseCatalog(`function\tunrelated(p_id uuid)\t${a}`);
+  for (
+    const row of [
+      `function\tunrelated(p_id uuid)\t${b}`,
+      `function\tunrelated(p_id text)\t${a}`,
+      `view\tunrelated(p_id uuid)\t${a}`,
+    ]
+  ) {
+    const result = classifyUnsourced(
+      compareCatalogs(fixture(row), fixture()),
+      inventory,
+    );
+    assert(result.failures.length === 1 && result.unsourced.length === 0);
+  }
+});
+
+Deno.test("unsourced list includes unrelated-domain objects while scoped failures remain visible", () => {
+  const inventory = parseCatalog(`function\tunrelated()\t${a}`);
+  const live = fixture(`function\tunrelated()\t${a}`);
+  const freshCatalog = fixture();
+  freshCatalog.delete("view\tv_job_profit");
+  const result = classifyUnsourced(
+    compareCatalogs(live, freshCatalog),
+    inventory,
+  );
+  const failures = result.failures.filter((row) => parityArea(row.name));
+  const report = renderComparison(
+    failures,
+    live.size,
+    freshCatalog.size,
+    result.unsourced,
+  );
+  assert(failures.length === 1 && report.includes("v_job_profit | live_only"));
+  assert(report.includes("unrelated() | live-only-unsourced"));
+});
+
+Deno.test("director inventory retains all 23 unsourced snapshot coordinates including six evidence views", () => {
+  const inventory = parseCatalog(
+    Deno.readTextFileSync(new URL("live-only-unsourced.tsv", contractRoot)),
+  );
+  const snapshot = parseCatalog(
+    Deno.readTextFileSync(new URL("live-public-object-md5.tsv", contractRoot)),
+  );
+  assert(inventory.size === 23);
+  assert(
+    [...inventory.values()].filter((row) => parityArea(row.name) === "context")
+      .length === 6,
+  );
+  for (const [id, row] of inventory) {
+    assert(snapshot.get(id)?.md5 === row.md5, id);
+  }
 });
