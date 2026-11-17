@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 BEGIN;
 SET LOCAL statement_timeout = '30s';
-\ir ../../../migrations/20261118024515_trade_week_send_evidence.sql
+\ir ../../../migrations/20261118060922_trade_week_send_evidence.sql
 -- Make the function re-apply safe inside this contract without touching a sibling case.
 -- Each test database contains the same real v4 migration; this transaction restores v3.
 DO $$ DECLARE t text; c record; BEGIN
