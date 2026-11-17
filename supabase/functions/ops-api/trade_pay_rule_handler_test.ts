@@ -313,6 +313,14 @@ handlerTest("pay rule: an unreadable start date refuses the submit and writes no
   assert(!out.writes.some((w) => w.includes("trade_invoice") || w.startsWith("RPC ")), out.writes.join(", "));
 });
 
+handlerTest("pay rule: switch off and the start date unreadable still saves on the old rule", async () => {
+  const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Labour", 20, 50)], { payRuleOn: false, failPaySettings: true });
+  assertSaved(out);
+  const inv = out.invoiceRows[0];
+  assertEquals([inv.gross_earned, inv.super_amount, inv.net_pay], [1000, 120, 940]);
+  assert(!inv.super_basis, JSON.stringify(inv));
+});
+
 // ── no trade paid above a work order total ──────────────────────────────────
 
 handlerTest("pay rule: an agreed work order on the new rule bills its total, super inside it", async () => {

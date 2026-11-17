@@ -57972,7 +57972,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     week_start: weekStart,
     total_hours: Math.round(totalHours * 100) / 100,
     ...(previewRule.unavailable
-      ? { money: null, money_unavailable: true }
+      ? { money: null, money_unavailable: true as const }
       : {
         ...tradeInvoiceMoneyResponse(previewMoney),
         ...(previewRecurringDeduction ? tradeRecurringDeductionResponse(previewRecurringDeduction) : {}),
@@ -57981,7 +57981,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
         // The split as one object, with the rule it was worked out on
         // (super_basis null: the old rule). trade.html reads super_basis.
         money: { ...tradeInvoiceMoneyResponse(previewMoney), super_basis: previewMoney.super_basis ?? null },
-        money_unavailable: false,
+        money_unavailable: false as const,
       }),
     subtotal,
     already_submitted: !!existingInvoice,

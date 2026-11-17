@@ -250,6 +250,10 @@ BEGIN
   ] LOOP
     v_count := (length(v_def) - length(replace(v_def, 'p_invoice->>''super_basis''', ''))) / length('p_invoice->>''super_basis''');
     IF v_count <> 1 THEN RAISE EXCEPTION 'a persist carries the basis % times', v_count; END IF;
+    -- A raised variation must still survive a replaced draft (AGENTS.md).
+    IF position('carry_work_order_variations' IN v_def) = 0 THEN
+      RAISE EXCEPTION 'a persist lost carry_work_order_variations';
+    END IF;
   END LOOP;
   v_def := pg_get_functiondef('public.unfreeze_group_work_order_split(uuid,uuid)'::regprocedure);
   IF (length(v_def) - length(replace(v_def, 'group_split_inclusive_super_invoice', ''))) / length('group_split_inclusive_super_invoice') <> 1 THEN

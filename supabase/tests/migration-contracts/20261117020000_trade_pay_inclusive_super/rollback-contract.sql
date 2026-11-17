@@ -21,6 +21,10 @@ BEGIN
      OR position('group_split_inclusive_super_invoice' IN pg_get_functiondef('public.unfreeze_group_work_order_split(uuid,uuid)'::regprocedure)) > 0 THEN
     RAISE EXCEPTION 'rollback did not restore the function bodies';
   END IF;
+  IF position('carry_work_order_variations' IN pg_get_functiondef('public.persist_weekly_trade_invoice_v1(jsonb,jsonb,uuid)'::regprocedure)) = 0
+     OR position('carry_work_order_variations' IN pg_get_functiondef('public.persist_trade_work_order_invoice_v1(jsonb,jsonb,uuid)'::regprocedure)) = 0 THEN
+    RAISE EXCEPTION 'rollback lost carry_work_order_variations from a persist';
+  END IF;
   IF position('i.super_basis IS NOT NULL' IN pg_get_functiondef('public.trade_invoice_lines_group_share_snapshot()'::regprocedure)) = 0 THEN
     RAISE EXCEPTION 'rollback did not restore the group share line guard';
   END IF;

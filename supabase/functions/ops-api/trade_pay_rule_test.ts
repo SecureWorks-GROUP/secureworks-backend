@@ -92,6 +92,20 @@ Deno.test("pay rule: spec test 8, an unreadable rule refuses a submit and shows 
   }
 });
 
+Deno.test("pay rule: with the switch off, a fault reading the start date still prices on the old rule", async () => {
+  for (
+    const settings of [
+      { data: null, error: { message: "relation does not exist" } },
+      { data: [{ inclusive_super_from: 7 }], error: null },
+    ]
+  ) {
+    const client = () => fakeClient({ feature_flags: { data: [{ enabled: false }], error: null }, trade_pay_settings: settings });
+    assertEquals(await readTradePayRule(client()), { ok: true, on: false, from: null });
+    assertEquals(await resolveTradePayBasisForSubmit(client(), FROM), null);
+    assertEquals(await resolveTradePayBasisForPreview(client(), FROM), { basis: null, unavailable: false });
+  }
+});
+
 Deno.test("pay rule: a readable rule prices a submit and a preview the same way", async () => {
   const client = () =>
     fakeClient({

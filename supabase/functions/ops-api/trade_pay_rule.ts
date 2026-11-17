@@ -69,8 +69,12 @@ export async function readTradePayRule(client: any): Promise<TradePayRuleRead> {
         .limit(1),
     ]);
     if (flag?.error) return { ok: false, error: "switch unreadable" };
-    if (settings?.error) return { ok: false, error: "start date unreadable" };
     const on = firstRow(flag?.data)?.enabled === true;
+    // A switch read cleanly as off decides alone: the start date cannot
+    // change the answer, so a fault reading it (or the table not there yet)
+    // never stops an invoice priced on the old rule.
+    if (!on) return { ok: true, on: false, from: null };
+    if (settings?.error) return { ok: false, error: "start date unreadable" };
     const raw = firstRow(settings?.data)?.inclusive_super_from ?? null;
     const from = dateOnly(raw);
     if (raw !== null && from === null) {
