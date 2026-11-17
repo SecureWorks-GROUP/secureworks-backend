@@ -22,6 +22,7 @@ import {
   tradeJobWorkOrderRead,
 } from "./job_work_orders.ts";
 import { tradeJobWorkOrderRedaction } from "./index.ts";
+import { _resetSwitchCacheForTest } from "../_shared/switch_cache.ts";
 import { patioBase } from "../_shared/job_budget/budget_examples.ts";
 import { budgetAddedUp } from "../_shared/job_budget/budget_v1.ts";
 
@@ -928,6 +929,8 @@ const AUTO_FLAG = "job_work_order_auto_issue_v1";
 
 function autoIssueOn(db: FakeDb) {
   db.tables.feature_flags = [{ flag_name: AUTO_FLAG, enabled: true }];
+  // A switch answer is remembered for 45 seconds (P0-07.2): forget it.
+  _resetSwitchCacheForTest();
 }
 
 /** auto_issue_job_work_order as the database answers it

@@ -42,6 +42,7 @@ import {
 } from "./group_work_order.ts";
 import { JOB_WORK_ORDER_OPEN_STATUSES } from "./job_work_order_quote_fill.ts";
 import { QUOTE_LINE_FLAGS } from "./quote_work_order_lines.ts";
+import { readSwitch } from "../_shared/switch_cache.ts";
 
 export const GROUP_WORK_ORDER_AUTO_PATIO_FLAG = "group_work_order_auto_patio_v1";
 export const GROUP_WORK_ORDER_AUTO_FENCE_FLAG = "group_work_order_auto_fence_v1";
@@ -115,14 +116,7 @@ export type PatioAutoGroupResult = {
 };
 
 async function flagOn(client: any, flag: string): Promise<boolean> {
-  try {
-    const { data, error } = await client.from("feature_flags").select("enabled")
-      .eq("flag_name", flag).limit(1);
-    if (error) return false;
-    return data?.[0]?.enabled === true;
-  } catch {
-    return false;
-  }
+  return readSwitch(client, flag);
 }
 
 /**
