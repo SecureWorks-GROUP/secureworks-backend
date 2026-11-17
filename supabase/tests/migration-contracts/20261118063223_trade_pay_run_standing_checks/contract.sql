@@ -1,5 +1,5 @@
 BEGIN;
-\ir ../../../migrations/20261118060158_trade_pay_run_standing_checks.sql
+\ir ../../../migrations/20261118063223_trade_pay_run_standing_checks.sql
 CREATE FUNCTION pg_temp.zztest_assert(ok boolean, words text) RETURNS void
 LANGUAGE plpgsql AS $$ BEGIN
  IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'ZZTEST %',words; END IF;
@@ -63,7 +63,7 @@ DECLARE
  i1 uuid := '08030000-0000-4000-8000-000000000301';
  i2 uuid := '08030000-0000-4000-8000-000000000302';
  i3 uuid := '08030000-0000-4000-8000-000000000303';
- ids uuid[] := ARRAY[i1,i2,i3]; r jsonb; c jsonb; stage text; terminal text; finish_at timestamptz;
+ ids uuid[] := ARRAY[i1,i2,i3]; r jsonb; c jsonb; stage text; terminal text; finish_at timestamptz; event_kind text; payload jsonb;
 BEGIN
  FOREACH stage IN ARRAY ARRAY['before_xero','after_xero'] LOOP
   r := public.trade_pay_run_standing_checks(org,ids,stage);
@@ -168,6 +168,57 @@ BEGIN
   PERFORM pg_temp.zztest_assert(jsonb_array_length(r->'stopped_invoices')=1,'unknown finish time was skipped');
   DELETE FROM public.job_events WHERE job_id='08030000-0000-4000-8000-000000000102';
  END LOOP;
+ -- Follow-up 34 item 12: the exact trade-report writer's status_change
+ -- shape and every job_cost_close status-event form share the finish boundary.
+ FOR event_kind,payload,terminal IN VALUES
+  ('status_change','{"status":"complete","source":"trade_report"}'::jsonb,'complete'),
+  ('restoration_stage_changed','{"job_status":"complete"}'::jsonb,'complete'),
+  ('callback_resolved','{}'::jsonb,'complete')
+ LOOP
+  UPDATE public.jobs SET status=terminal WHERE id='08030000-0000-4000-8000-000000000102';
+  INSERT INTO public.job_events(job_id,event_type,detail_json,created_at)
+   VALUES('08030000-0000-4000-8000-000000000102',event_kind,payload,'2026-11-22 15:59:59Z');
+  r := public.trade_pay_run_standing_checks(org,ids,'before_xero');
+  PERFORM pg_temp.zztest_assert(r->'stopped_invoices'='[]'
+   AND (pg_temp.zztest_check(r,'no_paid_line_without_work_order')->>'skipped')::int=1,
+   'pre-rule status event not read: '||event_kind);
+  UPDATE public.job_events SET created_at='2026-11-22 16:00:00Z'
+   WHERE job_id='08030000-0000-4000-8000-000000000102';
+  r := public.trade_pay_run_standing_checks(org,ids,'before_xero');
+  PERFORM pg_temp.zztest_assert(jsonb_array_length(r->'stopped_invoices')=1
+   AND r#>>'{stopped_invoices,0,invoice_id}'=i2::text AND r->'run_blocked'='false',
+   'on-rule status event skipped: '||event_kind);
+  DELETE FROM public.job_events WHERE job_id='08030000-0000-4000-8000-000000000102';
+ END LOOP;
+ -- A later working event of any implied form defeats an old closure.
+ FOREACH event_kind IN ARRAY ARRAY['quote_accepted','quote_run_declined','callback_opened'] LOOP
+  INSERT INTO public.job_events(job_id,event_type,detail_json,created_at) VALUES
+   ('08030000-0000-4000-8000-000000000102','status_changed','{"new_status":"complete"}','2026-11-22 15:59:59Z'),
+   ('08030000-0000-4000-8000-000000000102',event_kind,'{}','2026-11-24 01:00Z');
+  PERFORM pg_temp.zztest_assert(jsonb_array_length(public.trade_pay_run_standing_checks(org,ids,'before_xero')->'stopped_invoices')=1,
+   'later implied working status was ignored: '||event_kind);
+  DELETE FROM public.job_events WHERE job_id='08030000-0000-4000-8000-000000000102';
+ END LOOP;
+ -- Cross-writer tied evidence cannot pick the convenient terminal row.
+ INSERT INTO public.job_events(job_id,event_type,detail_json,created_at) VALUES
+  ('08030000-0000-4000-8000-000000000102','status_changed','{"new_status":"complete"}','2026-11-22 15:59:59Z'),
+  ('08030000-0000-4000-8000-000000000102','status_change','{"status":"in_progress"}','2026-11-22 15:59:59Z');
+ PERFORM pg_temp.zztest_assert(jsonb_array_length(public.trade_pay_run_standing_checks(org,ids,'before_xero')->'stopped_invoices')=1,
+  'conflicting cross-writer tie was skipped');
+ DELETE FROM public.job_events WHERE job_id='08030000-0000-4000-8000-000000000102';
+ -- Make-safe cancel writes makesafe_cancelled, not a status event. Its
+ -- changed_at annotation is not a new source of finish-time authority.
+ UPDATE public.jobs SET status='cancelled' WHERE id='08030000-0000-4000-8000-000000000102';
+ INSERT INTO public.job_events(job_id,event_type,detail_json,created_at) VALUES
+  ('08030000-0000-4000-8000-000000000102','makesafe_cancelled',
+   '{"previous_status":"accepted","changed_at":"2026-11-22T15:59:59Z"}','2026-11-22 15:59:59Z');
+ r := public.trade_pay_run_standing_checks(org,ids,'before_xero');
+ c := pg_temp.zztest_check(r,'no_paid_line_without_work_order');
+ PERFORM pg_temp.zztest_assert(jsonb_array_length(r->'stopped_invoices')=1
+  AND r#>>'{stopped_invoices,0,invoice_id}'=i2::text
+  AND r#>>'{stopped_invoices,0,stops,0,code}'='standing_no_paid_line_without_work_order'
+  AND (c->>'skipped')::int=0 AND r->'run_blocked'='false','make-safe cancel without status evidence was skipped');
+ DELETE FROM public.job_events WHERE job_id='08030000-0000-4000-8000-000000000102';
  -- No event, a missing start, or a later contradictory status never skips.
  r := public.trade_pay_run_standing_checks(org,ids,'before_xero');
  PERFORM pg_temp.zztest_assert(jsonb_array_length(r->'stopped_invoices')=1,'missing finish event was skipped');
@@ -273,6 +324,14 @@ BEGIN
   PERFORM public.trade_pay_run_standing_checks(org,ids,'before_xero');
   RAISE EXCEPTION 'ZZTEST failed settings read returned clean';
  EXCEPTION WHEN undefined_table THEN NULL; END;
+ -- An unreadable policy cannot silently erase the status-event vocabulary.
+ BEGIN
+  EXECUTE 'CREATE OR REPLACE FUNCTION public.job_cost_close_policy() RETURNS jsonb LANGUAGE sql IMMUTABLE AS $bad$ SELECT NULL::jsonb $bad$';
+  PERFORM public.trade_pay_run_standing_checks(org,ids,'before_xero');
+  RAISE EXCEPTION 'ZZTEST failed status policy returned clean';
+ EXCEPTION WHEN raise_exception THEN
+  IF SQLERRM<>'standing_status_events_unreadable' THEN RAISE; END IF;
+ END;
  -- A failed dependency read raises; it never supplies a clean empty answer.
  BEGIN
   ALTER VIEW public.v_job_cost_events RENAME TO zztest_standing_unreadable;
@@ -300,7 +359,8 @@ ANALYZE public.job_events;
 DO $$ DECLARE p jsonb; n jsonb; seen boolean := false; BEGIN
  EXPLAIN (ANALYZE,FORMAT JSON)
  SELECT e.created_at,e.detail_json FROM public.job_events e
- WHERE e.job_id='08030000-0000-4000-8000-000000000102' AND e.event_type='status_changed'
+ WHERE e.job_id='08030000-0000-4000-8000-000000000102'
+  AND (public.job_cost_close_policy()->'status_events') ? e.event_type
  ORDER BY e.created_at DESC NULLS FIRST FETCH FIRST 1 ROW WITH TIES INTO p;
  FOR n IN SELECT value FROM jsonb_path_query(p,'$.** ? (@."Relation Name" == "job_events")') value LOOP
   seen := true;
@@ -333,7 +393,7 @@ EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON)
    AND org_id='00000000-0000-0000-0000-000000000001')
  SELECT sum(c.amount_ex) FROM public.v_job_cost_events c JOIN inv i ON c.document_id=i.id::text
  WHERE c.is_actual AND c.source IN ('trade_line','trade_employer_super');
-\ir ../../../rollbacks/20261118060158_trade_pay_run_standing_checks_down.sql
+\ir ../../../rollbacks/20261118063223_trade_pay_run_standing_checks_down.sql
 SELECT pg_temp.zztest_assert(to_regprocedure('public.trade_pay_run_standing_checks(uuid,uuid[],text)') IS NULL,'rollback left the function');
 
 ROLLBACK;

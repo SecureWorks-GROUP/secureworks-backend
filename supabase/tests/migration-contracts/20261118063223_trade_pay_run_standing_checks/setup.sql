@@ -73,3 +73,10 @@ CREATE FUNCTION public.job_work_order_billed_invoice_statuses() RETURNS text[] L
  SELECT ARRAY['pending_acknowledgment','queried','acknowledged','pending_ops_review','approved','pushed_to_xero','paid']::text[]
 $$;
 \endif
+
+-- The registered stack keeps its real policy. Standalone runs load the exact
+-- policy body from main's job_cost_close migration, not a second event list.
+SELECT to_regprocedure('public.job_cost_close_policy()') IS NULL AS need_close_policy \gset
+\if :need_close_policy
+\ir job_cost_close_policy.sql
+\endif

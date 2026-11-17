@@ -13,6 +13,7 @@ DECLARE
  v_work_orders uuid[];
  v_changes jsonb := '{}'::jsonb;
  v_result jsonb;
+ v_status_events jsonb;
 /* block */ BEGIN
  IF p_stage IS NULL OR p_stage NOT IN ('before_xero','after_xero') THEN
   RAISE EXCEPTION 'standing_stage_invalid';
@@ -28,6 +29,11 @@ DECLARE
    WHERE i.id=ANY(v_ids) AND i.org_id=p_org_id AND i.invoice_kind IN ('standard','follow_on'))
    OR array_position(v_ids,NULL) IS NOT NULL THEN
   RAISE EXCEPTION 'standing_invoice_not_found';
+ END IF;
+ -- Reuse Job Profit's event vocabulary, including implied callback statuses.
+ SELECT public.job_cost_close_policy()->'status_events' INTO v_status_events;
+ IF jsonb_typeof(v_status_events) IS DISTINCT FROM 'object' THEN
+  RAISE EXCEPTION 'standing_status_events_unreadable';
  END IF;
  -- idx_inv_lines_invoice and idx_wo_job restrict this to the selected jobs.
  SELECT coalesce(array_agg(DISTINCT w.id),'{}'::uuid[]) INTO v_work_orders
@@ -62,17 +68,18 @@ DECLARE
    FROM public.work_orders wo WHERE wo.job_id=j.id AND wo.org_id=p_org_id
     AND wo.kind='job' AND wo.status IN ('draft','approved')
   ) w ON true
-  -- jobs.completed_at is stamped for complete, not every terminal status, and
-  -- can survive a reopen. Use the latest recorded status_changed event instead:
-  -- new_status is updateJobStatus's shape; to is the other existing writer shape.
-  -- job_events_job_created_idx bounds this to selected jobs. Equal-time events
-  -- must all agree with today's status; missing/undated/conflicting facts fail closed.
+  -- jobs.completed_at can survive a reopen. Read the newest status event in
+  -- job_cost_close_policy, resolving the same four payload keys and implied
+  -- status. A make-safe cancellation with no such event remains unproved.
+  -- job_events_job_created_idx bounds selected jobs. Equal-time events must
+  -- all agree with today's status; missing/undated/conflicting facts fail closed.
   LEFT JOIN LATERAL (
-   SELECT bool_and(coalesce(coalesce(e.detail_json->>'new_status',e.detail_json->>'to')=j.status,false))
+   SELECT bool_and(coalesce(coalesce(e.detail_json->>'new_status',e.detail_json->>'to',
+      e.detail_json->>'status',e.detail_json->>'job_status',v_status_events->>e.event_type)=j.status,false))
     AND (max(e.created_at) AT TIME ZONE 'Australia/Perth')::date
       < (SELECT s.inclusive_super_from FROM public.trade_pay_settings s WHERE s.id=1) before_rule
-   FROM (SELECT e.created_at,e.detail_json FROM public.job_events e
-    WHERE e.job_id=j.id AND e.event_type='status_changed'
+   FROM (SELECT e.created_at,e.detail_json,e.event_type FROM public.job_events e
+    WHERE e.job_id=j.id AND v_status_events ? e.event_type
     ORDER BY e.created_at DESC NULLS FIRST FETCH FIRST 1 ROW WITH TIES) e
   ) finish ON true
   WHERE j.id IN (SELECT job_id FROM ln WHERE job_id IS NOT NULL) AND j.org_id=p_org_id
