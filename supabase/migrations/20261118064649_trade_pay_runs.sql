@@ -126,6 +126,19 @@ CREATE POLICY trade_pay_run_invoices_service ON public.trade_pay_run_invoices
 
 -- ── 4. approve a run ────────────────────────────────────────────────────────
 
+-- Rule 15: this function is new (absent on main and live, 18 Nov). A re-apply
+-- accepts only its own body; any other body at this signature belongs to
+-- someone else and is never replaced (or later dropped by the rollback).
+DO $guard$
+DECLARE
+  v_md5 text := (SELECT md5(p.prosrc) FROM pg_proc p
+                 WHERE p.oid = to_regprocedure('public.approve_trade_pay_run(uuid,date,uuid,jsonb)'));
+/* block */ BEGIN
+  IF v_md5 IS NOT NULL AND v_md5 <> '422a37ee4add48ff6bd7ca221d9fda7f' THEN
+    RAISE EXCEPTION 'approve_trade_pay_run: Rule 15, another body is installed (md5 %); refusing to replace it', v_md5;
+  END IF;
+END;
+$guard$;
 CREATE OR REPLACE FUNCTION public.approve_trade_pay_run(
   p_org_id uuid, p_week_start date, p_actor uuid, p_snapshot jsonb
 ) RETURNS jsonb
@@ -301,6 +314,16 @@ END;
 $fn$;
 REVOKE ALL ON FUNCTION public.approve_trade_pay_run(uuid, date, uuid, jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.approve_trade_pay_run(uuid, date, uuid, jsonb) TO service_role;
+
+-- The guard's md5 is this file's own body.
+DO $own$
+/* block */ BEGIN
+  IF (SELECT md5(p.prosrc) FROM pg_proc p WHERE p.oid = to_regprocedure('public.approve_trade_pay_run(uuid,date,uuid,jsonb)'))
+     IS DISTINCT FROM '422a37ee4add48ff6bd7ca221d9fda7f' THEN
+    RAISE EXCEPTION 'approve_trade_pay_run: Rule 15 guard md5 is not this migration''s body';
+  END IF;
+END;
+$own$;
 
 -- ── 4a. the one office kind (phase 2 owns the list) ─────────────────────────
 

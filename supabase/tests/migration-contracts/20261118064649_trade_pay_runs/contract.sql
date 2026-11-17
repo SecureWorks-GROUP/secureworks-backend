@@ -76,6 +76,35 @@ SELECT pg_temp.zz_assert((SELECT count(*) FROM pg_attribute WHERE attrelid = 'pu
   AND attname IN ('pay_run_id','reviewed_at','reviewed_by')
   AND col_description(attrelid, attnum) LIKE 'P1-10.1:%') = 3, 'all three columns owned after the refusals');
 
+-- Rule 15 collision: another body at approve_trade_pay_run's signature is
+-- never replaced by a re-apply, nor dropped by the rollback. Same savepoint
+-- pattern as above; the captured last error is the refusal itself.
+\set ON_ERROR_STOP off
+\set ON_ERROR_ROLLBACK on
+SAVEPOINT zz_collide;
+CREATE OR REPLACE FUNCTION public.approve_trade_pay_run(p_org_id uuid, p_week_start date, p_actor uuid, p_snapshot jsonb)
+RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
+\ir ../../../migrations/20261118064649_trade_pay_runs.sql
+ROLLBACK TO SAVEPOINT zz_collide;
+SELECT :'LAST_ERROR_MESSAGE' AS collide_apply_error \gset
+SAVEPOINT zz_collide;
+CREATE OR REPLACE FUNCTION public.approve_trade_pay_run(p_org_id uuid, p_week_start date, p_actor uuid, p_snapshot jsonb)
+RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
+\ir ../../../rollbacks/20261118064649_trade_pay_runs_down.sql
+SELECT to_regclass('public.trade_pay_runs') IS NOT NULL
+  AND to_regprocedure('public.approve_trade_pay_run(uuid,date,uuid,jsonb)') IS NOT NULL AS collide_kept \gset
+ROLLBACK TO SAVEPOINT zz_collide;
+SELECT :'LAST_ERROR_MESSAGE' AS collide_down_error \gset
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP on
+SELECT pg_temp.zz_assert(:'collide_apply_error' LIKE '%approve_trade_pay_run: Rule 15, another body is installed%',
+  'a re-apply must refuse another approve body: ' || :'collide_apply_error');
+SELECT pg_temp.zz_assert(:'collide_down_error' LIKE '%approve_trade_pay_run is another body; refusing to drop it%'
+  AND :'collide_kept'::boolean, 'the rollback must refuse to drop another approve body: ' || :'collide_down_error');
+SELECT pg_temp.zz_assert((SELECT md5(prosrc) FROM pg_proc
+  WHERE oid = 'public.approve_trade_pay_run(uuid,date,uuid,jsonb)'::regprocedure) = '422a37ee4add48ff6bd7ca221d9fda7f',
+  'own approve body after the collision proofs');
+
 -- Historical fixtures need not satisfy today's write guards; the guards stay
 -- on the run tables, and every foreign key and unique constraint stays.
 DO $$ DECLARE t text; c record; BEGIN
@@ -346,6 +375,31 @@ SELECT pg_temp.zz_plan(format($q$SELECT 1 FROM public.trade_pay_run_invoices ri 
   (SELECT id FROM public.trade_invoices WHERE invoice_number = 'ZZTEST-BULK-5'))) AS run_plan \gset
 SELECT pg_temp.zz_assert(:'run_plan' NOT LIKE '%Seq Scan on trade_pay_run_invoices%', 'paid-run check scanned the run rows: ' || :'run_plan');
 SELECT pg_temp.zz_assert((SELECT count(*) FROM public.trade_pay_run_invoices) = 20005, 'bulk run rows loaded');
+-- The approval's whole eligibility read (the moved-since-shown EXISTS: the
+-- snapshot join, the run check and the clean-invoice comparisons), as
+-- PL/pgSQL runs it: a generic plan with the snapshot as a parameter. Each
+-- table is read through an index, never scanned.
+SET LOCAL plan_cache_mode = force_generic_plan;
+PREPARE zz_eligibility(jsonb) AS
+SELECT EXISTS (
+  SELECT 1 FROM public.trade_invoices i
+  JOIN jsonb_array_elements($1->'invoices') e ON (e->>'invoice_id')::uuid = i.id
+  WHERE i.pay_run_id IS NOT NULL
+     OR EXISTS (SELECT 1 FROM public.trade_pay_run_invoices ri
+                WHERE ri.invoice_id = i.id AND ri.verdict = 'clean')
+     OR (e->>'verdict' = 'clean' AND (
+          i.status NOT IN ('pending_ops_review', 'queried')
+          OR i.xero_bill_id IS NOT NULL
+          OR i.super_amount <> (e->>'super_amount')::numeric
+          OR round(i.net_pay + CASE WHEN i.gst_on THEN i.gst ELSE 0 END
+                   - coalesce(i.recurring_deduction_amount, 0), 2) <> (e->>'pays')::numeric)));
+SELECT pg_temp.zz_plan(format('EXECUTE zz_eligibility(%L)', jsonb_build_object('check_rule', 'v2', 'invoices',
+  (SELECT jsonb_agg(jsonb_build_object('invoice_id', i.id, 'verdict', 'clean', 'pays', 1, 'super_amount', 0))
+   FROM public.trade_invoices i WHERE i.invoice_number IN ('ZZTEST-BULK-7', 'ZZTEST-BULK-8007', 'ZZTEST-BULK-15007'))))) AS elig_plan \gset
+SELECT pg_temp.zz_assert(:'elig_plan' NOT LIKE '%Seq Scan%' AND :'elig_plan' LIKE '%Index%trade_invoices%'
+  AND :'elig_plan' LIKE '%Index%trade_pay_run_invoices%', 'eligibility read is not index bound: ' || :'elig_plan');
+DEALLOCATE zz_eligibility;
+RESET plan_cache_mode;
 
 ROLLBACK;
 \echo 'PASS: P1-10.1 pay run record, approval, refusals, ruling A, plans and kind row.'
