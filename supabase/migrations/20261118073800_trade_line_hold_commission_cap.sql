@@ -11,7 +11,7 @@
 -- (md5(prosrc) c2aea6de53237a5c3ae7d166d153cac5); a re-run at this
 -- migration's body returns; any other body refuses.
 -- No table write, no schedule, no switch change.
--- Rollback: supabase/rollbacks/20261118063000_trade_line_hold_commission_cap_down.sql.
+-- Rollback: supabase/rollbacks/20261118073800_trade_line_hold_commission_cap_down.sql.
 DO $patch$ DECLARE d text; old_text text; new_text text; body_md5 text; BEGIN
   d := pg_get_functiondef('public.assert_job_commission_cap(uuid,uuid)'::regprocedure);
   SELECT md5(prosrc) INTO body_md5 FROM pg_proc

@@ -1,4 +1,4 @@
--- Rollback for 20261118063000_trade_line_hold_commission_cap.sql: restore
+-- Rollback for 20261118073800_trade_line_hold_commission_cap.sql: restore
 -- main's assert_job_commission_cap body.
 DO $patch$ DECLARE d text; old_text text; new_text text; body_md5 text; BEGIN
   d := pg_get_functiondef('public.assert_job_commission_cap(uuid,uuid)'::regprocedure);
