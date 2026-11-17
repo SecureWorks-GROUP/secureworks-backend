@@ -1729,10 +1729,11 @@ Deno.test("ZZTEST repayment: remaining balance caps each week without changing s
     weekStart: THIS_WEEK, payable: 1000, repaymentsOn: true, balanceLeft: 50 });
   const base = calculateTradeInvoiceMoney({ grossEarned: 1000, gstOn: true, earningsDate: "2026-11-16" });
   const money = withTradeInvoiceRecurringDeduction(base, result.applied);
-  assertEquals([money.super_amount, money.gst], [base.super_amount, base.gst]);
+  assertEquals([money.super_amount, money.gst_amount], [base.super_amount, base.gst_amount]);
   const lines = splitTradeInvoiceXeroLines([{ Description: "ZZTEST work", Quantity: 1,
     UnitAmount: 1000, AccountCode: "ZZTEST-LABOUR", TaxType: "INPUT", Tracking: [] }], money, { superAccountCode: "ZZTEST-SUPER" });
-  const repayment = lines.find((line) => line.Description.startsWith("Repayment - "))!;
+  const repayment = lines.find((line) => line.Description?.startsWith("Repayment - "));
+  assert(repayment);
   assertEquals(repayment.AccountCode, "ZZTEST-ACCOUNT");
   assertEquals(repayment.TaxType, "NONE");
   assertEquals(repayment.Tracking, []);
