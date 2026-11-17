@@ -12,6 +12,7 @@ const words = {
     "Add a photo of the receipt first. A reimbursement needs its receipt.",
   reimbursement_rejected: "The office sent this receipt back.",
   reimbursement_already_claimed: "This receipt is already on an invoice.",
+  reimbursement_amount_unreadable: "Check the receipt amount first. It must be a positive number.",
 };
 export type ReimbursementSkip = {
   expense_receipt_id: string | null;
@@ -62,7 +63,28 @@ export function reimbursementReceiptRefusal(
       !String(receipt.receipt_photo_url || "").trim()) || receipt.no_receipt_reason) return "reimbursement_receipt_required";
   if (receipt.status === "rejected") return "reimbursement_rejected";
   if (receipt.xero_bill_id || claimed) return "reimbursement_already_claimed";
+  const amount = Number(receipt.total_amount);
+  if (!Number.isFinite(amount) || amount <= 0) return "reimbursement_amount_unreadable";
   return null;
+}
+
+// Both the picker and save count every retained line, including draft and
+// ops-reject. Only the save's server-selected replacement draft is exempt.
+export async function loadClaimedReimbursementReceipts(
+  client: any,
+  receiptIds: string[],
+  replacingDraftId: string | null = null,
+): Promise<Set<string>> {
+  if (!receiptIds.length) return new Set();
+  // trade_invoice_lines_one_receipt / expense_receipt_idx: caller supplies at
+  // most the 100-row picker page (save supplies one receipt).
+  const { data, error } = await client.from("trade_invoice_lines")
+    .select("expense_receipt_id, trade_invoice_id")
+    .in("expense_receipt_id", receiptIds);
+  if (error) throw new Error("Could not read the receipt's invoice claims");
+  return new Set<string>((data || []).filter((line: any) =>
+    !replacingDraftId || line.trade_invoice_id !== replacingDraftId
+  ).map((line: any) => String(line.expense_receipt_id)));
 }
 
 export async function receiptHasLiveTradeInvoice(
@@ -71,16 +93,19 @@ export async function receiptHasLiveTradeInvoice(
   replacingDraftId: string | null = null,
   draftsAreClaims = true,
 ): Promise<boolean> {
+  if (draftsAreClaims) {
+    return (await loadClaimedReimbursementReceipts(client, [receiptId], replacingDraftId)).has(receiptId);
+  }
+  // Switch-off expense-to-Xero compatibility: retain main's query and rule.
   // trade_invoice_lines_one_receipt bounds this read to one claim, in any status.
   const { data, error } = await client.from("trade_invoice_lines")
-    .select(draftsAreClaims ? "trade_invoice_id" : "trade_invoice_id, invoice:trade_invoices!inner(status)")
+    .select("trade_invoice_id, invoice:trade_invoices!inner(status)")
     .eq("expense_receipt_id", receiptId);
   if (error) throw new Error("Could not read the receipt's invoice claims");
   // Only a server-selected prior draft may be ignored for an atomic replacement.
   // The persist RPC rechecks its tenant, owner, week, status and Xero identity.
   return (data || []).some((line: any) => {
     if (replacingDraftId && line.trade_invoice_id === replacingDraftId) return false;
-    if (draftsAreClaims) return true;
     // Compatibility for the expense-to-Xero route while the switch is off.
     const invoice = Array.isArray(line.invoice) ? line.invoice[0] : line.invoice;
     return !invoice || !["draft", "ops-reject"].includes(String(invoice.status));
@@ -112,8 +137,9 @@ export async function resolveReimbursementExtras(client: any, input: {
       if (error) throw new Error("Could not read the reimbursement receipt");
       receipt = data;
       code = reimbursementReceiptRefusal(receipt, input.userId, false);
-      if (!code && await receiptHasLiveTradeInvoice(client, id, input.replacingDraftId)) {
-        code = "reimbursement_already_claimed";
+      if (!code || code === "reimbursement_amount_unreadable") {
+        code = reimbursementReceiptRefusal(receipt, input.userId,
+          await receiptHasLiveTradeInvoice(client, id, input.replacingDraftId));
       }
     }
     if (code) {
@@ -121,10 +147,6 @@ export async function resolveReimbursementExtras(client: any, input: {
       continue;
     }
     const amount = Number(receipt.total_amount);
-    // Never manufacture a positive claim from an unreadable receipt total.
-    if (!Number.isFinite(amount) || amount <= 0) {
-      throw new Error("The receipt amount must be positive");
-    }
     const hold = !receipt.job_id
       ? "no_job"
       : receipt.status === "approved"

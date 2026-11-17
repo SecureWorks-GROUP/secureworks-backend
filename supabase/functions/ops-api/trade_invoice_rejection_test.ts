@@ -12,10 +12,12 @@ async function action(client: any, invoiceId = "ZZTEST-invoice") {
   class ApiError extends Error {
     constructor(message: string, public status: number) { super(message); }
   }
-  return await run({ client, body: { invoice_id: invoiceId, note: "ZZTEST correct the week" },
+  return await run({ client, body: { invoice_id: invoiceId, note: "ZZTEST correct the week", actor: "ZZTEST-spoof" },
     json: (value: unknown) => value, ApiError, officeSentBackNote,
+    authUser: { id: "ZZTEST-office" },
+    reviewActorLabel: (user: any) => `user:${user.id}`,
     tradeInvoiceHasExternalXeroIdentity: (i: any) => Boolean(i.xero_bill_id || i.xero_pushed_at),
-    rejectTradeInvoiceStorage: async (...args: [any, string, string]) =>
+    rejectTradeInvoiceStorage: async (...args: [any, string, string, string]) =>
       (await import("./trade_invoice_rejection.ts")).rejectTradeInvoiceStorage(...args),
   });
 }
@@ -44,7 +46,7 @@ function store(options: { enabled?: boolean; flagError?: boolean; rpcError?: boo
       rpc(name: string, args: any) {
         rpcCalls++;
         assertEquals(name, "reject_trade_invoice_v1");
-        assertEquals(args, { p_invoice_id: invoice.id, p_note: officeSentBackNote("ZZTEST correct the week") });
+        assertEquals(args, { p_invoice_id: invoice.id, p_note: officeSentBackNote("ZZTEST correct the week"), p_actor: "user:ZZTEST-office" });
         if (options.rpcError) return Promise.resolve({ data: null, error: { message: "ZZTEST release failed" } });
         if (options.raced) return Promise.resolve({ data: null });
         invoice.status = "ops-reject";
@@ -120,4 +122,11 @@ Deno.test("FU17 hourly submit passes labour, group share and receipt to the same
   });
   assertEquals(id, "ZZTEST-saved");
   assertEquals(saves, 1);
+});
+
+Deno.test("cx-reimb-rest rejection passes the office session actor despite a request actor", async () => {
+  const s = store({ enabled: true });
+  await action(s.client);
+  // The RPC fake asserts p_actor is user:ZZTEST-office, never body.actor.
+  assertEquals(s.rpcCalls, 1);
 });
