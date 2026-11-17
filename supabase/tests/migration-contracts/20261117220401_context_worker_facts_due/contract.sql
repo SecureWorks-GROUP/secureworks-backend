@@ -6,7 +6,9 @@ INSERT INTO public.automation_switches (id, all_stop, extraction, attribution, c
 VALUES (1, false, true, false, false);
 DELETE FROM public.context_extraction_event_receipts;
 DELETE FROM public.context_catchup_reads;
-DELETE FROM public.context_catchup_jobs;
+-- Earlier cases roll their fixtures back, leaving dead index entries. Give
+-- this plan fixture fresh storage, without forcing the planner or pinning names.
+TRUNCATE public.context_catchup_jobs;
 DELETE FROM public.context_model_call_reservations;
 DELETE FROM public.context_extraction_runs;
 DELETE FROM public.business_events;
