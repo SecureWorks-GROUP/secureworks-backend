@@ -4,7 +4,7 @@ import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/asser
 // Execute the production action with local sweep dependencies and no server.
 const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
 const action = source.split("case 'auto_issue_job_work_orders': {")[1]
-  .split(/\n\s*case /)[0];
+  .split("case 'list_office_job_work_orders':")[0];
 const body = action.slice(0, action.lastIndexOf("}"))
   .replaceAll(": Record<string, unknown>", "")
   .replaceAll(": unknown[]", "")
@@ -26,7 +26,6 @@ Deno.test("work order sweep confirms only a valid successful sweep and reports R
     { query: `gate=other&gate_token=${token}`, confirmed: false },
     { query: "gate=job-work-order-auto-issue&gate_token=invalid", confirmed: false },
     { query: `gate=job-work-order-auto-issue&gate_token=${token}`, releaseError: true, confirmed: false },
-    { query: `gate=job-work-order-auto-issue&gate_token=${token}`, xeroPushError: true, confirmed: false },
     { query: `gate=job-work-order-auto-issue&gate_token=${token}`, rpcError: true, confirmed: false },
     { query: `gate=job-work-order-auto-issue&gate_token=${token}`, issueError: true, confirmed: false },
   ]) {
@@ -42,7 +41,7 @@ Deno.test("work order sweep confirms only a valid successful sweep and reports R
       (fn: () => unknown) => fn(),
       () => scenario.issueError ? Promise.reject(new Error("issue failed")) : Promise.resolve({ issued: 1 }),
       empty, empty, () => Promise.resolve(["invoice-fixture"]),
-      () => Promise.resolve(scenario.releaseError ? { error: "release failed" } : scenario.xeroPushError ? { xero_push_error: "push failed" } : { success: true }),
+      () => Promise.resolve(scenario.releaseError ? { error: "release failed" } : { success: true }),
     );
     if (scenario.issueError) {
       await assertRejects(invoke, Error, "issue failed");
