@@ -8,6 +8,7 @@ DO $$
 DECLARE
   proposal uuid;
   expired uuid;
+  expired_count integer;
   claimed public.agent_action_proposals;
   operator_id uuid := '00000000-0000-4000-8000-000000000401';
 BEGIN
@@ -29,7 +30,8 @@ BEGIN
   VALUES ('agent:test', 'api_key', 'reconcile_payment', '{}', 'expired-fixture', 'xero_payment', 'Record the requested payment.', now() - interval '1 day') RETURNING id INTO expired;
   SELECT * INTO claimed FROM public.agent_action_proposal_claim(expired, operator_id);
   IF claimed.id IS NOT NULL THEN RAISE EXCEPTION 'proposal contract: expired claim accepted'; END IF;
-  IF public.agent_action_proposals_expire() <> 1 OR (SELECT status FROM public.agent_action_proposals WHERE id = expired) <> 'expired' THEN
+  expired_count := public.agent_action_proposals_expire();
+  IF expired_count <> 1 OR (SELECT status FROM public.agent_action_proposals WHERE id = expired) <> 'expired' THEN
     RAISE EXCEPTION 'proposal contract: expiry failed';
   END IF;
   BEGIN
