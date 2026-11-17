@@ -1,0 +1,374 @@
+[
+  {
+    "id": 1,
+    "repo": "B",
+    "file": "supabase/functions/ops-ai/index.ts",
+    "line": [
+      3525,
+      3605,
+      3673,
+      3691
+    ],
+    "function": [
+      "<request handler>",
+      "<request handler>",
+      "<request handler>",
+      "<request handler>"
+    ],
+    "provider": "Anthropic",
+    "model": "per call: Sonnet 4 or Haiku 4.5",
+    "what": "Ops dashboard chat, up to four calls per message",
+    "runs": "per chat message",
+    "fate": "Switch off after ops_chat_engine_agent_v1 is on (P4-08.4); then remove this function key",
+    "safe_without_key": "No: preserve the key until chat cutover",
+    "other_repository_sites": []
+  },
+  {
+    "id": 2,
+    "repo": "B",
+    "file": "supabase/functions/ops-ai/index.ts",
+    "line": [
+      2699
+    ],
+    "function": [
+      "evaluateAction"
+    ],
+    "provider": "Anthropic",
+    "model": "claude-haiku-4-5-20251001",
+    "what": "Judges a proposed chat action",
+    "runs": "per chat action",
+    "fate": "Switch off with row 1",
+    "safe_without_key": "No: preserve action safety until cutover",
+    "other_repository_sites": []
+  },
+  {
+    "id": 3,
+    "repo": "B",
+    "file": "supabase/functions/agent-runner/index.ts",
+    "line": [
+      872,
+      895
+    ],
+    "function": [
+      "<request handler>",
+      "<request handler>"
+    ],
+    "provider": "Anthropic",
+    "model": "claude-sonnet-4-20250514",
+    "what": "Agent turn in edge function; executeConfirmedAction is a separate branch",
+    "runs": "on request; count not knowable from code",
+    "fate": "Switch off if no caller remains; else move callers to subscription service chat",
+    "safe_without_key": "No: model turn requires key",
+    "other_repository_sites": []
+  },
+  {
+    "id": 4,
+    "repo": "B",
+    "file": "supabase/functions/daily-digest/index.ts",
+    "line": [
+      97
+    ],
+    "function": [
+      "generateNarrative"
+    ],
+    "provider": "Anthropic",
+    "model": "claude-sonnet-4-20250514",
+    "what": "Daily digest prose paragraph",
+    "runs": "daily; cron daily-digest at 0 23 * * *",
+    "fate": "Move to subscription runner",
+    "safe_without_key": "Yes: empty paragraph; digest continues",
+    "other_repository_sites": []
+  },
+  {
+    "id": 5,
+    "repo": "B",
+    "file": "supabase/functions/daily-digest/index.ts",
+    "line": [
+      322,
+      427
+    ],
+    "function": [
+      "generateCoachingInsights",
+      "generateObservationReport"
+    ],
+    "provider": "Anthropic",
+    "model": "Sonnet 4; Haiku 4.5",
+    "what": "Coaching and observation paragraphs",
+    "runs": "weekly code paths; exact count not knowable",
+    "fate": "Replace with code using computed counts",
+    "safe_without_key": "Yes: coaching null; observation code-built fallback",
+    "other_repository_sites": []
+  },
+  {
+    "id": 6,
+    "repo": "B",
+    "file": "supabase/functions/daily-digest/index.ts",
+    "line": [
+      898,
+      1088,
+      1235,
+      1395
+    ],
+    "function": [
+      "generateWeeklyLetter",
+      "generateWeeklyPulse",
+      "generateFinancialSnapshot",
+      "_dailyDigestRequestHandlerForTest"
+    ],
+    "provider": "Anthropic",
+    "model": "claude-sonnet-4-20250514",
+    "what": "Weekly letter, pulse and financial snapshot prose",
+    "runs": "weekly code paths; manual requests also exist",
+    "fate": "Move to subscription runner; money figures only from books lines",
+    "safe_without_key": "Partial: empty letter and computed pulse/snapshot survive; financial brief requires key",
+    "other_repository_sites": []
+  },
+  {
+    "id": 7,
+    "repo": "B",
+    "file": "supabase/functions/reporting-api/index.ts",
+    "line": [
+      4330
+    ],
+    "function": [
+      "computeJobIntelligence"
+    ],
+    "provider": "Anthropic",
+    "model": "claude-haiku-4-5-20251001",
+    "what": "Summary of one job",
+    "runs": "per request",
+    "fate": "Replace with code reading job_page_get",
+    "safe_without_key": "Yes: model skipped; deterministic unavailable summary",
+    "other_repository_sites": []
+  },
+  {
+    "id": 8,
+    "repo": "B",
+    "file": "supabase/functions/ops-api/index.ts",
+    "line": [
+      33551
+    ],
+    "function": [
+      "_reextractExtractFields"
+    ],
+    "provider": "Anthropic",
+    "model": "claude-haiku-4-5-20251001",
+    "what": "Re-reads make-safe documents into fields",
+    "runs": "per re-extract request",
+    "fate": "Move to worker read-picture document reader",
+    "safe_without_key": "Degraded: deterministic parsing remains; extraction marked degraded",
+    "other_repository_sites": []
+  },
+  {
+    "id": 9,
+    "repo": "B",
+    "file": "supabase/functions/ops-api/index.ts",
+    "line": [
+      36265
+    ],
+    "function": [
+      "retiredPaidAiIntakeImplementation"
+    ],
+    "provider": "Anthropic",
+    "model": "claude-haiku-4-5-20251001",
+    "what": "Retired intake reader",
+    "runs": "not determined",
+    "fate": "Switch off: delete only after caller findings resolved",
+    "safe_without_key": "Not a live entry point; preserve manual-test export here",
+    "other_repository_sites": []
+  },
+  {
+    "id": 10,
+    "repo": "B",
+    "file": "supabase/functions/ops-api/index.ts",
+    "line": [
+      60350
+    ],
+    "function": [
+      "analyseSupplierQuote"
+    ],
+    "provider": "Anthropic",
+    "model": "claude-sonnet-4-20250514",
+    "what": "Reads supplier quote documents",
+    "runs": "per upload",
+    "fate": "Move to worker document reader",
+    "safe_without_key": "No: extraction needs key",
+    "other_repository_sites": []
+  },
+  {
+    "id": 11,
+    "repo": "B",
+    "file": "supabase/functions/ops-api/index.ts",
+    "line": [
+      63743
+    ],
+    "function": [
+      "submitExpense"
+    ],
+    "provider": "Anthropic",
+    "model": "claude-haiku-4-5-20251001",
+    "what": "Reads receipt photo after receipt saved",
+    "runs": "per receipt",
+    "fate": "Move to worker picture reader; save first and fill fields later",
+    "safe_without_key": "Yes: receipt inserted before optional extraction",
+    "other_repository_sites": []
+  },
+  {
+    "id": 12,
+    "repo": "B",
+    "file": "supabase/functions/ops-api/index.ts",
+    "line": [
+      66177
+    ],
+    "function": [
+      "_callClaude"
+    ],
+    "provider": "Anthropic",
+    "model": "caller-selected model",
+    "what": "Debt follow-up drafts",
+    "runs": "per draft request",
+    "fate": "Move to subscription runner; drafts only, never AI sends",
+    "safe_without_key": "No: helper throws without key",
+    "other_repository_sites": []
+  },
+  {
+    "id": 13,
+    "repo": "B",
+    "file": "supabase/functions/transcribe-call/index.ts",
+    "line": [
+      24,
+      58
+    ],
+    "function": [
+      "<module>",
+      "<module>"
+    ],
+    "provider": "OpenAI",
+    "model": "whisper-1",
+    "what": "Call recording transcription",
+    "runs": "per recorded call",
+    "fate": "P4-08.8 compares routes for one week; director decides switch off or named exception",
+    "safe_without_key": "No paid transcript; recording capture is separate",
+    "other_repository_sites": [
+      {
+        "file": "src/automation/transcribe-worker.ts",
+        "line": [
+          161
+        ],
+        "function": [
+          "transcribeAudio"
+        ]
+      }
+    ]
+  },
+  {
+    "id": 14,
+    "repo": "J",
+    "file": "src/utils/embeddings.ts",
+    "line": [
+      20
+    ],
+    "function": [
+      "getClient"
+    ],
+    "provider": "OpenAI",
+    "model": "text-embedding-3-small",
+    "what": "Memory search vectors",
+    "runs": "per memory write and search",
+    "fate": "Ends with subscription chat rebuild; outside-chat callers listed below",
+    "safe_without_key": "No: throws; some callers catch and omit vectors",
+    "other_repository_sites": []
+  },
+  {
+    "id": 15,
+    "repo": "J",
+    "file": "src/orchestrator/commitment-detector-v2.ts",
+    "line": [
+      27
+    ],
+    "function": [
+      "getAnthropic"
+    ],
+    "provider": "Anthropic",
+    "model": "claude-haiku-4-5-20251001",
+    "what": "Detects promises in messages",
+    "runs": "not determined",
+    "fate": "Switch off: notes reader replaces it; delete if caller search clear",
+    "safe_without_key": "No: client requires key",
+    "other_repository_sites": []
+  },
+  {
+    "id": 16,
+    "repo": "J",
+    "file": "src/automation/context-extractor.ts",
+    "line": [
+      59
+    ],
+    "function": [
+      "anth"
+    ],
+    "provider": "Anthropic",
+    "model": "claude-haiku-4-5-20251001",
+    "what": "Older fact extractors",
+    "runs": "not determined",
+    "fate": "Switch off: retired fact lanes; preserve shared subscription helpers",
+    "safe_without_key": "No for paid classifier; injected subscription classifier is separate",
+    "other_repository_sites": [
+      {
+        "file": "src/automation/context-fact-extractor.ts",
+        "line": [
+          84
+        ],
+        "function": [
+          "anth"
+        ]
+      },
+      {
+        "file": "src/automation/context-fact-extractor-v2.ts",
+        "line": [
+          285
+        ],
+        "function": [
+          "anth"
+        ]
+      }
+    ]
+  },
+  {
+    "id": 17,
+    "repo": "J",
+    "file": "src/agent.ts",
+    "line": [
+      45
+    ],
+    "function": [
+      "<module>"
+    ],
+    "provider": "Anthropic",
+    "model": "per-module chat, triage and consolidation configuration",
+    "what": "Chat, email triage and memory consolidation",
+    "runs": "per chat, email and consolidation run",
+    "fate": "Moved by P4-08.2, P4-08.3 and P4-08.5; cutover not observed here",
+    "safe_without_key": "No for old engine; use follow-up cutovers",
+    "other_repository_sites": [
+      {
+        "file": "src/channels/email/email-processor.ts",
+        "line": [
+          58
+        ],
+        "function": [
+          "getAnthropic"
+        ]
+      },
+      {
+        "file": "src/workers/memory-consolidation.ts",
+        "line": [
+          38
+        ],
+        "function": [
+          "getAnthropic"
+        ]
+      }
+    ]
+  }
+]
