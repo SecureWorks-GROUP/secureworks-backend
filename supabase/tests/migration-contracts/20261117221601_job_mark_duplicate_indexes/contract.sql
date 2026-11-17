@@ -1,3 +1,7 @@
+-- Stand up each prerequisite in order before asserting the cleanup contract.
+\ir ../../../migrations/20261117195401_pipeline_newest_job_mark.sql
+\ir ../../../migrations/20261117210101_context_worker_mark_reads.sql
+\ir ../../../migrations/20261117221601_job_mark_duplicate_indexes.sql
 BEGIN;
 DO $check$
 BEGIN
