@@ -21,15 +21,15 @@ BEGIN
   END IF;
 
   -- Neither legacy writer has to know about the new fields.
-  INSERT INTO public.trade_invoices (invoice_number)
-  VALUES ('ZZTEST-AUTOFILL-NEW') RETURNING id INTO invoice_id;
+  INSERT INTO public.trade_invoices (invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay)
+  VALUES ('ZZTEST-AUTOFILL-NEW', false, 0.12, 0, 0, 0) RETURNING id INTO invoice_id;
   IF NOT EXISTS (SELECT 1 FROM public.trade_invoices WHERE id = invoice_id
       AND auto_sent = false AND accepted_untouched IS NULL
       AND confirm_seconds IS NULL AND office_sent_back_at IS NULL) THEN
     RAISE EXCEPTION 'old-shape invoice insert lost its defaults';
   END IF;
-  INSERT INTO public.trade_invoice_lines (trade_invoice_id)
-  VALUES (invoice_id);
+  INSERT INTO public.trade_invoice_lines (trade_invoice_id, line_total_ex)
+  VALUES (invoice_id, 0);
   IF NOT EXISTS (SELECT 1 FROM public.trade_invoice_lines
       WHERE trade_invoice_id = invoice_id
         AND suggested IS NULL AND changed_from_suggestion IS NULL) THEN
