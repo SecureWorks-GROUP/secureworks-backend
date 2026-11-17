@@ -43,6 +43,7 @@ import { incrementalModifiedSince } from './sync_window.ts'
 import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { syncSupplierCreditNotes } from './supplier_credit_notes.ts'
 import { billCostDocument, collectBillCostDocument } from './cost_lines.ts'
+import { handleCostLinesBackfill } from './cost_lines_backfill.ts'
 import { syncCustomerAllocations } from './customer_allocations.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { BILLS_WINDOW_COLUMNS, readBillsInWindow } from './bills_window_read.ts'
@@ -226,6 +227,8 @@ if (import.meta.main) serve(async (req: Request) => {
       return json({ skipped: true, reason: 'automation_lane_disabled', lane })
     }
     switch (action) {
+      case 'cost_lines_backfill_documents':
+        return await handleCostLinesBackfill(req, sb, DEFAULT_ORG_ID, SUPABASE_SERVICE_KEY)
       case 'token_refresh':
         return json(await refreshToken(sb))
       case 'sync_invoices':
