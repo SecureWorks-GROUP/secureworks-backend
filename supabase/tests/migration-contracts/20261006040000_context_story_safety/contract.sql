@@ -765,7 +765,15 @@ BEGIN
  END IF;
 END $ninthpure$;
 
+-- (client story saved, 20261117090000) replaced the client story since, so it builds no job story and
+-- lists no open items: its down goes first, inside this transaction only, so the client story checks
+-- below read this migration's body.
+SELECT coalesce(obj_description(to_regprocedure('public.context_client_story(uuid,timestamptz)'), 'pg_proc'), '')
+       LIKE '%(client story saved, 20261117090000)%' AS client_story_saved_live \gset
 BEGIN;
+\if :client_story_saved_live
+\ir ../../../rollbacks/20261117090000_context_client_story_saved_down.sql
+\endif
 SET LOCAL session_replication_role = replica;
 -- The fixtures are read as of Wed 7 Oct 2026 10:00 Perth: a fixture row that names no capture
 -- time was captured the day they were written (6 Oct), never the day the suite runs, or every
@@ -3370,6 +3378,11 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_row_unrea
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
        LIKE '%(record scope, 20261011130000)%' AS record_scope_live \gset
 BEGIN;
+-- (client story saved, 20261117090000) replaced the client story since: its down goes first, as this
+-- migration's guard refuses while a later body is live.
+\if :client_story_saved_live
+\ir ../../../rollbacks/20261117090000_context_client_story_saved_down.sql
+\endif
 \if :record_scope_live
 \ir ../../../rollbacks/20261011130000_context_record_scope_down.sql
 \endif

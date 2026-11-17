@@ -575,6 +575,13 @@ SELECT to_regprocedure('public.context_finished_wake_hours()') IS NOT NULL AS fi
 \ir ../../../rollbacks/20261007010000_context_lead_cutoff_down.sql
 \endif
 \if :story_safety_live
+-- (client story saved, 20261117090000) replaced story safety's client story since: its down goes
+-- first, as story safety's refuses while a later body is live
+SELECT coalesce(obj_description(to_regprocedure('public.context_client_story(uuid,timestamptz)'), 'pg_proc'), '')
+       LIKE '%(client story saved, 20261117090000)%' AS client_story_saved_live \gset
+\if :client_story_saved_live
+\ir ../../../rollbacks/20261117090000_context_client_story_saved_down.sql
+\endif
 SELECT coalesce(obj_description('public.context_job_record_messages(uuid[],timestamptz)'::regprocedure,'pg_proc'),'') LIKE '%staff placement identity (20261030170545)%' AS has_staff_identity_successor \gset
 \if :has_staff_identity_successor
 \ir ../../../rollbacks/20261030170545_context_staff_placement_identity_down.sql
