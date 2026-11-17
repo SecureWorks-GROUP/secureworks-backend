@@ -7,7 +7,7 @@ CREATE TEMP TABLE fu32_before AS
  SELECT oid,proname,prosrc,pg_get_functiondef(oid) definition,proacl,proconfig,prosecdef
  FROM pg_proc WHERE pronamespace='public'::regnamespace
  AND (proname ~ '^job_profit_.*_trg$' OR proname='job_profit_source_changed');
-\ir ../../../migrations/20261118000102_job_profit_trigger_switch_first.sql
+\ir ../../../migrations/20261118023108_job_profit_trigger_switch_first.sql
 DO $check$ DECLARE before_row record; after_row record; gate text:=$gate$
  -- feature_flags_pkey: return before row JSON or the helper exception block.
  IF NOT EXISTS(SELECT 1 FROM public.feature_flags WHERE flag_name='job_profit_refresh_v1' AND enabled) THEN RETURN NULL; END IF;$gate$; BEGIN
@@ -28,7 +28,7 @@ DO $check$ DECLARE before_row record; after_row record; gate text:=$gate$
  END LOOP;
 END $check$;
 -- Idempotent application keeps the gate once, never nesting it on a retry.
-\ir ../../../migrations/20261118000102_job_profit_trigger_switch_first.sql
+\ir ../../../migrations/20261118023108_job_profit_trigger_switch_first.sql
 -- Restore these small fixture relations only inside the rolled-back contract.
 DROP TABLE IF EXISTS public.jobs CASCADE;
 CREATE TABLE public.jobs(id uuid PRIMARY KEY,org_id uuid,job_number text,client_name text,type text,status text,metadata jsonb,expected_costs jsonb,pricing_json jsonb,completed_at timestamptz,created_at timestamptz,legacy boolean);
