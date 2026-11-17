@@ -265,3 +265,59 @@ Deno.test("director inventory retains all 23 unsourced snapshot coordinates incl
     assert(snapshot.get(id)?.md5 === row.md5, id);
   }
 });
+
+Deno.test("parity job owns supplemental DDL and comparison on every event", () => {
+  const workflow = Deno.readTextFileSync(
+    new URL(".github/workflows/pr-check.yml", root),
+  );
+  const job = (name: string) => {
+    const marker = `  ${name}:\n`;
+    const start = workflow.indexOf(marker);
+    assert(start >= 0, `missing job ${name}`);
+    return workflow.slice(start + marker.length).split(
+      /\n  [a-z][a-z-]*:\n/,
+      1,
+    )[0];
+  };
+  const shards = job("migration-contracts-shard");
+  const aggregate = job("migration-contracts");
+  const parity = job("migration-catalog-parity");
+  assert(shards.includes("shard: [0, 1, 2, 3]"));
+  assert(
+    shards.includes(
+      'bash supabase/tests/migration-contracts/run.sh "${CASES[@]}"',
+    ),
+  );
+  for (
+    const forbidden of [
+      "MIGRATION_CONTRACT_MODE",
+      "compare-public-object-md5",
+      "CATALOG_OUTPUT",
+      "SUPPLEMENTAL_OUTPUT",
+      "test-ci-public-object-walk",
+    ]
+  ) {
+    assert(
+      !shards.includes(forbidden),
+      `contract shard inherited ${forbidden}`,
+    );
+  }
+  assert(
+    aggregate.includes(
+      "needs: [migration-contracts-plan, migration-contracts-shard]",
+    ),
+  );
+  assert(!aggregate.includes("migration-catalog-parity"));
+  assert(parity.includes("MIGRATION_CONTRACT_MODE: parity"));
+  assert(parity.includes("--live-only-unsourced"));
+  assert(parity.includes("--scope job-profit-context-pay"));
+  assert(parity.includes("if: always()"));
+  assert(
+    !parity.includes("github.event_name"),
+    "PR must show parity differences too",
+  );
+  assert(
+    !parity.includes("continue-on-error"),
+    "differences must make parity visibly red",
+  );
+});

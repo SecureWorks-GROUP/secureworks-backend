@@ -86,24 +86,31 @@ database bootstrap.
 
 ## Job Profit, context and pay parity (cx-ci-parity)
 
-`supplemental-migrations.txt` inventories the omitted domain migrations. Both
-forward walks try these at their number alongside registered cases. Each try
-uses `psql --single-transaction`: a refusal rolls back that whole file and is
-listed as `supplemental refused` with SQLSTATE, never partly applied. The
-`public-object-parity` artifact includes the applied/refused inventory for
-both walks. Client/connection failures stop the walk. Existing registered
-migration errors still fail the suite. A successful supplemental application
-is schema-build coverage, not a new behaviour contract. Historical migration
-files and their guards are unchanged. These are disposable database writes only.
+`migration-catalog-parity` is an independent, non-required job on PR, main and
+manual runs. It sets `MIGRATION_CONTRACT_MODE=parity`, builds one ordered stack,
+exports the catalog and stops before contract assertions or rollback proofs.
+The four existing shards use the default `contracts` mode: only registered
+migrations, the same case assignment and all existing proofs as main. Their
+protected aggregate does not depend on the parity job.
+
+`supplemental-migrations.txt` inventories omitted domain migrations, tried only
+in parity mode. Each try uses `psql --single-transaction`: a refusal rolls back
+that whole file and is listed with SQLSTATE, never partly applied. Client or
+connection failures and registered migration errors stop the walk. The
+`public-object-parity` artifact includes the forward applied/refused inventory.
+This is schema-build coverage, not a behaviour contract for those migrations.
+Historical files and their guards are unchanged. Only disposable databases are
+written.
 
 The runner exports view/function digests with the comparison script's `--sql`
 when `MIGRATION_CONTRACT_CATALOG_OUTPUT` is set, immediately after the first
-walk and before assertions or rollbacks. It never exports business rows or
-function bodies. The existing fixtures still contain stand-ins; equality is
-limited to the actual exported view definitions and function bodies.
+walk and before assertions or rollbacks. Parity mode requires an output path.
+It never exports business rows or function bodies. Existing fixtures still
+contain stand-ins; equality covers only exported definitions and bodies.
 
-Shard 0 on main and manual runs compares that export with
-`live-public-object-md5.tsv`, the director's 18 Nov catalog. The snapshot was
+The parity job compares that export with `live-public-object-md5.tsv`, the
+director's 18 Nov catalog, and fails visibly on differences without failing the
+four contract shards. The snapshot was
 inspected before copying: object identifiers, argument type signatures and md5
 only, no business names, amounts or row ids. The director refreshes that file
 from `compare-public-object-md5.ts --sql` on live, with UTC, matching

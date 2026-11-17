@@ -14,6 +14,19 @@ STACK_DATABASE=${CONTRACT_DATABASE}_stack
 # The copy one fail-closed, rollback or break proof runs in.
 PROOF_DATABASE=${CONTRACT_DATABASE}_proof
 CONTRACT_DATABASE_URL=
+# Supplemental DDL belongs only to the independent catalog job. The default
+# contract shards keep main's registered stack and every existing proof.
+WALK_MODE=${MIGRATION_CONTRACT_MODE:-contracts}
+case "$WALK_MODE" in
+  contracts) ;;
+  parity)
+    [ -n "${MIGRATION_CONTRACT_CATALOG_OUTPUT:-}" ] || {
+      echo "error: parity mode requires MIGRATION_CONTRACT_CATALOG_OUTPUT" >&2
+      exit 2
+    }
+    ;;
+  *) echo "error: unknown MIGRATION_CONTRACT_MODE: $WALK_MODE" >&2; exit 2 ;;
+esac
 
 # No statement may wait forever: a stuck statement fails with its own error and
 # the label printed above it, long before the job's own time limit. A contract
@@ -82,27 +95,31 @@ for case_directory in "${case_directories[@]}"; do
 done
 
 # The supplemental registry includes historical migrations without a behaviour
-# contract. Try each in its own transaction at its number in BOTH walks. Some
+# contract. Only parity mode tries each transaction at its number. Some
 # production pre-images are absent in the fixture stack: a refusal must leave
 # no partial DDL, be listed, and never be treated as a registered-case failure.
 supplemental_migrations=()
-while IFS= read -r candidate || [ -n "$candidate" ]; do
-  case "$candidate" in ''|'#'*) continue ;; esac
-  if [[ ! "$candidate" =~ ^[0-9]{14}_[a-z0-9_]+$ ]] \
-    || [ ! -f "$REPO_ROOT/supabase/migrations/$candidate.sql" ] \
-    || [ -d "$CONTRACT_ROOT/$candidate" ]; then
-    echo "error: invalid or already registered supplemental migration $candidate" >&2
-    exit 2
-  fi
-  for prior in "${supplemental_migrations[@]}"; do
-    [ "$prior" != "$candidate" ] || { echo "error: duplicate supplemental migration $candidate" >&2; exit 2; }
-  done
-  supplemental_migrations+=("$candidate")
-done < "$CONTRACT_ROOT/supplemental-migrations.txt"
+if [ "$WALK_MODE" = parity ]; then
+  while IFS= read -r candidate || [ -n "$candidate" ]; do
+    case "$candidate" in ''|'#'*) continue ;; esac
+    if [[ ! "$candidate" =~ ^[0-9]{14}_[a-z0-9_]+$ ]] \
+      || [ ! -f "$REPO_ROOT/supabase/migrations/$candidate.sql" ] \
+      || [ -d "$CONTRACT_ROOT/$candidate" ]; then
+      echo "error: invalid or already registered supplemental migration $candidate" >&2
+      exit 2
+    fi
+    for prior in "${supplemental_migrations[@]}"; do
+      [ "$prior" != "$candidate" ] || { echo "error: duplicate supplemental migration $candidate" >&2; exit 2; }
+    done
+    supplemental_migrations+=("$candidate")
+  done < "$CONTRACT_ROOT/supplemental-migrations.txt"
+fi
 walk_names=()
 while IFS= read -r step; do walk_names+=("$step"); done < <(
   { for directory in "${case_directories[@]}"; do basename "$directory"; done
-    printf '%s\n' "${supplemental_migrations[@]}"
+    if [ "${#supplemental_migrations[@]}" -gt 0 ]; then
+      printf '%s\n' "${supplemental_migrations[@]}"
+    fi
   } | sort
 )
 
@@ -238,7 +255,7 @@ for case_name in "${walk_names[@]}"; do
   if [ -d "$case_directory" ]; then
     run_sql_file "$case_name prerequisites" "$case_directory/setup.sql"
   fi
-  if case_selected "$case_name" && [ -f "$case_directory/preexisting-failure.sql" ]; then
+  if [ "$WALK_MODE" = contracts ] && case_selected "$case_name" && [ -f "$case_directory/preexisting-failure.sql" ]; then
     if [ ! -f "$case_directory/preexisting-failure.expected" ]; then
       echo "error: missing $case_directory/preexisting-failure.expected" >&2
       exit 2
@@ -259,6 +276,13 @@ if [ -n "${MIGRATION_CONTRACT_CATALOG_OUTPUT:-}" ]; then
   deno run "$REPO_ROOT/scripts/compare-public-object-md5.ts" --sql | \
     psql "$CONTRACT_DATABASE_URL" -X -qAt -F "$(printf '\t')" -v ON_ERROR_STOP=1 \
     > "$MIGRATION_CONTRACT_CATALOG_OUTPUT"
+fi
+
+# Catalog coverage is independent of legacy behaviour proofs. Stop before a
+# contract or rollback can mutate this schema or fail on supplemental effects.
+if [ "$WALK_MODE" = parity ]; then
+  echo "PostgreSQL parity catalog exported"
+  exit 0
 fi
 
 # The walk now holds every registered migration in timestamp order. Keep a copy

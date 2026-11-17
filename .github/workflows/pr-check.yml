@@ -1044,14 +1044,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      - name: Test offline catalog parity
-        if: matrix.shard == 0
-        run: deno test --no-check --allow-env --allow-read scripts/test/ci-public-object-parity_test.ts
-
       - name: Ensure PostgreSQL client is available
         run: |
           if ! command -v psql >/dev/null 2>&1; then
@@ -1059,22 +1051,12 @@ jobs:
             sudo apt-get install --yes postgresql-client
           fi
 
-      - name: Test supplemental walk on four invented migrations
-        if: matrix.shard == 0
-        env:
-          CI_PARITY_TEST_SCRATCH: ${{ runner.temp }}/ci-public-object-walk-test
-          MIGRATION_CONTRACT_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
-          MIGRATION_CONTRACT_DISPOSABLE_ACK: I-confirm-this-is-disposable-local-postgres
-        run: bash scripts/test/test-ci-public-object-walk.sh
-
       - name: Run PostgreSQL migration contract shard
         env:
           SHARD: ${{ matrix.shard }}
           # Tiny fixtures have story plans above the JIT compilation threshold.
           # Avoid compilation overhead; keep every SQL assertion and proof.
           PGOPTIONS: -c jit=off
-          MIGRATION_CONTRACT_SUPPLEMENTAL_OUTPUT: ${{ runner.temp }}/supplemental-migrations.tsv
-          MIGRATION_CONTRACT_CATALOG_OUTPUT: ${{ runner.temp }}/fresh-public-object-md5.tsv
           MIGRATION_CONTRACT_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
           MIGRATION_CONTRACT_DISPOSABLE_ACK: I-confirm-this-is-disposable-local-postgres
         run: |
@@ -1115,11 +1097,63 @@ jobs:
           printf 'Shard %s: %s of %s cases\n' "$SHARD" "${#CASES[@]}" "$TOTAL"
           bash supabase/tests/migration-contracts/run.sh "${CASES[@]}"
 
-      # The export is made by run.sh BEFORE any contract/rollback mutates it.
-      # Main/manual runs use the director-refreshed, identifier/digest-only
-      # snapshot in git. No CI credential or live database call is involved.
+  # Advisory and independent: omitted migrations must never change the schema
+  # used by the four contract shards or feed their protected aggregate.
+  migration-catalog-parity:
+    needs: migration-contracts-plan
+    if: needs.migration-contracts-plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Ensure PostgreSQL client is available
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes postgresql-client
+          fi
+
+      - name: Test offline catalog parity and job isolation
+        run: deno test --no-check --allow-env --allow-read scripts/test/ci-public-object-parity_test.ts
+
+      - name: Test supplemental walk on four invented migrations
+        env:
+          CI_PARITY_TEST_SCRATCH: ${{ runner.temp }}/ci-public-object-walk-test
+          MIGRATION_CONTRACT_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+          MIGRATION_CONTRACT_DISPOSABLE_ACK: I-confirm-this-is-disposable-local-postgres
+        run: bash scripts/test/test-ci-public-object-walk.sh
+
+      - name: Build independent parity catalog without contract assertions
+        env:
+          PGOPTIONS: -c jit=off
+          MIGRATION_CONTRACT_MODE: parity
+          MIGRATION_CONTRACT_SUPPLEMENTAL_OUTPUT: ${{ runner.temp }}/supplemental-migrations.tsv
+          MIGRATION_CONTRACT_CATALOG_OUTPUT: ${{ runner.temp }}/fresh-public-object-md5.tsv
+          MIGRATION_CONTRACT_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+          MIGRATION_CONTRACT_DISPOSABLE_ACK: I-confirm-this-is-disposable-local-postgres
+        run: bash supabase/tests/migration-contracts/run.sh
+
+      # Every event, including this PR, shows the outstanding snapshot differences.
+      # These identifiers/digests were supplied by the director; no live calls.
       - name: Compare Job Profit, context and pay with the live snapshot
-        if: always() && matrix.shard == 0 && github.event_name != 'pull_request'
         run: |
           deno run --allow-read --allow-write scripts/compare-public-object-md5.ts \
             --scope job-profit-context-pay \
@@ -1129,7 +1163,7 @@ jobs:
             --output "${{ runner.temp }}/public-object-parity.md"
 
       - name: Keep catalog parity evidence
-        if: always() && matrix.shard == 0
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: public-object-parity
