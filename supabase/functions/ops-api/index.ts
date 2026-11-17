@@ -10647,7 +10647,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const gate = url.searchParams.get('gate')
         const token = url.searchParams.get('gate_token') || ''
         if (switches.sweep_gate_v1 && gate === 'job-work-order-auto-issue' && /^[a-f0-9]{32}$/.test(token)
-          && issueError === null && !groupReleases.some(entry => entry !== null && typeof entry === 'object' && 'error' in entry)) {
+          && issueError === null && !groupReleases.some(entry => entry !== null && typeof entry === 'object' && ('error' in entry || 'xero_push_error' in entry))) {
           const { error: confirmError } = await client.rpc('sweep_gate_confirm', { p_name: gate, p_token: token })
           if (confirmError) console.error('[ops-api] work order sweep gate confirmation failed:', confirmError.message)
           else gateConfirmed = true
