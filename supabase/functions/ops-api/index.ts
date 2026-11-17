@@ -14092,8 +14092,6 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 return true
               })
               : []
-            const draftSuperBasis = await tradePayBasisForSave(client, existingDraft, draftWeekStart || draftWeekEnd)
-            const draftReimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(draftExtras) ? draftExtras : [], draftSuperBasis)
             const draftShareShaped = (item: any) =>
               isGroupShareInvoiceItem(item) || Boolean(item?.group_share_id)
             const plainLabour = labourLines.filter((line: any) => !draftShareShaped(line))
@@ -14133,6 +14131,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 groupWorkOrderApiError(error)
               }
             }
+            const draftSuperBasis = resolvedShares.length > 0
+              ? null
+              : await tradePayBasisForSave(client, existingDraft, draftWeekStart || draftWeekEnd)
+            const draftReimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(draftExtras) ? draftExtras : [], draftSuperBasis)
             let labourTotal = 0
             for (const l of plainLabour) labourTotal += roundMoney(Number(l.line_total_ex || 0))
             let extraTotal = 0
@@ -64140,16 +64142,18 @@ async function listExpenses(client: any, params: URLSearchParams, caller?: { id:
     .limit(limit)
 
   const tradeCaller = caller && !['admin', 'owner', 'ops_manager'].includes(String(caller.role || '').toLowerCase())
-  if (tradeCaller) query = query.eq('submitted_by', caller.id)
   if (jobId) query = query.eq('job_id', jobId)
   if (status) query = query.eq('status', status)
 
   const { data, error } = await query
   if (error) throw error
   if (!tradeCaller) return { expenses: data || [] }
+  const { data: flag } = await client.from('feature_flags').select('enabled').eq('flag_name', REIMBURSEMENT_FLAG).maybeSingle()
+  if (flag?.enabled !== true) return { expenses: data || [] }
+  const basis = await tradePayBasisForSave(client, null, new Date().toISOString().slice(0, 10))
   const expenses = []
   for (const row of data || []) {
-    const result = await invoiceReimbursements(client, caller.id, [{ type: 'reimbursement', expense_receipt_id: row.id }], await tradePayBasisForSave(client, null, new Date().toISOString().slice(0, 10)))
+    const result = await resolveReimbursementExtras(client, { userId: caller.id, items: [{ type: 'reimbursement', expense_receipt_id: row.id }], flagOn: true, basis })
     expenses.push({ ...row, reimbursement: { claimable: result.lines.length > 0, reason: result.skipped_items[0]?.code || null } })
   }
   return { expenses }

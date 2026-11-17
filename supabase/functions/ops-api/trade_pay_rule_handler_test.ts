@@ -429,3 +429,15 @@ for (const action of ["save_trade_invoice_draft", "generate_trade_invoice"]) {
     });
   }
 }
+
+handlerTest("pay rule: every save door and the work order retry use the one decision", async () => {
+  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  // Nothing in ops-api reads the current rule except through the helper.
+  assertEquals(src.match(/resolveTradePayBasis\(/g)?.length, 1);
+  assertEquals(src.match(/tradePayBasisForSave\(/g)?.length, 5); // definition + three save doors + switched-on receipt list
+  assertStringIncludes(src, "tradePayBasisForSave(client, retryDrafts[0] ?? null, woInvoiceDate)");
+  assertStringIncludes(src, "tradePayBasisForSave(client, existingDraft, draftWeekStart || draftWeekEnd)");
+  assertStringIncludes(src, "tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10))");
+  assert(src.includes("const draftSuperBasis = resolvedShares.length > 0\n              ? null"), "group shares retain their existing draft pricing");
+  assertStringIncludes(src, ".select(`id, user_id, status, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)");
+});

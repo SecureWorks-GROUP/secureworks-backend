@@ -2,6 +2,7 @@
 INSERT INTO public.feature_flags(flag_name, enabled, description)
 VALUES ('trade_reimbursement_line_v1', false, 'A trade may add a reimbursement line, tied to a receipt, to a trade invoice. No super on it.')
 ON CONFLICT (flag_name) DO NOTHING;
+SET lock_timeout = '5s';
 ALTER TABLE public.trade_invoice_lines ADD COLUMN IF NOT EXISTS expense_receipt_id uuid REFERENCES public.expense_receipts(id);
 ALTER TABLE public.trade_invoice_lines DROP CONSTRAINT IF EXISTS trade_invoice_lines_reimbursement_check;
 ALTER TABLE public.trade_invoice_lines ADD CONSTRAINT trade_invoice_lines_reimbursement_check
