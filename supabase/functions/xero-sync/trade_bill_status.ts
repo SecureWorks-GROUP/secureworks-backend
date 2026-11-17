@@ -67,6 +67,21 @@ export function shouldBackfillTradeBillPdf(inv: any, current: TradeBillCurrent &
   return Array.isArray(inv.LineItems) && inv.LineItems.length > 0
 }
 
+// The PDF sweep's cached-bill write (director ruling 18 Nov). status, raw_json
+// and line_items are stored together from the ONE Xero read the sweep made, so
+// an office edit in Xero can never leave the new status beside the earlier
+// lines. A read with no line list stores nothing: the row keeps its earlier,
+// self-consistent snapshot and the next sync or sweep reads it again.
+// `snapshot` lets the attach path record HasAttachments on that same read.
+export function tradeBillSweepSnapshotPatch(
+  inv: any,
+  nowIso: string,
+  snapshot: any = inv,
+): { raw_json: any; status: unknown; line_items: unknown[]; synced_at: string } | null {
+  if (!inv || !inv.InvoiceID || !Array.isArray(inv.LineItems)) return null
+  return { raw_json: snapshot, status: inv.Status, line_items: inv.LineItems, synced_at: nowIso }
+}
+
 // ── Changes the office makes to a crew bill in Xero (Group WO field-ready
 // check V10, 3 Nov 2026) ──
 // The office adds its own lines to a crew bill in Xero after our push: on
