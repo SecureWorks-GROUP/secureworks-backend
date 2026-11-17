@@ -1,6 +1,7 @@
 // JWT flag: --no-verify-jwt. Keep this line at the top: the deploy workflow reads
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
+import { syncConversationCache } from './conversation_cache_write.ts'
 import { isMoneyAction, moneyActionGate, readMoneyActionFlags } from "./money_actions.ts"
 import { agentProposalAction } from "./agent_proposals.ts"
 import { setCouncilRequired } from './council_mark.ts'
@@ -16888,6 +16889,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'force_reconcile_invoice': return json(await forceReconcileInvoice(client, body))
 
       // ── Job Memory Loop: generic business_event logger ──
+      case 'sync_conversation_cache': {
+        const result = await syncConversationCache(client, body, {
+          method: req.method,
+          serverCaller: authMode === 'api_key' && serverSecretPresented,
+        })
+        return json(result.body, result.status)
+      }
       case 'log_business_event': {
         const { event_type, entity_type, entity_id, job_id, payload } = body
         if (!event_type) return json({ error: 'event_type required' }, 400)
