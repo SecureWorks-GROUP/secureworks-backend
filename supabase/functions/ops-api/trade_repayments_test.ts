@@ -35,3 +35,10 @@ Deno.test("ZZTEST repayment administration: named approver only, valid non-overl
   assertEquals(writes[1].active, false);
   assertEquals(writes[1].note.includes("ZZTEST stop"), true);
 });
+
+Deno.test("ZZTEST repayment list refuses a server key before reading people", async () => {
+  const client = { from() { throw new Error("ZZTEST unexpected people read"); } };
+  const out = await tradeRepaymentsAction(client, "list_trade_repayments", "GET", {},
+    { staff: true, userId: null, orgId: "ZZTEST-org" });
+  assertEquals(out.status, 403);
+});
