@@ -1,0 +1,123 @@
+import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { officeSentBackNote } from "./trade_invoice_office_note.ts";
+
+// Drive the actual action, including its preflight and compare-and-set outcome.
+async function action(client: any, invoiceId = "ZZTEST-invoice") {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const start = source.indexOf("      case 'reject_trade_invoice': {");
+  const end = source.indexOf("      case 'push_trade_invoice_to_xero':", start);
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const run = new AsyncFunction("ctx", "with (ctx) {" + source.slice(start, end)
+    .replace("case 'reject_trade_invoice':", "") + "}");
+  class ApiError extends Error {
+    constructor(message: string, public status: number) { super(message); }
+  }
+  return await run({ client, body: { invoice_id: invoiceId, note: "ZZTEST correct the week" },
+    json: (value: unknown) => value, ApiError, officeSentBackNote,
+    tradeInvoiceHasExternalXeroIdentity: (i: any) => Boolean(i.xero_bill_id || i.xero_pushed_at),
+    rejectTradeInvoiceStorage: async (...args: [any, string, string]) =>
+      (await import("./trade_invoice_rejection.ts")).rejectTradeInvoiceStorage(...args),
+  });
+}
+
+function store(options: { enabled?: boolean; flagError?: boolean; rpcError?: boolean; raced?: boolean; xero?: boolean } = {}) {
+  const invoice: any = { id: "ZZTEST-invoice", status: "pending_ops_review", xero_bill_id: options.xero ? "ZZTEST-bill" : null, xero_pushed_at: null };
+  const claims = [{ trade_invoice_id: invoice.id, expense_receipt_id: "ZZTEST-receipt" }];
+  let rpcCalls = 0;
+  return { invoice, claims, get rpcCalls() { return rpcCalls; },
+    client: {
+      from(table: string) {
+        let changes: any = null;
+        return {
+          select() { return this; }, eq() { return this; }, is() { return this; },
+          update(value: unknown) { changes = value; return this; },
+          maybeSingle() {
+            if (table === "feature_flags") return Promise.resolve({ data: options.flagError ? null : { enabled: options.enabled === true }, error: options.flagError ? { message: "ZZTEST unreadable" } : null });
+            if (changes) {
+              if (options.raced) return Promise.resolve({ data: null });
+              Object.assign(invoice, changes);
+            }
+            return Promise.resolve({ data: { ...invoice } });
+          },
+        };
+      },
+      rpc(name: string, args: any) {
+        rpcCalls++;
+        assertEquals(name, "reject_trade_invoice_v1");
+        assertEquals(args, { p_invoice_id: invoice.id, p_note: officeSentBackNote("ZZTEST correct the week") });
+        if (options.rpcError) return Promise.resolve({ data: null, error: { message: "ZZTEST release failed" } });
+        if (options.raced) return Promise.resolve({ data: null });
+        invoice.status = "ops-reject";
+        invoice.query_note = args.p_note;
+        claims.splice(0);
+        return Promise.resolve({ data: invoice.id });
+      },
+    },
+  };
+}
+
+Deno.test("FU17 real reject action frees its receipt for a corrected invoice", async () => {
+  const s = store({ enabled: true });
+  assertEquals(await action(s.client), { success: true, invoice_id: s.invoice.id, status: "ops-reject" });
+  assertEquals(s.claims, []);
+  assertEquals(s.invoice.query_note, officeSentBackNote("ZZTEST correct the week"));
+  assertEquals(s.rpcCalls, 1);
+});
+Deno.test("FU17 switch off or unreadable preserves main's rejection write and receipt", async () => {
+  for (const options of [{ enabled: false }, { flagError: true }]) {
+    const s = store(options);
+    assertEquals(await action(s.client), { success: true, invoice_id: s.invoice.id, status: "ops-reject" });
+    assertEquals(s.invoice.status, "ops-reject");
+    assertEquals(s.claims.length, 1);
+    assertEquals(s.rpcCalls, 0);
+  }
+});
+Deno.test("FU17 failed receipt release cannot report rejection success", async () => {
+  const s = store({ enabled: true, rpcError: true });
+  await assertRejects(() => action(s.client), Error, "ZZTEST release failed");
+  assertEquals(s.invoice.status, "pending_ops_review");
+  assertEquals(s.claims.length, 1);
+});
+Deno.test("FU17 concurrent Xero identity refuses rejection and retains receipt", async () => {
+  const s = store({ enabled: true, raced: true });
+  await assertRejects(() => action(s.client), Error, "Cannot reject an invoice while its Xero identity is being recorded");
+  assertEquals(s.invoice.status, "pending_ops_review");
+  assertEquals(s.claims.length, 1);
+});
+Deno.test("FU17 existing Xero identity is refused before the release operation", async () => {
+  const s = store({ enabled: true, xero: true });
+  await assertRejects(() => action(s.client), Error, "Cannot reject an invoice already in Xero/paid");
+  assertEquals(s.rpcCalls, 0);
+  assertEquals(s.claims.length, 1);
+});
+
+Deno.test("FU17 hourly submit passes labour, group share and receipt to the same atomic save", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const start = source.indexOf("            const invoiceId = await retryReimbursementClaims(client, reimbursements,");
+  const end = source.indexOf("            const invoice = { id: invoiceId }", start);
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const submit = new AsyncFunction("ctx", "with (ctx) {" + source.slice(start, end)
+    .replace(/: (any|number)\b/g, "") + "return invoiceId; }");
+  const labour = { line_type: "labour", job_id: "ZZTEST-hourly", line_total_ex: 560 };
+  const group = { line_type: "group share", job_id: "ZZTEST-group", group_share_id: "ZZTEST-share", line_total_ex: 280 };
+  const receipt = { line_type: "reimbursement", expense_receipt_id: "ZZTEST-receipt", line_total_ex: 80 };
+  const header = { status: "pending_acknowledgment", gross_earned: 920, super_basis: "inclusive_12_112_v1", super_base_ex: 840, super_amount: 90, net_pay: 830 };
+  let saves = 0;
+  const id = await submit({ client: {}, reimbursements: { lines: [receipt], skipped_items: [] },
+    week_start: "2026-11-16", priorDraftId: null, weeklyInvoice: null,
+    invoicePayload: header, tradeUser: { orgId: "ZZTEST-org" }, lineItems: [labour], extraLineItems: [group, receipt],
+    retryReimbursementClaims: (_c: unknown, _r: unknown, persist: () => Promise<string>) => persist(),
+    persistWithFreeNumber: async (persist: () => Promise<string>) => await persist(),
+    toTradeInvoiceLineRow: (_id: string, row: unknown) => row,
+    _persistTradeInvoiceWeekDraft: (_c: unknown, h: unknown, lines: unknown[], prior: unknown) => {
+      saves++;
+      assertEquals(h, { ...header, org_id: "ZZTEST-org" });
+      assertEquals(lines, [labour, group, receipt]);
+      assertEquals(prior, null);
+      return "ZZTEST-saved";
+    },
+    replaceTradeInvoiceDraftKeepingPrior: () => { throw new Error("Mixed submit bypassed the atomic save"); },
+  });
+  assertEquals(id, "ZZTEST-saved");
+  assertEquals(saves, 1);
+});
