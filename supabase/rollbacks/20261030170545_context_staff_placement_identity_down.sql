@@ -1,6 +1,6 @@
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='60s';
-DO $$ BEGIN IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_record_messages(uuid[],timestamp with time zone)'::regprocedure) IS DISTINCT FROM 'c2b73175d602d5add3cf19bceeaae7eb' THEN RAISE EXCEPTION 'staff_placement_identity_postimage_mismatch'; END IF; END $$;
+DO $$ BEGIN IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_record_messages(uuid[],timestamp with time zone)'::regprocedure) NOT IN ('c2b73175d602d5add3cf19bceeaae7eb','4ab1e2a3ff35aa69576f80a06d7b42ba') THEN RAISE EXCEPTION 'staff_placement_identity_postimage_mismatch'; END IF; END $$;
 CREATE OR REPLACE FUNCTION public.context_job_record_messages(p_job_ids uuid[], p_as_of timestamp with time zone DEFAULT now())
  RETURNS TABLE(job_id uuid, source_table text, source_id text, at timestamp with time zone, event_type text, source text, channel text, direction text, words text, counterpart_role text, sender_role text, audience text, recipient_role text, is_job_contact boolean, from_is_client boolean, to_is_client boolean, sent_by_kind text, internal_role text, is_msg boolean, is_note boolean, customer_side boolean, internal boolean, automated boolean, bad_call boolean, call_answered boolean, placement text)
  LANGUAGE sql
