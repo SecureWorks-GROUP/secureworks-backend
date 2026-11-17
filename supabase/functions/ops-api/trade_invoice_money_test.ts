@@ -926,14 +926,14 @@ Deno.test("inclusive super: spec test 9, the Xero draft bill carries the three f
   assertEquals([gst[0].TaxType, gst[1].TaxType], ["INPUT", "NONE"]);
 });
 
-Deno.test("inclusive super: a GST trade's reimbursement is held back from Xero, never sent with GST on it", () => {
+Deno.test("inclusive super: an unidentified reimbursement is refused before Xero", () => {
   const m = inclusiveMoney(1200, { reimbursementEx: 80, gstOn: true });
   const withReimbursement: TradeInvoiceXeroLine[] = [
     ...INCLUSIVE_LINES,
-    { Description: "ZZTEST reimbursement", Quantity: 1, UnitAmount: 80, AccountCode: "310" } as TradeInvoiceXeroLine,
+    { Description: "Reimbursement - ZZTEST receipt", Quantity: 1, UnitAmount: 80, AccountCode: "310" } as TradeInvoiceXeroLine,
   ];
   assertThrows(
-    () => splitTradeInvoiceXeroLines(withReimbursement, m, { superAccountCode: "478" }),
+    () => splitTradeInvoiceXeroLines(withReimbursement.map((line, i) => i === withReimbursement.length - 1 ? { ...line, Description: "ZZTEST unidentified receipt" } : line), m, { superAccountCode: "478" }),
     TradeInvoiceMoneyError,
     "reimbursement",
   );

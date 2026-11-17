@@ -1187,26 +1187,15 @@ export function splitTradeInvoiceXeroLines(
     tradeName?: string | null;
   },
 ): TradeInvoiceXeroLine[] {
+  if (money.super_basis === TRADE_INVOICE_INCLUSIVE_SUPER_BASIS) {
+    assertTradeInvoiceSuperBaseMatchesLines(money, 0, grossLines.filter(isTradeInvoiceReimbursementXeroLine).reduce((sum, line) => sum + Number(line.Quantity ?? 1) * Number(line.UnitAmount ?? 0), 0));
+  }
   const model = buildTradeInvoiceAuditModel(
     grossLines,
     money,
     options.tradeName,
   );
   const taxType = money.gst_on ? "INPUT" : "NONE";
-  // Super inclusive GST is 10% of the total less reimbursements, but every
-  // work line goes to Xero as INPUT, so Xero would charge GST on a
-  // reimbursement line too and the bill would not match the invoice. Refuse
-  // that one shape until reimbursement lines carry their own tax type
-  // (P1-03). No reimbursement line can be saved before then.
-  if (
-    money.super_basis === TRADE_INVOICE_INCLUSIVE_SUPER_BASIS && money.gst_on &&
-    money.super_base_ex !== null && money.super_base_ex !== undefined
-  ) {
-    throw new TradeInvoiceMoneyError(
-      "MONEY_SPLIT_INVALID",
-      "A GST registered trade's reimbursement cannot be put on a super inclusive Xero bill yet",
-    );
-  }
   // Labour stays at the submitted amounts. The minus line is the worker
   // withhold only, so the bill total is cash payable to the trade. Super
   // remittance (super_amount, still 12%) is paid to the fund separately and

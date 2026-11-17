@@ -94,7 +94,7 @@ Deno.test("ZZTEST expense on submitted invoice stops before Xero, draft-only exp
 const accountStart = source.indexOf("async function reimbursementXeroAccount(");
 const accountBody = source.slice(
   source.indexOf(" {\n", accountStart) + 3,
-  source.indexOf("\nfunction persistedTradeInvoiceMoney", accountStart),
+  source.indexOf("\n}\n", accountStart) + 2,
 ).trim().replace(/}$/, "");
 Deno.test("ZZTEST missing reimbursement account refuses before token or Xero transport", async () => {
   const account = new AsyncFunction(
