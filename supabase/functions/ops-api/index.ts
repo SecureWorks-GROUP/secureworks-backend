@@ -13,6 +13,7 @@ import { setCouncilRequired } from './council_mark.ts'
 import { JobLabourPayReadError, readHourlyCappedJobs, readHourlyLabourLimits } from './job_labour_cap.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
+import { addMyselfToJob, jobsNearMe, SelfAddError, SELF_ADDED_CONTACT_ACCESS_FILTER, bookingGrantsContactAccess, contactFreeJob } from './trade_self_add.ts'
 import { SelfAllocationRefusal, selfAllocateForInvoice } from './trade_self_allocation.ts'
 import {
   isWorkOrderInvoiceItem,
@@ -5346,6 +5347,8 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   // for the signed-in trade, inside their company.
   'trade_invoice_job_modes',
   'self_allocate_for_invoice',
+  'add_myself_to_job',
+  'jobs_near_me',
   'submit_trade_invoice',
   'my_trade_invoices',
   'get_trade_invoice',
@@ -13265,6 +13268,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'crew_charges_on_my_jobs':
       case 'review_crew_charge':
       case 'submit_work_order_invoice':
+      case 'add_myself_to_job':
+      case 'jobs_near_me':
       case 'search_all_jobs':
       case 'generate_trade_invoice':
       case 'my_invoices':
@@ -13538,6 +13543,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 office_note: tradeInvoiceOfficeNote(inv, detailLines),
               },
             })
+          }
+          case 'add_myself_to_job':
+          case 'jobs_near_me': {
+            const method = action === 'add_myself_to_job' ? 'POST' : 'GET'
+            if (req.method !== method) return json({ error: `${action} requires ${method}` }, 405)
+            try {
+              if (action === 'jobs_near_me') return json(await jobsNearMe(client, url.searchParams, tradeUser))
+              return json(await addMyselfToJob(client, body, tradeUser, {
+                createAssignment: (b) => createAssignment(client, b),
+                isUserDateConflict: isAssignmentUserDateConflict,
+                enrollGroup: (jobId, userId) => enrollClockGroupParticipant(client, jobId, userId, async () => {
+                  const modes = await loadTradeInvoiceJobModes(client, {
+                    tradeId: userId, orgId: tradeUser.orgId, jobIds: [jobId],
+                    jobVertical: _jobVertical, normaliseManagedVerticals: _normalizeManagedVerticals,
+                  })
+                  return modes.jobs[0]?.invoice_mode
+                }),
+              }))
+            } catch (error) {
+              if (error instanceof SelfAddError) return json({ ok: false, error: error.message, code: error.code }, error.status)
+              throw error
+            }
           }
           case 'search_all_jobs':
             return json(await searchAllJobs(client, url.searchParams, tradeUser, isDispatcher))
@@ -18037,6 +18064,19 @@ export async function tradeCalendarEvents(
       )
     )
   }
+  if (!isDispatcher && pageRows.length > 0) {
+    const allowed = new Set<string>()
+    const ids = collectUniqueStringIds(pageRows.map((e: any) => e.assignment_id))
+    for (let i = 0; i < ids.length; i += 25) {
+      // job_assignments_pkey, at most 25 exact page rows per read.
+      const { data: bookings, error: bookingError } = await client.from('job_assignments')
+        .select('id, added_by, self_added_status').in('id', ids.slice(i, i + 25))
+      if (bookingError) throw bookingError
+      for (const b of bookings || []) if (bookingGrantsContactAccess(b)) allowed.add(String(b.id))
+    }
+    pageRows = pageRows.filter((e: any) => allowed.has(String(e.assignment_id)) ||
+      tradeViewerQuoteVisibleForJob({ type: e.job_type, job_number: e.job_number, job_family: e.job_family }, { managedVerticals }))
+  }
   const events = pageRows.map((event: any) => {
     const { org_id, ...safeEvent } = event
     return safeEvent
@@ -18926,6 +18966,7 @@ async function viewerGenuineAssignmentJobIds(client: any, viewer: TradeAuthConte
   while (true) {
     const { data, error } = await client.from('job_assignments')
       .select('job_id')
+      .or(SELF_ADDED_CONTACT_ACCESS_FILTER)
       .eq('user_id', viewer.id)
       .eq('is_ghost', false)
       .or('status.is.null,status.neq.cancelled')
@@ -38238,7 +38279,8 @@ export async function createAssignment(client: any, body: any) {
       ? { duration_days: Math.round(Number(body.durationDays || body.duration_days)) } : {}),
     start_time: startTime || start_time || null,
     end_time: endTime || end_time || null,
-    role: role || 'lead_installer',
+    role: body.self_added === true ? 'installer' : role || 'lead_installer',
+    ...(body.self_added === true ? { added_by: 'self', self_added_status: 'added', self_added_at: new Date().toISOString() } : {}),
     notes: notes || null,
     assignment_type: assignmentType || assignment_type || 'install',
     crew_name: crewName || crew_name || null,
@@ -38321,7 +38363,7 @@ export async function createAssignment(client: any, body: any) {
   await client.from('job_events').insert({
     job_id: jId,
     event_type: 'assignment_created',
-    detail_json: { assignment_id: data.id, date: sDate, operator: body.operator_email || body.user_email || null },
+    detail_json: { assignment_id: data.id, date: sDate, operator: body.operator_email || body.user_email || null, ...(body.self_added === true ? { self_added: true } : {}) },
   })
 
   // ── SMS to assigned installer ──
@@ -38414,7 +38456,7 @@ export async function createAssignment(client: any, body: any) {
       },
       metadata: { operator: body.operator_email || body.user_email || null },
     })
-    if (jobData?.ghl_opportunity_id) {
+    if (jobData?.ghl_opportunity_id && body.self_added !== true) {
       const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=update_custom_fields`
       fetch(ghlUrl, {
         method: 'POST',
@@ -44092,6 +44134,7 @@ async function assertAssigned(client: any, jobId: string, userId: string, isAdmi
     .eq('job_id', jobId)
     .eq('user_id', userId)
     .neq('status', 'cancelled')
+    .or(SELF_ADDED_CONTACT_ACCESS_FILTER)
     .limit(1)
     .maybeSingle()
   if (!data) throw new Error('You are not assigned to this job')
@@ -44476,15 +44519,17 @@ export async function resolveTradeJobAccessTier(
       return { tier: 'division_manager', quoteVisible: true, reason: 'vertical_manager', job }
     }
   }
-  const { data: assigned } = await client
+  const { data: assigned, error: assignmentError } = await client
     .from('job_assignments')
     .select('id')
     .eq('job_id', jobId)
     .eq('user_id', userId)
     .neq('status', 'cancelled')
+    .or(SELF_ADDED_CONTACT_ACCESS_FILTER)
     .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
     .limit(1)
     .maybeSingle()
+  if (assignmentError) throw assignmentError
   if (assigned) {
     return { tier: 'allocated', quoteVisible: false, reason: 'assigned', job }
   }
@@ -44793,6 +44838,7 @@ export async function searchAllJobs(
       (from, limit) =>
         client.from('job_assignments')
           .select('id, job_id')
+          .or(SELF_ADDED_CONTACT_ACCESS_FILTER)
           .eq('user_id', viewer.id)
           .neq('status', 'cancelled')
           .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
@@ -45424,7 +45470,7 @@ const GHOST_EXCLUDED_COLUMN = 'is_ghost'
 const GHOST_EXCLUDED_VALUE = false
 
 const OCCUPANCY_PROBE_SELECT = `
-        job_id, id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name,
+        job_id, id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, added_by, self_added_status,
         started_at, completed_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         user:user_id ( id, name )
       `
@@ -45563,6 +45609,8 @@ export function _shouldRecoverOccupiedPoolJob(input: {
 function occupiedPoolAssignmentCard(assignment: any, job: any) {
   return {
     id: assignment?.id,
+    added_by: assignment?.added_by,
+    self_added_status: assignment?.self_added_status,
     scheduled_date: assignment?.scheduled_date ?? null,
     scheduled_end: assignment?.scheduled_end ?? null,
     start_time: assignment?.start_time ?? null,
@@ -45626,7 +45674,7 @@ export async function myJobs(
   // family-tagged repair job (jobs.type unchanged, per the SES boards' rule)
   // on every myJobs lane, not only the make-safe pool.
   const ASSIGNMENT_SELECT_ADMIN = `
-        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
+        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at, added_by, self_added_status,
         clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         user:user_id ( id, name ),
         jobs:job_id (
@@ -45635,7 +45683,7 @@ export async function myJobs(
         )
       `
   const ASSIGNMENT_SELECT_USER = `
-        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
+        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at, added_by, self_added_status,
         clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         jobs:job_id (
           id, type, status, archived, client_name, client_phone, client_email,
@@ -45815,7 +45863,7 @@ export async function myJobs(
   // A plain embed + top-level `jobs.type` filter does NOT constrain the parent and
   // would either error or return ALL of the trade's old assignments — both wrong.
   const ASSIGNMENT_SELECT_USER_MAKESAFE = `
-        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
+        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at, added_by, self_added_status,
         clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         jobs:job_id!inner (
           id, type, status, archived, client_name, client_phone, client_email,
@@ -46351,6 +46399,13 @@ export async function myJobs(
       a.jobs.vertical = _jobVertical(a.jobs)
     }
   }
+
+  // A self-added booking is clockable, but is not customer-detail authority yet.
+  assignments = (assignments || []).filter((a: any) =>
+    bookingGrantsContactAccess(a) || tradeViewerQuoteVisibleForJob(a.jobs, myJobsQuoteCtx)
+  )
+
+  for (const a of assignments) { delete a.added_by; delete a.self_added_status }
 
   // Trade Today `recent` is an action queue, not assignment history. Load the
   // current make-safe cycle's report evidence for past cards so completed visits
@@ -57782,7 +57837,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   let asnQuery = client
     .from('job_assignments')
     .select(`
-      id, scheduled_date, start_time, status, role, assignment_type, crew_name,
+      id, scheduled_date, start_time, status, role, assignment_type, crew_name, added_by, self_added_status,
       started_at, completed_at, hours_worked, break_minutes, clocked_on_at, clocked_off_at,
       invoiced_in,
       jobs:job_id (
@@ -57805,6 +57860,10 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   const { data: rawAssignments, error } = await asnQuery.order('scheduled_date', { ascending: true })
 
   if (error) throw error
+
+  for (const a of rawAssignments || []) {
+    if (!bookingGrantsContactAccess(a) && a.jobs) a.jobs = contactFreeJob(a.jobs)
+  }
 
   // M9 FIX A2: attach external_ref to each assignment's jobs object so the trade
   // weekly job cards can display the insurer/builder ref. Batch-resolved: prefer
@@ -58040,8 +58099,11 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
         ? Math.round((new Date(a.completed_at).getTime() - new Date(a.started_at).getTime()) / 3600000 * 100) / 100
         : 0
     totalHours += hours
+    const { added_by, ...card } = a
     return {
-      ...a,
+      ...card,
+      added_by_self: added_by === 'self',
+      self_added_status: a.self_added_status ?? null,
       hours,
       // null hours_worked means no clock data — the client renders an editable
       // (required) hours field for this card instead of a read-only value.
@@ -58169,6 +58231,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
 
   const response = {
     assignments: enriched,
+    self_add: await readFlag(client, 'trade_self_add_v1'),
     rate,
     // rate_resolved=false signals the client to show a "Rate not set — contact
     // office" card state and BLOCK that card's inclusion (never a silent $0).  [F5]
