@@ -132,7 +132,7 @@ Deno.test("incoming: every line but commission counts per job; deductions come o
 });
 
 function fakeClient(
-  opts: { lines?: any[]; lanes?: any[]; variations?: any[]; fail?: string },
+  opts: { lines?: any[]; lanes?: any[]; variations?: any[]; changes?: any[]; fail?: string },
 ) {
   return {
     from(table: string) {
@@ -142,7 +142,7 @@ function fakeClient(
         ? opts.lanes || []
         : table === "work_order_customer_variations"
         ? opts.variations || []
-        : [];
+        : table === "work_order_amount_changes" ? opts.changes || [] : [];
       const q: any = {
         select: () => q,
         in: () => q,
@@ -724,4 +724,18 @@ Deno.test("list: an hourly job's row shows the limit the doors refuse by; a fail
     hourlyLimits: () => Promise.reject(new Error("x")),
   });
   assertEquals([failed.cap_read, failed.work_orders[0].cap], ["failed", null]);
+});
+
+Deno.test("ZZTEST changed work order: cap follows the change to the cent and read failures refuse", async () => {
+  const client = fakeClient({ changes: [{ work_order_id: WO, delta_ex: 224 }],
+    lines: [line("ZZTEST-line", "approved", "labour", 1120)] });
+  const check = (amount: number) => checkWorkOrderTotalCap(client, {
+    lines: [{ job_id: JOB, line_type: "labour", line_total_ex: amount }],
+    loadModes: async () => [{ job_id: JOB, invoice_mode: "work_order", work_order_agreed_ex: 1120, job_work_order_id: WO }],
+    jobRefs: async () => new Map([[JOB, "ZZTEST-P2"]]),
+  });
+  assertEquals(await check(224), null);
+  assertEquals((await check(224.01))?.jobs[0].most_this_invoice_ex, 224);
+  await assertRejects(() => readWorkOrderCapFacts(fakeClient({ fail: "work_order_amount_changes" }),
+    [{ jobId: JOB, ref: "ZZTEST-P2", agreedEx: 1120, workOrderId: WO }]), WorkOrderTotalCapReadError);
 });
