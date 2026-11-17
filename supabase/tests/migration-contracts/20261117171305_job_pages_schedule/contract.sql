@@ -105,3 +105,9 @@ ROLLBACK;
 
 -- Restore the successor for the remaining registered cases.
 \ir ../../../migrations/20261117172503_job_pages_queue_safety.sql
+
+-- Restore the installed speed/fairness successor after this historical reapply.
+SELECT to_regprocedure('public.job_page_yield(uuid)') IS NOT NULL AS page_retry_successor_live \gset
+\if :page_retry_successor_live
+\ir ../../../migrations/20261117194301_job_page_speed_and_retry.sql
+\endif
