@@ -5,7 +5,7 @@ SET LOCAL statement_timeout='120s';
 CREATE TEMP TABLE fu33_renderer AS SELECT pg_get_functiondef('public.job_page_refresh(uuid)'::regprocedure) AS body;
 \ir ../../../migrations/20261117172503_job_pages_queue_safety.sql
 DO $restore$ BEGIN EXECUTE (SELECT body FROM fu33_renderer); END $restore$;
-\ir ../../../migrations/20261118024225_job_pages_real_changes_first.sql
+\ir ../../../migrations/20261118055951_job_pages_real_changes_first.sql
 DO $renderer$ BEGIN
  IF pg_get_functiondef('public.job_page_refresh(uuid)'::regprocedure)<>(SELECT body FROM fu33_renderer) THEN
   RAISE EXCEPTION 'FU33 replaced the main renderer'; END IF;
@@ -180,10 +180,10 @@ DO $budget$ DECLARE result jsonb; BEGIN
 END $budget$;
 ROLLBACK TO slow_build;
 -- Undo is tested and put back inside the transaction, never left on the shard.
-\ir ../../../rollbacks/20261118024225_job_pages_real_changes_first_down.sql
+\ir ../../../rollbacks/20261118055951_job_pages_real_changes_first_down.sql
 DO $down$ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.job_pages_next_due()'::regprocedure)<>'d35be2589fd0d6009ae964c277eb8ed1' THEN RAISE EXCEPTION 'FU33 rollback'; END IF;
 END $down$;
-\ir ../../../migrations/20261118024225_job_pages_real_changes_first.sql
+\ir ../../../migrations/20261118055951_job_pages_real_changes_first.sql
 ROLLBACK;
 \echo FU33 contract passed: 16 behaviour groups, 2 native indexed plans, renderer preserved, rollback restored
