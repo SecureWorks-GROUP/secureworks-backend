@@ -1,3 +1,4 @@
+import { readSwitches } from "../_shared/switch_cache.ts";
 import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 
 // Execute the production action with local sweep dependencies and no server.
@@ -36,7 +37,7 @@ Deno.test("work order sweep confirms only a valid successful sweep and reports R
     const empty = () => Promise.resolve({});
     const invoke = () => run(
       client, new URL(`https://example.invalid/?${scenario.query}`), "api_key", true,
-      { method: "POST" }, {}, (value: unknown) => value, empty, empty, empty,
+      { method: "POST" }, {}, (value: unknown) => value, () => Promise.resolve({ sweep_gate_v1: true }), empty, empty,
       (fn: () => unknown) => fn(),
       () => scenario.issueError ? Promise.reject(new Error("issue failed")) : Promise.resolve({ issued: 1 }),
       empty, empty, () => Promise.resolve(["invoice-fixture"]),
@@ -53,4 +54,38 @@ Deno.test("work order sweep confirms only a valid successful sweep and reports R
       ? [["sweep_gate_confirm", { p_name: "job-work-order-auto-issue", p_token: token }]]
       : []);
   }
+});
+
+Deno.test("work order sweep with gate off makes one switch read and no confirmation call", async () => {
+  let switchReads = 0;
+  const calls: unknown[] = [];
+  const client = {
+    from: (table: string) => {
+      assertEquals(table, "feature_flags");
+      switchReads++;
+      return { select: () => ({ in: (_column: string, names: string[]) => {
+        assertEquals(names.includes("sweep_gate_v1"), true);
+        return Promise.resolve({ data: [], error: null });
+      } }) };
+    },
+    rpc: (name: string, args: unknown) => {
+      calls.push([name, args]);
+      return Promise.resolve({ error: null });
+    },
+  };
+  const empty = () => Promise.resolve({});
+  const result = await run(
+    client,
+    new URL(`https://example.invalid/?gate=job-work-order-auto-issue&gate_token=${"a".repeat(32)}`),
+    "api_key", true, { method: "POST" }, {}, (value: unknown) => value,
+    readSwitches, empty, empty, (fn: () => unknown) => fn(),
+    () => Promise.resolve({ issued: 1 }), empty, empty,
+    () => Promise.resolve(["invoice-fixture"]),
+    () => Promise.resolve({ success: true }),
+  );
+  assertEquals(result.issued, 1);
+  assertEquals(result.group_releases, [{ invoice_id: "invoice-fixture", success: true }]);
+  assertEquals(result.gate_confirmed, false);
+  assertEquals(switchReads, 1);
+  assertEquals(calls, []);
 });
