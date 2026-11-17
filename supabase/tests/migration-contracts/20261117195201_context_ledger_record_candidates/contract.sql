@@ -19,12 +19,12 @@ BEGIN
  OR EXISTS(SELECT 1 FROM public.context_ledger_record_candidates('00000000-0000-4000-8000-000000000401','reply',NULL,'2026-11-03T09:00:00+08')) THEN RAISE EXCEPTION 'record candidates: refusal cases'; END IF;
 END $c$;
 -- A failed document email with no job link still prevents a manufactured send.
-INSERT INTO public.email_events(email_type,status,metadata,recipient,sender) VALUES('quote','failed','{"document_id":"00000000-0000-4000-8000-000000000401"}','role@example.test','role@example.test');
+INSERT INTO public.email_events(email_type,status,metadata,recipient) VALUES('quote','failed','{"document_id":"00000000-0000-4000-8000-000000000401"}','role@example.test');
 DO $c$ BEGIN
  IF EXISTS(SELECT 1 FROM public.context_ledger_record_candidates('00000000-0000-4000-8000-000000000401','quote_sent',NULL,'2026-11-03T09:00:00+08')) THEN
  RAISE EXCEPTION 'record candidates: failed email closed quote'; END IF;
 END $c$;
-INSERT INTO public.email_events(email_type,status,sent_at,metadata,recipient,sender) VALUES('quote','sent','2026-11-04T11:00:00+08','{"document_id":"00000000-0000-4000-8000-000000000401"}','role@example.test','role@example.test');
+INSERT INTO public.email_events(email_type,status,sent_at,metadata,recipient) VALUES('quote','sent','2026-11-04T11:00:00+08','{"document_id":"00000000-0000-4000-8000-000000000401"}','role@example.test');
 DO $c$ BEGIN
  IF (SELECT closes_at FROM public.context_ledger_record_candidates('00000000-0000-4000-8000-000000000401','quote_sent',NULL,'2026-11-03T09:00:00+08'))
  IS DISTINCT FROM '2026-11-04T11:00:00+08'::timestamptz THEN RAISE EXCEPTION 'record candidates: delivery time'; END IF;
