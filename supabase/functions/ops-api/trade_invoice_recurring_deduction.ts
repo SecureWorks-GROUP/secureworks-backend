@@ -468,9 +468,22 @@ export async function withStoredTradeRepaymentRule(
   client: any, invoice: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   if (!invoice.recurring_deduction_id || !invoice.recurring_deduction_amount) return invoice;
-  const read = await client.from("trade_recurring_deductions").select("kind, xero_account_code")
-    .eq("id", invoice.recurring_deduction_id).maybeSingle();
-  if (read.error || !read.data) throw new Error("Could not read the stored deduction rule");
+  let read;
+  try {
+    read = await client.from("trade_recurring_deductions").select("kind, xero_account_code")
+      .eq("id", invoice.recurring_deduction_id).maybeSingle();
+    if (read.error || !read.data) throw new Error("Could not read the stored deduction rule");
+  } catch (error) {
+    // With repayments off, an unavailable rule must preserve the existing Xero split.
+    let enabled = false;
+    try {
+      const flag = await client.from("feature_flags").select("enabled")
+        .eq("flag_name", "trade_repayments_v1").maybeSingle();
+      enabled = !flag.error && flag.data?.enabled === true;
+    } catch { /* Missing or unreadable is off. */ }
+    if (!enabled) return invoice;
+    throw error;
+  }
   if (read.data.kind !== "repayment") return invoice;
   if (!String(read.data.xero_account_code ?? "").trim()) throw new Error("Could not read the repayment account");
   return { ...invoice, recurring_deduction_kind: "repayment",

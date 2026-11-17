@@ -20,7 +20,7 @@ export async function tradeRepaymentsAction(
   body: Record<string, any>,
   caller: Caller,
 ) {
-  if (!caller.staff) {
+  if (!caller.staff || !caller.userId) {
     return result(403, "staff_only", "Repayments are for the office.");
   }
   if (method !== (action === "list_trade_repayments" ? "GET" : "POST")) {

@@ -1765,3 +1765,17 @@ Deno.test("ZZTEST repayment reads: unreadable balance takes nothing, stored Xero
       recurring_deduction_id: RULE_100, recurring_deduction_label: rule.label, recurring_deduction_amount: 50 });
   assertEquals(stored.recurring_deduction_xero_account_code, "ZZTEST-account");
 });
+
+Deno.test("ZZTEST stored deduction read failure preserves Xero money with repayment switch off", async () => {
+  const invoice = { recurring_deduction_id: "ZZTEST-rule", recurring_deduction_amount: 50 };
+  for (const thrown of [false, true]) {
+    const client = { from(table: string) {
+      const q: any = { select: () => q, eq: () => q, maybeSingle: () => {
+        if (table === "feature_flags") return { data: { enabled: false }, error: null };
+        if (thrown) throw new Error("ZZTEST read failure");
+        return { data: null, error: { message: "ZZTEST read failure" } };
+      } }; return q;
+    } };
+    assertEquals(await withStoredTradeRepaymentRule(client, invoice), invoice);
+  }
+});
