@@ -102,4 +102,3 @@ CREATE OR REPLACE VIEW public.v_job_cost_events_lines AS
  (SELECT NULL::text document_id,NULL::uuid job_id WHERE false) s ON s.document_id=l.document_id
  WHERE l.kind='installer_bill' AND l.state='needs_person'
  UNION ALL SELECT po.*,NULL::uuid,NULL::text FROM po;
-
