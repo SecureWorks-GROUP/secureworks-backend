@@ -16,38 +16,9 @@
 // ── Division (Business Unit) rule ──
 // Maps a job to its Xero "Business Unit" tracking option.
 //
-// SWR- IS NOW AMBIGUOUS, AND THIS FUNCTION REFUSES TO GUESS.
-//
-// The prefix was already shared by renovation and roofing; repair makes it three
-// ways. An insurance repair is SES insurance work and books where the make-safe /
-// SES insurance work books (NOT 'SW - PRIVATE ROOFING', which is private
-// roofing revenue). So a bare SWR- number can no longer decide a business unit,
-// and returning a wrong category is worse than returning none: every caller
-// already handles the empty answer (they skip Tracking, or fall back to
-// 'Construction' in a description), whereas a wrong one silently misfiles
-// revenue and nobody notices until month end.
-//
-// Pass the job type wherever a job row is in hand and the answer is exact.
-// Callers holding only a job-number string (supplier bills, WO cost lines) get
-// '' for SWR-. Every OTHER prefix is untouched and answers exactly as before.
-//
-// The pre-merge premise (PR #771) was that production held zero renovation
-// jobs, zero roofing jobs and zero SWR- job numbers, so no existing row changed
-// answer. That premise is spent: the repair SWR- mint lane went live 2026-08-28,
-// which is exactly why a bare SWR- number must keep resolving to '' rather than
-// being taught a default. Re-measure production before assuming any count here.
-//
-// 'SW - MAKESAFE' for repair is inherited from the make-safe route, and the
-// captain confirmed the intent behind it on 2026-08-31: repair revenue books as
-// make-safe / insurance work, so it tracks where SES insurance work already
-// tracks. Read that intent, not the string: a future tracking split follows the
-// insurance work, not the 'repair' label. (Closes what this comment carried as
-// OPEN RISK #2; OPEN RISK #1, captain signoff on the money-seal path, is a
-// different question and stays open in the 20260826000001 migration header.)
-//
-// Division stock (a line booked to a division, not a job) names its division in
-// stock_division: an option already written `SW - ...` is taken as it is, and a
-// plain division word maps to its option. Anything else falls to the job rule.
+// A bare SWR number is ambiguous between repair, roofing and renovation.
+// The explicit type decides; repair books with SES work. Unknown stays empty.
+// Division stock takes precedence over the job's type and number.
 
 export const DIVISION_CATEGORY_NAME = 'Business Unit'
 
@@ -62,12 +33,16 @@ const STOCK_DIVISION_OPTIONS: Record<string, string> = {
   makesafe: 'SW - MAKESAFE',
   insurance: 'SW - INSURANCE WORK',
   restoration: 'SW - RESTORATION',
+  fuel: 'SW Group',
+  parking: 'SW Group',
+  meals: 'SW Group',
 }
 
 export function divisionTrackingOption(input: {
   job_number?: string | null
   job_type?: string | null
   stock_division?: string | null
+  activeOptions?: ReadonlySet<string>
 }): string {
   const stock = String(input.stock_division || '').trim()
   if (stock.startsWith('SW - ')) return stock
@@ -78,8 +53,11 @@ export function divisionTrackingOption(input: {
   const jobType = input.job_type
   // An explicit type always wins, including when the job has no number yet.
   const type = String(jobType || '').trim().toLowerCase()
-  // Granny-flat accounting is unresolved. Never infer a division from its retained number.
-  if (type === 'granny_flat') return ''
+  if (type === 'granny_flat') return 'SecureBuild'
+  // Only a stored active option authorises this name. Never create it in Xero.
+  if (type === 'misc' || type === 'miscellaneous' || type === 'general') {
+    return input.activeOptions?.has('Private Renovations') ? 'Private Renovations' : ''
+  }
   if (type === 'repair') return 'SW - MAKESAFE'
   if (type === 'roofing' || type === 'renovation') return 'SW - PRIVATE ROOFING'
   if (!jobNumber) return ''

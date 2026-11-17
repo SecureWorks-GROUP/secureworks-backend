@@ -212,8 +212,8 @@ Deno.test('checkDraft: a customer invoice with no document is never short of one
 
 Deno.test('linesFingerprint: same lines give the same print; one account code changes it', async () => {
   const lines = [
-    { accountCode: '306', trackingOption: 'SW - PATIOS', quantity: 2, unitAmount: 10.005 },
-    { accountCode: '306', trackingOption: 'SW - PATIOS', quantity: 1, unitAmount: 5 },
+    { accountCode: '306', trackingOption: 'SW - PATIOS', quantity: 2 },
+    { accountCode: '306', trackingOption: 'SW - PATIOS', quantity: 1 },
   ]
   const a = await linesFingerprint(lines)
   const b = await linesFingerprint(lines.map((l) => ({ ...l })))
