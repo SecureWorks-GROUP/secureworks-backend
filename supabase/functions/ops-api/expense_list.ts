@@ -1,5 +1,6 @@
 import {
   REIMBURSEMENT_FLAG,
+  loadClaimedReimbursementReceipts,
   reimbursementReceiptRefusal,
 } from "./trade_invoice_reimbursement.ts";
 
@@ -42,34 +43,14 @@ export async function listExpenseReceipts(
     .eq("flag_name", REIMBURSEMENT_FLAG).maybeSingle();
   if (flag?.enabled !== true || !rows.length) return { expenses: rows };
   const basis = await readPayBasis();
-  const claimed = new Set<string>();
-  if (basis === "inclusive_12_112_v1") {
-    // trade_invoice_lines_one_receipt (also expense_receipt_idx) bounds this
-    // single lookup to at most 100 receipts, with no invoice or receipt rereads.
-    const { data: claims, error: claimsError } = await client.from(
-      "trade_invoice_lines",
-    )
-      .select("expense_receipt_id").in(
-        "expense_receipt_id",
-        rows.map((row: any) => row.id),
-      );
-    if (claimsError) {
-      throw new Error("Could not read the receipt's invoice claims");
-    }
-    for (const claim of claims || []) claimed.add(claim.expense_receipt_id);
-  }
+  const claimed = basis === "inclusive_12_112_v1"
+    ? await loadClaimedReimbursementReceipts(client, rows.map((row: any) => row.id))
+    : new Set<string>();
   return {
     expenses: rows.map((row: any) => {
       const reason = basis !== "inclusive_12_112_v1"
         ? "reimbursement_switch_off"
         : reimbursementReceiptRefusal(row, caller.id, claimed.has(row.id));
-      if (
-        !reason &&
-        (!Number.isFinite(Number(row.total_amount)) ||
-          Number(row.total_amount) <= 0)
-      ) {
-        throw new Error("The receipt amount must be positive");
-      }
       return { ...row, reimbursement: { claimable: reason === null, reason } };
     }),
   };
