@@ -14,6 +14,8 @@
  * thenable builder that resolves per-table fixtures and records writes.
  */
 // deno-lint-ignore-file no-explicit-any no-import-prefix
+import "./trade_app_visibility_rules_test_env.ts";
+import { CARD, send } from "./trade_week_submission_test_harness.ts";
 import {
   assert,
   assertEquals,
@@ -152,19 +154,27 @@ Deno.test("audit 2: manual hours must be finite, more than 0 and at most 24", ()
   assertEquals(_sanitiseManualAssignmentHours(undefined), null);
 });
 
-// Owner, 15 Nov 2026: a trade may set their own rate per booked job card. The
-// card's rate is read only when the app marks it typed by the trade, only
-// through tradeTypedJobRate (trade_rate_per_job.ts), and a missing office rate
-// still blocks the submission.
-Deno.test("audit 2: generate_trade_invoice manual lane reads a client rate only as the trade's typed job rate", () => {
-  assertStringIncludes(INDEX, "hours_worked: h, hourly_rate: typedRate ?? resolvedRate,");
-  assertStringIncludes(INDEX, "typedRate = manualRow.rate_source === 'client_entered'");
-  assertStringIncludes(INDEX, "? tradeTypedJobRate(manualRow.rate, resolvedRate,");
-  assertEquals(INDEX.includes("clientRateProvided"), false, "the old client rate path must stay gone");
-  assertEquals(INDEX.includes("anyClientRate"), false, "client rate must not bypass RATE_NOT_CONFIGURED");
-  const guardAt = INDEX.indexOf("code: 'RATE_NOT_CONFIGURED',");
-  const readAt = INDEX.indexOf("typedRate = manualRow.rate_source === 'client_entered'");
-  assert(guardAt > 0 && readAt > guardAt, "the office-rate guard must run before a typed rate is read");
+// P1-16.3 preserves the old-client contract while autofill is off. Drive the
+// real handler so a variable rename cannot invalidate this money proof.
+Deno.test({
+  name: "audit 2: switch off keeps a typed job rate, body GST and the missing-office-rate guard",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const typed = await send({ on: false, body: { manual_assignments: [{ assignment_id: CARD, hours: 7.5, rate: 41, rate_source: "client_entered" }] } });
+    assertEquals(typed.status, 200, JSON.stringify(typed.response));
+    assertEquals(typed.lines[0].line_total_ex, 307.5);
+    assertEquals(typed.invoices[0].gst > 0, true);
+    assertEquals("accepted_untouched" in typed.invoices[0], false);
+    assertEquals("suggested" in typed.lines[0], false);
+    const staleDisplay = await send({ on: false, body: { manual_assignments: [{ assignment_id: CARD, hours: 7.5, rate: 41, rate_source: "server_resolved" }] } });
+    assertEquals(staleDisplay.status, 200, JSON.stringify(staleDisplay.response));
+    assertEquals(staleDisplay.lines[0].line_total_ex, 300);
+    const missing = await send({ on: false, rates: [], body: { manual_assignments: [{ assignment_id: CARD, hours: 7.5, rate: 41, rate_source: "client_entered" }] } });
+    assertEquals(missing.status, 422);
+    assertEquals(missing.response.code, "RATE_NOT_CONFIGURED");
+    assertEquals(missing.invoices.length, 0);
+  },
 });
 
 // ── 3. one live invoice per trade + week ─────────────────────────────────────
