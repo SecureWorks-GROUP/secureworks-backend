@@ -1,4 +1,9 @@
 BEGIN;
+-- This case owns the conservative predecessor, not FU20 part 1's due verdict.
+SELECT to_regclass('public.business_events_worker_facts_jobs') IS NOT NULL AS worker_facts_due_successor \gset
+\if :worker_facts_due_successor
+\ir ../../../rollbacks/20261117220401_context_worker_facts_due_down.sql
+\endif
 -- Inspect this slice before its later fact-read switch overlay.
 \ir ../../../rollbacks/20261117220301_context_fact_read_state_down.sql
 -- This contract proves the earlier facts-only delta against its own predecessor.
