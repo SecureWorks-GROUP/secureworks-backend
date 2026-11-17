@@ -15,6 +15,7 @@ on:
       # never merge. Prefer scripts/** over a hardcoded list so new files under
       # scripts/ (e.g. evidence checkers) still fire the required check.
       - "supabase/migrations/**"
+      - "supabase/rollbacks/**"
       - "supabase/tests/migration-contracts/**"
       - "scripts/**"
       - "scripts/deploy-edge-function.sh"
@@ -960,8 +961,37 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Identify changed database files
+        id: changed
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # An unavailable diff must run the suite, never silently skip it.
+          HAS_CHANGES=true
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "Not a pull request; running the full migration contract suite"
+          elif ! CHANGED=$(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA" -- \
+            'supabase/migrations/' \
+            'supabase/rollbacks/' \
+            'supabase/tests/migration-contracts/' \
+            'scripts/apply-pending-migrations.sh' \
+            '.github/workflows/pr-check.yml'); then
+            echo "Cannot compute the PR diff; running the full migration contract suite"
+          elif [ -n "$CHANGED" ]; then
+            echo "Database inputs changed; running the full migration contract suite"
+          else
+            HAS_CHANGES=false
+            echo "Skipping migration contract suite: no database inputs changed in this PR"
+          fi
+          echo "has_changes=$HAS_CHANGES" >> "$GITHUB_OUTPUT"
 
       - name: Ensure PostgreSQL client is available
+        if: steps.changed.outputs.has_changes == 'true'
         run: |
           if ! command -v psql >/dev/null 2>&1; then
             sudo apt-get update
@@ -969,6 +999,7 @@ jobs:
           fi
 
       - name: Run PostgreSQL migration contracts
+        if: steps.changed.outputs.has_changes == 'true'
         env:
           MIGRATION_CONTRACT_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
           MIGRATION_CONTRACT_DISPOSABLE_ACK: I-confirm-this-is-disposable-local-postgres
