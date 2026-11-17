@@ -84,7 +84,7 @@ export const TRADE_INVOICE_EMPLOYER_SUPER_BASIS = "employer_12_v2";
 // Super comes out of every line paid to a person; a reimbursement line
 // carries none. Nothing is added on top and nothing more is withheld, so the
 // company pays out the invoice total and no more. Stamped on the invoice when
-// it is priced (trade_super_inclusive.ts decides, from the start date), so an
+// it is priced (trade_pay_rule.ts decides, from the start date), so an
 // invoice keeps the rule it was priced under and every earlier week stays as
 // it was.
 export const TRADE_INVOICE_INCLUSIVE_SUPER_BASIS = "inclusive_12_112_v1";

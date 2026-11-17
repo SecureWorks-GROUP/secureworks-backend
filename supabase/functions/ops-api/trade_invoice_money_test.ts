@@ -1,8 +1,10 @@
 // deno-lint-ignore-file no-import-prefix require-await
 
 import {
+  assert,
   assertEquals,
   assertRejects,
+  assertStringIncludes,
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
@@ -21,7 +23,15 @@ import {
   TRADE_INVOICE_WORKER_WITHHOLD_RATE,
   TradeInvoiceMoneyError,
   validatePersistedTradeInvoiceMoney,
+  assertTradeInvoiceSuperBaseMatchesLines,
+  groupedMoneyLabel,
+  isTradeInvoiceReimbursementLine,
+  reimbursementLinesTotalEx,
+  TRADE_INVOICE_INCLUSIVE_SUPER_BASIS,
+  tradeInvoiceInclusiveSuper,
+  type TradeInvoiceXeroLine,
 } from "./trade_invoice_money.ts";
+import { buildTradeInvoiceAuditText } from "./trade_invoice_pdf.ts";
 
 Deno.test("captain 2026-09-18: $1000 gross keeps 12% super remittance and pays the boy $940", () => {
   assertEquals(
@@ -742,5 +752,222 @@ Deno.test("validator accepts the new 6% withhold shape and the historical 12% ca
       }),
     TradeInvoiceMoneyError,
     "does not reconcile",
+  );
+});
+
+// ── One super rule (P1-01.2, .4): every amount includes super ───────────────
+// The fund gets 12/112 of the total less reimbursements; the person the rest.
+// Stand-in ZZTEST figures only.
+
+const INCLUSIVE = TRADE_INVOICE_INCLUSIVE_SUPER_BASIS;
+
+function inclusiveMoney(
+  gross: number,
+  opts: { reimbursementEx?: number; gstOn?: boolean; commissionEx?: number } = {},
+) {
+  return calculateTradeInvoiceMoney({
+    grossEarned: gross,
+    gstOn: opts.gstOn ?? false,
+    earningsDate: "2026-12-13",
+    superBasis: INCLUSIVE,
+    commissionEx: opts.commissionEx,
+    reimbursementEx: opts.reimbursementEx,
+  });
+}
+
+/** Exact 12/112 of a cents amount, rounded half up, in cents (BigInt). */
+function exactInclusiveSuperCents(baseCents: number): number {
+  const num = BigInt(baseCents) * 12n;
+  const q = num / 112n;
+  const r = num % 112n;
+  return Number(r * 2n >= 112n ? q + 1n : q);
+}
+
+Deno.test("inclusive super: spec test 1, total 1,120.00 gives super 120.00 and pays 1,000.00", () => {
+  const m = inclusiveMoney(1120);
+  assertEquals(
+    [m.super_basis, m.super_amount, m.net_pay, m.gst_amount, m.trade_payable, m.total_inc],
+    [INCLUSIVE, 120, 1000, 0, 1000, 1120],
+  );
+  assertEquals([m.worker_withhold, m.company_contribution, m.company_total_out], [120, 0, 1120]);
+  assert(!("super_base_ex" in m));
+});
+
+Deno.test("inclusive super: spec tests 2 and 3, 1,000.00 and the 0.14 tie", () => {
+  const a = inclusiveMoney(1000);
+  assertEquals([a.super_amount, a.net_pay], [107.14, 892.86]);
+  assertEquals(Math.round(a.net_pay * 0.12 * 100) / 100, a.super_amount);
+  const b = inclusiveMoney(0.14);
+  assertEquals([b.super_amount, b.net_pay], [0.02, 0.12]);
+});
+
+Deno.test("inclusive super: spec test 4, a reimbursement carries no super and no GST", () => {
+  const m = inclusiveMoney(1200, { reimbursementEx: 80, gstOn: true, commissionEx: 448 });
+  assertEquals(
+    [m.super_base_ex, m.super_amount, m.net_pay, m.gst_amount, m.trade_payable, m.total_inc],
+    [1120, 120, 1080, 112, 1192, 1312],
+  );
+  const off = inclusiveMoney(1200, { reimbursementEx: 80 });
+  assertEquals([off.net_pay, off.trade_payable], [1080, 1080]);
+});
+
+Deno.test("inclusive super: spec test 5, a reimbursement-only invoice pays it all", () => {
+  const m = inclusiveMoney(80, { reimbursementEx: 80 });
+  assertEquals([m.super_base_ex, m.super_amount, m.net_pay, m.trade_payable], [0, 0, 80, 80]);
+});
+
+Deno.test("inclusive super: commission is in the base on the new rule", () => {
+  const withCommission = inclusiveMoney(1120, { commissionEx: 448 });
+  const without = inclusiveMoney(1120);
+  assertEquals(withCommission, without);
+});
+
+Deno.test("inclusive super: spec test 6, 10 hours at 56.00 is 560.00, super 60.00, paid 500.00", () => {
+  const m = inclusiveMoney(10 * 56);
+  assertEquals([m.gross_earned, m.super_amount, m.net_pay], [560, 60, 500]);
+});
+
+Deno.test("inclusive super: every whole cent 0.01 to 300.00 matches the exact fraction and validates", () => {
+  for (let cents = 1; cents <= 30000; cents++) {
+    const amount = cents / 100;
+    assertEquals(Math.round(tradeInvoiceInclusiveSuper(amount) * 100), exactInclusiveSuperCents(cents), `at ${amount}`);
+    const m = inclusiveMoney(amount);
+    const stored = {
+      gst_on: m.gst_on,
+      super_rate: m.super_rate,
+      super_amount: m.super_amount,
+      gross_earned: m.gross_earned,
+      net_pay: m.net_pay,
+      subtotal_ex: m.gross_earned,
+      gst: m.gst_amount,
+      total_inc: m.total_inc,
+      super_basis: m.super_basis,
+      week_end: "2026-12-13",
+    };
+    assertEquals(validatePersistedTradeInvoiceMoney(stored).net_pay, m.net_pay);
+  }
+});
+
+Deno.test("inclusive super: only a reimbursement line is free of super", () => {
+  assert(isTradeInvoiceReimbursementLine("reimbursement"));
+  for (const t of ["labour", "travel", "commission", "group share", "work order", "materials", "other"]) {
+    assert(!isTradeInvoiceReimbursementLine(t), t);
+  }
+  assertEquals(
+    reimbursementLinesTotalEx([
+      { line_type: "labour", line_total_ex: 560 },
+      { line_type: "reimbursement", line_total_ex: 79.995 },
+      { line_type: "Reimbursement", line_total_ex: 0.01 },
+    ]),
+    80.01,
+  );
+});
+
+Deno.test("inclusive super: the old rule is unchanged", () => {
+  const old = calculateTradeInvoiceMoney({ grossEarned: 1000, gstOn: true, earningsDate: "2026-11-29" });
+  assertEquals([old.super_amount, old.net_pay, old.gst_amount, old.total_inc], [120, 940, 100, 1100]);
+  assert(!("super_basis" in old));
+});
+
+Deno.test("inclusive super: a stored invoice validates, presents its figures, and its base must match its lines", () => {
+  const stored = {
+    gst_on: true,
+    super_rate: 0.12,
+    super_amount: 120,
+    gross_earned: 1200,
+    net_pay: 1080,
+    super_basis: INCLUSIVE,
+    super_base_ex: 1120,
+    subtotal_ex: 1200,
+    gst: 112,
+    total_inc: 1312,
+    week_end: "2026-12-13",
+  };
+  const money = validatePersistedTradeInvoiceMoney(stored);
+  assertEquals([money.super_amount, money.trade_payable], [120, 1192]);
+  const presented = presentTradeInvoiceMoney(stored);
+  assertEquals(presented.super_inclusive, { total: 1200, paid_to_you: 1080, paid_to_super_fund: 120 });
+  assertTradeInvoiceSuperBaseMatchesLines(money, 0, 80);
+  assertThrows(() => assertTradeInvoiceSuperBaseMatchesLines(money, 0, 40));
+  // GST on the whole gross is refused on the new rule.
+  assertThrows(() => validatePersistedTradeInvoiceMoney({ ...stored, gst: 120, total_inc: 1320 }));
+  // 12% of the total stamped inclusive is refused.
+  assertThrows(() =>
+    validatePersistedTradeInvoiceMoney({ ...stored, super_base_ex: null, gst_on: false, gst: 0, total_inc: 1200, super_amount: 144, net_pay: 1056 })
+  );
+});
+
+const INCLUSIVE_LINES: TradeInvoiceXeroLine[] = [
+  { Description: "ZZTEST labour", Quantity: 20, UnitAmount: 56, AccountCode: "310" } as TradeInvoiceXeroLine,
+];
+
+Deno.test("inclusive super: spec test 9, the Xero draft bill carries the three figures", () => {
+  const m = inclusiveMoney(1120);
+  const lines = splitTradeInvoiceXeroLines(INCLUSIVE_LINES, m, { superAccountCode: "478", tradeName: "ZZTEST Crew" });
+  assertEquals(lines.length, 2);
+  assertEquals([lines[0].Quantity, lines[0].UnitAmount, lines[0].TaxType], [20, 56, "NONE"]);
+  const superLine = lines[1];
+  assertEquals([superLine.UnitAmount, superLine.TaxType], [-120, "NONE"]);
+  const text = String(superLine.Description);
+  assert(text.startsWith("Superannuation Guarantee"), text);
+  assertStringIncludes(text, "Total (includes super) $1,120.00");
+  assertStringIncludes(text, "Paid to the super fund $120.00");
+  assertStringIncludes(text, "$1,000.00");
+  assert(!/company contribution/i.test(text), text);
+  const total = lines.reduce((sum, l) => sum + Number(l.Quantity ?? 1) * Number(l.UnitAmount ?? 0), 0);
+  assertEquals(Math.round(total * 100) / 100, 1000);
+  const returned = lines.map((l) => ({
+    ...l,
+    LineAmount: Math.round(Number(l.Quantity ?? 1) * Number(l.UnitAmount ?? 0) * 100) / 100,
+  }));
+  assertReturnedTradeInvoiceXeroSplit(returned, m);
+
+  const gst = splitTradeInvoiceXeroLines(INCLUSIVE_LINES, inclusiveMoney(1120, { gstOn: true }), { superAccountCode: "478" });
+  assertEquals([gst[0].TaxType, gst[1].TaxType], ["INPUT", "NONE"]);
+});
+
+Deno.test("inclusive super: a GST trade's reimbursement is held back from Xero, never sent with GST on it", () => {
+  const m = inclusiveMoney(1200, { reimbursementEx: 80, gstOn: true });
+  assertThrows(
+    () => splitTradeInvoiceXeroLines(INCLUSIVE_LINES, m, { superAccountCode: "478" }),
+    TradeInvoiceMoneyError,
+    "reimbursement",
+  );
+  // Without GST the bill goes, with the reimbursement named on the super line.
+  const noGst = inclusiveMoney(1200, { reimbursementEx: 80 });
+  const lines = splitTradeInvoiceXeroLines([
+    ...INCLUSIVE_LINES,
+    { Description: "ZZTEST reimbursement", Quantity: 1, UnitAmount: 80, AccountCode: "310" } as TradeInvoiceXeroLine,
+  ], noGst, { superAccountCode: "478" });
+  assertStringIncludes(String(lines.at(-1)?.Description), "Reimbursements $80.00 carry no super.");
+  const total = lines.reduce((sum, l) => sum + Number(l.Quantity ?? 1) * Number(l.UnitAmount ?? 0), 0);
+  assertEquals(Math.round(total * 100) / 100, 1080);
+});
+
+Deno.test("inclusive super: the audit PDF reads Total (includes super), Paid to your super fund, Paid to you", () => {
+  const m = inclusiveMoney(1120);
+  const text = buildTradeInvoiceAuditText(buildTradeInvoiceAuditModel(INCLUSIVE_LINES, m, "ZZTEST Crew"), {
+    invoiceNumber: "ZZTEST-1",
+    tradeName: "ZZTEST Crew",
+  }).join("\n");
+  const total = text.indexOf("Total (includes super) $1120.00");
+  const fund = text.indexOf("Paid to your super fund $120.00");
+  const you = text.indexOf("Paid to you $1000.00");
+  assert(total >= 0 && fund > total && you > fund, text);
+  assert(!/withheld/i.test(text), text);
+});
+
+Deno.test("inclusive super: job cost reads no company super on top", () => {
+  // 20261030170000 trade_employer_super: super_amount - (subtotal_ex - net_pay).
+  for (const [gross, reimbursement] of [[1120, 0], [1200, 80], [1000.02, 0], [57.5, 12.25]]) {
+    const m = inclusiveMoney(gross, { reimbursementEx: reimbursement });
+    assertEquals(Math.round((m.super_amount - (m.gross_earned - m.net_pay)) * 100) / 100, 0);
+  }
+});
+
+Deno.test("inclusive super: money labels group thousands", () => {
+  assertEquals(
+    [groupedMoneyLabel(1120), groupedMoneyLabel(0.5), groupedMoneyLabel(1234567.891), groupedMoneyLabel(-80)],
+    ["$1,120.00", "$0.50", "$1,234,567.89", "-$80.00"],
   );
 });
