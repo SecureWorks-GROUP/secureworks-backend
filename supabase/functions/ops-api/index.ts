@@ -58184,14 +58184,14 @@ async function setTradeRate(client: any, authUserId: string | null, body: any) {
 
   // Refuse before writing: an office edit must not erase a scheduled change.
   const { data: futureRate, error: futureError } = await client.from('trade_rates')
-    .select('id, effective_from')
+    .select('effective_from')
     .eq('user_id', targetUserId)
     .gt('effective_from', today)
     .order('effective_from', { ascending: true })
     .limit(1).maybeSingle()
   if (futureError) throw futureError
   if (futureRate) {
-    throw new ApiError(`Scheduled rate ${futureRate.id} starts on ${futureRate.effective_from}. No rates were changed. Ask the office to review that scheduled change before setting another rate.`, 409)
+    throw new ApiError(`This trade has a new rate starting ${futureRate.effective_from}. Nothing was changed. Tell the director if the rate needs to change before then.`, 409)
   }
 
   // The date guard also preserves a future row added after the read above.
@@ -58276,11 +58276,17 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
     .or(`effective_to.is.null,effective_to.gte.${today}`)
     .order('effective_from', { ascending: false })
   if (ratesError) throw ratesError
+  const seenTrades = new Set<string>()
+  const currentRates = (rates || []).filter((rate: any) => {
+    if (seenTrades.has(rate.user_id)) return false
+    seenTrades.add(rate.user_id)
+    return true
+  })
 
   return {
     invoices: mergeTradeBillRows(weekly.data || [], noWeek.data || [], stuckRows.slice(0, STUCK_TRADE_BILLS_CAP))
       .map((invoice: any) => presentTradeInvoiceSafe(invoice)),
-    rates: rates || [],
+    rates: currentRates,
     ...(stuckCapHit
       ? { stuck_note: `More than ${STUCK_TRADE_BILLS_CAP} invoices are stuck with no Xero bill; only the newest ${STUCK_TRADE_BILLS_CAP} are listed.` }
       : {}),
@@ -58313,32 +58319,36 @@ export function mergeTradeBillRows(weekly: any[], noWeek: any[], stuck: any[] = 
 // the weighted rate; cost is summed before rounding, as for a single rate.
 async function loadDatedTradeLabour(client: any, assignments: any[], unnamedTrade: string) {
   const trades: Record<string, { name: string, hours: number, rate: number, cost: number }> = {}
-  const ratesByDay = new Map<string, number>()
-  const mixedRates = new Set<string>()
+  const workByTrade = new Map<string, Array<{ day: string, hours: number }>>()
   for (const a of assignments) {
     const hours = Math.round(((new Date(a.completed_at).getTime() - new Date(a.started_at).getTime()) / 3600000) * 100) / 100
     const userId = String(a.user_id)
     const day = a.scheduled_date || getAWSTDate(new Date(a.started_at))
-    const key = `${userId}:${day}`
-    if (!ratesByDay.has(key)) {
-      const { data: rateRow, error } = await client.from('trade_rates')
-        .select('hourly_rate')
-        .eq('user_id', userId)
-        .lte('effective_from', day)
-        .or(`effective_to.is.null,effective_to.gte.${day}`)
-        .order('effective_from', { ascending: false })
-        .limit(1).maybeSingle()
-      if (error) throw error
-      ratesByDay.set(key, rateRow ? Number(rateRow.hourly_rate) : 0)
-    }
-    const rate = ratesByDay.get(key)!
-    const trade = trades[userId] ||= { name: a.users?.name || unnamedTrade, hours: 0, rate, cost: 0 }
-    if (trade.rate !== rate) mixedRates.add(userId)
-    trade.hours += hours
-    trade.cost += hours * rate
+    trades[userId] ||= { name: a.users?.name || unnamedTrade, hours: 0, rate: 0, cost: 0 }
+    if (!workByTrade.has(userId)) workByTrade.set(userId, [])
+    workByTrade.get(userId)!.push({ day, hours })
   }
-  for (const [userId, trade] of Object.entries(trades)) {
-    if (trade.hours && mixedRates.has(userId)) trade.rate = Math.round(trade.cost / trade.hours * 100) / 100
+  for (const [userId, work] of workByTrade) {
+    const days = work.map((row) => row.day).sort()
+    // One indexed per-trade read for the job's work-date range, not per day.
+    const { data: rates, error } = await client.from('trade_rates')
+      .select('hourly_rate, effective_from, effective_to')
+      .eq('user_id', userId)
+      .lte('effective_from', days[days.length - 1])
+      .or(`effective_to.is.null,effective_to.gte.${days[0]}`)
+      .order('effective_from', { ascending: false })
+    if (error) throw error
+    const trade = trades[userId]
+    const usedRates = new Set<number>()
+    for (const { day, hours } of work) {
+      const row = (rates || []).find((rate: any) => rate.effective_from <= day && (!rate.effective_to || rate.effective_to >= day))
+      const rate = row ? Number(row.hourly_rate) : 0
+      usedRates.add(rate)
+      trade.rate = rate
+      trade.hours += hours
+      trade.cost += hours * rate
+    }
+    if (trade.hours && usedRates.size > 1) trade.rate = Math.round(trade.cost / trade.hours * 100) / 100
     trade.cost = Math.round(trade.cost * 100) / 100
   }
   return trades
