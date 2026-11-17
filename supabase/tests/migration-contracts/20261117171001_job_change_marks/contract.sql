@@ -147,7 +147,7 @@ END $c$;
 
 -- A re-apply is a no-op.
 BEGIN;
-\ir ../../../migrations/20261117161100_job_change_marks.sql
+\ir ../../../migrations/20261117171001_job_change_marks.sql
 DO $c$
 BEGIN
  IF (SELECT count(*) FROM pg_proc WHERE proname IN ('job_mark_changed', 'job_marks_notes_seen')

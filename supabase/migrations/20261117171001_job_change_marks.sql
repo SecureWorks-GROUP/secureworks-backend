@@ -5,7 +5,7 @@
 -- This migration adds the table and its two functions only: the triggers that call job_mark_changed come in
 -- P0-02.2, and nothing reads the table yet. Stored Job Profit (P0-09) keeps its own job_profit_dirty table and calls
 -- job_mark_changed(<job>, 'profit'), so any source text is accepted.
--- Rollback: supabase/rollbacks/20261117161100_job_change_marks_down.sql.
+-- Rollback: supabase/rollbacks/20261117171001_job_change_marks_down.sql.
 SET LOCAL lock_timeout = '5s';
 
 CREATE TABLE IF NOT EXISTS public.job_change_marks (

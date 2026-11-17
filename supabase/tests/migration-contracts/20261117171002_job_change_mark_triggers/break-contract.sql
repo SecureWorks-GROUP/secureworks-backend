@@ -1,0 +1,1 @@
+DROP TRIGGER job_mark_changed_business_events ON public.business_events;
