@@ -7,7 +7,7 @@ SELECT to_regclass('public.reconcile_items') IS NULL AS raise_contract_needs_tab
 \ir ../20261118060051_reconcile_tables/main_lines_reader.sql
 \ir ../../../migrations/20261118060051_reconcile_tables.sql
 \endif
-\ir ../../../migrations/20261118063500_reconcile_item_raise.sql
+\ir ../../../migrations/20261118064402_reconcile_item_raise.sql
 
 CREATE FUNCTION pg_temp.expect_failure(command text, expected text) RETURNS void
 LANGUAGE plpgsql AS $expect$
