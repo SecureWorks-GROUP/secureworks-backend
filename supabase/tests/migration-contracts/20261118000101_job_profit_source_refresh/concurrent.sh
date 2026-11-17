@@ -5,7 +5,13 @@ case "$CONTRACT_DATABASE_URL" in
  postgresql://*@127.0.0.1:*/*|postgres://*@127.0.0.1:*/*|postgresql://*@localhost:*/*|postgres://*@localhost:*/*) ;;
  *) echo 'local disposable database only' >&2; exit 2 ;;
 esac
-proof_root=/Volumes/SSD/agent-scratch/cx-p0-09-45
+# Keep Mac proof output on the SSD. Hosted Linux runners have their own
+# disposable scratch volume and cannot create /Volumes/SSD.
+if [ "${GITHUB_ACTIONS:-}" = true ]; then
+ proof_root="${RUNNER_TEMP:?GitHub runner scratch required}/cx-p0-09-45"
+else
+ proof_root=/Volumes/SSD/agent-scratch/cx-p0-09-45
+fi
 mkdir -p "$proof_root"
 proof_dir=$(mktemp -d "$proof_root/concurrent.XXXXXX")
 proof_job=ffffffff-ffff-4fff-8fff-ffffffffff45
