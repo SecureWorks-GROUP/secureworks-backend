@@ -65,7 +65,7 @@ BEGIN
  IF d IS DISTINCT FROM 'CREATE INDEX business_events_pending_luna_marker ON public.business_events USING btree (attribution_checked_at DESC) INCLUDE (id) WHERE ((job_id IS NULL) AND (attribution_status = ''pending_luna''::text) AND (attribution_checked_at IS NOT NULL))' THEN
   RAISE EXCEPTION 'pending marker: the index is not the promised shape: %', d;
  END IF;
- IF position('20261117090000' IN coalesce(obj_description('public.business_events_pending_luna_marker'::regclass, 'pg_class'), '')) = 0 THEN
+ IF position('20261117100000' IN coalesce(obj_description('public.business_events_pending_luna_marker'::regclass, 'pg_class'), '')) = 0 THEN
   RAISE EXCEPTION 'pending marker: the index comment is missing';
  END IF;
 END $c$;
@@ -74,7 +74,7 @@ END $c$;
 BEGIN;
 CREATE TEMP TABLE pm_before AS SELECT indexrelid, pg_get_indexdef(indexrelid) AS def FROM pg_index
  WHERE indexrelid = 'public.business_events_pending_luna_marker'::regclass;
-\ir ../../../migrations/20261117090000_context_pending_marker_index.sql
+\ir ../../../migrations/20261117100000_context_pending_marker_index.sql
 DO $c$
 BEGIN
  IF (SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'business_events_pending_luna_marker') <> 1

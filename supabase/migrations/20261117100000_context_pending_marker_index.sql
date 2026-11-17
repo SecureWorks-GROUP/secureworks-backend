@@ -12,7 +12,7 @@
 -- Release order: this migration first, then the worker. Before it, the worker's read is correct but scans.
 -- Building it takes a SHARE lock on business_events (writes wait) for one pass over the table; lock_timeout keeps it
 -- from queueing behind a long writer.
--- Rollback: supabase/rollbacks/20261117090000_context_pending_marker_index_down.sql.
+-- Rollback: supabase/rollbacks/20261117100000_context_pending_marker_index_down.sql.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
@@ -21,4 +21,4 @@ CREATE INDEX IF NOT EXISTS business_events_pending_luna_marker
   WHERE job_id IS NULL AND attribution_status = 'pending_luna' AND attribution_checked_at IS NOT NULL;
 
 COMMENT ON INDEX public.business_events_pending_luna_marker IS
-  'Pending marker (20261117090000, P0-03): the context worker''s one-row read of the pending_luna row with no job checked last, before it pages the attribution backlog. Index-only, stops at the first row. Read by secureworks-jarvis readPendingMarker.';
+  'Pending marker (20261117100000, P0-03): the context worker''s one-row read of the pending_luna row with no job checked last, before it pages the attribution backlog. Index-only, stops at the first row. Read by secureworks-jarvis readPendingMarker.';
