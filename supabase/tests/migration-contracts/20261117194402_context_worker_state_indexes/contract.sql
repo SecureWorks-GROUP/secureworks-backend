@@ -1,4 +1,6 @@
 BEGIN;
+-- Inspect this slice before its later fact-read switch overlay.
+\ir ../../../rollbacks/20261117220301_context_fact_read_state_down.sql
 -- This contract proves the earlier facts-only delta against its own predecessor.
 -- Stand that state body back up inside this rolled-back transaction when FU20
 -- part 2 is present; the successor's own case proves the new mark reads.
