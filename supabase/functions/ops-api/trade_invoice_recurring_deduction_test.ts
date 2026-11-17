@@ -47,6 +47,7 @@ import {
 import {
   decideTradeRecurringDeduction,
   loadTradeRecurringDeductionDecision,
+  withStoredTradeRepaymentRule,
   tradeRecurringDeductionInvoiceFields,
   tradeRecurringDeductionResponse,
   tradeRecurringDeductionRulesCovering,
@@ -1736,4 +1737,25 @@ Deno.test("ZZTEST repayment: remaining balance caps each week without changing s
   assertEquals(repayment.TaxType, "NONE");
   assertEquals(repayment.Tracking, []);
   assertReturnedTradeInvoiceXeroSplit(lines, money);
+});
+
+Deno.test("ZZTEST repayment reads: unreadable balance takes nothing, stored Xero rule keeps its account", async () => {
+  let failed = true;
+  const rule = { ...RULES[0], label: "ZZTEST repayment", kind: "repayment", balance_total: 250, xero_account_code: "ZZTEST-account" };
+  const client = { rpc: () => ({ data: failed ? null : 50, error: failed ? { message: "ZZTEST read failure" } : null }),
+    from(table: string) {
+      const q: any = { select: () => q, eq: () => q, not: () => q, maybeSingle: () => q,
+        then: (resolve: any) => resolve({ data: table === "feature_flags" ? { enabled: true }
+          : table === "trade_recurring_deductions" ? [rule] : [], error: null }) }; return q;
+    } };
+  const input = { userId: UTE_TRADE, weekStart: THIS_WEEK, payable: 1000 };
+  const missing = await loadTradeRecurringDeductionDecision(client, input);
+  assertEquals(missing.applied, null);
+  assertEquals(missing.note, "The repayment balance could not be read, so nothing was taken this week.");
+  failed = false;
+  assertEquals((await loadTradeRecurringDeductionDecision(client, input)).applied?.amount, 50);
+  const stored = await withStoredTradeRepaymentRule({ from: () => ({ select() { return this; }, eq() { return this; },
+    maybeSingle: () => ({ data: rule, error: null }) }) }, {
+      recurring_deduction_id: RULE_100, recurring_deduction_label: rule.label, recurring_deduction_amount: 50 });
+  assertEquals(stored.recurring_deduction_xero_account_code, "ZZTEST-account");
 });

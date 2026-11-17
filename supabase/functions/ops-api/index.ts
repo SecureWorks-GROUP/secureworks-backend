@@ -736,6 +736,7 @@ import {
 } from './trade_invoice_running_draft.ts'
 import {
   loadTradeRecurringDeductionDecision,
+  withStoredTradeRepaymentRule,
   type TradeRecurringDeductionDecision,
   tradeRecurringDeductionInvoiceFields,
   tradeRecurringDeductionResponse,
@@ -2748,7 +2749,7 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
     (sum: number, line: { lineTotalEx: number }) => sum + line.lineTotalEx,
     0,
   )
-  const invMoney = persistedTradeInvoiceMoney(inv)
+  const invMoney = persistedTradeInvoiceMoney(await withStoredTradeRepaymentRule(client, inv))
   const expectedSubtotal = invMoney.gross_earned
   if (Math.abs(computedSubtotal - expectedSubtotal) > 0.01) {
     throw new Error('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
@@ -10792,6 +10793,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // Ruling 17 step 4: a job paid hourly up to a maximum. Its limit is the
       // database's read (20261114030000_job_labour_cap.sql); the refusal is
       // the one work order cap guard's (ruling 17c); job_labour_cap.ts.
+      case 'change_work_order_amount':
+      case 'work_order_changes': {
+        const { workOrderAmountChangeAction } = await import('./work_order_amount_change.ts')
+        const result = await workOrderAmountChangeAction(client, action, req.method,
+          req.method === 'GET' ? Object.fromEntries(url.searchParams) : body, {
+            staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+            userId: authMode === 'jwt' ? authUser?.id || null : null,
+            orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+          })
+        return json(result.body, result.status)
+      }
       case 'job_labour_cap':
       case 'raise_job_labour_cap': {
         const { jobLabourCapAction } = await import('./job_labour_cap.ts')
@@ -11451,6 +11463,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // ── Trade Invoicing (Ops) ──
       case 'list_trade_invoices': return json(await listTradeInvoices(client, url.searchParams))
       case 'labour_reconciliation': return json(await labourReconciliation(client, url.searchParams))
+      case 'list_trade_repayments':
+      case 'set_trade_repayment':
+      case 'stop_trade_repayment': {
+        const { tradeRepaymentsAction } = await import('./trade_repayments.ts')
+        const result = await tradeRepaymentsAction(client, action, req.method, body, {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          userId: authMode === 'jwt' ? authUser?.id || null : null,
+          orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+        })
+        return json(result.body, result.status)
+      }
       case 'set_trade_rate_ops': return json(await setTradeRate(client, null, body))
       case 'approve_trade_invoice': {
         // Ops (Shaun) approves a pending_ops_review trade invoice after verifying
