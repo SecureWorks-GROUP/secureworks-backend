@@ -1,0 +1,1 @@
+-- All inputs and the full checking views come from the preceding registered stack.
