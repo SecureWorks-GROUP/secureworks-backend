@@ -58137,6 +58137,8 @@ async function setTradeRate(client: any, authUserId: string | null, body: any) {
 }
 
 // ── list_trade_invoices: ops dashboard view ──
+export const _setTradeRateForTest = setTradeRate
+
 async function listTradeInvoices(client: any, params: URLSearchParams) {
   const limit = parseInt(params.get('limit') || '50')
   const status = params.get('status')
@@ -58341,6 +58343,8 @@ async function labourReconciliation(client: any, params: URLSearchParams) {
 }
 
 // ── trade_labour_budget: labour budget view for lead installer ──
+export const _labourReconciliationForTest = labourReconciliation
+
 async function tradeLabourBudget(
   client: any,
   params: URLSearchParams,
