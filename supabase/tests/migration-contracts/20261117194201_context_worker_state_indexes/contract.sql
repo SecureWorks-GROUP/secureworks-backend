@@ -49,6 +49,11 @@ WITH fixture_jobs AS (
 )
 INSERT INTO public.job_change_marks_base (job_id, last_marked_at, notes_done_at)
 SELECT id, now() - row_number() OVER () * interval '1 minute', now() + interval '1 hour' FROM fixture_jobs;
+-- Prove the raw-event plan at meaningful volume as well as the folded-base
+-- plan. A two-row raw table can correctly use a tiny sequential scan and sort.
+INSERT INTO public.job_change_mark_events (job_id, marked_at, source, page_pending)
+SELECT job_id, last_marked_at - interval '1 minute', 'fixture-history', false
+FROM public.job_change_marks_base;
 -- Raw events include an acknowledged newest mark and a later orphan. The view
 -- excludes the orphan, so the optimized read must also exclude it.
 INSERT INTO public.job_change_mark_events (job_id, marked_at, source, page_pending)
