@@ -57974,6 +57974,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     row.invoice_mode = mode?.invoice_mode ?? null
     row.invoice_mode_reason = mode?.invoice_mode_reason ?? null
     row.can_claim_commission = mode ? mode.can_claim_commission : null
+    row.commission = mode?.commission ?? { state: 'not_known', offer_ex: null }
     // The trade's own pay for the job: the approved job work order's agreed
     // labour, which the trade bills exactly (Marnin, 12 Nov 2026). Null when
     // there is none or it could not be read.

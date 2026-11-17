@@ -36,7 +36,12 @@
 // deno-lint-ignore-file no-explicit-any
 
 import { isRestorationCard } from "./restoration_workflow_store.ts";
-import { readJobCommissionRecords } from "./job_commission.ts";
+import {
+  commissionOfferFor,
+  type CommissionOffer,
+  type JobCommissionRecord,
+  readJobCommissionRecords,
+} from "./job_commission.ts";
 import {
   extraLineType,
   tradeMayClaimCommission,
@@ -61,7 +66,8 @@ export type TradeInvoiceModeDecision = {
 
 export type TradeInvoiceJobMode = TradeInvoiceModeDecision & {
   job_id: string;
-  can_claim_commission: boolean;
+  can_claim_commission: boolean | null;
+  commission: CommissionOffer;
   // Only on a work_order job with an approved job work order that has its
   // agreed labour set: the agreed labour, ex GST, and that work order's id.
   // Otherwise both null. The trade bills the work order at exactly this.
@@ -126,8 +132,9 @@ function chunks<T>(items: T[], size = CHUNK): T[][] {
 
 /**
  * Reads the trade, the jobs (inside the trade's company only) and their group
- * work orders, and decides each job. Every read error throws
+ * work orders, and decides each job. Mode read errors throw
  * TradeInvoiceModeReadError: an unreadable group never reads as "no group".
+ * An unreadable commission stays not known, with claim permission unknown.
  * Job ids not found in the trade's company are returned in `not_found`.
  */
 export async function loadTradeInvoiceJobModes(
@@ -257,11 +264,13 @@ export async function loadTradeInvoiceJobModes(
     managedVerticals: input.normaliseManagedVerticals(user.managed_verticals),
     invoiceAnyJob: user.invoice_any_job === true,
   };
-  let commissionRecords: Map<string, { salesperson_user_id: string | null }>;
+  let commissionRecords = new Map<string, JobCommissionRecord>();
+  let commissionUnavailable = false;
   try {
     commissionRecords = await readJobCommissionRecords(client, [...jobs.keys()]);
-  } catch {
-    throw new TradeInvoiceModeReadError("the job commission records");
+  } catch (error) {
+    console.error("[ops-api] trade invoice job modes: commission unreadable", error);
+    commissionUnavailable = true;
   }
   const out: TradeInvoiceJobMode[] = [];
   const notFound: string[] = [];
@@ -279,7 +288,8 @@ export async function loadTradeInvoiceJobModes(
       ...mode,
       work_order_agreed_ex: agreed ? agreed.agreed : null,
       job_work_order_id: agreed ? agreed.id : null,
-      can_claim_commission: tradeMayClaimCommission({
+      commission: commissionOfferFor(commissionRecords.get(id) ?? null, input.tradeId),
+      can_claim_commission: commissionUnavailable ? null : tradeMayClaimCommission({
         job: {
           id,
           createdBy: row.created_by ? String(row.created_by) : null,

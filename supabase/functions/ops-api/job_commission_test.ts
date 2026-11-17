@@ -9,6 +9,7 @@
 import "./trade_app_visibility_rules_test_env.ts";
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  commissionOfferFor,
   commissionCapCodeFromDbError,
   commissionCapRefusal,
   jobCommissionAction,
@@ -254,4 +255,19 @@ handlerTest("handler: the server key cannot change a rate; a staff sign-in reach
   assert(owner.rpcs[0].includes(`"p_actor":"${ME}"`), owner.rpcs[0]);
   const trade = await call("commission_rates", { method: "GET", headers: { authorization: "Bearer trade-jwt" } }, "lead_installer");
   assertEquals(trade.status, 403, JSON.stringify(trade.body));
+});
+
+Deno.test("commission offer: only the named salesperson receives the remaining figure", () => {
+  assertEquals(commissionOfferFor(null, ME), { state: "not_known", offer_ex: null });
+  for (const state of ["no_amount", "no_salesperson", "salesperson_not_found"] as const) {
+    for (const caller of [ME, OTHER]) {
+      assertEquals(commissionOfferFor(rec({ state }), caller), { state: "not_known", offer_ex: null });
+    }
+  }
+  assertEquals(commissionOfferFor(rec({ remaining_ex_gst: 448 }), ME), { state: "offer", offer_ex: 448 });
+  assertEquals(commissionOfferFor(rec({ remaining_ex_gst: 448 }), OTHER), { state: "not_yours", offer_ex: null });
+  for (const remaining_ex_gst of [0, -1]) {
+    assertEquals(commissionOfferFor(rec({ remaining_ex_gst }), ME), { state: "claimed", offer_ex: 0 });
+    assertEquals(commissionOfferFor(rec({ remaining_ex_gst }), OTHER), { state: "not_yours", offer_ex: null });
+  }
 });
