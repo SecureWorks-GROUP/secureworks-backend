@@ -5,7 +5,7 @@ import { _opsApiRequestHandlerForTest } from "./index.ts";
 
 const tradeId = "00000000-0000-4000-8000-000000000016";
 const officeId = "00000000-0000-4000-8000-000000000017";
-const serverKey = "sb_secret_ZZTEST_rate_audit";
+const serverKey = `sb_secret_${crypto.randomUUID()}`;
 type Row = Record<string, any>;
 
 function fixture() {
