@@ -262,3 +262,5 @@ BEGIN
 END $$;
 ROLLBACK;
 
+-- 11. Job Profit counts a new-rule invoice once, at its total (P1-01.5).
+\ir job-profit-contract.sql
