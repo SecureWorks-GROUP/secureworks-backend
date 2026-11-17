@@ -1563,6 +1563,7 @@ import {
 // TP-01 Xero tie-out (20261029121500): staff read, bills by month and bucket.
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
+import { TradePayRunError, payRunReadsFromClient, readPayRun } from './trade_pay_run.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
 import { jobTraceAction, jobTraceView } from './job_trace.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
@@ -10026,6 +10027,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }))
         } catch (err) {
           if (err instanceof TradePayRunCheckError) throw new ApiError(err.message, err.status)
+          throw err
+        }
+      }
+
+      // The weekly pay run (P1-10.2): the week's invoices clean or stopped
+      // (pay-run check v2 plus the standing checks), the clean totals, super
+      // owed per person and the hash P1-10.3 approves against. Read only;
+      // staff by the front door (not in any trade, routine or agent-read list).
+      case 'pay_run': {
+        try {
+          return json(await readPayRun(payRunReadsFromClient(client), {
+            weekStart: url.searchParams.get('week_start'),
+            // Never substitute the server org for a JWT caller with a missing profile org.
+            orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
+            // The server key is no person, so it can never approve.
+            actorUserId: authMode === 'jwt' ? (authUser?.id || null) : null,
+          }))
+        } catch (err) {
+          if (err instanceof TradePayRunError) {
+            return json({ ok: false, error: err.code, message: err.message }, err.status)
+          }
           throw err
         }
       }
