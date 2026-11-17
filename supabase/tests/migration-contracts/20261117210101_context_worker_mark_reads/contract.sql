@@ -47,28 +47,32 @@ ANALYZE public.job_notes_marks_seen;
 
 CREATE TEMP TABLE worker_mark_plans (label text, reader text, plan text) ON COMMIT DROP;
 CREATE FUNCTION pg_temp.worker_mark_plan(label text) RETURNS void LANGUAGE plpgsql AS $f$
-DECLARE reader text; query text; line text; plan text;
+DECLARE reader text; query text; plan jsonb; relation_name text; relations text[];
 BEGIN
   FOREACH reader IN ARRAY ARRAY['context_worker_marks_newest', 'context_worker_notes_due'] LOOP
     SELECT p.prosrc INTO query FROM pg_proc p WHERE p.oid = ('public.' || reader || '()')::regprocedure;
-    plan := '';
-    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) ' || query LOOP
-      plan := plan || line || E'\n';
+    EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) ' || query INTO plan;
+    INSERT INTO worker_mark_plans VALUES (label, reader, plan::text);
+    relations := ARRAY['job_change_mark_events', 'job_change_marks_base', 'jobs'];
+    IF reader = 'context_worker_notes_due' THEN
+      relations := array_append(relations, 'job_notes_marks_seen');
+    END IF;
+    FOREACH relation_name IN ARRAY relations LOOP
+      IF NOT jsonb_path_exists(plan,
+        '$.** ? (@."Relation Name" == $relation && (@."Node Type" == "Index Scan" || @."Node Type" == "Index Only Scan"))',
+        jsonb_build_object('relation', relation_name))
+        OR jsonb_path_exists(plan,
+        '$.** ? (@."Relation Name" == $relation && @."Node Type" == "Seq Scan")',
+        jsonb_build_object('relation', relation_name)) THEN
+        RAISE EXCEPTION 'worker mark reads: % plan not indexed: %',
+          CASE WHEN reader = 'context_worker_notes_due' THEN 'notes' ELSE 'newest' END, plan;
+      END IF;
     END LOOP;
-    INSERT INTO worker_mark_plans VALUES (label, reader, plan);
-    IF reader = 'context_worker_marks_newest' AND
-      (plan NOT LIKE '%Index Only Scan using job_change_mark_events_worker_newest%'
-       OR plan NOT LIKE '%Index Only Scan using job_change_marks_base_worker_newest%') THEN
-      RAISE EXCEPTION 'worker mark reads: newest plan not indexed: %', plan;
-    END IF;
-    IF reader = 'context_worker_notes_due' AND
-      (plan NOT LIKE '%Index Only Scan using job_change_mark_events_worker_notes%'
-       OR plan NOT LIKE '%Index Only Scan using job_change_marks_base_worker_notes%') THEN
-      RAISE EXCEPTION 'worker mark reads: notes plan not indexed: %', plan;
-    END IF;
-    IF plan LIKE '%Seq Scan on job_change_mark%' OR plan LIKE '%Seq Scan on jobs %'
-      OR plan LIKE '%Seq Scan on job_notes_marks_seen%' THEN
-      RAISE EXCEPTION 'worker mark reads: unindexed mark or acknowledgement read: %', plan;
+    -- The two capped sources may sort at most 50 candidates each. Raw history
+    -- must stream in job/time order, not sort all marks via a weaker index.
+    IF reader = 'context_worker_notes_due' AND jsonb_path_exists(plan,
+      '$.** ? ((@."Node Type" == "Sort" || @."Node Type" == "Incremental Sort") && @."Actual Rows" > 100)') THEN
+      RAISE EXCEPTION 'worker mark reads: notes plan not indexed: unbounded history sort: %', plan;
     END IF;
   END LOOP;
 END $f$;

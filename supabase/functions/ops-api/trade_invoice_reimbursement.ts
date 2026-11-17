@@ -29,6 +29,19 @@ export function reimbursementSkip(
     words: words[code],
   };
 }
+// Shared receipt eligibility for invoice saves and the batched receipt picker.
+export function reimbursementReceiptRefusal(
+  receipt: any, userId: string, claimed: boolean,
+): ReimbursementSkip["code"] | null {
+  if (!receipt || receipt.submitted_by !== userId) return "reimbursement_not_yours";
+  if (!["personal_card", "cash"].includes(receipt.payment_method)) return "reimbursement_not_personal_spend";
+  if ((!String(receipt.receipt_storage_path || "").trim() &&
+      !String(receipt.receipt_photo_url || "").trim()) || receipt.no_receipt_reason) return "reimbursement_receipt_required";
+  if (receipt.status === "rejected") return "reimbursement_rejected";
+  if (receipt.xero_bill_id || claimed) return "reimbursement_already_claimed";
+  return null;
+}
+
 export async function receiptHasLiveTradeInvoice(
   client: any,
   receiptId: string,
@@ -75,19 +88,10 @@ export async function resolveReimbursementExtras(client: any, input: {
         .eq("id", id).maybeSingle();
       if (error) throw new Error("Could not read the reimbursement receipt");
       receipt = data;
-      if (!receipt || receipt.submitted_by !== input.userId) {
-        code = "reimbursement_not_yours";
-      } else if (!["personal_card", "cash"].includes(receipt.payment_method)) {
-        code = "reimbursement_not_personal_spend";
-      } else if (
-        (!String(receipt.receipt_storage_path || "").trim() &&
-          !String(receipt.receipt_photo_url || "").trim()) ||
-        receipt.no_receipt_reason
-      ) code = "reimbursement_receipt_required";
-      else if (receipt.status === "rejected") code = "reimbursement_rejected";
-      else if (
-        receipt.xero_bill_id || await receiptHasLiveTradeInvoice(client, id, input.replacingDraftId)
-      ) code = "reimbursement_already_claimed";
+      code = reimbursementReceiptRefusal(receipt, input.userId, false);
+      if (!code && await receiptHasLiveTradeInvoice(client, id, input.replacingDraftId)) {
+        code = "reimbursement_already_claimed";
+      }
     }
     if (code) {
       skipped_items.push(reimbursementSkip(id, code));

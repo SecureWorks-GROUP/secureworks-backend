@@ -1,0 +1,1 @@
+-- Both readers and both index pairs are supplied by the registered stack.
