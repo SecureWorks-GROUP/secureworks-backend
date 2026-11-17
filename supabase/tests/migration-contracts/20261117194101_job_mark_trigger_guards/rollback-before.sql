@@ -9,3 +9,11 @@ DO $$ DECLARE t text; BEGIN
  END LOOP;
 END $$;
 SELECT public.job_change_mark_triggers_install();
+
+-- Test-only pg_cron API; no real scheduler exists in the disposable database.
+CREATE SCHEMA cron;
+CREATE TABLE cron.job (jobid bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,jobname text);
+CREATE FUNCTION cron.unschedule(bigint) RETURNS boolean LANGUAGE sql AS $stub$
+ WITH d AS (DELETE FROM cron.job WHERE jobid=$1 RETURNING 1) SELECT EXISTS (SELECT 1 FROM d)
+$stub$;
+INSERT INTO cron.job(jobname) VALUES ('job-pages-refresh'),('job-pages-nightly'),('unrelated-contract-timer');

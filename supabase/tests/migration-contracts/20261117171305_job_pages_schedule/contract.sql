@@ -40,9 +40,32 @@ SELECT public.job_pages_install();
 RESET ROLE;
 DO $c$
 BEGIN
- IF (SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND starts_with(tgname,'job_mark_changed_')) <> 14
-  OR (SELECT count(*) FROM cron.job WHERE jobname IN ('job-pages-refresh','job-pages-nightly')) <> 2 THEN
-  RAISE EXCEPTION 'job pages install: expected all 14 triggers and both schedules';
+ -- Require this install's original hooks by table and name. A successor may split
+ -- an UPDATE hook without making any of these fourteen source tables optional.
+ IF EXISTS (
+  SELECT 1 FROM (VALUES
+   ('business_events','job_mark_changed_business_events'),
+   ('context_ledger_items','job_mark_changed_context_ledger_items'),
+   ('context_ledger_generations','job_mark_changed_context_ledger_generations'),
+   ('xero_invoices','job_mark_changed_xero_invoices'),
+   ('job_documents','job_mark_changed_job_documents'),
+   ('email_events','job_mark_changed_email_events'),
+   ('job_assignments','job_mark_changed_job_assignments'),
+   ('job_events','job_mark_changed_job_events'),
+   ('jobs','job_mark_changed_jobs'),
+   ('job_materials_facts','job_mark_changed_job_materials_facts'),
+   ('trade_invoice_lines','job_mark_changed_trade_invoice_lines'),
+   ('work_orders','job_mark_changed_work_orders'),
+   ('purchase_orders','job_mark_changed_purchase_orders'),
+   ('job_client_signoffs','job_mark_changed_job_client_signoffs')
+  ) AS expected(table_name,trigger_name)
+  WHERE NOT EXISTS (
+   SELECT 1 FROM pg_trigger t
+   WHERE t.tgrelid=to_regclass('public.'||expected.table_name)
+    AND t.tgname=expected.trigger_name AND NOT t.tgisinternal AND t.tgenabled='O'
+  )
+ ) OR (SELECT count(*) FROM cron.job WHERE jobname IN ('job-pages-refresh','job-pages-nightly')) <> 2 THEN
+  RAISE EXCEPTION 'job pages install: expected each named source trigger and both schedules';
  END IF;
  IF NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname='job-pages-refresh'
   AND command=$cmd$SET LOCAL statement_timeout = '45s'; SELECT public.job_pages_refresh_due(1);$cmd$) THEN

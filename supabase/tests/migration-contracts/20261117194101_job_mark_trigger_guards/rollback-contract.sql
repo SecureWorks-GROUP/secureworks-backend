@@ -1,4 +1,8 @@
 DO $$ BEGIN
+ IF EXISTS (SELECT 1 FROM cron.job WHERE jobname IN ('job-pages-refresh','job-pages-nightly'))
+  OR NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname='unrelated-contract-timer') THEN
+  RAISE EXCEPTION 'trigger guard rollback: page timer remains or unrelated timer removed';
+ END IF;
  IF EXISTS(SELECT 1 FROM pg_trigger WHERE NOT tgisinternal AND tgname LIKE 'job_mark_changed_%') THEN
   RAISE EXCEPTION 'trigger guard rollback: installed trigger remains';
  END IF;

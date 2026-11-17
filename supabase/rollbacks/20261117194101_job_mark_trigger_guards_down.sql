@@ -1,7 +1,14 @@
--- Remove the complete installed set, including split update triggers, before restoring definitions.
+-- Remove both page timers and the complete installed set before restoring definitions.
 -- Director explicitly reinstalls the original set after rollback proof.
 SET LOCAL lock_timeout = '5s';
-SELECT public.job_change_mark_triggers_remove();
+DO $uninstall$ DECLARE v_job bigint; BEGIN
+ IF to_regclass('cron.job') IS NOT NULL THEN
+  FOR v_job IN SELECT jobid FROM cron.job WHERE jobname IN ('job-pages-refresh','job-pages-nightly') LOOP
+   PERFORM cron.unschedule(v_job);
+  END LOOP;
+ END IF;
+ PERFORM public.job_change_mark_triggers_remove();
+END $uninstall$;
 
 CREATE OR REPLACE FUNCTION public.job_change_mark_triggers_install() RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $install$
