@@ -49,10 +49,11 @@ BEGIN
     'document_kind','xero_credit_note','document_id','ZZTEST-credit','document_status','AUTHORISED','live',true,
     'lines','[{"line_key":"1","kind":"supplier_credit","lane":"materials","amount_ex":-100,"follows_document_kind":"xero_bill","follows_document_id":"ZZTEST-writer"}]'::jsonb)));
   SELECT id INTO credit FROM public.job_cost_lines WHERE document_id='ZZTEST-credit';
-  -- A removed line is a not-counted source, so the follower must stay undecided.
+  -- A removed line is history, not a current undecided bill line.
   PERFORM public.job_cost_lines_refollow('xero_bill','ZZTEST-writer');
-  IF (SELECT needs_reason FROM public.job_cost_lines WHERE id=credit) <> 'follows_undecided' THEN
-    RAISE EXCEPTION 'writer: not-counted followed line was ignored'; END IF;
+  IF (SELECT array_agg(amount_ex ORDER BY part_no) FROM public.job_cost_line_parts WHERE line_id=credit)
+    IS DISTINCT FROM ARRAY[-60,-30,-10]::numeric[] THEN
+    RAISE EXCEPTION 'writer: removed history poisoned current bill follow'; END IF;
   -- Use an independent single-line bill for the proportional examples.
   d := jsonb_set(d,'{document_id}','"ZZTEST-split"');
   PERFORM public.job_cost_lines_upsert_documents(jsonb_build_array(d));

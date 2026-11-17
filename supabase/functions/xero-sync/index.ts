@@ -42,7 +42,7 @@ import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_
 import { incrementalModifiedSince } from './sync_window.ts'
 import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { syncSupplierCreditNotes } from './supplier_credit_notes.ts'
-import { billCostDocument } from './cost_lines.ts'
+import { billCostDocument, collectBillCostDocument } from './cost_lines.ts'
 import { syncCustomerAllocations } from './customer_allocations.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { BILLS_WINDOW_COLUMNS, readBillsInWindow } from './bills_window_read.ts'
@@ -759,6 +759,7 @@ async function syncInvoices(sb: any) {
   let costLinesWritten = 0
   const costLinesErrors: string[] = []
   let costLinesOn = false
+  let costEmployerSuperOn = false
   const costMirrorBillIds = new Set<string>()
   try {
     const { data, error } = await sb.from('feature_flags').select('enabled')
@@ -766,6 +767,10 @@ async function syncInvoices(sb: any) {
     if (error) throw error
     costLinesOn = data?.enabled === true
     if (costLinesOn) {
+      const { data: superFlag, error: superError } = await sb.from('feature_flags').select('enabled')
+        .eq('flag_name', 'job_cost_employer_super_v1').maybeSingle()
+      if (superError) throw superError
+      costEmployerSuperOn = superFlag?.enabled === true
       // Page the one mirror read so the PostgREST row ceiling cannot admit a mirror.
       for (let start = 0;; start += 1000) {
         const { data: mirrors, error: mirrorError } = await sb.from('trade_invoices')
@@ -886,8 +891,9 @@ async function syncInvoices(sb: any) {
         } else {
           totalSynced++
           if (costLinesOn) {
-            const document = billCostDocument(record, { orgId: DEFAULT_ORG_ID, mirrorBillIds: costMirrorBillIds })
-            if (document) costDocuments.push(document)
+            collectBillCostDocument(record, {
+              orgId: DEFAULT_ORG_ID, mirrorBillIds: costMirrorBillIds, employerSuperOn: costEmployerSuperOn,
+            }, costDocuments, costLinesErrors)
           }
 
           // Auto-link invoice to job via SW reference number in Reference field.
