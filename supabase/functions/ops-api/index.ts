@@ -702,10 +702,14 @@ import {
   calculateTradeInvoiceMoney,
   checkpointAndAssertReturnedTradeInvoiceXeroSplit,
   presentTradeInvoiceMoney,
+  reimbursementLinesTotalEx,
   resolvePersistedTradeInvoiceLineAmount,
   resolveTradeInvoiceGstOn,
   splitTradeInvoiceXeroLines,
+  TRADE_INVOICE_EMPLOYER_SUPER_BASIS,
+  TRADE_INVOICE_INCLUSIVE_SUPER_BASIS,
   TradeInvoiceMoneyError,
+  type TradeInvoiceSuperBasis,
   type TradeInvoiceMoney,
   tradeInvoicePayableBeforeDeduction,
   tradeInvoiceXeroBillSubtotal,
@@ -714,6 +718,12 @@ import {
   validatePersistedTradeInvoiceMoney,
   withTradeInvoiceRecurringDeduction,
 } from './trade_invoice_money.ts'
+import {
+  resolveTradePayBasisForPreview,
+  resolveTradePayBasisForSubmit,
+  TRADE_PAY_RULE_UNREADABLE_WORDS,
+  TradePayRuleUnreadable,
+} from './trade_pay_rule.ts'
 import {
   getRunningInvoiceDraft,
   requireRunningDraftAgentCaller,
@@ -2094,7 +2104,7 @@ export async function _findLiveTradeInvoiceForWeek(
   weekEnd: string,
 ): Promise<any | null> {
   const { data, error } = await client.from('trade_invoices')
-    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, recurring_deduction_label, recurring_deduction_amount')
+    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, super_base_ex, total_inc, recurring_deduction_label, recurring_deduction_amount')
     .eq('user_id', userId)
     .eq('week_end', weekEnd)
     .order('created_at', { ascending: true })
@@ -2324,11 +2334,37 @@ function tradeInvoiceMoney(
   // The invoice's commission lines, ex GST (commissionLinesTotalEx): no super
   // on commission (Marnin, 12 Nov 2026). 0 leaves super on the whole gross.
   commissionEx: unknown = 0,
+  // The invoice's reimbursement lines, ex GST (reimbursementLinesTotalEx):
+  // read only under the super inclusive rule (P1-01).
+  reimbursementEx: unknown = 0,
 ): TradeInvoiceMoney {
   try {
-    return calculateTradeInvoiceMoney({ grossEarned, gstOn, earningsDate, superBasis, commissionEx })
+    return calculateTradeInvoiceMoney({ grossEarned, gstOn, earningsDate, superBasis, commissionEx, reimbursementEx })
   } catch (error) {
     return tradeInvoiceMoneyApiError(error)
+  }
+}
+
+// Which super rule prices an invoice being saved (trade_pay_rule.ts), by its
+// pay day. Unreadable: 503 pay_rule_unreadable, nothing saved.
+async function tradePayBasisForSubmit(
+  client: any,
+  payDay: unknown,
+): Promise<TradeInvoiceSuperBasis | null> {
+  try {
+    return await resolveTradePayBasisForSubmit(client, payDay)
+  } catch (error) {
+    if (error instanceof TradePayRuleUnreadable) {
+      throw new ApiError(TRADE_PAY_RULE_UNREADABLE_WORDS, 503, {
+        ok: false,
+        success: false,
+        saved: false,
+        code: error.code,
+        error: TRADE_PAY_RULE_UNREADABLE_WORDS,
+        userMessage: TRADE_PAY_RULE_UNREADABLE_WORDS,
+      })
+    }
+    throw error
   }
 }
 
@@ -2714,7 +2750,7 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
   // A stored super base must still be the lines less their commission. An
   // invoice with none was priced with super on its whole gross and keeps it.
   try {
-    assertTradeInvoiceSuperBaseMatchesLines(invMoney, commissionLinesTotalEx(reviewLines))
+    assertTradeInvoiceSuperBaseMatchesLines(invMoney, commissionLinesTotalEx(reviewLines), reimbursementLinesTotalEx(reviewLines))
   } catch (error) {
     tradeInvoiceMoneyApiError(error)
   }
@@ -13634,10 +13670,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             )
             const sourceWorkOrderDate = weeklyWorkOrderBusinessDate(wo)
             const woInvoiceDate = new Date().toISOString().slice(0, 10)
+            // One super rule (P1-01.3): a work order claim includes super.
+            // No week on this invoice: its pay day is the day it is made.
+            const woSuperBasis = await tradePayBasisForSubmit(client, woInvoiceDate)
             const woMoney = tradeInvoiceMoney(
               invoiceTotals.subtotal_ex,
               woGstOn,
               woInvoiceDate,
+              woSuperBasis,
             )
             const subtotal = woMoney.gross_earned
             const gst = woMoney.gst_amount
@@ -14056,11 +14096,33 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               extraTotal += roundMoney(Number(share.line_total_ex || 0))
             }
             const draftSubtotal = weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)
+            // One super rule (P1-01): the draft is priced as the submit
+            // will be, from the lines it saves.
+            const draftMoneyLines: Array<{ line_type?: unknown; line_total_ex?: unknown }> = weeklyInvoice
+              ? weeklyInvoiceLineRows(weeklyInvoice)
+              : plainExtras.map((extra: any) => ({
+                line_type: (extra.type || 'other').toLowerCase(),
+                line_total_ex: roundMoney(roundMoney(Number(extra.quantity || 1)) * roundMoney(Number(extra.rate || 0))),
+              }))
+            // The draft is saved with a split, so an unreadable rule refuses
+            // it (503, nothing saved) rather than store a guess. A draft that
+            // carries a group share keeps today's draft pricing; its submit
+            // prices it on the group's basis.
+            const draftSuperBasis = resolvedShares.length > 0
+              ? null
+              : await tradePayBasisForSubmit(client, draftWeekStart || draftWeekEnd)
             // Recurring deduction: a dated draft shows what the submitted
             // invoice will carry, so the trade sees it before submitting.
             const { money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(
               client,
-              tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd),
+              tradeInvoiceMoney(
+                draftSubtotal,
+                draftGstOn,
+                draftWeekEnd,
+                draftSuperBasis,
+                0,
+                reimbursementLinesTotalEx(draftMoneyLines),
+              ),
               { userId: tradeUser.id, weekStart: draftWeekStart || null },
             )
 
@@ -15291,6 +15353,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour' })),
               ...extraLineItems,
             ])
+            // One super rule (P1-01.3): from the start date every amount
+            // includes super and reimbursement lines carry none. A group
+            // share keeps its group's basis.
+            const invoiceReimbursementEx = reimbursementLinesTotalEx(extraLineItems)
+            const invoiceSuperBasis = groupInvoiceBasis.superBasis ??
+              await tradePayBasisForSubmit(client, week_start || invoiceEarningsDate)
             // Recurring deduction (for example Ute hire): taken off the amount
             // payable of a weekly invoice, after super and GST. The lines,
             // subtotal, super and GST below are untouched by it. An invoice
@@ -15298,7 +15366,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // trade has a deduction that week.
             const { money, decision: recurringDeduction } = await applyTradeRecurringDeduction(
               client,
-              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, groupInvoiceBasis.superBasis, invoiceCommissionEx),
+              tradeInvoiceMoney(
+                subtotal,
+                gstOn,
+                invoiceEarningsDate,
+                invoiceSuperBasis,
+                invoiceSuperBasis === TRADE_INVOICE_INCLUSIVE_SUPER_BASIS ? 0 : invoiceCommissionEx,
+                invoiceReimbursementEx,
+              ),
               {
                 userId: tradeUser.id,
                 weekStart: week_start || null,
@@ -16353,7 +16428,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               })
             }
 
-            const groupCrewRelease = officeReviewHold && money.super_basis
+            const groupCrewRelease = officeReviewHold && money.super_basis === TRADE_INVOICE_EMPLOYER_SUPER_BASIS
               ? await releaseGroupCrewBills(client, String(invoice.id), `user:${tradeUser.id}`)
               : null
             if (officeReviewHold) {
@@ -57825,7 +57900,11 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   // submitting. It is taken off this preview only when the preview covers it.
   // A failed rule read is logged and shows no deduction; it never fails the
   // hours view. The submit path does not share that leniency.
-  let previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding)
+  // One super rule (P1-01.3): the preview shows the rule this week will be
+  // priced under. An unreadable rule shows no money figures
+  // (money_unavailable); the hours still show.
+  const previewRule = await resolveTradePayBasisForPreview(client, weekStart || weekEnding)
+  let previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding, previewRule.basis)
   let previewRecurringDeduction: TradeRecurringDeductionDecision | null = null
   try {
     const previewed = await applyTradeRecurringDeduction(client, previewMoney, { userId, weekStart })
@@ -57892,11 +57971,19 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     week_ending: weekEnding,
     week_start: weekStart,
     total_hours: Math.round(totalHours * 100) / 100,
-    ...tradeInvoiceMoneyResponse(previewMoney),
-    ...(previewRecurringDeduction ? tradeRecurringDeductionResponse(previewRecurringDeduction) : {}),
+    ...(previewRule.unavailable
+      ? { money: null, money_unavailable: true }
+      : {
+        ...tradeInvoiceMoneyResponse(previewMoney),
+        ...(previewRecurringDeduction ? tradeRecurringDeductionResponse(previewRecurringDeduction) : {}),
+        gst,
+        total: previewMoney.total_inc,
+        // The split as one object, with the rule it was worked out on
+        // (super_basis null: the old rule). trade.html reads super_basis.
+        money: { ...tradeInvoiceMoneyResponse(previewMoney), super_basis: previewMoney.super_basis ?? null },
+        money_unavailable: false,
+      }),
     subtotal,
-    gst,
-    total: previewMoney.total_inc,
     already_submitted: !!existingInvoice,
     running_invoice_draft: runningInvoiceDraftEnabled(userRow?.trade_details),
     // True when how each job is invoiced could not be read; every card's

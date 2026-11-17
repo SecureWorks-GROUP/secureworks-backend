@@ -760,6 +760,8 @@ type Stub = {
   gstRegistered?: boolean;
   // job_assignments rows of the week. Absent: the one 8-hour card.
   cards?: any[];
+  // The one super rule's switch and start date (P1-01.3). Absent: off.
+  payRule?: { on: boolean; from: string | null };
 };
 
 type Captured = {
@@ -855,6 +857,12 @@ async function callTradeAction(
       return Promise.resolve(
         Response.json({ message: stub.fail[table] }, { status: 500 }),
       );
+    }
+    if (table === "feature_flags" && url.searchParams.get("flag_name") === "eq.trade_pay_inclusive_super_v1") {
+      return Promise.resolve(reply([{ enabled: stub.payRule?.on === true }]));
+    }
+    if (table === "trade_pay_settings") {
+      return Promise.resolve(reply([{ inclusive_super_from: stub.payRule?.from ?? null }]));
     }
     if (table === "users") {
       return Promise.resolve(reply([{
@@ -1651,3 +1659,47 @@ Deno.test("loader: a failed read throws, it never reads as no deduction", async 
   );
   assertEquals(unread.outcome, "none");
 });
+
+// ── One super rule (P1-01.3): the my_hours preview ─────────────────────────
+
+handlerTest(
+  "my_hours: from the start date the preview is priced super inclusive and says so",
+  async () => {
+    // 8 clocked hours at $50: a total of $400 that includes super.
+    const on = await callTradeAction("my_hours", {}, {
+      user: OTHER_TRADE,
+      payRule: { on: true, from: THIS_WEEK },
+    }, { week_ending: "2026-10-18" });
+    assertEquals(on.status, 200, JSON.stringify(on.body));
+    assertEquals(on.body.money_unavailable, false);
+    assertEquals(on.body.money.super_basis, "inclusive_12_112_v1");
+    assertEquals(
+      [on.body.money.submitted_total, on.body.money.super_amount, on.body.money.amount_payable, on.body.trade_payable],
+      [400, 42.86, 357.14, 357.14],
+    );
+
+    // A week before the start date: the old rule, unchanged.
+    const before = await callTradeAction("my_hours", {}, {
+      user: OTHER_TRADE,
+      payRule: { on: true, from: "2026-10-19" },
+    }, { week_ending: "2026-10-18" });
+    assertEquals(before.body.money.super_basis, null);
+    assertEquals(before.body.trade_payable, 376);
+  },
+);
+
+handlerTest(
+  "my_hours: an unreadable pay rule shows the hours and no money figures",
+  async () => {
+    const out = await callTradeAction("my_hours", {}, {
+      user: OTHER_TRADE,
+      payRule: { on: true, from: THIS_WEEK },
+      fail: { trade_pay_settings: "boom" },
+    }, { week_ending: "2026-10-18" });
+    assertEquals(out.status, 200, JSON.stringify(out.body));
+    assertEquals(out.body.money_unavailable, true);
+    assertEquals(out.body.money, null);
+    assert(!("trade_payable" in out.body), JSON.stringify(out.body));
+    assert(Number(out.body.total_hours) > 0);
+  },
+);
