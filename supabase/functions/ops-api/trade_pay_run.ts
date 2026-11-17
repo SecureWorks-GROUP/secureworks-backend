@@ -146,7 +146,10 @@ export function invoicePayWeek(row: PayRunInvoiceRow): string | null {
   return sent ? perthMonday(sent) : null;
 }
 
-// Two open director decisions, one line each. Change the value, nothing else.
+// The one open director decision, one line. Change the value, nothing else.
+// (run-invoice-unique was ruled 18 Nov 06:55, ruling A: a stopped invoice is
+// listed again next week; a clean one is paid by one run only, which
+// pay_run_id and P1-10.1's clean-once index hold.)
 export type PayRunReach = {
   /**
    * pay-run-history. true: an invoice already billed in Xero the one-off way
@@ -155,37 +158,26 @@ export type PayRunReach = {
    * ticket as written.
    */
   skipBilledInXero: boolean;
-  /**
-   * run-invoice-unique. true (the ticket as written): an invoice recorded in
-   * an earlier run without being approved (stopped there) is listed again;
-   * approve_trade_pay_run then refuses that week while it is in the snapshot.
-   * false: it is left out of every later run.
-   */
-  relistEarlierRunInvoices: boolean;
 };
 export const PAY_RUN_REACH: PayRunReach = {
   skipBilledInXero: true, // pay-run-history: default until the director rules
-  relistEarlierRunInvoices: true, // run-invoice-unique: as written until ruled
 };
 
 /**
  * Could this invoice be in a pay run at all? Standard or follow-on (a holding
- * invoice never is), not draft or sent back, not already approved in a run,
- * then the two open decisions above. Change the run's reach here and nowhere
- * else.
+ * invoice never is), not draft or sent back, not already paid by a run
+ * (an invoice stopped in an earlier run is shown again), then the open
+ * decision above. Change the run's reach here and nowhere else.
  */
 export function payRunEligible(
   row: PayRunInvoiceRow,
   reach: PayRunReach = PAY_RUN_REACH,
-  recordedInEarlierRun: ReadonlySet<string> = new Set(),
 ): boolean {
   const kind = row.invoice_kind ?? "standard";
   return (kind === "standard" || kind === "follow_on") &&
     row.status !== "draft" && row.status !== "ops-reject" &&
     !row.pay_run_id &&
-    !(reach.skipBilledInXero && row.xero_bill_id) &&
-    (reach.relistEarlierRunInvoices ||
-      !recordedInEarlierRun.has(String(row.id)));
+    !(reach.skipBilledInXero && row.xero_bill_id);
 }
 
 export type PayRunPlacement = "in_run" | "late" | "not_yet";
@@ -296,8 +288,6 @@ export type PayRunReads = {
     week: string,
     reach: PayRunReach,
   ): Promise<PayRunInvoiceRow[]>;
-  /** Which of these invoices are recorded on any run (decision run-invoice-unique). */
-  recordedOnARun(ids: string[]): Promise<Set<string>>;
   invoicesById(ids: string[]): Promise<PayRunInvoiceRow[]>;
   lines(
     invoiceIds: string[],
@@ -398,19 +388,6 @@ export function payRunReadsFromClient(client: any): PayRunReads {
         },
         "the week's invoices",
       );
-    },
-    async recordedOnARun(ids) {
-      // trade_pay_run_invoices invoice_id unique index.
-      const rows = await byIdChunks(
-        ids,
-        (chunk) =>
-          client.from("trade_pay_run_invoices").select("invoice_id").in(
-            "invoice_id",
-            chunk,
-          ),
-        "the earlier runs",
-      );
-      return new Set(rows.map((r: any) => String(r.invoice_id)));
     },
     async invoicesById(ids) {
       return await byIdChunks(
@@ -610,11 +587,9 @@ export async function readPayRun(
   // Every invoice that could be in a run up to this week: the late ones for
   // this week come from here even once the run is recorded.
   const reach = opts.reach ?? PAY_RUN_REACH;
-  const fetched = await reads.candidates(orgId, week, reach);
-  const recorded = reach.relistEarlierRunInvoices
-    ? new Set<string>()
-    : await reads.recordedOnARun(fetched.map((r) => String(r.id)));
-  const candidates = fetched.filter((r) => payRunEligible(r, reach, recorded));
+  const candidates = (await reads.candidates(orgId, week, reach)).filter((
+    r,
+  ) => payRunEligible(r, reach));
   const late = candidates.filter((r) => payRunPlacement(r, week) === "late");
 
   // The run's invoices: once a run is recorded, exactly the ones it recorded;
