@@ -435,8 +435,11 @@ export async function saveHoldingInvoice(
 export async function deleteHoldingInvoice(client: any, invoiceId: string): Promise<void> {
   if (!invoiceId) return;
   try {
-    await client.from("trade_invoice_lines").delete().eq("trade_invoice_id", invoiceId);
-    await client.from("trade_invoices").delete().eq("id", invoiceId).eq("invoice_kind", "held");
+    // PostgREST returns errors rather than throwing; a failed delete is logged.
+    const { error: lineError } = await client.from("trade_invoice_lines").delete().eq("trade_invoice_id", invoiceId);
+    if (lineError) throw lineError;
+    const { error: headerError } = await client.from("trade_invoices").delete().eq("id", invoiceId).eq("invoice_kind", "held");
+    if (headerError) throw headerError;
   } catch (error) {
     console.error("[ops-api] holding invoice clean-up failed:", lineSendLogCode(error), invoiceId);
   }
