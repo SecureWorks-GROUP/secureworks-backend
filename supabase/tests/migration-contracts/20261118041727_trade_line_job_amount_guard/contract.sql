@@ -1,7 +1,7 @@
 BEGIN;
 SET LOCAL statement_timeout='120s';
 -- Rule 17: reapply our creating migration inside the rolled-back contract.
-\ir ../../../migrations/20261118024515_trade_line_job_amount_guard.sql
+\ir ../../../migrations/20261118041727_trade_line_job_amount_guard.sql
 CREATE FUNCTION pg_temp.zztest_assert(ok boolean, words text) RETURNS void LANGUAGE plpgsql AS $$ BEGIN
  IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'ZZTEST %',words; END IF;
 END $$;
@@ -140,6 +140,7 @@ DO $$ DECLARE plan jsonb; query text; BEGIN
  ] LOOP
   EXECUTE 'EXPLAIN (ANALYZE,FORMAT JSON) '||query INTO plan;
   PERFORM pg_temp.zztest_assert(NOT jsonb_path_exists(plan,'$.** ? (@."Node Type" == "Seq Scan")'),'job query scanned a table');
+  PERFORM pg_temp.zztest_assert(NOT jsonb_path_exists(plan,'$.** ? (@."Actual Rows" > 10 || @."Rows Removed by Filter" > 10)'),'job query read unrelated rows');
   PERFORM pg_temp.zztest_assert(jsonb_path_exists(plan,'$.** ? (@."Node Type" == "Index Scan" || @."Node Type" == "Index Only Scan" || @."Node Type" == "Bitmap Index Scan")'),'job query used no index');
  END LOOP;
 END $$;
