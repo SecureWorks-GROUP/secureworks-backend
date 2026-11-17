@@ -1,14 +1,15 @@
 \echo == P1-08.1 pay-run v2 money and refusal contract ==
 BEGIN;
 SET LOCAL statement_timeout = '120s';
-\ir ../../../migrations/20261118024515_trade_pay_run_check_v2.sql
+\ir ../../../migrations/20261118043357_trade_pay_run_check_v2.sql
 -- Ignore unrelated write guards only inside this rolled-back read-model fixture.
 DO $$ DECLARE t text; c record; BEGIN
   FOREACH t IN ARRAY ARRAY['users','jobs','trade_invoices','trade_invoice_lines','work_orders',
     'trade_pay_settings','feature_flags','expense_receipts','job_commissions',
     'trade_recurring_deductions','work_order_customer_variations','group_work_orders','group_work_order_shares'] LOOP
     EXECUTE format('ALTER TABLE public.%I DISABLE TRIGGER USER',t);
-    FOR c IN SELECT conname FROM pg_constraint WHERE conrelid=format('public.%I',t)::regclass AND contype IN ('f','c','u','x') LOOP
+    FOR c IN SELECT conname FROM pg_constraint WHERE conrelid=format('public.%I',t)::regclass AND contype IN ('f','c','u','x')
+      AND NOT (t='feature_flags' AND contype='u') LOOP
       EXECUTE format('ALTER TABLE public.%I DROP CONSTRAINT %I',t,c.conname);
     END LOOP;
     FOR c IN SELECT attname FROM pg_attribute WHERE attrelid=format('public.%I',t)::regclass

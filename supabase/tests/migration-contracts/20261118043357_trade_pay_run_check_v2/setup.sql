@@ -15,7 +15,8 @@ ALTER TABLE public.trade_invoice_lines
 ALTER TABLE public.work_orders ADD COLUMN IF NOT EXISTS job_id uuid, ADD COLUMN IF NOT EXISTS kind text;
 CREATE TABLE IF NOT EXISTS public.jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid());
 ALTER TABLE public.jobs ADD COLUMN IF NOT EXISTS status text;
-CREATE TABLE IF NOT EXISTS public.feature_flags(flag_name text PRIMARY KEY, enabled boolean);
+CREATE TABLE IF NOT EXISTS public.feature_flags(
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), flag_name text UNIQUE, enabled boolean);
 ALTER TABLE public.feature_flags ADD COLUMN IF NOT EXISTS description text;
 CREATE TABLE IF NOT EXISTS public.trade_pay_settings(id integer PRIMARY KEY);
 ALTER TABLE public.trade_pay_settings ADD COLUMN IF NOT EXISTS inclusive_super_from date,
