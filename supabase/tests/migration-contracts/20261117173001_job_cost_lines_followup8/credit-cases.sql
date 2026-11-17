@@ -1,4 +1,12 @@
 BEGIN;
+-- P2-03.1 gives the fixture's existing decision ids a real parent row.
+-- No assertion changed; before that schema exists these ids remain unbound.
+DO $decision_fixture$ BEGIN
+ IF to_regclass('public.reconcile_decisions') IS NOT NULL THEN
+  EXECUTE $rows$INSERT INTO public.reconcile_decisions(id,org_id,subject_kind,subject_id,action,"by")
+   OVERRIDING SYSTEM VALUE VALUES (123,'00000000-0000-0000-0000-000000000001','cost_document','ZZTEST-prior-decision-123','overhead','person:00000000-0000-0000-0000-00000000c310');$rows$;
+ END IF;
+END $decision_fixture$;
 INSERT INTO public.jobs(id,org_id,job_number,type,status) VALUES
  ('40000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-000000000001','ZZTEST-990201','fencing','accepted'),
  ('40000000-0000-4000-8000-000000000002','00000000-0000-0000-0000-000000000001','ZZTEST-990202','patio','accepted');
