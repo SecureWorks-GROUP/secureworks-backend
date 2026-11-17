@@ -2093,7 +2093,7 @@ export async function _findLiveTradeInvoiceForWeek(
   weekEnd: string,
 ): Promise<any | null> {
   const { data, error } = await client.from('trade_invoices')
-    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, recurring_deduction_label, recurring_deduction_amount')
+    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, super_base_ex, total_inc, recurring_deduction_label, recurring_deduction_amount')
     .eq('user_id', userId)
     .eq('week_end', weekEnd)
     .order('created_at', { ascending: true })
@@ -2713,7 +2713,7 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
   // A stored super base must still be the lines less their commission. An
   // invoice with none was priced with super on its whole gross and keeps it.
   try {
-    assertTradeInvoiceSuperBaseMatchesLines(invMoney, commissionLinesTotalEx(reviewLines))
+    assertTradeInvoiceSuperBaseMatchesLines(invMoney, commissionLinesTotalEx(reviewLines), reimbursementLinesTotalEx(reviewLines))
   } catch (error) {
     tradeInvoiceMoneyApiError(error)
   }

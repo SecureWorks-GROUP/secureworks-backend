@@ -5,6 +5,7 @@
 
 import {
   buildTradeInvoiceAuditModel,
+  TRADE_INVOICE_SUPER_INCLUSIVE_BASIS,
   type TradeInvoiceAuditModel,
   type TradeInvoiceMoney,
   type TradeInvoiceXeroLine,
@@ -13,6 +14,64 @@ import { distinctXeroPdfFilenames } from "./xero_attachment.ts";
 
 const moneyLabel = (value: number): string => `$${value.toFixed(2)}`;
 
+// Super inclusive (P1-01): every amount includes super. Three figures: the
+// total, what is paid to the person, what is paid to their super fund.
+function buildSuperInclusiveAuditText(
+  model: TradeInvoiceAuditModel,
+  tradeName: string,
+  invoiceNumber: string,
+): string[] {
+  const base = model.super_base_ex;
+  const lines: string[] = [
+    "TAX INVOICE - every amount includes super; the super fund gets 12/112 of the total",
+    `${tradeName}  ${invoiceNumber}`,
+    `Total ${moneyLabel(model.header.submitted_total)}`,
+    `Paid to you ${moneyLabel(model.header.amount_payable)}`,
+    `Paid to your super fund ${moneyLabel(model.header.super_amount)}`,
+  ];
+  if (base !== null && base !== undefined) {
+    lines.push(
+      `Reimbursements ${
+        moneyLabel(Math.round((model.header.submitted_total - base) * 100) / 100)
+      } carry no super; super is 12/112 of ${moneyLabel(base)}`,
+    );
+  }
+  lines.push("Lines (submitted amounts, each includes super)");
+  for (const line of model.submitted_lines) {
+    const desc = line.description.replace(/\s+/g, " ").trim();
+    lines.push(
+      `${desc}  qty ${line.quantity} x ${moneyLabel(line.unit_amount)} = ${
+        moneyLabel(line.line_total)
+      }`,
+    );
+  }
+  lines.push(
+    `${model.super_line.description.replace(/\s+/g, " ").trim()}  ${
+      moneyLabel(model.super_line.line_total)
+    }`,
+  );
+  lines.push(`TOTAL paid to you ${moneyLabel(model.header.amount_payable)}`);
+  const cashBeforeDeduction = model.header.amount_payable + model.gst_amount;
+  if (model.gst_amount > 0) {
+    lines.push(
+      `GST ${moneyLabel(model.gst_amount)} on the total. Paid to you including GST ${
+        moneyLabel(cashBeforeDeduction)
+      }`,
+    );
+  }
+  if (model.recurring_deduction_line) {
+    lines.push(
+      `${
+        model.recurring_deduction_line.description.replace(/\s+/g, " ").trim()
+      }  ${moneyLabel(model.recurring_deduction_line.line_total)}`,
+    );
+    lines.push(
+      `PAID TO YOU after the weekly deduction ${moneyLabel(model.trade_payable)}`,
+    );
+  }
+  return lines;
+}
+
 export function buildTradeInvoiceAuditText(
   model: TradeInvoiceAuditModel,
   options: { invoiceNumber?: string | null; tradeName?: string | null } = {},
@@ -20,6 +79,9 @@ export function buildTradeInvoiceAuditText(
   const tradeName = String(options.tradeName || "").trim() || "Trade";
   const invoiceNumber = String(options.invoiceNumber || "").trim() ||
     "trade-invoice";
+  if (model.super_basis === TRADE_INVOICE_SUPER_INCLUSIVE_BASIS) {
+    return buildSuperInclusiveAuditText(model, tradeName, invoiceNumber);
+  }
   const lines: string[] = [
     "TAX INVOICE - labour at submitted amounts, super 12% remittance, worker withhold on the minus line",
     `${tradeName}  ${invoiceNumber}`,

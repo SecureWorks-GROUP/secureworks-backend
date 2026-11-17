@@ -78,11 +78,24 @@ export type TradeInvoiceMoney = {
 };
 
 export const TRADE_INVOICE_EMPLOYER_SUPER_BASIS = "employer_12_v2";
-export type TradeInvoiceSuperBasis = typeof TRADE_INVOICE_EMPLOYER_SUPER_BASIS;
+// One super rule (owner, 17 Nov 2026, ticket P1-01): every rate and every
+// work order amount includes super. The super fund gets 12/112 of the total
+// (exactly 12% of what the person is paid) and the person is paid the rest.
+// Super comes out of every line paid to a person; a reimbursement line
+// carries none. Nothing is added on top and nothing more is withheld, so the
+// company pays out the invoice total and no more. Stamped on the invoice when
+// it is priced (trade_super_inclusive.ts decides, from the start date), so an
+// invoice keeps the rule it was priced under and every earlier week stays as
+// it was.
+export const TRADE_INVOICE_SUPER_INCLUSIVE_BASIS = "super_inclusive_v1";
+export type TradeInvoiceSuperBasis =
+  | typeof TRADE_INVOICE_EMPLOYER_SUPER_BASIS
+  | typeof TRADE_INVOICE_SUPER_INCLUSIVE_BASIS;
 
 export function resolveTradeInvoiceSuperBasis(value: unknown): TradeInvoiceSuperBasis | null {
   if (value === null || value === undefined) return null;
   if (value === TRADE_INVOICE_EMPLOYER_SUPER_BASIS) return value;
+  if (value === TRADE_INVOICE_SUPER_INCLUSIVE_BASIS) return value;
   throw new TradeInvoiceMoneyError(
     "MONEY_SPLIT_INVALID",
     "Trade invoice super basis is not recognised and cannot be pushed to Xero",
@@ -240,6 +253,107 @@ export function persistedTradeInvoiceSuperBaseEx(value: unknown): number | null 
   return round2(base);
 }
 
+// Reimbursement lines (owner, 17 Nov 2026: "The only thing it won't come out
+// of is reimbursements"). A closed list of saved line types: money the person
+// spent for the company and is paid back. Every other line type carries
+// super under the super inclusive rule, deductions included (a deduction
+// lowers what the person is paid, so it lowers their super too).
+export const TRADE_INVOICE_REIMBURSEMENT_LINE_TYPES: readonly string[] = [
+  "materials",
+  "reimbursement",
+];
+
+export function isTradeInvoiceReimbursementLine(lineType: unknown): boolean {
+  return TRADE_INVOICE_REIMBURSEMENT_LINE_TYPES.includes(
+    String(lineType ?? "").trim().toLowerCase(),
+  );
+}
+
+/** The reimbursement lines of an invoice, ex GST, summed in cents. */
+export function reimbursementLinesTotalEx(
+  lines: ReadonlyArray<{ line_type?: unknown; line_total_ex?: unknown }>,
+): number {
+  const cents = (lines || []).reduce((sum, line) => {
+    if (!isTradeInvoiceReimbursementLine(line?.line_type)) return sum;
+    const amount = Number(line?.line_total_ex ?? 0);
+    return Number.isFinite(amount) ? sum + Math.round(amount * 100) : sum;
+  }, 0);
+  return cents / 100;
+}
+
+/**
+ * The super inside a super inclusive amount: 12/112 of it, to the cent,
+ * rounded half up exactly as PostgreSQL round(base * 12 / 112, 2) rounds a
+ * positive numeric. Worked in whole cents so a base that lands on half a
+ * cent (one in 28) never rounds the other way in floating point.
+ */
+export function superInclusiveSuperAmount(superBaseEx: number): number {
+  const baseCents = toCents(superBaseEx);
+  if (!Number.isFinite(baseCents) || baseCents < 0) {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_INVALID",
+      "Super inclusive base must be zero or more",
+    );
+  }
+  return Math.floor((baseCents * 12 + 56) / 112) / 100;
+}
+
+/**
+ * The super base under the super inclusive rule: gross less the
+ * reimbursement lines, never below 0. null when the invoice has no
+ * reimbursement, so the base is the whole gross and nothing new is stored.
+ */
+export function tradeInvoiceInclusiveSuperBaseEx(
+  grossEarned: number,
+  reimbursementEx: unknown,
+): number | null {
+  const reimbursement = round2(Number(reimbursementEx ?? 0));
+  if (!Number.isFinite(reimbursement) || reimbursement <= 0) return null;
+  const gross = round2(grossEarned);
+  const base = Math.max(0, round2(gross - reimbursement));
+  return base < gross ? base : null;
+}
+
+/** Super inclusive split: the fund gets 12/112 of the base, the person the rest. */
+export function tradeInvoiceSuperInclusiveSplit(
+  grossEarned: number,
+  superBaseEx: number = grossEarned,
+): {
+  super_amount: number;
+  worker_withhold: number;
+  company_contribution: number;
+  net_pay: number;
+  company_total_out: number;
+} {
+  const gross = round2(grossEarned);
+  const superAmount = superInclusiveSuperAmount(round2(superBaseEx));
+  const netPay = round2(gross - superAmount);
+  if (netPay < 0) {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_INVALID",
+      "Trade invoice super inclusive split does not reconcile",
+    );
+  }
+  return {
+    super_amount: superAmount,
+    worker_withhold: superAmount,
+    company_contribution: 0,
+    net_pay: netPay,
+    company_total_out: gross,
+  };
+}
+
+/** The super an invoice must carry on its base, under its own basis. */
+function expectedSuperAmount(
+  superBasis: TradeInvoiceSuperBasis | null | undefined,
+  superBaseEx: number,
+  superRate: number,
+): number {
+  return superBasis === TRADE_INVOICE_SUPER_INCLUSIVE_BASIS
+    ? superInclusiveSuperAmount(superBaseEx)
+    : round2(round2(superBaseEx) * superRate);
+}
+
 function validDateOnly(raw: unknown): string | null {
   const text = String(raw ?? "").slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
@@ -285,7 +399,11 @@ export function calculateTradeInvoiceMoney(input: {
   superBasis?: unknown;
   // The invoice's commission lines, ex GST. Commission is gross but carries no
   // super (Marnin, 12 Nov 2026). Absent or 0: super on the whole gross.
+  // Ignored under the super inclusive rule, where commission carries super.
   commissionEx?: unknown;
+  // The invoice's reimbursement lines, ex GST (reimbursementLinesTotalEx).
+  // Read only under the super inclusive rule: they carry no super.
+  reimbursementEx?: unknown;
 }): TradeInvoiceMoney {
   const superBasis = resolveTradeInvoiceSuperBasis(input.superBasis);
   const grossEarned = Number(input.grossEarned);
@@ -313,9 +431,14 @@ export function calculateTradeInvoiceMoney(input: {
   }
 
   const gross = round2(grossEarned);
-  const superBaseEx = tradeInvoiceSuperBaseEx(gross, input.commissionEx);
+  const inclusive = superBasis === TRADE_INVOICE_SUPER_INCLUSIVE_BASIS;
+  const superBaseEx = inclusive
+    ? tradeInvoiceInclusiveSuperBaseEx(gross, input.reimbursementEx)
+    : tradeInvoiceSuperBaseEx(gross, input.commissionEx);
   const base = superBaseEx ?? gross;
-  const split = superBasis
+  const split = inclusive
+    ? tradeInvoiceSuperInclusiveSplit(gross, base)
+    : superBasis
     ? employerSuperSplit(gross, superRate, base)
     : tradeInvoiceCurrentPayableSplit(gross, superRate, base);
   // GST remains 10% of the original contractor supply (gross earned). Super is
@@ -487,8 +610,10 @@ export function validatePersistedTradeInvoiceMoney(
     Math.abs(superRate - statutoryRate) > 0.000001 ||
     !closeMoney(gross, subtotalEx) ||
     (superBaseEx !== null && !(superBaseEx >= 0 && superBaseEx < gross)) ||
-    !closeMoney(superAmount, round2(superBase * superRate)) ||
-    (superBasis
+    !closeMoney(superAmount, expectedSuperAmount(superBasis, superBase, superRate)) ||
+    (superBasis === TRADE_INVOICE_SUPER_INCLUSIVE_BASIS
+      ? !closeMoney(netPay, round2(gross - superAmount))
+      : superBasis
       ? !closeMoney(netPay, gross)
       : !netPayMatchesKnownPayableSplit(gross, superAmount, netPay, superRate, superBaseEx)) ||
     !closeMoney(
@@ -608,6 +733,32 @@ export function presentTradeInvoiceXeroAdjustments(
   };
 }
 
+// Added to a presented invoice only when it was priced super inclusive
+// (P1-01), so every earlier invoice reads exactly as it did. Ex GST.
+export type PresentedTradeInvoiceSuperInclusive = {
+  super_inclusive: {
+    // The invoice total: every line, each including super.
+    total: number;
+    // What the person is paid: the total less the super.
+    paid_to_you: number;
+    // What goes to their super fund: 12/112 of the total less reimbursements.
+    paid_to_super_fund: number;
+  };
+};
+
+function presentedSuperInclusive(
+  money: TradeInvoiceMoney,
+): Partial<PresentedTradeInvoiceSuperInclusive> {
+  if (money.super_basis !== TRADE_INVOICE_SUPER_INCLUSIVE_BASIS) return {};
+  return {
+    super_inclusive: {
+      total: money.gross_earned,
+      paid_to_you: money.net_pay,
+      paid_to_super_fund: money.super_amount,
+    },
+  };
+}
+
 export function presentTradeInvoiceMoney<
   T extends Record<string, unknown>,
 >(
@@ -616,7 +767,8 @@ export function presentTradeInvoiceMoney<
   & T
   & { trade_payable: number | null }
   & Partial<PresentedTradeInvoiceRecurringDeduction>
-  & Partial<PresentedTradeInvoiceXeroAdjustments> {
+  & Partial<PresentedTradeInvoiceXeroAdjustments>
+  & Partial<PresentedTradeInvoiceSuperInclusive> {
   const hasPersistedSplit = PERSISTED_SPLIT_FIELDS.some((field) =>
     invoice[field] !== null && invoice[field] !== undefined
   );
@@ -626,8 +778,9 @@ export function presentTradeInvoiceMoney<
 
   const money = validatePersistedTradeInvoiceMoney(invoice);
   const xero = presentTradeInvoiceXeroAdjustments(invoice, money.trade_payable);
+  const inclusive = presentedSuperInclusive(money);
   if (!money.recurring_deduction) {
-    return { ...invoice, trade_payable: money.trade_payable, ...xero };
+    return { ...invoice, trade_payable: money.trade_payable, ...xero, ...inclusive };
   }
   return {
     ...invoice,
@@ -635,6 +788,7 @@ export function presentTradeInvoiceMoney<
     recurring_deduction: money.recurring_deduction,
     payable_before_deduction: tradeInvoicePayableBeforeDeduction(money),
     ...xero,
+    ...inclusive,
   };
 }
 
@@ -789,6 +943,27 @@ export function formatTradeInvoiceSuperWithheldDescription(
   tradeName?: unknown,
 ): string {
   const name = String(tradeName || "").trim() || "the trade";
+  if (money.super_basis === TRADE_INVOICE_SUPER_INCLUSIVE_BASIS) {
+    // The three figures the crew bill carries (P1-01): the total, what is
+    // paid to the person and what is paid to their super fund. No company
+    // contribution line: nothing is paid on top of the total.
+    const base = money.super_base_ex ?? null;
+    return [
+      `Superannuation Guarantee 12/112 of submitted total${
+        base !== null ? " less reimbursements" : ""
+      }, super inclusive`,
+      `Total ${moneyLabel(money.gross_earned)}. Paid to you ${
+        moneyLabel(money.net_pay)
+      }. Paid to your super fund ${moneyLabel(money.super_amount)}${
+        base !== null
+          ? ` (12/112 of ${moneyLabel(base)}; reimbursements ${
+            moneyLabel(round2(money.gross_earned - base))
+          } carry no super)`
+          : ""
+      }.`,
+      `Paid to the super fund separately. Not part of the amount payable to ${name}`,
+    ].join("\n");
+  }
   if (money.super_basis === TRADE_INVOICE_EMPLOYER_SUPER_BASIS) {
     return [
       `Superannuation Guarantee ${rateLabel(money.super_rate)} of submitted total`,
@@ -853,6 +1028,8 @@ export type TradeInvoiceAuditModel = {
   // What super is charged on: the submitted total less commission when the
   // invoice carries commission, else null (the whole submitted total).
   super_base_ex: number | null;
+  // The invoice's stored super basis (null on the 12/6 split).
+  super_basis: TradeInvoiceSuperBasis | null;
   amount_payable: number;
   gst_amount: number;
   trade_payable: number;
@@ -912,7 +1089,11 @@ export function buildTradeInvoiceAuditModel(
       !(superBase >= 0 && superBase < money.gross_earned)) ||
     !closeMoney(
       money.super_amount,
-      round2((superBase ?? money.gross_earned) * money.super_rate),
+      expectedSuperAmount(
+        money.super_basis,
+        superBase ?? money.gross_earned,
+        money.super_rate,
+      ),
     )
   ) {
     throw new TradeInvoiceMoneyError(
@@ -965,6 +1146,7 @@ export function buildTradeInvoiceAuditModel(
     super_rate: money.super_rate,
     super_amount: money.super_amount,
     super_base_ex: superBase,
+    super_basis: money.super_basis ?? null,
     amount_payable: money.net_pay,
     gst_amount: money.gst_amount,
     trade_payable: money.trade_payable,
@@ -1060,8 +1242,27 @@ export function splitTradeInvoiceXeroLines(
 export function assertTradeInvoiceSuperBaseMatchesLines(
   money: TradeInvoiceMoney,
   commissionEx: unknown,
+  // The stored lines' reimbursements (reimbursementLinesTotalEx). Read only
+  // for a super inclusive invoice, whose base is the lines less them.
+  reimbursementEx: unknown = 0,
 ): void {
   const stored = money.super_base_ex ?? null;
+  if (money.super_basis === TRADE_INVOICE_SUPER_INCLUSIVE_BASIS) {
+    const expected = tradeInvoiceInclusiveSuperBaseEx(
+      money.gross_earned,
+      reimbursementEx,
+    );
+    if (
+      (stored === null) !== (expected === null) ||
+      (stored !== null && expected !== null && !closeMoney(stored, expected))
+    ) {
+      throw new TradeInvoiceMoneyError(
+        "MONEY_SPLIT_INVALID",
+        "Trade invoice super base no longer matches its reimbursement lines and cannot be pushed to Xero",
+      );
+    }
+    return;
+  }
   if (stored === null) return;
   const expected = tradeInvoiceSuperBaseEx(money.gross_earned, commissionEx);
   if (expected === null || !closeMoney(stored, expected)) {
