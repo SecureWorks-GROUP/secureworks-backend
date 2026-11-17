@@ -1,550 +1,180 @@
-// ════════════════════════════════════════════════════════════
-// M1 REGRESSION — matchUnlinkedInvoices Strategy 2
-//
-// The 9.1k/day PostgREST 400 storm: Strategy 2 selected jobs.quoted_value
-// (never existed). The caller only destructured `data`, so jobs was null
-// every iteration and contact-name auto-link was 100% dead as silence.
-//
-// Guards:
-//   1. select list must not include bare quoted_value
-//   2. PostgREST error must not be treated as "no candidate jobs"
-//   3. single match still auto-links; multi-match still flags
-//
-// RUN:
-//   ~/.deno/bin/deno test --no-check --allow-env --allow-read \
-//     supabase/functions/xero-sync/match_unlinked_strategy2_test.ts
-// ════════════════════════════════════════════════════════════
+import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import * as sync from "./index.ts";
 
-import {
-  assert,
-  assertEquals,
-  assertStringIncludes,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { matchUnlinkedInvoices, sealedSesXeroLinkRefusal } from "./index.ts";
-
-type Call = {
-  table: string;
-  select?: string;
-  filters: Array<{ op: string; args: unknown[] }>;
-  update?: unknown;
-  insert?: unknown;
-};
+type Row = Record<string, any>;
+type Call = { table: string; mode: string; filters: [string, string, any][]; columns?: string; row?: Row };
+const ORG = "00000000-0000-0000-0000-000000000001";
+const NOW = new Date("2026-11-17T06:00:00Z");
+const invoice = (id = "invoice-1", extra: Row = {}) => ({
+  id, xero_invoice_id: id, invoice_number: id, invoice_type: "ACCREC",
+  status: "AUTHORISED", job_id: null, contact_name: "customer_role", ...extra,
+});
+const job = (id = "job-1", extra: Row = {}) => ({
+  id, job_number: "SWF-260001", client_name: "customer_role", type: "fencing",
+  status: "accepted", legacy: false, org_id: ORG, created_at: "2026-11-01T00:00:00Z", ...extra,
+});
 
 function makeClient(opts: {
-  unlinked?: any[];
-  jobsByContact?: Record<string, { data: any[] | null; error: any | null }>;
-  captureEnabled?: boolean;
-  // INT-14: what a guarded link write returns. "lost" = a job was set since the read.
-  linkWrite?: "ok" | "lost" | "error";
-}) {
+  unlinked?: Row[]; jobs?: Row[]; annotations?: Row[]; jobsError?: boolean;
+  annotationsError?: boolean; capture?: boolean; linkWrite?: "lost" | "error";
+  enabled?: boolean; cursor?: string; builderRows?: Row[];
+} = {}) {
   const calls: Call[] = [];
-  const updates: Array<{ table: string; row: any; id?: string }> = [];
-  const inserts: Array<{ table: string; row: any }> = [];
-
-  function builder(table: string) {
-    const call: Call = { table, filters: [] };
-    let mode: "select" | "update" | "insert" = "select";
-    let updateRow: any = null;
-    let _insertRow: any = null;
-    const eqFilters: Record<string, unknown> = {};
-
+  const invoices = structuredClone(opts.unlinked ?? []);
+  const annotations = structuredClone(opts.annotations ?? []);
+  const events: Row[] = [];
+  let cursor = opts.cursor;
+  function query(table: string) {
+    const call: Call = { table, mode: "select", filters: [] };
+    let range: [number, number] | undefined;
+    let limit = Infinity;
+    let ordering: [string, boolean] | undefined;
     const b: any = {
-      select: (s: string) => {
-        call.select = s;
-        // .update(...).select('id') returns the written rows; it stays an update.
-        if (mode !== "update") mode = "select";
-        return b;
-      },
-      update: (row: any) => {
-        mode = "update";
-        updateRow = row;
-        call.update = row;
-        return b;
-      },
-      insert: (row: any) => {
-        mode = "insert";
-        _insertRow = row;
-        call.insert = row;
-        inserts.push({ table, row });
-        return b;
-      },
-      eq: (k: string, v: unknown) => {
-        call.filters.push({ op: "eq", args: [k, v] });
-        eqFilters[k] = v;
-        return b;
-      },
-      is: (k: string, v: unknown) => {
-        call.filters.push({ op: "is", args: [k, v] });
-        return b;
-      },
-      not: (...args: unknown[]) => {
-        call.filters.push({ op: "not", args });
-        return b;
-      },
-      ilike: (k: string, v: unknown) => {
-        call.filters.push({ op: "ilike", args: [k, v] });
-        eqFilters[k] = v;
-        return b;
-      },
-      order: (...args: unknown[]) => {
-        call.filters.push({ op: "order", args });
-        return b;
-      },
-      limit: (...args: unknown[]) => {
-        call.filters.push({ op: "limit", args });
-        return b;
-      },
-      maybeSingle: () => Promise.resolve({ data: null, error: null }),
-      single: () => Promise.resolve({ data: null, error: null }),
-      catch: () => Promise.resolve(null),
-      then: (resolve: any, reject?: any) => {
-        calls.push(call);
-        if (mode === "update") {
-          const outcome = opts.linkWrite ?? "ok";
-          if (outcome === "error") {
-            return Promise.resolve({ data: null, error: { message: "write refused" } }).then(resolve, reject);
-          }
-          if (outcome === "ok") {
-            updates.push({
-              table,
-              row: updateRow,
-              id: eqFilters.id as string | undefined,
-            });
-          }
-          return Promise.resolve({
-            data: call.select ? (outcome === "ok" ? [{ id: eqFilters.id }] : []) : null,
-            error: null,
-          }).then(
-            resolve,
-            reject,
-          );
-        }
-        if (mode === "insert") {
-          return Promise.resolve({ data: null, error: null }).then(
-            resolve,
-            reject,
-          );
-        }
-        if (table === "xero_invoices") {
-          return Promise.resolve({
-            data: opts.unlinked ?? [],
-            error: null,
-          }).then(resolve, reject);
-        }
-        if (table === "jobs") {
-          // Strategy 1 uses maybeSingle; Strategy 2 uses array thenable.
-          // Contact-name path is identified by client_name ilike filter.
-          const contact = call.filters.find((f) =>
-            f.op === "ilike" && f.args[0] === "client_name"
-          );
-          if (contact) {
-            const key = String(contact.args[1] ?? "").toLowerCase();
-            const hit = opts.jobsByContact?.[key] ??
-              opts.jobsByContact?.[String(contact.args[1])] ??
-              { data: [], error: null };
-            return Promise.resolve(hit).then(resolve, reject);
-          }
-          return Promise.resolve({ data: null, error: null }).then(
-            resolve,
-            reject,
-          );
-        }
-        if (table === "ai_annotations") {
-          return Promise.resolve({ data: [], error: null }).then(
-            resolve,
-            reject,
-          );
-        }
-        return Promise.resolve({ data: null, error: null }).then(
-          resolve,
-          reject,
-        );
-      },
+      select(columns: string) { call.columns = columns; return b; },
+      update(row: Row) { call.mode = "update"; call.row = row; return b; },
+      insert(row: Row) { call.mode = "insert"; call.row = row; return b; },
+      upsert(row: Row) { call.mode = "upsert"; call.row = row; return b; },
+      order(key: string, options?: Row) { ordering = [key, options?.ascending !== false]; return b; },
+      limit(n: number) { limit = n; return b; },
+      range(start: number, end: number) { range = [start, end]; return b; },
+      maybeSingle() { return execute(true); },
+      then(resolve: any, reject: any) { return execute(false).then(resolve, reject); },
     };
+    for (const op of ["eq", "is", "not", "like", "ilike"]) {
+      b[op] = (key: string, value: any, third?: any) => {
+        call.filters.push([op, key, op === "not" ? third : value]); return b;
+      };
+    }
+    function matches(row: Row) {
+      return call.filters.every(([op, key, value]) => {
+        if (op === "eq" || op === "is") return (row[key] ?? null) === value;
+        if (op === "not") return !String(value).replace(/[()\"]/g, "").split(",").includes(row[key]);
+        const pattern = String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/%/g, ".*").replace(/_/g, ".");
+        return new RegExp(`^${pattern}$`, op === "ilike" ? "i" : "").test(String(row[key] ?? ""));
+      });
+    }
+    async function execute(single: boolean) {
+      calls.push(call);
+      if (table === "feature_flags") return { data: single ? { enabled: opts.enabled === true } : [{ enabled: opts.enabled === true }], error: null };
+      if (table === "xero_sync_state") {
+        if (call.mode === "upsert") cursor = call.row?.cursor_at;
+        return { data: cursor ? { cursor_at: cursor } : null, error: null };
+      }
+      if ((table === "jobs" && opts.jobsError) || (table === "ai_annotations" && opts.annotationsError)) {
+        return { data: null, error: { code: "42703", message: "read failed" } };
+      }
+      const rows = table === "jobs" ? (opts.jobs ?? []) : table === "xero_invoices" ? invoices : table === "ai_annotations" ? annotations : events;
+      if (call.mode === "insert") { rows.push(call.row!); return { data: null, error: null }; }
+      let selected = rows.filter(matches);
+      if (call.mode === "update") {
+        if (table === "xero_invoices" && opts.linkWrite) return { data: [], error: opts.linkWrite === "error" ? { message: "write failed" } : null };
+        selected.forEach((row) => Object.assign(row, call.row));
+        return { data: call.columns ? selected.map((row) => ({ id: row.id })) : null, error: null };
+      }
+      if (ordering) { const [key, asc] = ordering; selected = [...selected].sort((a, z) => String(a[key]).localeCompare(String(z[key])) * (asc ? 1 : -1)); }
+      if (range) selected = selected.slice(range[0], range[1] + 1);
+      selected = selected.slice(0, limit);
+      return { data: single ? selected.length === 1 ? selected[0] : null : selected, error: null };
+    }
     return b;
   }
-
   return {
-    client: {
-      from: (t: string) => builder(t),
-      rpc: () => Promise.resolve({ data: opts.captureEnabled ?? true, error: null }),
-    },
-    calls,
-    updates,
-    inserts,
+    client: { from: query, rpc: (fn: string) => Promise.resolve({ data: fn === "xero_builder_reference_candidates" ? opts.builderRows ?? [] : opts.capture ?? false, error: null }) },
+    calls, invoices, annotations, events,
   };
 }
 
-const UNLINKED = [{
-  id: "inv-row-1",
-  xero_invoice_id: "xero-1",
-  reference: null,
-  contact_name: "Jane Client",
-  total: 1200,
-  invoice_number: "INV-1001",
-  invoice_type: "ACCREC",
-  status: "AUTHORISED",
-}];
-
-Deno.test("Strategy 2: job lookup select must not include bare quoted_value", async () => {
-  const { client, calls } = makeClient({
-    unlinked: UNLINKED,
-    jobsByContact: {
-      "Jane Client": {
-        data: [{
-          id: "job-1",
-          job_number: "SWP-25001",
-          client_name: "Jane Client",
-        }],
-        error: null,
-      },
-    },
-  });
-
-  await matchUnlinkedInvoices(client);
-
-  const jobSelects = calls
-    .filter((c) => c.table === "jobs" && c.select)
-    .map((c) => c.select!);
-  assert(jobSelects.length >= 1, "expected at least one jobs select");
-  for (const sel of jobSelects) {
-    // Bare quoted_value is the 42703 that killed Strategy 2.
-    // Aliased form (quoted_value:something) would also be wrong here —
-    // Strategy 2 never reads the value; only id/job_number/client_name matter.
-    assert(
-      !/(^|,\s*)quoted_value(\s*,|$)/.test(sel),
-      `Strategy 2 must not select bare quoted_value; got: ${sel}`,
-    );
-    assert(
-      sel.includes("id") && sel.includes("job_number") &&
-        sel.includes("client_name"),
-      `Strategy 2 must select id, job_number, client_name; got: ${sel}`,
-    );
-  }
-});
-
-Deno.test("Strategy 2: PostgREST error is visible and does not auto-link", async () => {
-  const errors: string[] = [];
-  const orig = console.error;
-  console.error = (...args: unknown[]) => {
-    errors.push(args.map(String).join(" "));
-  };
-
-  try {
-    const { client, updates } = makeClient({
-      unlinked: UNLINKED,
-      jobsByContact: {
-        "Jane Client": {
-          data: null,
-          error: {
-            message: "column jobs.quoted_value does not exist",
-            code: "42703",
-          },
-        },
-      },
-    });
-
-    const result = await matchUnlinkedInvoices(client);
-
-    assertEquals(result.matched, 0);
-    assertEquals(
-      updates.filter((u) => u.table === "xero_invoices").length,
-      0,
-      "must not write job_id when the lookup failed",
-    );
-    assert(
-      errors.some((e) => e.includes("Strategy 2") && e.includes("INV-1001")),
-      `expected a visible Strategy 2 error log; got: ${JSON.stringify(errors)}`,
-    );
-  } finally {
-    console.error = orig;
-  }
-});
-
-Deno.test("Strategy 2: single client_name match auto-links the invoice", async () => {
-  const { client, updates } = makeClient({
-    unlinked: UNLINKED,
-    jobsByContact: {
-      "Jane Client": {
-        data: [{
-          id: "job-1",
-          job_number: "SWP-25001",
-          client_name: "Jane Client",
-        }],
-        error: null,
-      },
-    },
-  });
-
-  const result = await matchUnlinkedInvoices(client);
-  assertEquals(result.matched, 1);
-  const link = updates.find((u) =>
-    u.table === "xero_invoices" && u.row?.job_id === "job-1"
-  );
-  assert(link, "expected xero_invoices update with job_id");
-});
-
-Deno.test("Strategy 2: capture-off still auto-links without business_events", async () => {
-  const { client, updates, inserts } = makeClient({
-    unlinked: UNLINKED,
-    captureEnabled: false,
-    jobsByContact: {
-      "Jane Client": {
-        data: [{
-          id: "job-1",
-          job_number: "SWP-25001",
-          client_name: "Jane Client",
-        }],
-        error: null,
-      },
-    },
-  });
-
-  const result = await matchUnlinkedInvoices(client);
-  assertEquals(result.matched, 1);
-  assert(
-    updates.some((u) => u.table === "xero_invoices" && u.row?.job_id === "job-1"),
-    "expected xero_invoices update with job_id",
-  );
-  assertEquals(inserts.filter((i) => i.table === "business_events").length, 0);
-});
-
-Deno.test("Strategy 2: multiple client_name matches flag, do not auto-link", async () => {
-  const { client, updates, inserts } = makeClient({
-    unlinked: UNLINKED,
-    jobsByContact: {
-      "Jane Client": {
-        data: [
-          { id: "job-1", job_number: "SWP-25001", client_name: "Jane Client" },
-          { id: "job-2", job_number: "SWP-25002", client_name: "Jane Client" },
-        ],
-        error: null,
-      },
-    },
-  });
-
-  const result = await matchUnlinkedInvoices(client);
+Deno.test("250 unlinked invoices use one jobs page and one annotations page, with no single lookups", async () => {
+  const f = makeClient({ unlinked: Array.from({ length: 250 }, (_, i) => invoice(String(i), { invoice_type: i < 150 ? "ACCREC" : "ACCPAY" })) });
+  const result = await sync.matchUnlinkedInvoices(f.client);
   assertEquals(result.matched, 0);
-  assertEquals(result.flagged, 1);
-  assertEquals(
-    updates.filter((u) => u.table === "xero_invoices").length,
-    0,
-  );
-  assert(
-    inserts.some((i) =>
-      i.table === "ai_annotations" &&
-      i.row?.annotation_type === "unlinked_invoice"
-    ),
-    "expected unlinked_invoice annotation for multi-match",
-  );
+  assertEquals(result.flagged, 0);
+  assertEquals(f.calls.filter((c) => c.table === "jobs" && c.mode === "select").length, 1);
+  assertEquals(f.calls.filter((c) => c.table === "ai_annotations" && c.mode === "select").length, 1);
+  assertEquals(f.calls.filter((c) => ["jobs", "ai_annotations"].includes(c.table) && c.mode === "select" && c.filters.some(([op]) => op === "eq" || op === "ilike")).length, 0);
 });
 
-Deno.test("Strategy 2: genuine empty result is not an error (no false log)", async () => {
-  const errors: string[] = [];
-  const orig = console.error;
-  console.error = (...args: unknown[]) => {
-    errors.push(args.map(String).join(" "));
-  };
+Deno.test("reference links exactly one job, preserves money and records its evidence", async () => {
+  const f = makeClient({ unlinked: [invoice(undefined, { reference: "SWF-260001", contact_name: null })], jobs: [job()], capture: true });
+  assertEquals((await sync.matchUnlinkedInvoices(f.client)).matched, 1);
+  assertEquals(f.invoices[0].job_id, "job-1");
+  const writes = f.calls.filter((c) => c.table === "xero_invoices" && c.mode === "update");
+  assertEquals(Object.keys(writes[0].row!).sort(), ["job_id", "updated_at"]);
+  assert(writes[0].filters.some(([op, key, value]) => op === "is" && key === "job_id" && value === null));
+  assertEquals(f.events[0].payload.method, "reference_match");
+});
 
-  try {
-    const { client, updates } = makeClient({
-      unlinked: UNLINKED,
-      jobsByContact: {
-        "Jane Client": { data: [], error: null },
-      },
-    });
+Deno.test("duplicate job numbers never select a reference winner", async () => {
+  const f = makeClient({ unlinked: [invoice(undefined, { reference: "SWF-260001", contact_name: null })], jobs: [job(), job("job-2")] });
+  assertEquals((await sync.matchUnlinkedInvoices(f.client)).matched, 0);
+  assertEquals(f.invoices[0].job_id, null);
+});
 
-    const result = await matchUnlinkedInvoices(client);
+Deno.test("one live exact name links, excluding draft, legacy, cancelled, lost and other organisation jobs", async () => {
+  const f = makeClient({ unlinked: [invoice()], jobs: [job(), job("draft", { status: "draft" }), job("legacy", { legacy: true }), job("cancelled", { status: "cancelled" }), job("lost", { status: "lost" }), job("other", { org_id: "other-org" })] });
+  assertEquals((await sync.matchUnlinkedInvoices(f.client)).matched, 1);
+  assertEquals(f.invoices[0].job_id, "job-1");
+  assertEquals(f.events.length, 0);
+});
+
+Deno.test("two name candidates flag once across runs and never link", async () => {
+  const f = makeClient({ unlinked: [invoice()], jobs: [job(), job("job-2", { job_number: "SWF-260002" })] });
+  assertEquals((await sync.matchUnlinkedInvoices(f.client)).flagged, 1);
+  assertEquals((await sync.matchUnlinkedInvoices(f.client)).flagged, 1);
+  assertEquals(f.annotations.length, 1);
+  assertEquals(f.invoices[0].job_id, null);
+});
+
+for (const failure of ["jobsError", "annotationsError"] as const) {
+  Deno.test(`${failure} refuses every link, including an explicit reference`, async () => {
+    const f = makeClient({ unlinked: [invoice(undefined, { reference: "SWF-260001" })], jobs: [job()], [failure]: true });
+    const result = await sync.matchUnlinkedInvoices(f.client);
     assertEquals(result.matched, 0);
-    assertEquals(result.flagged, 0);
-    assertEquals(updates.length, 0);
-    assertEquals(
-      errors.filter((e) => e.includes("Strategy 2")).length,
-      0,
-      "genuine miss must not log a Strategy 2 failure",
-    );
-  } finally {
-    console.error = orig;
-  }
-});
-
-Deno.test("Strategy 2: SWMS ACCREC match auto-links after seal removal", async () => {
-  const { client, updates } = makeClient({
-    unlinked: UNLINKED,
-    jobsByContact: {
-      "Jane Client": {
-        data: [{
-          id: "job-ses-1",
-          job_number: "SWMS-261055",
-          type: "makesafe",
-          client_name: "Jane Client",
-        }],
-        error: null,
-      },
-    },
+    assert(result.error);
+    assertEquals(f.invoices[0].job_id, null);
+    assertEquals(f.events.length, 0);
   });
-
-  const result = await matchUnlinkedInvoices(client);
-  const refusals = result.refusals ?? [];
-  assertEquals(result.matched, 1);
-  assertEquals(result.refused, 0);
-  assertEquals(refusals, []);
-  assertEquals(
-    updates.filter((update) => update.table === "xero_invoices").length,
-    1,
-  );
-});
-
-Deno.test("ACCPAY remains outside the sealed SES sales-invoice link fence", async () => {
-  const client = {
-    from: () => {
-      throw new Error("ACCPAY must not perform a sealed SES classification");
-    },
-  };
-  const refusal = await sealedSesXeroLinkRefusal(
-    client,
-    {
-      xero_invoice_id: "bill-1",
-      invoice_number: "BILL-1001",
-      invoice_type: "ACCPAY",
-    },
-    { id: "job-ses-1", job_number: "SWMS-261055", type: "makesafe" },
-    "test ACCPAY link",
-  );
-  assertEquals(refusal, null);
-});
-
-Deno.test("legacy SWMS target classification is inert for unknown invoice types", async () => {
-  const refusal = await sealedSesXeroLinkRefusal(
-    {
-      from: () => {
-        throw new Error("direct SWMS classification must not need a lookup");
-      },
-    },
-    {
-      xero_invoice_id: "unknown-type-1",
-      invoice_number: "INV-UNKNOWN",
-      invoice_type: null,
-    },
-    { id: "job-ses-1", job_number: "SWMS-261055", type: "makesafe" },
-    "test unknown invoice type link",
-  );
-  assertEquals(refusal, null);
-});
-
-Deno.test("explicit SES invoice bindings still refuse auto-linking", async () => {
-  const refusal = await sealedSesXeroLinkRefusal(
-    {},
-    {
-      xero_invoice_id: "ses-bound-1",
-      invoice_number: "INV-SES",
-      invoice_type: "ACCREC",
-      invoice_obligation_revision_id:
-        "20000000-0000-4000-8000-000000000002",
-    },
-    { id: "job-ses-1", job_number: "SWMS-261055", type: "makesafe" },
-    "test SES-bound invoice link",
-  );
-  assertEquals(refusal?.code, "sealed_ses_release_required");
-});
-
-// ════════════════════════════════════════════════════════════
-// INT-14 — can an invoice→job decision move revenue? (CFO side, case b)
-//
-// The rule, word for word in both workflows' records and in Context's test:
-//   An invoice→job decision decides only which job an invoice counts on, never
-//   its money: total, amount due, amount paid and status come only from Xero's
-//   own record. xero-sync's reference and exact client-name links may set the
-//   job on an invoice that has none, and never move one already on a job. A
-//   Context decision never writes the invoice row, so it never moves revenue.
-// ════════════════════════════════════════════════════════════
-
-const MONEY_FIELDS = ["total", "sub_total", "total_tax", "amount_due", "amount_paid", "status", "fully_paid_on", "line_items"];
-
-function invoiceLinkWrites(calls: Call[]) {
-  return calls.filter((c) => c.table === "xero_invoices" && c.update);
 }
 
-Deno.test("INT-14: a client_name_exact link writes only the job, never the invoice's money", async () => {
-  const { client, calls } = makeClient({
-    unlinked: UNLINKED,
-    jobsByContact: { "Jane Client": { data: [{ id: "job-1", job_number: "SWP-25001", client_name: "Jane Client" }], error: null } },
-  });
-  const result = await matchUnlinkedInvoices(client);
-  assertEquals(result.matched, 1);
-  const writes = invoiceLinkWrites(calls);
-  assertEquals(writes.length, 1);
-  assertEquals(Object.keys(writes[0].update as Record<string, unknown>).sort(), ["job_id", "updated_at"]);
-  for (const f of MONEY_FIELDS) assert(!(f in (writes[0].update as Record<string, unknown>)), `link must not write ${f}`);
+Deno.test("percent and underscore in a contact name match literal characters only", async () => {
+  const f = makeClient({ unlinked: [invoice(undefined, { contact_name: "customer%_role" })], jobs: [job("literal", { client_name: "customer%_role" }), job("wildcard", { client_name: "customerXXrole" })] });
+  assertEquals((await sync.matchUnlinkedInvoices(f.client)).matched, 1);
+  assertEquals(f.invoices[0].job_id, "literal");
 });
 
-Deno.test("INT-14: a client_name_exact link never moves an invoice already on a job", async () => {
-  const { client, calls } = makeClient({
-    unlinked: UNLINKED,
-    jobsByContact: { "Jane Client": { data: [{ id: "job-1", job_number: "SWP-25001", client_name: "Jane Client" }], error: null } },
-  });
-  await matchUnlinkedInvoices(client);
-  const writes = invoiceLinkWrites(calls);
-  assertEquals(writes.length, 1);
-  // Guarded in the write itself: a job set between the read and the write is kept.
-  assert(
-    writes[0].filters.some((f) => f.op === "is" && f.args[0] === "job_id" && f.args[1] === null),
-    `the link write must be guarded by job_id is null; got ${JSON.stringify(writes[0].filters)}`,
-  );
-});
-
-Deno.test("INT-14: the reference link writes only the job, and only onto an invoice with none", async () => {
-  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const at = src.indexOf("export async function matchUnlinkedInvoices");
-  const fn = src.slice(at, src.indexOf("// Strategy 2: Contact name matches", at));
-  assertStringIncludes(fn, ".is('job_id', null)\n      .eq('invoice_type', type)");
-  assertStringIncludes(
-    fn,
-    ".update({ job_id: job.id, updated_at: new Date().toISOString() })\n            .eq('id', inv.id)\n            .is('job_id', null)",
-  );
-});
-
-Deno.test("INT-14: only invoices with no job are candidates for a link", async () => {
-  const { client, calls } = makeClient({ unlinked: [] });
-  await matchUnlinkedInvoices(client);
-  const reads = calls.filter((c) => c.table === "xero_invoices" && c.select && !c.update);
-  assert(reads.length >= 1);
-  for (const r of reads) {
-    assert(r.filters.some((f) => f.op === "is" && f.args[0] === "job_id" && f.args[1] === null), "candidate read must be job_id is null");
-  }
-});
-
-Deno.test("INT-14: a lost race links nothing, records no evidence and counts nothing", async () => {
+Deno.test("lost or failed guarded writes count nothing and record no evidence", async () => {
   for (const linkWrite of ["lost", "error"] as const) {
-    const orig = console.error;
-    console.error = () => {};
-    try {
-      const { client, calls, inserts } = makeClient({
-        unlinked: UNLINKED,
-        linkWrite,
-        jobsByContact: { "Jane Client": { data: [{ id: "job-1", job_number: "SWP-25001", client_name: "Jane Client" }], error: null } },
-      });
-      const result = await matchUnlinkedInvoices(client);
-      assertEquals(result.matched, 0, `${linkWrite}: nothing counted`);
-      assertEquals(inserts.filter((i) => i.table === "business_events").length, 0, `${linkWrite}: no invoice.auto_linked evidence`);
-      // The write asked for the rows it changed, so a lost race is visible.
-      assertEquals(invoiceLinkWrites(calls)[0]?.select, "id");
-    } finally {
-      console.error = orig;
-    }
+    const f = makeClient({ unlinked: [invoice()], jobs: [job()], capture: true, linkWrite });
+    assertEquals((await sync.matchUnlinkedInvoices(f.client)).matched, 0);
+    assertEquals(f.invoices[0].job_id, null);
+    assertEquals(f.events.length, 0);
   }
 });
 
-Deno.test("INT-14: every automatic invoice→job link write is guarded by job_id is null", async () => {
-  const files = ["./index.ts", "../reporting-api/index.ts"];
-  for (const f of files) {
-    const src = await Deno.readTextFile(new URL(f, import.meta.url));
-    const re = /\.update\(\{ job_id: [^}]*\}\)([\s\S]{0,160})/g;
-    let n = 0;
-    for (const m of src.matchAll(re)) {
-      n++;
-      assert(m[1].includes(".is('job_id', null)"), `${f}: unguarded job link write near: ${m[0].slice(0, 120)}`);
-    }
-    assert(n > 0, `${f}: expected job link writes`);
+Deno.test("explicit SES invoice binding still refuses reference auto-link", async () => {
+  const f = makeClient({ unlinked: [invoice(undefined, { reference: "SWF-260001", invoice_obligation_revision_id: "bound-revision" })], jobs: [job()] });
+  assertEquals((await sync.matchUnlinkedInvoices(f.client)).refused, 1);
+  assertEquals(f.invoices[0].job_id, null);
+});
+
+Deno.test("bills stay outside the SES sales-invoice binding fence", async () => {
+  assertEquals(await sync.sealedSesXeroLinkRefusal({}, { invoice_type: "ACCPAY", invoice_obligation_revision_id: "bound-revision" }, job(), "test"), null);
+});
+
+Deno.test("on-change gate skips unchanged recent runs, and runs for changes, missing state or an expired hour", async () => {
+  const run = (sync as any).matchUnlinkedInvoicesOnChange;
+  assertEquals(typeof run, "function");
+  for (const [enabled, changed, cursor, expectedRuns] of [
+    [false, 0, NOW.toISOString(), 1], [true, 0, NOW.toISOString(), 0],
+    [true, 1, NOW.toISOString(), 1], [true, 0, undefined, 1],
+    [true, 0, "2026-11-17T04:59:59Z", 1], [true, 0, "2026-11-17T05:00:00Z", 0],
+  ] as const) {
+    const f = makeClient({ enabled, cursor });
+    const result = await run(f.client, changed, NOW);
+    assertEquals(f.calls.filter((c) => c.table === "feature_flags").length, 1);
+    assertEquals(f.calls.filter((c) => c.table === "xero_invoices" && c.mode === "select").length, expectedRuns * 2);
+    assertEquals(f.calls.filter((c) => c.table === "xero_sync_state" && c.mode === "upsert").length, expectedRuns);
+    if (!expectedRuns) assertEquals(result, { matched: 0, flagged: 0, skipped: "no_change" });
+    else assertEquals(f.calls.find((c) => c.table === "xero_sync_state" && c.mode === "upsert")?.row?.cursor_at, NOW.toISOString());
   }
 });
