@@ -1,10 +1,13 @@
+-- Keep the historical rollback and every assertion inside one transaction.
+-- Rolling it back preserves all later table indexes and function bodies.
+BEGIN;
 -- Stand the historical mark/build contract back up; the successor has its own proofs.
 SELECT to_regclass('public.job_change_marks_base') IS NOT NULL AS queue_safety_live \gset
 \if :queue_safety_live
 \ir ../../../rollbacks/20261117172503_job_pages_queue_safety_down.sql
 \endif
 -- P0-02.2: observable changes and housekeeping writes, rolled back.
-BEGIN;
+SAVEPOINT fixture;
 SELECT public.job_change_mark_triggers_install();
 SELECT public.job_change_mark_triggers_install();
 SELECT set_config('request.jwt.claims','{"role":"service_role"}',true);
@@ -70,7 +73,7 @@ BEGIN
   RAISE EXCEPTION 'job mark triggers: document delete must mark job';
  END IF;
 END $c$;
-ROLLBACK;
+ROLLBACK TO SAVEPOINT fixture;
 
--- Restore the successor for the remaining registered cases.
-\ir ../../../migrations/20261117172503_job_pages_queue_safety.sql
+-- Restore the exact incoming schema, including all successor objects.
+ROLLBACK;
