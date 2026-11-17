@@ -1,6 +1,5 @@
 -- P1-16.1: retain the suggestion beside the sent week. Both switches ship off.
 -- Existing rows remain unknown except auto_sent, whose legacy value is false.
-BEGIN;
 
 INSERT INTO public.feature_flags (flag_name, enabled, description)
 VALUES
@@ -22,4 +21,3 @@ ALTER TABLE public.trade_invoices
   ADD COLUMN IF NOT EXISTS auto_sent boolean NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS office_sent_back_at timestamptz;
 
-COMMIT;
