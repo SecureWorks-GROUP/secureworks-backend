@@ -14394,7 +14394,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 weeklyInvoiceWithReimbursements(weeklyInvoice, draftReimbursements.lines),
                 existingDraftId,
               )
-              : draftWeekStart || undatedReimbursementSave
+              : draftWeekStart || (undatedReimbursementSave && draftReimbursements.lines.length > 0)
               ? await _persistTradeInvoiceWeekDraft(
                 client,
                 hourlyDraftPayload,

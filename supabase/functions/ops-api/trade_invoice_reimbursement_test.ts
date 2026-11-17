@@ -352,3 +352,24 @@ Deno.test("FU17 undated eligibility reuses the selected switch result; dated cal
     }
   }
 });
+
+Deno.test("FU17 receipt-free undated drafts keep the group-share-capable legacy save", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const start = source.indexOf("            const draftId = await retryReimbursementClaims(client, draftReimbursements,");
+  const end = source.indexOf("            await markTradeInvoiceJobsChanged", start);
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const save = new AsyncFunction("ctx", "with (ctx) {" + source.slice(start, end)
+    .replace(/: (any|number)\b/g, "") + "return draftId; }");
+  let atomic = 0, legacy = 0;
+  const saved = await save({ client: {}, draftReimbursements: { lines: [], skipped_items: [] },
+    weeklyInvoice: null, draftWeekStart: null, undatedReimbursementSave: true,
+    existingDraftId: "ZZTEST-draft", hourlyDraftPayload: { week_start: null, week_end: null },
+    hourlyDraftLineRows: [{ group_share_id: "ZZTEST-share", line_type: "group share" }],
+    retryReimbursementClaims,
+    _persistTradeInvoiceWeekDraft: () => { atomic++; return "ZZTEST-wrong-store"; },
+    replaceTradeInvoiceDraftKeepingPrior: () => { legacy++; return "ZZTEST-legacy"; },
+  });
+  assertEquals(saved, "ZZTEST-legacy");
+  assertEquals(atomic, 0);
+  assertEquals(legacy, 1);
+});
