@@ -240,10 +240,25 @@ export async function readWorkOrderCapFacts(
   const ids = jobs.map((j) => j.jobId);
   let lines: Awaited<ReturnType<typeof readJobTradeLines>>;
   let variations: any[];
+  let changes: any[];
   try {
-    [lines, variations] = await Promise.all([
+    [lines, variations, changes] = await Promise.all([
       readJobTradeLines(client, ids),
       readCustomerVariations(client, ids),
+      (async () => {
+        const rows: any[] = [];
+        for (let i = 0; i < jobs.length; i += 25) {
+          for (let offset = 0;; offset += 1000) {
+            const read = await client.from("work_order_amount_changes").select("id, work_order_id, delta_ex")
+              .in("work_order_id", jobs.slice(i, i + 25).map((job) => job.workOrderId))
+              .order("id").range(offset, offset + 999);
+            if (read.error) throw new WorkOrderTotalCapReadError();
+            rows.push(...(read.data || []));
+            if ((read.data || []).length < 1000) break;
+          }
+        }
+        return rows;
+      })(),
     ]);
   } catch {
     throw new WorkOrderTotalCapReadError();
@@ -257,7 +272,10 @@ export async function readWorkOrderCapFacts(
         String(v?.status) === "approved"
       )
       .reduce((s, v) => s + (Number(v?.trade_allocation_ex) || 0), 0);
-    return { jobId: j.jobId, ref: j.ref, allowedEx: money(j.agreedEx + added) };
+    const changed = changes.filter((row) => row.work_order_id === j.workOrderId)
+      .reduce((sum, row) => sum + Number(row.delta_ex), 0);
+    if (!Number.isFinite(changed)) throw new WorkOrderTotalCapReadError();
+    return { jobId: j.jobId, ref: j.ref, allowedEx: money(j.agreedEx + added + changed) };
   });
   return { jobs: capJobs, billedEx };
 }

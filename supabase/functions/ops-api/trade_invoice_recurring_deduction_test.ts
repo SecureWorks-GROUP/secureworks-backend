@@ -47,6 +47,7 @@ import {
 import {
   decideTradeRecurringDeduction,
   loadTradeRecurringDeductionDecision,
+  withStoredTradeRepaymentRule,
   tradeRecurringDeductionInvoiceFields,
   tradeRecurringDeductionResponse,
   tradeRecurringDeductionRulesCovering,
@@ -1708,3 +1709,59 @@ handlerTest(
     assert(Number(out.body.total_hours) > 0);
   },
 );
+
+Deno.test("ZZTEST repayment: remaining balance caps each week without changing super or GST", () => {
+  for (const [balance, expected] of [[200, [100, 100, 0]], [250, [100, 100, 50]]]) {
+    let left = balance as number;
+    for (const amount of expected as number[]) {
+      const result = decideTradeRecurringDeduction({ rules: [{ ...RULES[0],
+        label: "ZZTEST repayment", last_week_start: null, kind: "repayment",
+        balance_total: balance, xero_account_code: "ZZTEST-ACCOUNT" }],
+        userId: UTE_TRADE, weekStart: THIS_WEEK, payable: 1000,
+        repaymentsOn: true, balanceLeft: left });
+      assertEquals(result.applied?.amount ?? 0, amount);
+      if (amount) assertEquals(result.balance_left_after, left - amount);
+      left -= amount;
+    }
+  }
+  const rules = [{ ...RULES[0], label: "ZZTEST repayment", kind: "repayment",
+    balance_total: 250, xero_account_code: "ZZTEST-ACCOUNT" }];
+  assertEquals(decideTradeRecurringDeduction({ rules, userId: UTE_TRADE,
+    weekStart: THIS_WEEK, payable: 20, repaymentsOn: true, balanceLeft: 50 }).applied, null);
+  assertEquals(decideTradeRecurringDeduction({ rules, userId: UTE_TRADE,
+    weekStart: THIS_WEEK, payable: 1000, balanceLeft: 50 }).outcome, "none");
+  const result = decideTradeRecurringDeduction({ rules, userId: UTE_TRADE,
+    weekStart: THIS_WEEK, payable: 1000, repaymentsOn: true, balanceLeft: 50 });
+  const base = calculateTradeInvoiceMoney({ grossEarned: 1000, gstOn: true, earningsDate: "2026-11-16" });
+  const money = withTradeInvoiceRecurringDeduction(base, result.applied);
+  assertEquals([money.super_amount, money.gst_amount], [base.super_amount, base.gst_amount]);
+  const lines = splitTradeInvoiceXeroLines([{ Description: "ZZTEST work", Quantity: 1,
+    UnitAmount: 1000, AccountCode: "ZZTEST-LABOUR", TaxType: "INPUT", Tracking: [] }], money, { superAccountCode: "ZZTEST-SUPER" });
+  const repayment = lines.find((line) => line.Description?.startsWith("Repayment - "));
+  assert(repayment);
+  assertEquals(repayment.AccountCode, "ZZTEST-ACCOUNT");
+  assertEquals(repayment.TaxType, "NONE");
+  assertEquals(repayment.Tracking, []);
+  assertReturnedTradeInvoiceXeroSplit(lines, money);
+});
+
+Deno.test("ZZTEST repayment reads: unreadable balance takes nothing, stored Xero rule keeps its account", async () => {
+  let failed = true;
+  const rule = { ...RULES[0], label: "ZZTEST repayment", kind: "repayment", balance_total: 250, xero_account_code: "ZZTEST-account" };
+  const client = { rpc: () => ({ data: failed ? null : 50, error: failed ? { message: "ZZTEST read failure" } : null }),
+    from(table: string) {
+      const q: any = { select: () => q, eq: () => q, not: () => q, maybeSingle: () => q,
+        then: (resolve: any) => resolve({ data: table === "feature_flags" ? { enabled: true }
+          : table === "trade_recurring_deductions" ? [rule] : [], error: null }) }; return q;
+    } };
+  const input = { userId: UTE_TRADE, weekStart: THIS_WEEK, payable: 1000 };
+  const missing = await loadTradeRecurringDeductionDecision(client, input);
+  assertEquals(missing.applied, null);
+  assertEquals(missing.note, "The repayment balance could not be read, so nothing was taken this week.");
+  failed = false;
+  assertEquals((await loadTradeRecurringDeductionDecision(client, input)).applied?.amount, 50);
+  const stored = await withStoredTradeRepaymentRule({ from: () => ({ select() { return this; }, eq() { return this; },
+    maybeSingle: () => ({ data: rule, error: null }) }) }, {
+      recurring_deduction_id: RULE_100, recurring_deduction_label: rule.label, recurring_deduction_amount: 50 });
+  assertEquals(stored.recurring_deduction_xero_account_code, "ZZTEST-account");
+});

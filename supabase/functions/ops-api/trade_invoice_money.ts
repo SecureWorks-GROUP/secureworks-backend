@@ -49,6 +49,8 @@ export type TradeInvoiceRecurringDeduction = {
   id: string | null;
   label: string;
   amount: number;
+  kind?: "recurring" | "repayment";
+  xero_account_code?: string | null;
 };
 
 export type TradeInvoiceMoney = {
@@ -536,6 +538,7 @@ export function withTradeInvoiceRecurringDeduction(
       id: deduction.id ? String(deduction.id) : null,
       label,
       amount,
+      ...(deduction.kind === "repayment" ? { kind: deduction.kind, xero_account_code: deduction.xero_account_code } : {}),
     },
   };
 }
@@ -559,6 +562,8 @@ export function persistedTradeInvoiceRecurringDeduction(
       : null,
     label: String(record.recurring_deduction_label ?? ""),
     amount: Number(raw),
+    ...(record.recurring_deduction_kind === "repayment" ? { kind: "repayment" as const,
+      xero_account_code: String(record.recurring_deduction_xero_account_code ?? "") } : {}),
   };
 }
 
@@ -926,15 +931,17 @@ export function isTradeInvoiceSuperXeroLine(
 // work line always starts with the trade's name (see
 // withTradeIdentityOnXeroDescription), so a trade's own "ute hire" wording on
 // a work line is never read as the deduction.
+export const TRADE_INVOICE_REPAYMENT_XERO_PREFIX = "Repayment - ";
+
 export const TRADE_INVOICE_RECURRING_DEDUCTION_XERO_PREFIX =
   "Weekly deduction - ";
 
 export function isTradeInvoiceRecurringDeductionXeroLine(
   line: TradeInvoiceXeroLine | null | undefined,
 ): boolean {
-  return String(line?.Description || "").trimStart().toLowerCase().startsWith(
-    TRADE_INVOICE_RECURRING_DEDUCTION_XERO_PREFIX.toLowerCase(),
-  );
+  const description = String(line?.Description || "").trimStart().toLowerCase();
+  return [TRADE_INVOICE_RECURRING_DEDUCTION_XERO_PREFIX, TRADE_INVOICE_REPAYMENT_XERO_PREFIX]
+    .some((prefix) => description.startsWith(prefix.toLowerCase()));
 }
 
 export function formatTradeInvoiceRecurringDeductionDescription(
@@ -943,7 +950,7 @@ export function formatTradeInvoiceRecurringDeductionDescription(
 ): string {
   const name = String(tradeName || "").trim() || "the trade";
   return [
-    `${TRADE_INVOICE_RECURRING_DEDUCTION_XERO_PREFIX}${deduction.label}`,
+    `${deduction.kind === "repayment" ? TRADE_INVOICE_REPAYMENT_XERO_PREFIX : TRADE_INVOICE_RECURRING_DEDUCTION_XERO_PREFIX}${deduction.label}`,
     `${
       moneyLabel(deduction.amount)
     } taken off the amount payable to ${name}, after super and GST. Not part of the work billed on this invoice.`,
@@ -1237,7 +1244,9 @@ export function splitTradeInvoiceXeroLines(
   // on the account of the bill's own work lines. Whether the hire itself
   // should carry GST is the bookkeeper's call on the draft.
   if (model.recurring_deduction_line) {
-    const accountCode = String(grossLines[0]?.AccountCode ?? "").trim();
+    const accountCode = String(money.recurring_deduction?.kind === "repayment"
+      ? money.recurring_deduction.xero_account_code ?? ""
+      : grossLines[0]?.AccountCode ?? "").trim();
     if (!accountCode) {
       throw new TradeInvoiceMoneyError(
         "RECURRING_DEDUCTION_INVALID",
@@ -1365,6 +1374,8 @@ export function assertReturnedTradeInvoiceXeroSplit(
   if (
     superLines.length !== 1 ||
     deductionLines.length !== (money.recurring_deduction ? 1 : 0) ||
+    (money.recurring_deduction?.kind === "repayment" && deductionLines.some((line) =>
+      line.AccountCode !== money.recurring_deduction?.xero_account_code)) ||
     Math.abs(labourCents + reimbursementLines.reduce((sum, line) => sum + lineGrossCents(line), 0) - expectedGrossCents) > 1 ||
     Math.abs(superCents - expectedWithholdCents) > 1 ||
     Math.abs(deductionCents - expectedDeductionCents) > 1 ||

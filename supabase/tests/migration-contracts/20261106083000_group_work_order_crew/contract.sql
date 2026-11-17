@@ -8,6 +8,8 @@ BEGIN
  SELECT b.body INTO previous FROM public.migration_contract_group_crew_before b;
  -- Later amendments to this writer are undone first, newest first, so this
  -- check still pins only this migration's own change.
+ -- P1-14.3: amount changes join the pot; an approved budget still wins.
+ body := replace(body, $later$COALESCE((SELECT g.approved_budget_ex FROM public.group_work_orders g WHERE g.id=p_group_id),wo.agreed_labour_ex + public.work_order_amount_change_total(wo.id))$later$, $was$COALESCE((SELECT g.approved_budget_ex FROM public.group_work_orders g WHERE g.id=p_group_id),wo.agreed_labour_ex)$was$);
  -- 20261106160000: crew paid by the hour are out of the split and their pay
  -- comes off the pot (its six parts, last first).
  body := replace(body, $later$    RETURN jsonb_build_object('frozen', false, 'shares', v_shares, 'hours_paid_ex', round(v_hours_paid, 2));$later$, $was$    RETURN jsonb_build_object('frozen', false, 'shares', v_shares);$was$);

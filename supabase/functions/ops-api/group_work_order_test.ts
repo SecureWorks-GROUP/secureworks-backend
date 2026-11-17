@@ -3526,3 +3526,25 @@ Deno.test("ZZTEST reimbursement never takes a group share or hours", async () =>
   assertEquals(isNormalWorkOrderPayLine(line), false);
   assertEquals(isPaidHoursLine(line), false);
 });
+
+Deno.test("ZZTEST people history: office removal and restore each append once without changing success", async () => {
+  const memory = new Memory();
+  seedSplit(memory);
+  memory.rows("group_work_order_participants").push({ group_id: GROUP, user_id: USER_C });
+  const caller = trade(USER_A, true);
+  const removed = await removeGroupWorkOrderParticipant(memory.client(), caller, {
+    group_id: GROUP, user_id: USER_C, reason: "ZZTEST crew correction" });
+  assertEquals(removed.removed, true);
+  const restored = await restoreGroupWorkOrderParticipant(memory.client(), caller, { group_id: GROUP, user_id: USER_C });
+  assertEquals(restored.restored, true);
+  const rows = memory.rows("work_order_amount_changes");
+  assertEquals(rows.map((row) => {
+    assert(row.detail && typeof row.detail === "object" && "action" in row.detail);
+    return row.detail.action;
+  }), ["remove", "restore"]);
+  assertEquals(rows.map((row) => [row.kind, row.delta_ex]), [["people", 0], ["people", 0]]);
+  memory.insertFault.set("work_order_amount_changes", "ZZTEST failure");
+  const stillRemoved = await removeGroupWorkOrderParticipant(memory.client(), caller, {
+    group_id: GROUP, user_id: USER_C, reason: "ZZTEST retry" });
+  assertEquals(stillRemoved.removed, true);
+});

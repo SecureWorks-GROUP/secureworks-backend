@@ -30,6 +30,7 @@
 //
 // Nothing here sends a text, an email or a review request.
 
+import { recordWorkOrderPeopleChange } from "./work_order_amount_change.ts";
 import { clientSignoffForm, hasOfficeClientConfirmation, validSignoffDay, SIGNED_CLIENT_COPY_COLUMNS } from "./client_signoff_form_data.ts";
 import { GOOGLE_REVIEW_URL as SEEDED_GOOGLE_REVIEW_URL } from "../_shared/google_review_link.ts";
 import { signatureDataUrl } from "../_shared/signature_image.ts";
@@ -3516,6 +3517,9 @@ export async function removeGroupWorkOrderParticipant(
     p_actor: caller.userId,
   });
   throwQuery(error, "remove the participant");
+  await recordWorkOrderPeopleChange(client, { orgId: group.org_id, workOrderId: group.work_order_id,
+    jobId: group.job_id, actorUserId: caller.userId, reason: String(body.reason || "").trim(),
+    detail: { action: "remove" } });
   return { ok: true, removed: true, group_id: group.id, user_id: userId };
 }
 
@@ -3544,6 +3548,9 @@ export async function restoreGroupWorkOrderParticipant(
     p_actor: caller.userId,
   });
   throwQuery(error, "put the participant back");
+  await recordWorkOrderPeopleChange(client, { orgId: group.org_id, workOrderId: group.work_order_id,
+    jobId: group.job_id, actorUserId: caller.userId, reason: "Person restored to the claim by the office",
+    detail: { action: "restore" } });
   return { ok: true, restored: true, group_id: group.id, user_id: userId };
 }
 
