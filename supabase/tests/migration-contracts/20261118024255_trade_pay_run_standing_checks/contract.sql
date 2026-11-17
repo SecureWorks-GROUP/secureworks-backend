@@ -1,5 +1,5 @@
 BEGIN;
-\ir ../../../migrations/20261118023602_trade_pay_run_standing_checks.sql
+\ir ../../../migrations/20261118024255_trade_pay_run_standing_checks.sql
 CREATE FUNCTION pg_temp.zztest_assert(ok boolean, words text) RETURNS void
 LANGUAGE plpgsql AS $$ BEGIN
  IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'ZZTEST %',words; END IF;
@@ -21,6 +21,8 @@ DO $$ DECLARE t text; c record; BEGIN
   END LOOP;
  END LOOP;
 END $$;
+-- Deliberate historical corruption fixture only, restored by ROLLBACK.
+DROP INDEX IF EXISTS public.uq_work_orders_job_current;
 -- Inject faults into the read of real cost rows, never into the check's sums.
 -- The original view and every dependent object are restored by ROLLBACK.
 ALTER VIEW public.v_job_cost_events RENAME TO zztest_standing_original_cost;
@@ -233,8 +235,13 @@ EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON)
    AND org_id='00000000-0000-0000-0000-000000000001')
  SELECT sum(c.amount_ex) FROM public.v_job_cost_events c JOIN inv i ON c.document_id=i.id::text
  WHERE c.is_actual AND c.source IN ('trade_line','trade_employer_super');
-\ir ../../../rollbacks/20261118023602_trade_pay_run_standing_checks_down.sql
+\ir ../../../rollbacks/20261118024255_trade_pay_run_standing_checks_down.sql
 SELECT pg_temp.zztest_assert(to_regprocedure('public.trade_pay_run_standing_checks(uuid,uuid[],text)') IS NULL,'rollback left the function');
 
 ROLLBACK;
+DO $$ BEGIN
+ IF to_regclass('public.uq_work_orders_job_current') IS NULL THEN
+  RAISE EXCEPTION 'ZZTEST rollback did not restore the work order unique index';
+ END IF;
+END $$;
 SELECT 'PASS: P1-08.3 six standing checks, invoice stops, whole-run stop and rollback' AS result;

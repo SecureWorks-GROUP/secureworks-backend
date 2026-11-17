@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS public.job_assignments(
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), job_id uuid, user_id uuid,
  scheduled_date date, status text, is_lead boolean DEFAULT false);
 -- These mirror existing indexes, not new product indexes.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_work_orders_job_current ON public.work_orders(job_id) WHERE kind='job';
 CREATE INDEX IF NOT EXISTS idx_inv_lines_invoice ON public.trade_invoice_lines(trade_invoice_id);
 CREATE INDEX IF NOT EXISTS idx_inv_lines_job ON public.trade_invoice_lines(job_id);
 CREATE INDEX IF NOT EXISTS idx_wo_job ON public.work_orders(job_id) WHERE job_id IS NOT NULL;
