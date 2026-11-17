@@ -42,6 +42,7 @@ import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_
 import { incrementalModifiedSince } from './sync_window.ts'
 import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { syncSupplierCreditNotes } from './supplier_credit_notes.ts'
+import { checkDraftsApproved } from './draft_approval_check.ts'
 import { billCostDocument, collectBillCostDocument } from './cost_lines.ts'
 import { handleCostLinesBackfill } from './cost_lines_backfill.ts'
 import { syncCustomerAllocations } from './customer_allocations.ts'
@@ -2935,6 +2936,16 @@ async function syncTrackingPL(sb: any) {
     }
   }
 
+  // P3-01.10: drafts Xero now shows approved, from our own copy only. Its own
+  // try/catch: a failure here never fails the tracking P&L sync.
+  let draftsChecked: unknown
+  try {
+    draftsChecked = await checkDraftsApproved(sb, DEFAULT_ORG_ID, now.toISOString())
+  } catch (e: any) {
+    console.error('[xero-sync] draft approval check failed', e?.name || 'error')
+    draftsChecked = { ok: false, error: 'draft_check_threw' }
+  }
+
   // Log
   await sb.from('webhook_log').insert({
     org_id: DEFAULT_ORG_ID,
@@ -2950,6 +2961,7 @@ async function syncTrackingPL(sb: any) {
     options_synced: optionsSynced,
     months_failed: results.filter(r => r.status === 'error').length,
     results,
+    drafts_checked: draftsChecked,
   }
 }
 
