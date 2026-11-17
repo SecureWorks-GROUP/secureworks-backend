@@ -1,6 +1,6 @@
 BEGIN;
 SET LOCAL statement_timeout = '120s';
-\ir ../../../migrations/20261118060115_standard_hourly_maximums.sql
+\ir ../../../migrations/20261118065200_standard_hourly_maximums.sql
 DO $test$
 DECLARE
   actor uuid := '00000000-0000-0000-0000-000000000517';
@@ -86,7 +86,7 @@ BEGIN
 END $test$;
 -- The rollback and its readback stay inside this transaction, preserving
 -- every later migration's database surface for the next registered case.
-\ir ../../../rollbacks/20261118060115_standard_hourly_maximums_down.sql
+\ir ../../../rollbacks/20261118065200_standard_hourly_maximums_down.sql
 DO $rollback_test$ BEGIN
   IF to_regclass('public.standard_hourly_maximums') IS NOT NULL
      OR to_regclass('public.standard_hourly_maximum_changes') IS NOT NULL
