@@ -1,3 +1,6 @@
+-- Keep the historical rollback and every assertion inside one transaction.
+-- Rolling it back preserves all later table indexes and function bodies.
+BEGIN;
 -- Stand the historical mark/build contract back up; the successor has its own proofs.
 SELECT to_regclass('public.job_change_marks_base') IS NOT NULL AS queue_safety_live \gset
 \if :queue_safety_live
@@ -8,7 +11,7 @@ SELECT to_regclass('public.job_change_marks_base') IS NOT NULL AS queue_safety_l
 -- (c) after the page is done a new mark starts a new run (sources reset, first_marked_at moves forward);
 -- (d) a null job and an unknown job do nothing and raise nothing; (e) job_marks_notes_seen moves one row, then none.
 -- Then the table and function grants, row level security and the comment, and a re-apply is a no-op.
-BEGIN;
+SAVEPOINT fixture;
 INSERT INTO public.jobs (id, org_id, type, status, job_number)
 VALUES ('00000000-0000-4000-8000-000000000401', '00000000-0000-0000-0000-000000000001', 'fencing', 'accepted', 'ZZTEST-401');
 CREATE TEMP TABLE jcm_seen (step text PRIMARY KEY, first_at timestamptz, last_at timestamptz) ON COMMIT DROP;
@@ -112,7 +115,7 @@ BEGIN
   RAISE EXCEPTION 'job change marks: a deleted job kept its mark';
  END IF;
 END $c$;
-ROLLBACK;
+ROLLBACK TO SAVEPOINT fixture;
 
 -- Grants, row level security, the comment, and the two due indexes.
 DO $c$
@@ -151,7 +154,7 @@ BEGIN
 END $c$;
 
 -- A re-apply is a no-op.
-BEGIN;
+SAVEPOINT reapply;
 \ir ../../../migrations/20261117171302_job_change_marks.sql
 DO $c$
 BEGIN
@@ -160,7 +163,7 @@ BEGIN
   RAISE EXCEPTION 'job change marks: a re-apply duplicated a function';
  END IF;
 END $c$;
-ROLLBACK;
+ROLLBACK TO SAVEPOINT reapply;
 
--- Restore the successor for the remaining registered cases.
-\ir ../../../migrations/20261117172503_job_pages_queue_safety.sql
+-- Restore the exact incoming schema, including all successor objects.
+ROLLBACK;
