@@ -1,5 +1,7 @@
 BEGIN;
 DO $rollback$ BEGIN
+ IF to_regclass('public.job_cost_events_cutover') IS NOT NULL THEN
+  RAISE EXCEPTION 'P2-01.7 rollback: cutover marker remains'; END IF;
  IF to_regclass('public.v_job_cost_events_lines') IS NOT NULL OR to_regclass('public.v_job_cost_events_legacy') IS NOT NULL THEN
   RAISE EXCEPTION 'P2-01.7 rollback: helper views remain'; END IF;
  IF md5(pg_get_viewdef('public.v_job_cost_events'::regclass,true))<>'b48997c55913ce3c90e3a3c947533fd3' THEN

@@ -93,6 +93,7 @@ DECLARE v record; acl_entry record; c record; f record; legacy text;
 END $restore$;
 DROP VIEW public.v_job_cost_events_lines;
 DROP VIEW public.v_job_cost_events_legacy;
+DROP TABLE public.job_cost_events_cutover;
 ALTER TABLE public.job_cost_events_stored DROP COLUMN cost_line_id,DROP COLUMN cost_kind;
 DROP FUNCTION public.install_job_cost_events_from_cost_lines();
 DROP FUNCTION public.remove_job_cost_events_from_cost_lines();

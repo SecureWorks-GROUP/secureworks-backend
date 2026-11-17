@@ -1,4 +1,4 @@
--- P2-01.7. Shadow reader, off by default. No business trigger or schedule installs.
+-- P2-01.7. Cutover-gated reader, off by default. No business trigger or schedule installs.
 -- Reference: job_profit_views_live.sql, derived from migrations, not observed live.
 -- v_job_profit is never replaced. Its consumed literals stay on the source lines.
 -- Version is main's newest plus one second, beyond the assigned 4201-4299 block.
@@ -135,14 +135,40 @@ INSERT INTO public.feature_flags(flag_name,enabled,description)
 VALUES('job_cost_events_from_cost_lines_v1',false,'Read Job Profit cost events from counted cost line parts')
 ON CONFLICT(flag_name) DO NOTHING;
 
+-- Follow-up 25: the flag alone never abandons legacy costs. P2-01.8 must
+-- finish ALL three historical document backfills and install the trade hooks
+-- before its future completion writer may set completed_at. This migration
+-- seeds only an unset marker and supplies no completion writer.
+-- A singleton is bounded forever; no trim or growing progress ledger is needed.
+CREATE TABLE IF NOT EXISTS public.job_cost_events_cutover (
+ singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+ bills_backfilled_at timestamptz,
+ credits_backfilled_at timestamptz,
+ trade_backfilled_at timestamptz,
+ trade_triggers_installed_at timestamptz,
+ completed_at timestamptz,
+ CHECK (completed_at IS NULL OR
+  (bills_backfilled_at IS NOT NULL AND credits_backfilled_at IS NOT NULL
+   AND trade_backfilled_at IS NOT NULL AND trade_triggers_installed_at IS NOT NULL))
+);
+ALTER TABLE public.job_cost_events_cutover ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.job_cost_events_cutover FROM PUBLIC,anon,authenticated,service_role;
+GRANT SELECT ON public.job_cost_events_cutover TO service_role;
+DROP POLICY IF EXISTS job_cost_events_cutover_read ON public.job_cost_events_cutover;
+CREATE POLICY job_cost_events_cutover_read ON public.job_cost_events_cutover FOR SELECT TO service_role USING (true);
+INSERT INTO public.job_cost_events_cutover(singleton) VALUES(true) ON CONFLICT DO NOTHING;
+
 CREATE OR REPLACE VIEW public.v_job_cost_events AS
- SELECT l.* FROM public.v_job_cost_events_lines l
- WHERE EXISTS(SELECT 1 FROM public.feature_flags ff
- WHERE ff.flag_name='job_cost_events_from_cost_lines_v1' AND ff.enabled)
+ WITH cutover AS MATERIALIZED (
+  SELECT EXISTS(SELECT 1 FROM public.feature_flags ff
+   WHERE ff.flag_name='job_cost_events_from_cost_lines_v1' AND ff.enabled)
+   AND EXISTS(SELECT 1 FROM public.job_cost_events_cutover c
+    WHERE c.singleton AND c.completed_at IS NOT NULL) AS ready
+ )
+ SELECT l.* FROM public.v_job_cost_events_lines l WHERE (SELECT ready FROM cutover)
  UNION ALL
  SELECT g.*,NULL::uuid cost_line_id,NULL::text cost_kind FROM public.v_job_cost_events_legacy g
- WHERE NOT EXISTS(SELECT 1 FROM public.feature_flags ff
- WHERE ff.flag_name='job_cost_events_from_cost_lines_v1' AND ff.enabled);
+ WHERE NOT (SELECT ready FROM cutover);
 
 ALTER TABLE public.job_cost_events_stored ADD COLUMN IF NOT EXISTS cost_line_id uuid,
  ADD COLUMN IF NOT EXISTS cost_kind text;
@@ -200,7 +226,11 @@ CREATE OR REPLACE FUNCTION public.job_cost_events_switch_dirty_trg() RETURNS tri
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $fn$
 DECLARE prior_timeout text:=current_setting('lock_timeout');
 /* block */ BEGIN
- IF OLD.enabled IS NOT DISTINCT FROM NEW.enabled THEN RETURN NULL; END IF;
+ IF TG_TABLE_NAME='feature_flags' THEN
+  IF OLD.enabled IS NOT DISTINCT FROM NEW.enabled THEN RETURN NULL; END IF;
+ ELSE
+  IF OLD.completed_at IS NOT DISTINCT FROM NEW.completed_at THEN RETURN NULL; END IF;
+ END IF;
  PERFORM set_config('lock_timeout','1ms',true);
  /* subblock */ BEGIN
   -- Intentional one-time whole jobs_pkey scan on an explicit switch change.
@@ -224,6 +254,9 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $fn$
  DROP TRIGGER IF EXISTS job_cost_events_lines_dirty ON public.job_cost_lines;
  CREATE TRIGGER job_cost_events_lines_dirty AFTER UPDATE OF state,amount_ex,document_status,is_actual ON public.job_cost_lines
  FOR EACH ROW EXECUTE FUNCTION public.job_cost_events_dirty_trg();
+ DROP TRIGGER IF EXISTS job_cost_events_cutover_dirty ON public.job_cost_events_cutover;
+ CREATE TRIGGER job_cost_events_cutover_dirty AFTER UPDATE OF completed_at ON public.job_cost_events_cutover
+ FOR EACH ROW EXECUTE FUNCTION public.job_cost_events_switch_dirty_trg();
  DROP TRIGGER IF EXISTS job_cost_events_switch_dirty ON public.feature_flags;
  CREATE TRIGGER job_cost_events_switch_dirty AFTER UPDATE OF enabled ON public.feature_flags
  FOR EACH ROW WHEN (NEW.flag_name IN ('job_cost_events_from_cost_lines_v1','job_profit_expected_from_job_budget'))
@@ -235,6 +268,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $fn$
  DROP TRIGGER IF EXISTS job_cost_events_parts_dirty ON public.job_cost_line_parts;
  DROP TRIGGER IF EXISTS job_cost_events_lines_dirty ON public.job_cost_lines;
  DROP TRIGGER IF EXISTS job_cost_events_switch_dirty ON public.feature_flags;
+ DROP TRIGGER IF EXISTS job_cost_events_cutover_dirty ON public.job_cost_events_cutover;
 END $fn$;
 REVOKE ALL ON FUNCTION public.job_cost_events_mark_job(uuid),public.job_cost_events_dirty_trg(),
  public.job_cost_events_switch_dirty_trg(),public.install_job_cost_events_from_cost_lines(),
