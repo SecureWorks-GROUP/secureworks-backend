@@ -10,7 +10,7 @@ DECLARE source_hash text;
 /* pre-image guard */ BEGIN
   SELECT md5(prosrc) INTO source_hash FROM pg_proc
     WHERE oid = 'public.context_worker_facts_present()'::regprocedure;
-  IF source_hash NOT IN ('b54f07cf53aa8d120bb63120e88d369f', '7f24a25111c4c58004dca7f4c401c931') THEN
+  IF source_hash NOT IN ('b54f07cf53aa8d120bb63120e88d369f', '05b9e4b3258cef32f9607d1ae548b720') THEN
     RAISE EXCEPTION 'worker facts due: helper pre-image changed';
   END IF;
 END $guard$;
@@ -44,11 +44,15 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $fn$
       WHERE (judged.cadence->>'due')::boolean
       LIMIT 1
     ) OR EXISTS (
-      -- The catch-up half of that same pool, using its unfinished-job index.
-      SELECT 1 FROM public.context_catchup_jobs c
-      CROSS JOIN LATERAL public.context_jobs_cadence(ARRAY[c.job_id]) judged
-      WHERE c.done_at IS NULL AND (judged.cadence->>'due')::boolean
-      ORDER BY c.job_id
+      -- Keep the index-ordered candidate stream inside a subquery: EXISTS
+      -- discards a top-level ORDER BY before choosing its access path.
+      SELECT 1 FROM (
+        SELECT c.job_id FROM public.context_catchup_jobs c
+        WHERE c.done_at IS NULL
+        ORDER BY c.job_id
+      ) candidate
+      CROSS JOIN LATERAL public.context_jobs_cadence(ARRAY[candidate.job_id]) judged
+      WHERE (judged.cadence->>'due')::boolean
       LIMIT 1
     ) THEN 1 ELSE 0 END
 $fn$;

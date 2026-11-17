@@ -4,7 +4,7 @@ DECLARE source_hash text;
 /* pre-image guard */ BEGIN
   SELECT md5(prosrc) INTO source_hash FROM pg_proc
     WHERE oid = 'public.context_worker_facts_present()'::regprocedure;
-  IF source_hash NOT IN ('7f24a25111c4c58004dca7f4c401c931', 'b54f07cf53aa8d120bb63120e88d369f') THEN
+  IF source_hash NOT IN ('05b9e4b3258cef32f9607d1ae548b720', 'b54f07cf53aa8d120bb63120e88d369f') THEN
     RAISE EXCEPTION 'worker facts due: helper pre-image changed';
   END IF;
 END $guard$;
