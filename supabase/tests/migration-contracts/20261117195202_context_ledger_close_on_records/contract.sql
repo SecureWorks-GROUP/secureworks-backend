@@ -20,8 +20,13 @@ BEGIN
  n:=public.context_ledger_record_close_undo('2026-11-01');
  IF n<>2 OR (SELECT count(*) FROM public.context_ledger_transitions WHERE by='rule:record_close_undo')<>2
  OR EXISTS(SELECT 1 FROM public.context_ledger_items WHERE id IN ('00000000-0000-4000-8000-000000000401','00000000-0000-4000-8000-000000000402') AND (status<>'open' OR closed_at IS NOT NULL OR closed_by IS NOT NULL)) THEN RAISE EXCEPTION 'record close: T9 undo'; END IF;
+ UPDATE public.context_ledger_items SET to_role='supplier' WHERE id='00000000-0000-4000-8000-000000000403';
  v:=public.context_ledger_close_on_records('00000000-0000-4000-8000-000000000403',false);
  IF v->>'closed'<>'1' THEN RAISE EXCEPTION 'record close: T3 bill'; END IF;
+ UPDATE public.context_ledger_items SET closes_on='quote_sent' WHERE id='00000000-0000-4000-8000-000000000404';
+ INSERT INTO public.job_documents(job_id,type,quote_number,sent_at) VALUES
+ ('00000000-0000-4000-8000-000000000404','quote','Q-9004','2026-11-04T10:00:00+08'),
+ ('00000000-0000-4000-8000-000000000404','quote','Q-9005','2026-11-05T10:00:00+08');
  v:=public.context_ledger_close_on_records('00000000-0000-4000-8000-000000000404',false);
  IF v->>'ambiguous'<>'1' OR jsonb_array_length(v#>'{ambiguous_items,0,candidates}')<>2 OR v->>'closed'<>'0' THEN RAISE EXCEPTION 'record close: T4 ambiguity'; END IF;
  v:=public.context_ledger_close_on_records('00000000-0000-4000-8000-000000000405',false);
