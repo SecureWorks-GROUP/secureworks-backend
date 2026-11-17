@@ -1,7 +1,9 @@
 BEGIN;
 SET LOCAL statement_timeout='120s';
--- Rule 17: reapply our creating migration inside the rolled-back contract.
-\ir ../../../migrations/20261118061824_trade_line_job_amount_guard.sql
+-- Rule 17: reapply our creating migration inside the rolled-back contract. Its functions are
+-- created with plain CREATE FUNCTION, so the rollback runs first; both are undone at ROLLBACK.
+\ir ../../../rollbacks/20261118070639_trade_line_job_amount_guard_down.sql
+\ir ../../../migrations/20261118070639_trade_line_job_amount_guard.sql
 CREATE FUNCTION pg_temp.zztest_assert(ok boolean, words text) RETURNS void LANGUAGE plpgsql AS $$ BEGIN
  IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'ZZTEST %',words; END IF;
 END $$;
@@ -16,6 +18,8 @@ END $$;
 -- Prove merge does not install on a business table or change the flag.
 SELECT pg_temp.zztest_assert(NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='public.trade_invoice_lines'::regclass
  AND tgname='trade_invoice_lines_job_amount_guard'),'guard installed on merge');
+SELECT pg_temp.zztest_assert(NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='public.trade_invoices'::regclass
+ AND tgname='trade_invoices_job_amount_guard'),'header guard installed on merge');
 SELECT pg_temp.zztest_assert(EXISTS(SELECT 1 FROM public.feature_flags WHERE flag_name='trade_line_hold_v1' AND NOT enabled),'hold switch must stay off');
 SET LOCAL session_replication_role=replica;
 \ir fixture.sql
@@ -23,6 +27,7 @@ SELECT public.install_trade_line_job_amount_guard();
 SELECT public.install_trade_line_job_amount_guard();
 -- Isolate this guard from unrelated existing business triggers. Transaction rollback restores all settings.
 ALTER TABLE public.trade_invoice_lines ENABLE ALWAYS TRIGGER trade_invoice_lines_job_amount_guard;
+ALTER TABLE public.trade_invoices ENABLE ALWAYS TRIGGER trade_invoices_job_amount_guard;
 DO $$ DECLARE j uuid:='f1050900-0000-4000-8000-000000000001';
  i uuid:='f1050900-0000-4000-8000-000000000004';
  other_i uuid:='f1050900-0000-4000-8000-000000000005';
@@ -106,6 +111,60 @@ DO $$ DECLARE j uuid:='f1050900-0000-4000-8000-000000000001';
  END;
  PERFORM pg_temp.zztest_assert((SELECT count(*) FROM public.trade_invoice_lines WHERE trade_invoice_id=i)=0,'failed read left line');
 END $$;
+-- Header moves into a counted status or kind: two draft invoices each hold 100 against 120.
+DO $$ DECLARE j uuid:='f1050900-0000-4000-8000-000000000001';
+ i uuid:='f1050900-0000-4000-8000-000000000004';
+ other_i uuid:='f1050900-0000-4000-8000-000000000005';
+ extra uuid; BEGIN
+ DELETE FROM public.trade_invoice_lines WHERE job_id=j OR trade_invoice_id IN(i,other_i);
+ DELETE FROM public.work_order_amount_changes WHERE job_id=j;
+ UPDATE public.trade_invoices SET status='draft',invoice_kind='standard' WHERE id IN(i,other_i);
+ PERFORM pg_temp.zztest_assert(public.job_backed_room(j)=120,'header case room');
+ INSERT INTO public.trade_invoice_lines(trade_invoice_id,job_id,line_type,line_total_ex)
+ VALUES(i,j,'labour',100),(other_i,j,'labour',100),(other_i,j,'commission',999);
+ UPDATE public.trade_invoices SET status='pending_ops_review' WHERE id=i;
+ PERFORM pg_temp.zztest_assert(public.job_backed_room(j)=20,'first header did not spend room');
+ PERFORM pg_temp.zztest_guard_refuses(format('UPDATE public.trade_invoices SET status=%L WHERE id=%L','pending_ops_review',other_i));
+ PERFORM pg_temp.zztest_assert((SELECT status='draft' FROM public.trade_invoices WHERE id=other_i),'refused header changed');
+ PERFORM pg_temp.zztest_assert(public.job_backed_room(j)=20,'refused header spent room');
+ -- Retry after the office raises the amount: read fresh, admitted once it fits.
+ INSERT INTO public.work_order_amount_changes(org_id,work_order_id,job_id,kind,from_ex,to_ex,delta_ex,reason,changed_by)
+ VALUES('00000000-0000-0000-0000-000000000001','f1050900-0000-4000-8000-000000000002',j,'amount',120,200,80,'ZZTEST office raise','f1050900-0000-4000-8000-000000000003');
+ UPDATE public.trade_invoices SET status='pending_ops_review' WHERE id=other_i;
+ PERFORM pg_temp.zztest_assert(public.job_backed_room(j)=0,'retried header wrong');
+ -- A kind move from held to follow_on is checked like a status move.
+ UPDATE public.trade_invoices SET invoice_kind='held' WHERE id=other_i;
+ PERFORM pg_temp.zztest_assert(public.job_backed_room(j)=100,'held header still counted');
+ INSERT INTO public.trade_invoice_lines(trade_invoice_id,job_id,line_type,line_total_ex)
+ VALUES(other_i,j,'labour',0.01) RETURNING id INTO extra;
+ PERFORM pg_temp.zztest_guard_refuses(format('UPDATE public.trade_invoices SET invoice_kind=%L WHERE id=%L','follow_on',other_i));
+ PERFORM pg_temp.zztest_assert((SELECT invoice_kind='held' FROM public.trade_invoices WHERE id=other_i),'refused kind changed');
+ DELETE FROM public.trade_invoice_lines WHERE id=extra;
+ UPDATE public.trade_invoices SET invoice_kind='follow_on' WHERE id=other_i;
+ PERFORM pg_temp.zztest_assert(public.job_backed_room(j)=0,'follow_on header not counted');
+ -- Two headers in one statement see each other's spend; the whole statement is refused.
+ UPDATE public.trade_invoices SET status='draft' WHERE id IN(i,other_i);
+ INSERT INTO public.trade_invoice_lines(trade_invoice_id,job_id,line_type,line_total_ex)
+ VALUES(i,j,'labour',0.01) RETURNING id INTO extra;
+ PERFORM pg_temp.zztest_guard_refuses(format('UPDATE public.trade_invoices SET status=%L WHERE id IN(%L,%L)','pending_ops_review',i,other_i));
+ PERFORM pg_temp.zztest_assert((SELECT count(*) FROM public.trade_invoices WHERE id IN(i,other_i) AND status='draft')=2,'two-row refusal left a partial write');
+ -- Switch off: the same over-room move is saved, exactly as on main.
+ UPDATE public.feature_flags SET enabled=false WHERE flag_name='trade_line_hold_v1';
+ UPDATE public.trade_invoices SET status='pending_ops_review' WHERE id IN(i,other_i);
+ PERFORM pg_temp.zztest_assert(round(public.job_backed_room(j)*100)=-1,'switch off changed the header move');
+ -- Switch on again: a move between two counted statuses re-checks nothing, so a job already
+ -- over (an office hand edit or a write while off) still moves on, no worse than main.
+ UPDATE public.feature_flags SET enabled=true WHERE flag_name='trade_line_hold_v1';
+ UPDATE public.trade_invoices SET status='approved' WHERE id=i;
+ -- A header whose job has no approved amount is refused, as a line would be.
+ UPDATE public.trade_invoices SET status='draft' WHERE id=i;
+ DELETE FROM public.trade_invoice_lines WHERE trade_invoice_id=i;
+ INSERT INTO public.trade_invoice_lines(trade_invoice_id,job_id,line_type,line_total_ex)
+ VALUES(i,'f1050900-0000-4000-8000-000000000099','labour',1);
+ PERFORM pg_temp.zztest_guard_refuses(format('UPDATE public.trade_invoices SET status=%L WHERE id=%L','pending_ops_review',i));
+ DELETE FROM public.trade_invoice_lines WHERE trade_invoice_id IN(i,other_i);
+ UPDATE public.trade_invoices SET status='pending_ops_review',invoice_kind='standard' WHERE id IN(i,other_i);
+END $$;
 -- Real plans against a larger unrelated population, without forcing planner settings.
 UPDATE public.feature_flags SET enabled=false WHERE flag_name='trade_line_hold_v1';
 INSERT INTO public.trade_invoices(id,org_id,user_id,invoice_number,week_start,week_end,total_hours,status,
@@ -135,6 +194,11 @@ DO $$ DECLARE plan jsonb; query text; BEGIN
    AND lower(btrim(coalesce(l.line_type,''))) NOT IN ('commission','reimbursement')
    AND (l.office_review_status IS NULL OR l.office_review_status='approved')
    AND i.status NOT IN ('draft','ops-reject') AND i.invoice_kind IN ('standard','follow_on')$q$,
+  $q$SELECT l.job_id,sum(l.line_total_ex) FROM public.trade_invoice_lines l
+   WHERE l.trade_invoice_id='f1050900-0000-4000-8000-000000000004' AND l.job_id IS NOT NULL
+   AND lower(btrim(coalesce(l.line_type,''))) NOT IN ('commission','reimbursement')
+   AND (l.office_review_status IS NULL OR l.office_review_status='approved')
+   GROUP BY l.job_id ORDER BY l.job_id$q$,
   $q$SELECT agreed_labour_ex FROM public.work_orders WHERE job_id='f1050900-0000-4000-8000-000000000001'
     AND kind='job' AND status='approved' AND agreed_labour_ex IS NOT NULL$q$,
   $q$SELECT sum(trade_allocation_ex) FROM public.work_order_customer_variations WHERE work_order_id='f1050900-0000-4000-8000-000000000002' AND status='approved'$q$,
@@ -149,9 +213,11 @@ END $$;
 SELECT public.remove_trade_line_job_amount_guard();
 SELECT public.remove_trade_line_job_amount_guard();
 SELECT pg_temp.zztest_assert(NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='trade_invoice_lines_job_amount_guard' AND tgrelid='public.trade_invoice_lines'::regclass),'remove left guard');
+SELECT pg_temp.zztest_assert(NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='trade_invoices_job_amount_guard' AND tgrelid='public.trade_invoices'::regclass),'remove left header guard');
 SELECT pg_temp.zztest_assert(NOT has_function_privilege('anon','public.job_backed_room(uuid)','EXECUTE')
  AND NOT has_function_privilege('authenticated','public.job_backed_room(uuid)','EXECUTE')
  AND has_function_privilege('service_role','public.job_backed_room(uuid)','EXECUTE')
- AND NOT has_function_privilege('service_role','public.install_trade_line_job_amount_guard()','EXECUTE'),'guard privileges');
+ AND NOT has_function_privilege('service_role','public.install_trade_line_job_amount_guard()','EXECUTE')
+ AND NOT has_function_privilege('authenticated','public.trade_invoices_job_amount_guard()','EXECUTE'),'guard privileges');
 SELECT 'ZZTEST P1-05.9 contract passed' AS result;
 ROLLBACK;
