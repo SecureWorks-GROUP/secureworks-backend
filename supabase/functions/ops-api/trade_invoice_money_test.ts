@@ -908,3 +908,15 @@ Deno.test("inclusive super: job cost reads no company super on top", () => {
   }
 });
 
+
+Deno.test("ZZTEST reimbursement retains NONE tax and stays inside the returned totals", () => {
+  const money = calculateTradeInvoiceMoney({ grossEarned: 1200, gstOn: true, earningsDate: "2026-11-16", superBasis: "inclusive_12_112_v1", reimbursementEx: 80 });
+  const lines = splitTradeInvoiceXeroLines([
+    { Description: "ZZTEST hours", Quantity: 1, UnitAmount: 1120, AccountCode: "ZZTEST-labour" },
+    { Description: "Reimbursement - ZZTEST receipt", Quantity: 1, UnitAmount: 80, AccountCode: "ZZTEST-reimbursement", TaxType: "NONE" },
+  ], money, { tradeName: "ZZTEST-trade", superAccountCode: "ZZTEST-super" });
+  assertEquals(lines.map((l) => [l.UnitAmount, l.TaxType]), [[1120, "INPUT"], [80, "NONE"], [-120, "NONE"]]);
+  assertEquals(lines.reduce((s, l) => s + Number(l.Quantity) * Number(l.UnitAmount), 0), 1080);
+  assertReturnedTradeInvoiceXeroSplit(lines, money);
+  assertThrows(() => assertReturnedTradeInvoiceXeroSplit(lines.map((l, i) => i === 1 ? { ...l, TaxType: "INPUT" } : l), money));
+});
