@@ -178,7 +178,7 @@ Deno.test("dossier mode story: header, story and client, only the two story RPCs
     _assembleJobDossierForTest(client, { job_id: JOB, mode: "story" })
   );
   assertEquals(client.writes, []);
-  assertEquals(client.reads, ["jobs"]);
+  assertEquals(client.reads, ["jobs", "feature_flags"]);
   assertEquals(client.rpcs.map((r) => r.fn).sort(), [
     "context_client_story",
     "context_job_story",
