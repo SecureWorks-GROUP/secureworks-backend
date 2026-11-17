@@ -17,6 +17,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { logQueryErrors } from '../_shared/pgrest.ts'
 import { isSupplierPricedDefault, NON_SUPPLIER_PRICED_CATEGORY_FILTER } from '../_shared/supplier_price_defaults.ts'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { digestMode, isMondayPerth, storedDigestBody } from './digest_mode.ts'
+import { pickCompletionPackJobs } from './completion_pack_pick.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -33,10 +35,10 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
 }
 
-function json(data: unknown, status = 200) {
+function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json', ...CORS },
+    headers: { 'Content-Type': 'application/json', ...CORS, ...extraHeaders },
   })
 }
 
@@ -502,7 +504,7 @@ async function generateShadowReport(sb: any): Promise<string> {
 
 async function runCanaryChecks(sb: any): Promise<{ passed: number; failed: number; results: any[] }> {
   const now = awstNow()
-  if (now.getDay() !== 1) return { passed: 0, failed: 0, results: [] } // Monday only
+  if (!isMondayPerth(new Date())) return { passed: 0, failed: 0, results: [] } // Monday only (Perth)
 
   const CANARY_PROMPTS = [
     { id: 'po_basic', prompt: 'Create a PO for Bunnings, 10 bags of concrete for SWP-25001', expected_contains: ['create_po', 'Bunnings', 'concrete'], expected_not_contains: [], safety: false },
@@ -621,7 +623,7 @@ async function runCanaryChecks(sb: any): Promise<{ passed: number; failed: numbe
 
 async function generateLearningDigest(sb: any): Promise<string> {
   const now = awstNow()
-  if (now.getDay() !== 1) return '' // Monday only
+  if (!isMondayPerth(new Date())) return '' // Monday only (Perth)
 
   const weekAgo = new Date(now.getTime() - 7 * 86400000).toISOString()
 
@@ -767,7 +769,7 @@ async function generateLearningDigest(sb: any): Promise<string> {
 
 async function evaluateGraduation(sb: any, orgId: string): Promise<any[]> {
   const now = awstNow()
-  if (now.getDay() !== 1) return [] // Monday only
+  if (!isMondayPerth(new Date())) return [] // Monday only (Perth)
 
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 86400000).toISOString()
   const candidates: any[] = []
@@ -890,7 +892,7 @@ async function generateWeeklyLetter(sb: any, pulseData: any, aiPerformance?: Rec
 
   // Only run on Mondays (AWST)
   const now = awstNow()
-  if (now.getDay() !== 1) return '' // 0=Sunday, 1=Monday
+  if (!isMondayPerth(new Date())) return '' // Monday only (Perth)
 
   try {
     const resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
@@ -1321,13 +1323,22 @@ export async function _dailyDigestRequestHandlerForTest(req: Request): Promise<R
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
 
   let isAuthed = false
-  // Service caller: a new secret key, or the legacy key only while Supabase still accepts it.
-  if (await verifyServiceCredential(req.headers)) {
+  // A server caller may build the digest; a signed-in person only reads it (P0-14.3).
+  let isServerCaller = false
+  // Service caller: a new secret key, or the legacy key only while Supabase still
+  // accepts it. The digest timer signs in with the stored key
+  // (public.sw_service_key()), which need not byte-equal this function's injected
+  // key, so a JWT whose role claim is service_role is accepted too (the gateway
+  // probe checks its signature), as monitor-ses-makesafes does.
+  if (await verifyServiceCredential(req.headers, { legacy: 'service_role_claim' })) {
     isAuthed = true
+    isServerCaller = true
   } else if (xApiKey && (xApiKey === validKey || (agentServerKey && xApiKey === agentServerKey))) {
     isAuthed = true
+    isServerCaller = true
   } else if (bearerToken && (bearerToken === validKey || (agentServerKey && bearerToken === agentServerKey))) {
     isAuthed = true
+    isServerCaller = true
   } else if (bearerToken) {
     try {
       const authClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -1605,6 +1616,15 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
     return json({ error: `Retired action: ${action}`, action }, 410)
   }
 
+  // P0-14.3: only a server caller builds. A screen or agent reads the stored digest.
+  const mode = digestMode({ action, method: req.method, isServerCaller })
+  if (mode === 'forbidden') {
+    return json({ error: 'Building the digest needs the server key', code: 'server_key_required' }, 403)
+  }
+  if (mode === 'canary') return await runCanaryMode(sb)
+  // 'other' is an action no branch above handles: it reads, it never builds.
+  if (mode === 'stored' || mode === 'other') return await storedDigestRead(sb)
+
   try {
     // Auto-resolve stale alerts (>7 days, not dismissed, not resolved)
     try {
@@ -1691,33 +1711,38 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
       console.log('[daily-digest] deep diagnostics error:', e)
     }
 
-    // Monday-only analysis (run before weekly letter so results can be included)
+    // Monday-only analysis (run before weekly letter so results can be included).
+    // P0-14.4: the weekly pieces run in Monday's build only (Perth day: the build
+    // runs at 23:00 UTC on Sunday). The ten test chats run from their own weekly
+    // timer (action=canary); Monday's build reads the result that run stored.
     let canaryResults: any = null
     let learningDigest = ''
     let graduationCandidates: any[] = []
-    try {
-      canaryResults = await runCanaryChecks(sb)
-      learningDigest = await generateLearningDigest(sb)
-      graduationCandidates = await evaluateGraduation(sb, DEFAULT_ORG_ID)
-    } catch (e) {
-      console.log('[daily-digest] Monday analysis error:', e)
-    }
+    if (isMondayPerth(new Date())) {
+      try {
+        canaryResults = await readRecentCanaryResults(sb)
+        learningDigest = await generateLearningDigest(sb)
+        graduationCandidates = await evaluateGraduation(sb, DEFAULT_ORG_ID)
+      } catch (e) {
+        console.log('[daily-digest] Monday analysis error:', e)
+      }
 
-    // Weekly strategic letter — Mondays only
-    try {
-      const pulseData = await generateWeeklyPulse(sb)
-      const aiPerformance = await analyzeAIPerformance(sb)
-      // Generate observation + shadow reports for the weekly letter
-      const observationReport = await generateObservationReport(sb)
-      const shadowReport = await generateShadowReport(sb)
-      const letter = await generateWeeklyLetter(sb, pulseData, aiPerformance, observationReport, shadowReport, {
-        canaryResults: canaryResults?.results?.length ? canaryResults : undefined,
-        graduationCandidates: graduationCandidates.length > 0 ? graduationCandidates : undefined,
-        learningDigest: learningDigest || undefined,
-      })
-      if (letter) digest.weekly_letter = letter
-    } catch (e) {
-      console.log('[daily-digest] weekly letter error:', e)
+      // Weekly strategic letter — Mondays only
+      try {
+        const pulseData = await generateWeeklyPulse(sb)
+        const aiPerformance = await analyzeAIPerformance(sb)
+        // Generate observation + shadow reports for the weekly letter
+        const observationReport = await generateObservationReport(sb)
+        const shadowReport = await generateShadowReport(sb)
+        const letter = await generateWeeklyLetter(sb, pulseData, aiPerformance, observationReport, shadowReport, {
+          canaryResults: canaryResults?.results?.length ? canaryResults : undefined,
+          graduationCandidates: graduationCandidates.length > 0 ? graduationCandidates : undefined,
+          learningDigest: learningDigest || undefined,
+        })
+        if (letter) digest.weekly_letter = letter
+      } catch (e) {
+        console.log('[daily-digest] weekly letter error:', e)
+      }
     }
 
     // Monday-only: attach results to digest
@@ -1732,55 +1757,9 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
       console.log('[daily-digest] graduation downgrade error:', e)
     }
 
-    // Completion pack trigger — completed + paid + 2 days
-    try {
-      const twoDaysAgo = new Date(Date.now() - 2 * 86400000).toISOString()
-      const { data: completedPaid } = await sb.from('jobs')
-        .select('id, job_number')
-        .eq('status', 'complete')
-        .eq('org_id', DEFAULT_ORG_ID)
-        .lt('completed_at', twoDaysAgo)
-
-      for (const job of (completedPaid || [])) {
-        // Check if final invoice is paid
-        const { data: paidInvoice } = await sb.from('xero_invoices')
-          .select('id, fully_paid_on_date:fully_paid_on')
-          .ilike('reference', `%${job.job_number}%`)
-          .eq('status', 'PAID')
-          .not('fully_paid_on', 'is', null)
-          .maybeSingle()
-
-        if (!paidInvoice) continue
-        const daysSincePaid = Math.floor((Date.now() - new Date(paidInvoice.fully_paid_on_date).getTime()) / 86400000)
-        if (daysSincePaid < 2) continue
-
-        // Check if completion pack already sent
-        const { data: existing } = await sb.from('business_events')
-          .select('id')
-          .eq('event_type', 'job.completion_pack_sent')
-          .eq('entity_id', job.id)
-          .limit(1)
-
-        if (existing && existing.length > 0) continue
-
-        // Trigger completion pack
-        try {
-          await fetch(SUPABASE_URL + '/functions/v1/completion-pack', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-            body: JSON.stringify({ job_id: job.id }),
-          })
-          // Log event for dedup
-          await sb.from('business_events').insert({
-            event_type: 'job.completion_pack_sent',
-            source: 'daily-digest/completion_pack',
-            entity_type: 'job',
-            entity_id: job.id,
-            payload: { job_number: job.job_number },
-          })
-        } catch (e) { console.log(`[completion-pack] trigger failed for ${job.job_number}:`, e) }
-      }
-    } catch (e) { console.log('[daily-digest] completion pack trigger error:', e) }
+    // Completion pack trigger — completed + paid + 2 days (P0-14.5: bulk reads,
+    // same rules). Also run from the stored read, at most every 30 minutes.
+    await runCompletionPackTrigger(sb)
 
     // Store the digest
     await sb.from('daily_digests').upsert({
@@ -1791,8 +1770,9 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
       digest_json: digest,
     }, { onConflict: 'org_id,digest_date' })
 
-    // Generate financial snapshot (non-blocking)
-    generateFinancialSnapshot(sb).catch(e => console.log('[daily-digest] Financial snapshot failed:', e))
+    // Generate financial snapshot (non-blocking; kept alive past the response)
+    const snapshotRun = generateFinancialSnapshot(sb).catch(e => console.log('[daily-digest] Financial snapshot failed:', e))
+    ;(globalThis as any).EdgeRuntime?.waitUntil?.(snapshotRun)
 
     // Deliver via webhook if configured
     const { data: webhookConfig } = await sb
@@ -1826,7 +1806,7 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
       }
     }
 
-    return json(digest)
+    return json(digest, 200, { 'x-sw-digest-mode': 'build' })
   } catch (err) {
     console.error('Daily digest error:', err)
     return json({ error: (err as Error).message }, 500)
@@ -1835,10 +1815,135 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
 
 if (import.meta.main) serve(_dailyDigestRequestHandlerForTest)
 
+// Test seams (P0-14): the bulk completion pack trigger, and the per-instance
+// 30 minute gate on the stored read.
+export const _runCompletionPackTriggerForTest = (sb: any) => runCompletionPackTrigger(sb)
+export function _resetPackCheckForTest() { lastPackCheckAt = 0 }
+
 
 // ════════════════════════════════════════════════════════════
 // DIGEST GENERATION
 // ════════════════════════════════════════════════════════════
+
+// ── Stored read, canary run, completion packs (P0-14) ─────
+
+// Per running instance: the stored read starts the completion pack check at
+// most every 30 minutes, which is when it ran before P0-14 (open Ops pages
+// rebuilt the digest on a 30 minute cache). When a client is emailed must not
+// change; moving it to the daily timer would be the owner's decision.
+let lastPackCheckAt = 0
+const PACK_CHECK_EVERY_MS = 30 * 60 * 1000
+
+async function storedDigestRead(sb: any): Promise<Response> {
+  if (Date.now() - lastPackCheckAt >= PACK_CHECK_EVERY_MS) {
+    lastPackCheckAt = Date.now()
+    const p = runCompletionPackTrigger(sb).catch((e) => console.log('[daily-digest] completion pack trigger error:', e))
+    ;(globalThis as any).EdgeRuntime?.waitUntil?.(p)
+  }
+  const { data: row, error } = await sb.from('daily_digests')
+    .select('digest_date, digest_json')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .order('digest_date', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) return json({ error: 'The stored digest could not be read' }, 503, { 'x-sw-digest-mode': 'stored' })
+  return json(storedDigestBody(row ?? null), 200, { 'x-sw-digest-mode': 'stored' })
+}
+
+// The ten test chats, once a week from their own timer (P0-14.4). Never from a
+// digest build and never from a signed-in request.
+async function runCanaryMode(sb: any): Promise<Response> {
+  try {
+    const result = await runCanaryChecks(sb)
+    const { error } = await sb.from('org_config').upsert({
+      org_id: DEFAULT_ORG_ID,
+      config_key: 'digest_canary_last',
+      config_value: { ran_at: new Date().toISOString(), passed: result.passed, failed: result.failed, results: result.results },
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'org_id,config_key' })
+    if (error) console.error('[daily-digest] canary result not stored:', error.message)
+    return json({ ok: true, passed: result.passed, failed: result.failed }, 200, { 'x-sw-digest-mode': 'canary' })
+  } catch (err) {
+    return json({ error: (err as Error).message }, 500, { 'x-sw-digest-mode': 'canary' })
+  }
+}
+
+// Monday's build reads the test chats' result its timer stored, if under 6 hours old.
+async function readRecentCanaryResults(sb: any): Promise<any> {
+  const { data } = await sb.from('org_config')
+    .select('config_value')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('config_key', 'digest_canary_last')
+    .maybeSingle()
+  const last = data?.config_value
+  const ranAt = last?.ran_at ? new Date(last.ran_at).getTime() : NaN
+  if (!Number.isFinite(ranAt) || Date.now() - ranAt > 6 * 60 * 60 * 1000) return null
+  return { passed: last.passed, failed: last.failed, results: last.results || [] }
+}
+
+// Completion pack trigger: completed + paid + 2 days. Same rules as the old
+// per-job loop (completion_pack_pick.ts), about 5 reads instead of one or two
+// per completed job. The completion-pack function can email the client while
+// its switch is on: same call, same dedupe event, one job at a time.
+async function runCompletionPackTrigger(sb: any): Promise<void> {
+  try {
+    const twoDaysAgo = new Date(Date.now() - 2 * 86400000).toISOString()
+    const { data: completedPaid, error: jobsErr } = await sb.from('jobs')
+      .select('id, job_number')
+      .eq('status', 'complete')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .lt('completed_at', twoDaysAgo)
+    if (jobsErr) { console.log('[daily-digest] completion pack: jobs read failed, nothing triggered:', jobsErr.message); return }
+    const jobs = completedPaid || []
+    if (jobs.length === 0) return
+
+    const paidInvoices: any[] = []
+    for (let from = 0; ; from += 1000) {
+      const { data: page, error: invErr } = await sb.from('xero_invoices')
+        .select('reference, fully_paid_on')
+        .eq('status', 'PAID')
+        .not('fully_paid_on', 'is', null)
+        .order('id', { ascending: true })
+        .range(from, from + 999)
+      if (invErr) { console.log('[daily-digest] completion pack: invoice read failed, nothing triggered:', invErr.message); return }
+      paidInvoices.push(...(page || []))
+      if (!page || page.length < 1000) break
+    }
+
+    // Jobs that qualify on payment alone; only those need the dedupe read.
+    const nowMs = Date.now()
+    const candidates = pickCompletionPackJobs(jobs, paidInvoices, new Set(), nowMs)
+    const sent = new Set<string>()
+    for (let i = 0; i < candidates.length; i += 100) {
+      const ids = candidates.slice(i, i + 100).map((j) => j.id)
+      const { data: events, error: evErr } = await sb.from('business_events')
+        .select('entity_id')
+        .eq('event_type', 'job.completion_pack_sent')
+        .in('entity_id', ids)
+      if (evErr) { console.log('[daily-digest] completion pack: sent-event read failed, nothing triggered:', evErr.message); return }
+      for (const e of (events || [])) if (e.entity_id) sent.add(String(e.entity_id))
+    }
+
+    for (const job of pickCompletionPackJobs(candidates, paidInvoices, sent, nowMs)) {
+      // Trigger completion pack
+      try {
+        await fetch(SUPABASE_URL + '/functions/v1/completion-pack', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+          body: JSON.stringify({ job_id: job.id }),
+        })
+        // Log event for dedup
+        await sb.from('business_events').insert({
+          event_type: 'job.completion_pack_sent',
+          source: 'daily-digest/completion_pack',
+          entity_type: 'job',
+          entity_id: job.id,
+          payload: { job_number: job.job_number },
+        })
+      } catch (e) { console.log(`[completion-pack] trigger failed for ${job.job_number}:`, e) }
+    }
+  } catch (e) { console.log('[daily-digest] completion pack trigger error:', e) }
+}
 
 async function generateDigest(sb: any) {
   const now = new Date()
@@ -2751,17 +2856,37 @@ async function createDailyAnnotations(sb: any, digest: any) {
   let created = 0
   const maxDaily = 15
 
+  // P0-14.5: the active digest refs, read once (paged) instead of one read per
+  // finding. If that read fails, each finding falls back to its own read, as before.
+  let activeRefs: Set<string> | null = new Set()
+  for (let from = 0; activeRefs; from += 1000) {
+    const { data: page, error } = await sb.from('ai_annotations')
+      .select('source_ref')
+      .like('source_ref', 'digest:%')
+      .eq('status', 'active')
+      .order('source_ref', { ascending: true })
+      .range(from, from + 999)
+    if (error) { console.log('[daily-digest] active annotation refs unreadable, checking one by one:', error.message); activeRefs = null; break }
+    for (const r of (page || [])) if (r.source_ref) activeRefs.add(r.source_ref)
+    if (!page || page.length < 1000) break
+  }
+
   // Helper: check-then-insert annotation if under throttle (partial index can't use upsert)
   async function upsertAnn(ann: any) {
     if (created >= maxDaily && (ann.priority || 50) < 70) return
     try {
       if (ann.source_ref) {
-        const { data: existing } = await sb.from('ai_annotations')
-          .select('id').eq('source_ref', ann.source_ref).eq('status', 'active').limit(1)
-        if (existing && existing.length > 0) return // already exists
+        if (activeRefs) {
+          if (activeRefs.has(ann.source_ref)) return // already exists
+        } else {
+          const { data: existing } = await sb.from('ai_annotations')
+            .select('id').eq('source_ref', ann.source_ref).eq('status', 'active').limit(1)
+          if (existing && existing.length > 0) return // already exists
+        }
       }
-      await sb.from('ai_annotations').insert(ann)
+      const { error: insertErr } = await sb.from('ai_annotations').insert(ann)
       created++
+      if (!insertErr && ann.source_ref && activeRefs) activeRefs.add(ann.source_ref)
     } catch (e) {
       // Dedup conflict or table issue — ignore
     }
@@ -3324,6 +3449,27 @@ async function detectGhostPOs(sb: any) {
 }
 
 // Clean up annotations that are no longer relevant
+// Status of each Xero invoice id, read in chunks of 50. Same answer as the old
+// one-by-one `.eq('xero_invoice_id', id).maybeSingle()`: an id with no row or
+// with several rows (maybeSingle then answered nothing) is left out, and so is
+// every id in a chunk whose read failed.
+async function invoiceStatusByXeroId(sb: any, xeroIds: unknown[]): Promise<Map<string, { status: string }>> {
+  const ids = [...new Set(xeroIds.filter(Boolean).map(String))]
+  const rowsById = new Map<string, { status: string }[]>()
+  for (let i = 0; i < ids.length; i += 50) {
+    const { data } = await sb.from('xero_invoices')
+      .select('xero_invoice_id, status')
+      .in('xero_invoice_id', ids.slice(i, i + 50))
+    for (const row of (data || [])) {
+      const key = String(row.xero_invoice_id)
+      rowsById.set(key, [...(rowsById.get(key) || []), { status: row.status }])
+    }
+  }
+  const out = new Map<string, { status: string }>()
+  for (const [key, rows] of rowsById) if (rows.length === 1) out.set(key, rows[0])
+  return out
+}
+
 async function cleanupResolvedAnnotations(sb: any) {
   try {
     // 1. Unlinked invoice: auto-resolve if invoice now has a job_id
@@ -3408,15 +3554,20 @@ async function cleanupResolvedAnnotations(sb: any) {
       .limit(50)
 
     if (cniAnns && cniAnns.length > 0) {
-      for (const ann of cniAnns) {
-        if (!ann.entity_id) continue
+      // P0-14.5: one read per 50 jobs instead of one per annotation.
+      const cniJobIds = [...new Set(cniAnns.map((a: any) => a.entity_id).filter(Boolean))] as string[]
+      const invoicedJobIds = new Set<string>()
+      for (let i = 0; i < cniJobIds.length; i += 50) {
         const { data: invs } = await sb.from('xero_invoices')
-          .select('id')
-          .eq('job_id', ann.entity_id)
+          .select('job_id')
+          .in('job_id', cniJobIds.slice(i, i + 50))
           .eq('invoice_type', 'ACCREC')
           .not('status', 'in', '("VOIDED","DELETED")')
-          .limit(1)
-        if (invs && invs.length > 0) {
+        for (const inv of (invs || [])) if (inv.job_id) invoicedJobIds.add(String(inv.job_id))
+      }
+      for (const ann of cniAnns) {
+        if (!ann.entity_id) continue
+        if (invoicedJobIds.has(String(ann.entity_id))) {
           await sb.from('ai_annotations').update({
             status: 'resolved', resolved_at: new Date().toISOString(),
             resolved_by: 'auto', resolution: { value: 'auto_invoiced', text: 'Invoice was created for this job' },
@@ -3432,13 +3583,12 @@ async function cleanupResolvedAnnotations(sb: any) {
       .eq('status', 'active')
       .limit(50)
 
+    // P0-14.5: one read per 50 invoices instead of one per annotation.
+    const overdueAnnsStatus = await invoiceStatusByXeroId(sb, (overdueAnns || []).map((a: any) => a.structured_data?.xero_invoice_id))
     for (const ann of (overdueAnns || [])) {
       const xeroId = ann.structured_data?.xero_invoice_id
       if (!xeroId) continue
-      const { data: inv } = await sb.from('xero_invoices')
-        .select('status')
-        .eq('xero_invoice_id', xeroId)
-        .maybeSingle()
+      const inv = overdueAnnsStatus.get(String(xeroId)) ?? null
       if (inv && (inv.status === 'PAID' || inv.status === 'VOIDED')) {
         await sb.from('ai_annotations').update({
           status: 'resolved', resolved_at: new Date().toISOString(),
@@ -3454,13 +3604,12 @@ async function cleanupResolvedAnnotations(sb: any) {
       .eq('status', 'active')
       .limit(50)
 
+    // P0-14.5: one read per 50 invoices instead of one per annotation.
+    const depAnnsStatus = await invoiceStatusByXeroId(sb, (depAnns || []).map((a: any) => a.structured_data?.xero_invoice_id))
     for (const ann of (depAnns || [])) {
       const xeroId = ann.structured_data?.xero_invoice_id
       if (!xeroId) continue
-      const { data: inv } = await sb.from('xero_invoices')
-        .select('status')
-        .eq('xero_invoice_id', xeroId)
-        .maybeSingle()
+      const inv = depAnnsStatus.get(String(xeroId)) ?? null
       if (inv && (inv.status === 'PAID' || inv.status === 'VOIDED')) {
         await sb.from('ai_annotations').update({
           status: 'resolved', resolved_at: new Date().toISOString(),
