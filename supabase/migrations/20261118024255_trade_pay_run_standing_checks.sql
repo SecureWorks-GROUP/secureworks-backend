@@ -49,7 +49,9 @@ DECLARE
  ), job AS MATERIALIZED (
   -- One row per job. Multiple live orders are an invoice-level question,
   -- never multiplied historical lines or an arbitrary LIMIT 1 allowance.
-  SELECT j.id,j.job_number,j.status,w.work_order_count,w.has_amount,w.allowed
+  SELECT j.id,j.job_number,j.status,w.work_order_count,w.has_amount,w.allowed,
+   coalesce(j.status IN ('complete','completed','closed','archived','cancelled','lost')
+    AND finish.before_rule,false) closed_before_rule
   FROM public.jobs j
   LEFT JOIN LATERAL (
    SELECT count(*) work_order_count,bool_or(wo.agreed_labour_ex IS NOT NULL) has_amount,
@@ -60,6 +62,19 @@ DECLARE
    FROM public.work_orders wo WHERE wo.job_id=j.id AND wo.org_id=p_org_id
     AND wo.kind='job' AND wo.status IN ('draft','approved')
   ) w ON true
+  -- jobs.completed_at is stamped for complete, not every terminal status, and
+  -- can survive a reopen. Use the latest recorded status_changed event instead:
+  -- new_status is updateJobStatus's shape; to is the other existing writer shape.
+  -- job_events_job_created_idx bounds this to selected jobs. Equal-time events
+  -- must all agree with today's status; missing/undated/conflicting facts fail closed.
+  LEFT JOIN LATERAL (
+   SELECT bool_and(coalesce(coalesce(e.detail_json->>'new_status',e.detail_json->>'to')=j.status,false))
+    AND (max(e.created_at) AT TIME ZONE 'Australia/Perth')::date
+      < (SELECT s.inclusive_super_from FROM public.trade_pay_settings s WHERE s.id=1) before_rule
+   FROM (SELECT e.created_at,e.detail_json FROM public.job_events e
+    WHERE e.job_id=j.id AND e.event_type='status_changed'
+    ORDER BY e.created_at DESC NULLS FIRST FETCH FIRST 1 ROW WITH TIES) e
+  ) finish ON true
   WHERE j.id IN (SELECT job_id FROM ln WHERE job_id IS NOT NULL) AND j.org_id=p_org_id
  ), sums AS (
   SELECT i.id,coalesce(sum(l.line_total_ex) FILTER (WHERE lower(btrim(l.line_type)) IS DISTINCT FROM 'reimbursement'),0) super_base,
@@ -138,8 +153,8 @@ DECLARE
   SELECT 'no_paid_line_without_work_order',i.id,j.job_number,1,
    CASE WHEN coalesce(j.has_amount,false) OR (l.not_job_work_type_id IS NOT NULL AND l.office_review_status='approved') THEN 1 ELSE 0 END,
    NOT coalesce(j.has_amount,false) AND NOT coalesce(l.not_job_work_type_id IS NOT NULL AND l.office_review_status='approved',false)
-    AND NOT coalesce(j.status IN ('complete','completed','closed','archived','cancelled','lost'),false),
-   coalesce(j.status IN ('complete','completed','closed','archived','cancelled','lost'),false),'job closed before the rule',
+    AND NOT coalesce(j.closed_before_rule,false),
+   coalesce(j.closed_before_rule,false),'job closed before the rule',
    'Invoice '||i.invoice_number||' has a line on job '||coalesce(j.job_number,'not recorded')||', which has no work order amount.'
   FROM inv i JOIN ln l ON l.trade_invoice_id=i.id LEFT JOIN job j ON j.id=l.job_id
   WHERE lower(btrim(l.line_type)) IS DISTINCT FROM 'reimbursement'

@@ -2,6 +2,10 @@
 -- registered-stack tables/views are preserved; no live setup is supported.
 CREATE TABLE IF NOT EXISTS public.feature_flags(flag_name text PRIMARY KEY, enabled boolean NOT NULL, description text);
 CREATE TABLE IF NOT EXISTS public.users(id uuid PRIMARY KEY, org_id uuid, name text, role text);
+CREATE TABLE IF NOT EXISTS public.trade_pay_settings(id smallint PRIMARY KEY, inclusive_super_from date);
+CREATE TABLE IF NOT EXISTS public.job_events(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), job_id uuid,
+ event_type text, detail_json jsonb, created_at timestamptz DEFAULT now());
+CREATE INDEX IF NOT EXISTS job_events_job_created_idx ON public.job_events(job_id,created_at);
 CREATE TABLE IF NOT EXISTS public.jobs(id uuid PRIMARY KEY, org_id uuid, job_number text, status text, type text);
 CREATE TABLE IF NOT EXISTS public.trade_invoices(
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id uuid, user_id uuid, invoice_number text,
