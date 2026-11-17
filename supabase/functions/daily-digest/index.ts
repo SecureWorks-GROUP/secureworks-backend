@@ -1727,7 +1727,7 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
         console.log('[daily-digest] Monday analysis error:', e)
       }
 
-      // Weekly strategic letter — Mondays only
+      // Weekly strategic letter: Mondays only
       try {
         const pulseData = await generateWeeklyPulse(sb)
         const aiPerformance = await analyzeAIPerformance(sb)
@@ -1757,7 +1757,7 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
       console.log('[daily-digest] graduation downgrade error:', e)
     }
 
-    // Completion pack trigger — completed + paid + 2 days (P0-14.5: bulk reads,
+    // Completion pack trigger: completed + paid + 2 days (P0-14.5: bulk reads,
     // same rules). Also run from the stored read, at most every 30 minutes.
     await runCompletionPackTrigger(sb)
 

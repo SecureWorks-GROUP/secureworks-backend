@@ -312,7 +312,7 @@ const SUPABASE_SERVICE_KEY = "test-service-role-key";
 const DEFAULT_ORG_ID = ORG;
 
 async function oldCompletionPackLoop(sb: any) {
-  // Completion pack trigger — completed + paid + 2 days
+  // Completion pack trigger: completed + paid + 2 days
   try {
     const twoDaysAgo = new Date(Date.now() - 2 * 86400000).toISOString();
     const { data: completedPaid } = await sb.from("jobs")
