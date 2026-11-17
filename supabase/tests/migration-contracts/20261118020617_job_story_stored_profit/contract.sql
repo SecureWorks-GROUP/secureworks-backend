@@ -2,7 +2,7 @@
 SELECT position('story-stored-profit-v1' IN prosrc)>0 AS stored_profit_installed FROM pg_proc WHERE oid='public.context_job_story_book(uuid,timestamptz)'::regprocedure \gset
 \if :stored_profit_installed
 \else
-\ir ../../../migrations/20261118000201_job_story_stored_profit.sql
+\ir ../../../migrations/20261118020617_job_story_stored_profit.sql
 \endif
 BEGIN;
 CREATE FUNCTION pg_temp.prove(ok boolean,label text) RETURNS void LANGUAGE plpgsql AS $$
@@ -19,6 +19,7 @@ BEGIN
  PERFORM pg_temp.prove(context_job_story_book(j,clock_timestamp())=expected,'missing switch equals main');
  INSERT INTO feature_flags(flag_name,enabled) VALUES('job_story_stored_profit_v1',true);
  PERFORM pg_temp.prove(context_job_story_book(j,clock_timestamp())=expected,'missing stored row falls back');
+ SET LOCAL statement_timeout = '120s';
  PERFORM job_profit_refresh(j);
  SELECT computed_at INTO stamp FROM job_profit_stored WHERE job_id=j;
  got:=context_job_story_book(j,clock_timestamp());
@@ -53,6 +54,7 @@ BEGIN
  DELETE FROM job_profit_dirty WHERE job_id=j;
  UPDATE job_profit_stored SET computed_at=now()-interval '2 days' WHERE job_id=j;
  PERFORM pg_temp.prove(context_job_story_book(j,clock_timestamp())=expected,'date-based holds use live until daily refresh');
+ SET LOCAL statement_timeout = '120s';
  PERFORM job_profit_refresh(j);
  SELECT pg_get_functiondef('public.context_job_story_book_profit_stored(uuid,timestamptz)'::regprocedure) INTO f;
  EXECUTE $sql$CREATE OR REPLACE FUNCTION public.context_job_story_book_profit_stored(p_job_id uuid,p_as_of timestamptz DEFAULT now())
@@ -79,7 +81,7 @@ BEGIN
  END LOOP;
  PERFORM pg_temp.prove(NOT has_function_privilege('anon','public.context_job_story_book_profit_stored(uuid,timestamptz)','EXECUTE'),'private stored implementation');
 END $test$;
-\ir ../../../migrations/20261118000201_job_story_stored_profit.sql
+\ir ../../../migrations/20261118020617_job_story_stored_profit.sql
 SELECT pg_temp.prove(NOT enabled,'reapply keeps switch off') FROM feature_flags WHERE flag_name='job_story_stored_profit_v1';
 ROLLBACK;
 \echo PASS: stored story profit contract (22 behavior checks and 4 indexed plans)

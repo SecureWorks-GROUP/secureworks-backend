@@ -1,4 +1,4 @@
-\ir ../20261118000201_job_story_stored_profit/unwind-successor.sql
+\ir ../20261118020617_job_story_stored_profit/unwind-successor.sql
 -- Contract for 20261029170200_context_story_bill_outcomes: the job story card's
 -- bill_outcomes block. Synthetic jobs and bills (the CFO case's h7_fixtures.sql),
 -- no customer data; every fixture write is rolled back.
@@ -294,4 +294,4 @@ BEGIN
 END $$;
 ROLLBACK;
 
-\ir ../20261118000201_job_story_stored_profit/restore-successor.sql
+\ir ../20261118020617_job_story_stored_profit/restore-successor.sql
