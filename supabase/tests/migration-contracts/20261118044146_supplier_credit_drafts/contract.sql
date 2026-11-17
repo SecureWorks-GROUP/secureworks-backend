@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
-\ir ../../../migrations/20261118044001_supplier_credit_drafts.sql
+\ir ../../../migrations/20261118044146_supplier_credit_drafts.sql
 BEGIN;
 SET LOCAL statement_timeout = '30s';
 DO $contract$

@@ -14,7 +14,7 @@ trap cleanup EXIT
 "$PG_BIN/pg_ctl" -D "$CASE_ROOT/pgdata" -l "$CASE_ROOT/postgres.log" \
   -o "-c listen_addresses='' -k $CASE_ROOT -p 55492" -w start >/dev/null
 PSQL=("$PG_BIN/psql" -X -v ON_ERROR_STOP=1 -h "$CASE_ROOT" -p 55492 -U postgres -d postgres)
-CASE_NAME=20261118044001_supplier_credit_drafts
+CASE_NAME=20261118044146_supplier_credit_drafts
 "${PSQL[@]}" -f "$REPO_ROOT/supabase/tests/migration-contracts/$CASE_NAME/setup.sql"
 "${PSQL[@]}" -f "$REPO_ROOT/supabase/migrations/$CASE_NAME.sql"
 "${PSQL[@]}" -f "$REPO_ROOT/supabase/migrations/$CASE_NAME.sql"
