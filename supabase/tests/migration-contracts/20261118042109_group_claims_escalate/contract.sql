@@ -1,6 +1,6 @@
 BEGIN;
 SET LOCAL statement_timeout = '120s';
-\ir ../../../migrations/20261118024515_group_claims_escalate.sql
+\ir ../../../migrations/20261118042109_group_claims_escalate.sql
 CREATE FUNCTION pg_temp.zztest_group_fixture() RETURNS uuid LANGUAGE plpgsql AS $fixture$
 DECLARE job uuid:=gen_random_uuid(); wo uuid:=gen_random_uuid(); grp uuid:=gen_random_uuid();
  org uuid:='00000000-0000-0000-0000-000000000001';
@@ -116,7 +116,7 @@ $cron$;
 CREATE FUNCTION cron.unschedule(bigint) RETURNS boolean LANGUAGE sql AS $cron$
  WITH removed AS(DELETE FROM cron.job WHERE jobid=$1 RETURNING 1) SELECT EXISTS(SELECT 1 FROM removed);
 $cron$;
-\ir ../../../migrations/20261118024515_group_claims_escalate.sql
+\ir ../../../migrations/20261118042109_group_claims_escalate.sql
 DO $$ BEGIN
  IF EXISTS(SELECT 1 FROM cron.job) THEN RAISE EXCEPTION 'ZZTEST merge installed a schedule'; END IF;
 END $$;
@@ -127,7 +127,7 @@ DO $$ BEGIN
    AND schedule='*/15 * * * *' AND command='SELECT public.group_claims_escalate_due();')<>1 THEN
   RAISE EXCEPTION 'ZZTEST repeated install differs from one timer'; END IF;
 END $$;
-\ir ../../../rollbacks/20261118024515_group_claims_escalate_down.sql
+\ir ../../../rollbacks/20261118042109_group_claims_escalate_down.sql
 \ir rollback-contract.sql
 DO $$ BEGIN
  IF EXISTS(SELECT 1 FROM cron.job WHERE jobname='group-claims-escalate') THEN
