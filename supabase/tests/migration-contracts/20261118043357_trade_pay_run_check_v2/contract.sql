@@ -46,8 +46,11 @@ $$;
 DO $$ DECLARE j jsonb; BEGIN
  j:=pg_temp.result();
  IF j->>'rule'<>'trade-pay-check-v2' OR (j#>>'{counts,clean}')::int<>1 THEN RAISE EXCEPTION 'ZZTEST exact work order must be clean: %',j; END IF;
- IF j#>>'{invoices,0,super_amount}'<>'120' OR j#>>'{invoices,0,paid_to_you}'<>'1000'
-   OR j#>>'{invoices,0,stage}'<>'before_xero' OR j#>'{invoices,0,pay_run_id}'<>'null'::jsonb THEN RAISE EXCEPTION 'ZZTEST pay coordinates'; END IF;
+ -- Money is numeric: earlier stack fixtures retain a two-decimal scale.
+ IF (j#>>'{invoices,0,super_amount}')::numeric IS DISTINCT FROM 120
+   OR (j#>>'{invoices,0,paid_to_you}')::numeric IS DISTINCT FROM 1000
+   OR j#>>'{invoices,0,stage}' IS DISTINCT FROM 'before_xero'
+   OR j#>'{invoices,0,pay_run_id}' IS DISTINCT FROM 'null'::jsonb THEN RAISE EXCEPTION 'ZZTEST pay coordinates: %',j; END IF;
  IF NOT pg_temp.has_stop('not_in_xero','ZZTEST-1','after_xero') THEN RAISE EXCEPTION 'ZZTEST after Xero must stop missing bill'; END IF;
  j:=public.trade_pay_run_check('2026-11-25',1,md5('ZZTEST org')::uuid);
  IF j->>'rule'<>'trade-pay-check-v1' OR NOT (j#>'{invoices,0,stops}' @> '[{"code":"not_in_xero"}]') THEN RAISE EXCEPTION 'ZZTEST v1 retains missing bill'; END IF;

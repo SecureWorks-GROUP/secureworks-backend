@@ -5,9 +5,12 @@ ALTER TABLE public.trade_invoices
   ADD COLUMN IF NOT EXISTS super_basis text,
   ADD COLUMN IF NOT EXISTS super_base_ex numeric,
   ADD COLUMN IF NOT EXISTS gross_earned numeric,
-  ADD COLUMN IF NOT EXISTS super_amount numeric,
+  ADD COLUMN IF NOT EXISTS super_amount numeric(12,2),
   ADD COLUMN IF NOT EXISTS recurring_deduction_id uuid,
   ADD COLUMN IF NOT EXISTS invoice_kind text DEFAULT 'standard';
+-- Match the earlier stack's money scale so the narrow run covers JSON numbers
+-- rendered as 120.00 / 1000.00 rather than relying on unscaled numeric text.
+ALTER TABLE public.trade_invoices ALTER COLUMN net_pay TYPE numeric(12,2);
 ALTER TABLE public.trade_invoice_lines
   ADD COLUMN IF NOT EXISTS expense_receipt_id uuid,
   ADD COLUMN IF NOT EXISTS not_job_work_type_id uuid,
