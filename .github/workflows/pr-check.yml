@@ -996,24 +996,47 @@ jobs:
       - name: Run PostgreSQL migration contract shard
         env:
           SHARD: ${{ matrix.shard }}
+          # Tiny fixtures have story plans above the JIT compilation threshold.
+          # Avoid compilation overhead; keep every SQL assertion and proof.
+          PGOPTIONS: -c jit=off
           MIGRATION_CONTRACT_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
           MIGRATION_CONTRACT_DISPOSABLE_ACK: I-confirm-this-is-disposable-local-postgres
         run: |
-          # C order matches run.sh. Assign every folder exactly once, retaining
-          # each case's contract/concurrent/fail-closed/rollback/break proofs.
+          # Measured heavy cases (439s / 118s / 93s in run 44078711810).
+          # Deal one per shard before round-robin so they cannot pile up again.
+          HEAVY_CASES=(
+            20261006040000_context_story_safety
+            20261007010000_context_lead_cutoff
+            20261006014000_context_job_story
+          )
           export LC_ALL=C
           CASES=()
+          for INDEX in "${!HEAVY_CASES[@]}"; do
+            CASE="${HEAVY_CASES[$INDEX]}"
+            [ -d "supabase/tests/migration-contracts/$CASE" ] || { echo "Missing heavy case: $CASE" >&2; exit 1; }
+            if [ "$INDEX" -eq "$SHARD" ]; then
+              CASES+=("$CASE")
+            fi
+          done
+          # C order matches run.sh. Select every remaining folder exactly once.
+          # The runner keeps both full stack walks and each case's proof order.
           INDEX=0
+          TOTAL=${#HEAVY_CASES[@]}
           for CASE in supabase/tests/migration-contracts/20*; do
             [ -d "$CASE" ] || continue
+            CASE="${CASE##*/}"
+            case " ${HEAVY_CASES[*]} " in
+              *" $CASE "*) continue ;;
+            esac
             if [ "$((INDEX % 4))" -eq "$SHARD" ]; then
-              CASES+=("${CASE##*/}")
+              CASES+=("$CASE")
             fi
             INDEX=$((INDEX + 1))
+            TOTAL=$((TOTAL + 1))
           done
           # An empty selection would mean "all cases" to the local runner.
           [ "${#CASES[@]}" -gt 0 ] || { echo "No cases assigned to shard $SHARD" >&2; exit 1; }
-          printf 'Shard %s: %s of %s cases\n' "$SHARD" "${#CASES[@]}" "$INDEX"
+          printf 'Shard %s: %s of %s cases\n' "$SHARD" "${#CASES[@]}" "$TOTAL"
           bash supabase/tests/migration-contracts/run.sh "${CASES[@]}"
 
   # Keep the protected check name. always() also runs after a failed planner,
