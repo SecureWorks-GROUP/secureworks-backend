@@ -10,8 +10,9 @@
 //   - context_client_story(job, as_of)                  client-story-v1
 //   - context_story_scorecard(as_of) and context_story_scorecard_jobs(after,
 //     limit), folded into one story-scorecard-v1 answer.
-// No table write, no provider call, no model call. A failed read is unknown
-// with a code, never an empty story.
+// No provider or model call. The default SQL read writes nothing; the optional
+// stored-page reader can build a missing page through job_page_get. A failed
+// read is unknown with a code, never an empty story.
 
 import { storySourceCoverage } from "./context_source_gaps.ts";
 
@@ -184,7 +185,37 @@ export async function readJobStory(
   // p_record_only (the records alone, for the ledger reader's own prompt) is
   // an RPC argument only: no staff door forwards it.
   try {
-    const { data, error } = await client.rpc("context_job_story", args);
+    // Historical, generation-specific and since-filtered requests need their
+    // original SQL semantics. The saved page is only a current whole-job card.
+    let stored = false;
+    if (!input.asOf && !input.generationId && !input.since) {
+      try {
+        // feature_flags_pkey: one switch, no table scan. Missing/unreadable is off.
+        const flag = await client.from("feature_flags").select("enabled")
+          .eq("flag_name", "job_page_stored_read_v1").maybeSingle();
+        stored = !flag.error && flag.data?.enabled === true;
+      } catch {
+        stored = false;
+      }
+    }
+    let page: any = null;
+    if (stored) {
+      try {
+        const { data, error } = await client.rpc("job_page_get", args);
+        if (
+          !error && data?.version === "job-page-v1" &&
+          data.status === "ready" && data.card?.version === "job-story-v1" &&
+          data.card?.job?.id === input.jobId && !Array.isArray(data.card)
+        ) {
+          page = data;
+        }
+      } catch {
+        // A stored miss must not take away the live story.
+      }
+    }
+    const { data, error } = page
+      ? { data: page.card, error: null }
+      : await client.rpc("context_job_story", args);
     if (error) {
       return {
         story: null,
@@ -201,7 +232,20 @@ export async function readJobStory(
       return { story: null, status: failed("invalid_shape") };
     }
     return {
-      story: data,
+      story: page
+        ? {
+          ...data,
+          meta: {
+            ...data.meta,
+            stored_page: {
+              as_at: page.as_at,
+              stale: page.stale,
+              kept_ready: page.kept_ready,
+              page_version: page.page_version,
+            },
+          },
+        }
+        : data,
       status: {
         ok: true,
         state: "ok",

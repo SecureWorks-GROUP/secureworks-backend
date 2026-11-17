@@ -1,0 +1,1 @@
+DROP INDEX public.job_cost_lines_follows_line_idx;
