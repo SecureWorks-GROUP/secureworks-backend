@@ -1,4 +1,5 @@
 -- Never erase the provenance or decision on a self-added booking.
+BEGIN;
 LOCK TABLE public.job_assignments IN ACCESS EXCLUSIVE MODE;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM public.job_assignments WHERE added_by = 'self') THEN
@@ -18,3 +19,4 @@ ALTER TABLE public.job_assignments
   DROP COLUMN IF EXISTS self_added_status,
   DROP COLUMN IF EXISTS added_by;
 DELETE FROM public.feature_flags WHERE flag_name = 'trade_self_add_v1';
+COMMIT;
