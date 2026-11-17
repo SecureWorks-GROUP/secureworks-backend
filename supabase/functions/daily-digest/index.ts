@@ -1761,6 +1761,11 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
     // same rules). Also run from the stored read, at most every 30 minutes.
     await runCompletionPackTrigger(sb)
 
+    // When it was built, so a screen can say which Perth day it is for: the
+    // stored digest_date is the UTC day, and the 07:00 Perth build is at 23:00 UTC
+    // the day before (P0-14.6).
+    ;(digest as any).built_at = new Date().toISOString()
+
     // Store the digest
     await sb.from('daily_digests').upsert({
       org_id: DEFAULT_ORG_ID,

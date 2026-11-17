@@ -400,6 +400,13 @@ Deno.test("the build sends the completion pack for the paid, unsent job only, an
         payload: { job_number: "SWF-90001" },
       }]);
       assertEquals(webhookCalls(calls).length, 1);
+      // Stamped with when it was built, for the screens' Perth day.
+      assertEquals(
+        firstBody(
+          writes(calls, "daily_digests").find((c) => c.method === "POST"),
+        ).digest_json.built_at,
+        PERTH_TUESDAY.toISOString(),
+      );
       assertEquals(
         writes(calls, "daily_digests").filter((c) => c.method === "POST")
           .length,
