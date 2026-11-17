@@ -860,6 +860,7 @@ import {
   type TradeRedaction,
   updateJobWorkOrderDraft,
 } from './job_work_orders.ts'
+import { readJobWorkOrderGaps } from './job_work_order_gaps.ts'
 import { loadWorkOrderClaimCheck, withClaimWarnings } from './work_order_claim_check.ts'
 import {
   CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG,
@@ -10648,6 +10649,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // Fill and approve stay named-approver writes. Line review is any
       // office role (DEFAULT, owner to confirm). The last approved line
       // pushes the invoice. A rejected line returns it to the trade.
+      case 'job_work_order_gaps': {
+        const actor = officeJobWorkOrderActor(authMode, authUser)
+        actor.orgId = authMode === 'api_key' ? DEFAULT_ORG_ID : actor.orgId
+        return json(await runJobWorkOrder(() => readJobWorkOrderGaps(client, req.method, actor)))
+      }
       case 'list_office_job_work_orders': {
         if (req.method !== 'GET') {
           return json({ error: 'list_office_job_work_orders is GET only', code: 'method_not_allowed' }, 405)
