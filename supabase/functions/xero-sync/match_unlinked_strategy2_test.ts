@@ -151,6 +151,36 @@ Deno.test("lost or failed guarded writes count nothing and record no evidence", 
   }
 });
 
+Deno.test("INT-14: only invoices with no job are candidates for a link", async () => {
+  const f = makeClient({ unlinked: [] });
+  await sync.matchUnlinkedInvoices(f.client);
+  const reads = f.calls.filter((c) => c.table === "xero_invoices" && c.mode === "select");
+  assert(reads.length >= 1);
+  for (const read of reads) {
+    assert(
+      read.filters.some(([op, key, value]) => op === "is" && key === "job_id" && value === null),
+      "candidate read must be job_id is null",
+    );
+  }
+});
+
+Deno.test("INT-14: every automatic invoice→job link write is guarded by job_id is null", async () => {
+  const files = ["./index.ts", "../reporting-api/index.ts"];
+  for (const file of files) {
+    const source = await Deno.readTextFile(new URL(file, import.meta.url));
+    const pattern = /\.update\(\{ job_id: [^}]*\}\)([\s\S]{0,160})/g;
+    let count = 0;
+    for (const match of source.matchAll(pattern)) {
+      count++;
+      assert(
+        match[1].includes(".is('job_id', null)"),
+        `${file}: unguarded job link write near: ${match[0].slice(0, 120)}`,
+      );
+    }
+    assert(count > 0, `${file}: expected job link writes`);
+  }
+});
+
 Deno.test("explicit SES invoice binding still refuses reference auto-link", async () => {
   const f = makeClient({ unlinked: [invoice(undefined, { reference: "SWF-260001", invoice_obligation_revision_id: "bound-revision" })], jobs: [job()] });
   assertEquals((await sync.matchUnlinkedInvoices(f.client)).refused, 1);
