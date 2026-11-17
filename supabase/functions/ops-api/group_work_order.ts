@@ -974,6 +974,25 @@ async function loadWorkOrder(client: any, workOrderId: string) {
   return data as Record<string, unknown> | null;
 }
 
+async function workOrderWithAmountChanges(
+  client: any,
+  workOrder: Record<string, unknown> | null,
+): Promise<Record<string, unknown> | null> {
+  if (!workOrder) return null;
+  const flag = await client.from("feature_flags").select("enabled")
+    .eq("flag_name", "work_order_amount_change_v1").maybeSingle();
+  if (flag.error || flag.data?.enabled !== true) return workOrder;
+  // work_order_amount_changes_wo_idx bounds the existing total RPC to this order.
+  const changed = await client.rpc("work_order_amount_change_total", {
+    p_work_order_id: workOrder.id,
+  });
+  throwQuery(changed.error, "read the changed work order amount");
+  const base = moneyToCents(workOrder.agreed_labour_ex);
+  const delta = changed.data == null ? null : moneyToCents(changed.data);
+  if (delta == null) throw new Error("Could not read the changed work order amount");
+  return { ...workOrder, agreed_labour_ex: base == null ? null : centsToMoney(base + delta) };
+}
+
 function potFromWorkOrder(workOrder: Record<string, unknown> | null): number {
   if (
     !workOrder || workOrder.kind !== "job" || workOrder.status !== "approved" ||
@@ -2410,7 +2429,7 @@ export async function readGroupWorkOrderMyShare(
   if (awaiting !== "needs_hours") {
     const workOrder = await loadWorkOrder(client, String(group.work_order_id));
     try {
-      pot = group.approved_budget_ex != null ? Number(group.approved_budget_ex) : potFromWorkOrder(workOrder);
+      pot = group.approved_budget_ex != null ? Number(group.approved_budget_ex) : potFromWorkOrder(await workOrderWithAmountChanges(client, workOrder));
     } catch (error) {
       if (
         !(error instanceof GroupWorkOrderError) ||
@@ -3315,6 +3334,9 @@ export async function readGroupWorkOrderOffice(
     loadShareView(client, group, participants),
     readHoursPayOnJob(client, String(group.job_id)),
   ]);
+  const potWorkOrder = group.approved_budget_ex != null
+    ? workOrder
+    : await workOrderWithAmountChanges(client, workOrder);
   const hoursPaid = hoursPay.paid;
   const unresolvedIds = [...hoursPay.unresolved].sort();
   const unresolvedNames = await namesOf(client, unresolvedIds);
@@ -3339,10 +3361,10 @@ export async function readGroupWorkOrderOffice(
     client_signoff_actor: view.signed ? view.signoff?.captured_by_actor : null,
     pay_basis: group.pay_basis || "gross_v1",
     budget_includes_super: isAllInBasis(group.pay_basis),
-    pot_total: group.approved_budget_ex != null ? Number(group.approved_budget_ex) : workOrder
-      ? moneyToCents(workOrder.agreed_labour_ex) == null
+    pot_total: group.approved_budget_ex != null ? Number(group.approved_budget_ex) : potWorkOrder
+      ? moneyToCents(potWorkOrder.agreed_labour_ex) == null
         ? null
-        : centsToMoney(moneyToCents(workOrder.agreed_labour_ex) || 0)
+        : centsToMoney(moneyToCents(potWorkOrder.agreed_labour_ex) || 0)
       : null,
     // Crew paid by the hour on this job: left out of the split, and the pot
     // is reduced by what they were paid (20261106160000).

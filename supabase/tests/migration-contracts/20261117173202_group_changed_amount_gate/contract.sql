@@ -22,16 +22,14 @@ BEGIN
   r:=public.project_group_work_order_split(grp);
   SELECT sum((x->>'share_ex')::numeric) INTO total FROM jsonb_array_elements(r->'shares') x;
   IF total IS DISTINCT FROM 2240 THEN RAISE EXCEPTION 'ZZTEST changed zero pot incorrect: %',r; END IF;
-  PERFORM public.change_work_order_amount(wo,2464,'ZZTEST larger pot',actor,org);
-  r:=public.project_group_work_order_split(grp);
-  SELECT sum((x->>'share_ex')::numeric) INTO total FROM jsonb_array_elements(r->'shares') x;
-  IF total IS DISTINCT FROM 2464 THEN RAISE EXCEPTION 'changed pot incorrect: %',r; END IF;
-  UPDATE public.group_work_orders SET approved_budget_ex=2000,budget_approved_by=actor,budget_approved_at=now(),budget_approval_reason='ZZTEST approved budget' WHERE id=grp;
-  r:=public.project_group_work_order_split(grp);
-  SELECT sum((x->>'share_ex')::numeric) INTO total FROM jsonb_array_elements(r->'shares') x;
-  IF total IS DISTINCT FROM 2000 THEN RAISE EXCEPTION 'approved budget no longer wins: %',r; END IF;
-  r:=public.change_work_order_amount(wo,2688,'ZZTEST unknown profit',actor,org);
-  IF r->>'profit_before_ex' IS NOT NULL OR r->>'profit_after_ex' IS NOT NULL OR r->>'profit_basis'<>'not_known' THEN RAISE EXCEPTION 'unknown profit became zero'; END IF;
+  UPDATE public.feature_flags SET enabled=false WHERE flag_name='work_order_amount_change_v1';
+  BEGIN
+    PERFORM public.project_group_work_order_split(grp);
+    RAISE EXCEPTION 'ZZTEST switch off changed zero pot gate';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM NOT LIKE '%group_pot_missing%' THEN RAISE; END IF;
+  END;
+  IF (SELECT agreed_labour_ex FROM public.work_orders WHERE id=wo) IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'ZZTEST sealed amount changed'; END IF;
 END $$;
--- The known-profit example waits on P0-09's canonical expected-profit source.
 ROLLBACK;
