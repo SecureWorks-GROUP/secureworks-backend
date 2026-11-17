@@ -35,7 +35,7 @@ id_edges AS MATERIALIZED (
   FROM call_rows a JOIN call_rows b ON a.id <> b.id AND a.keys && b.keys
 ),
 -- Prefer call ids. Contact/time is the specified fallback only for a row
--- without an id join, never a replacement for an established id match.
+-- without an id join on either side, never a replacement for an established id match.
 edges AS MATERIALIZED (
   SELECT a, b FROM id_edges
   UNION
@@ -45,7 +45,7 @@ edges AS MATERIALIZED (
     AND b.occurred_at BETWEEN a.occurred_at - interval '15 minutes'
                           AND a.occurred_at + interval '15 minutes'
   WHERE NOT EXISTS (SELECT 1 FROM id_edges x WHERE x.a = a.id)
-     OR NOT EXISTS (SELECT 1 FROM id_edges x WHERE x.a = b.id)
+    AND NOT EXISTS (SELECT 1 FROM id_edges x WHERE x.a = b.id)
 ),
 reach (start_id, member_id) AS (
   SELECT id, id FROM call_rows
