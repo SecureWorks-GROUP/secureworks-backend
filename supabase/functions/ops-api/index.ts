@@ -42843,12 +42843,12 @@ async function addPOEvent(client: any, body: any) {
 // ── Tracking category helper ──
 // Maps a job to its Xero "Business Unit" tracking option. The rule, and why a
 // bare SWR- number answers '', live in divisionTrackingOption
-// (_shared/xero_draft_standard.ts), the one copy both phases call.
+// (_shared/xero_draft_standard.ts). New draft rules have a separate opt-in entry.
 // The only Business Unit options ensure_xero_tracking_option may add.
 const XERO_TRACKING_OPTIONS_WE_MAY_ADD = ['SW - RESTORATION']
 
 function trackingCategoryForJob(jobNumber: string, jobType?: string | null): string {
-  return divisionTrackingOption({ job_number: jobNumber, job_type: jobType })
+  return divisionTrackingOption(jobNumber, jobType)
 }
 
 // Builds Xero Tracking array for a line item

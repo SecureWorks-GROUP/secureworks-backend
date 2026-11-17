@@ -1,7 +1,7 @@
 // The Xero draft standard (ticket P3-01.2): one file decides a draft's division,
 // its account rule, whether it carries its four things, and the fingerprint of
-// its lines. ops-api's trackingCategoryForJob and phase 2's P2-07 call this file;
-// never keep a second copy of the division rule.
+// its lines. Existing ops callers use the unchanged legacy mapper. Only new
+// draft writers opt into draftDivisionTrackingOption behind the stored switch.
 //
 // A draft our system makes in Xero must carry four things so approving is the
 // only step left: an account code on every line (from xero_account_rules), a
@@ -18,7 +18,9 @@
 //
 // A bare SWR number is ambiguous between repair, roofing and renovation.
 // The explicit type decides; repair books with SES work. Unknown stays empty.
-// Division stock takes precedence over the job's type and number.
+// Division stock takes precedence only in the switched-on draft path.
+
+import { readSwitch } from './switch_cache.ts'
 
 export const DIVISION_CATEGORY_NAME = 'Business Unit'
 
@@ -38,26 +40,13 @@ const STOCK_DIVISION_OPTIONS: Record<string, string> = {
   meals: 'SW Group',
 }
 
-export function divisionTrackingOption(input: {
-  job_number?: string | null
-  job_type?: string | null
-  stock_division?: string | null
-  activeOptions?: ReadonlySet<string>
-}): string {
-  const stock = String(input.stock_division || '').trim()
-  if (stock.startsWith('SW - ')) return stock
-  const stockOption = STOCK_DIVISION_OPTIONS[stock.toLowerCase()]
-  if (stockOption) return stockOption
-
-  const jobNumber = String(input.job_number || '')
-  const jobType = input.job_type
+// Main's mapper body is retained line for line. Existing invoice create/edit
+// callers never read the switch and never receive the new draft rules.
+export function divisionTrackingOption(jobNumber: string, jobType?: string | null): string {
   // An explicit type always wins, including when the job has no number yet.
   const type = String(jobType || '').trim().toLowerCase()
-  if (type === 'granny_flat') return 'SecureBuild'
-  // Only a stored active option authorises this name. Never create it in Xero.
-  if (type === 'misc' || type === 'miscellaneous' || type === 'general') {
-    return input.activeOptions?.has('Private Renovations') ? 'Private Renovations' : ''
-  }
+  // Granny-flat accounting is unresolved. Never infer a division from its retained number.
+  if (type === 'granny_flat') return ''
   if (type === 'repair') return 'SW - MAKESAFE'
   if (type === 'roofing' || type === 'renovation') return 'SW - PRIVATE ROOFING'
   if (!jobNumber) return ''
@@ -73,6 +62,47 @@ export function divisionTrackingOption(input: {
   if (prefix === 'SWI') return 'SW - INSURANCE WORK'
   // 'SWR' deliberately falls through to '': renovation | roofing | repair.
   return ''
+}
+
+export type DraftDivisionInput = {
+  job_number?: string | null
+  job_type?: string | null
+  stock_division?: string | null
+}
+
+// Opt-in entry for NEW draft writers only. Missing, false or unreadable switch
+// returns exactly the legacy answer, without reading options or applying stock.
+export async function draftDivisionTrackingOption(
+  client: SupabaseLike,
+  orgId: string,
+  input: DraftDivisionInput,
+): Promise<string> {
+  const legacy = () => divisionTrackingOption(input.job_number || '', input.job_type)
+  if (!await readSwitch(client, 'xero_draft_standard_v1')) return legacy()
+
+  const stock = String(input.stock_division || '').trim()
+  if (stock.startsWith('SW - ')) return stock
+  const stockOption = STOCK_DIVISION_OPTIONS[stock.toLowerCase()]
+  if (stockOption) return stockOption
+
+  const type = String(input.job_type || '').trim().toLowerCase()
+  if (type === 'granny_flat') return 'SecureBuild'
+  if (type === 'misc' || type === 'miscellaneous' || type === 'general') {
+    // Only this org's stored ACTIVE option authorises the exact name.
+    // No caller-supplied option list and no Xero option creation.
+    try {
+      const { data, error } = await client.from('xero_tracking_options')
+        .select('option_name')
+        .eq('org_id', orgId)
+        .eq('status', 'ACTIVE')
+        .eq('option_name', 'Private Renovations')
+        .limit(1)
+      return !error && data?.[0]?.option_name === 'Private Renovations' ? 'Private Renovations' : ''
+    } catch {
+      return ''
+    }
+  }
+  return legacy()
 }
 
 // ── Account rules (xero_account_rules) ──

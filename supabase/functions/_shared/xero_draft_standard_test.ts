@@ -3,6 +3,7 @@ import {
   accountRuleFor,
   checkDraft,
   divisionTrackingOption,
+  draftDivisionTrackingOption,
   loadDraftStandard,
   linesFingerprint,
   withJobPrefix,
@@ -18,7 +19,7 @@ const examples: Example[] = JSON.parse(
 Deno.test('division examples: divisionTrackingOption and trackingCategoryForJob both give each expect', () => {
   for (const e of examples) {
     assertEquals(
-      divisionTrackingOption({ job_number: e.job_number, job_type: e.job_type }),
+      divisionTrackingOption(e.job_number ?? '', e.job_type),
       e.expect,
       `divisionTrackingOption(${e.job_number}, ${e.job_type})`,
     )
@@ -30,30 +31,96 @@ Deno.test('division examples: divisionTrackingOption and trackingCategoryForJob 
   }
 })
 
-Deno.test('stock division: an SW option is taken as it is; a division word maps in any case; anything else falls to the job', () => {
-  assertEquals(divisionTrackingOption({ stock_division: 'SW - PATIOS' }), 'SW - PATIOS')
+Deno.test('existing invoice path pins main: granny flat stays untagged and general/misc keep prefix fallback', () => {
+  for (const jobNumber of ['SWP-ZZTEST01', 'SWF-ZZTEST01', '']) {
+    assertEquals(_trackingCategoryForJob(jobNumber, 'granny_flat'), '')
+  }
+  for (const type of ['general', 'miscellaneous', 'misc', ' GENERAL ']) {
+    assertEquals(_trackingCategoryForJob('SWP-ZZTEST01', type), 'SW - PATIOS')
+    assertEquals(_trackingCategoryForJob('SWF-ZZTEST01', type), 'SW - FENCING')
+    assertEquals(_trackingCategoryForJob('SWM-ZZTEST01', type), '')
+  }
+})
+
+Deno.test('stock division: switched-on drafts take SW options and division words, else fall to the job', async () => {
+  const client = fakeClient({ feature_flags: { data: [{ enabled: true }], error: null } })
+  const pick = (input: Parameters<typeof draftDivisionTrackingOption>[2]) => draftDivisionTrackingOption(client, 'org-1', input)
+  assertEquals(await pick({ stock_division: 'SW - PATIOS' }), 'SW - PATIOS')
   const words: [string, string][] = [
     ['patio', 'SW - PATIOS'], ['Patios', 'SW - PATIOS'], ['FENCING', 'SW - FENCING'], ['fence', 'SW - FENCING'],
     ['decking', 'SW - DECKING'], ['Deck', 'SW - DECKING'], ['roofing', 'SW - PRIVATE ROOFING'],
     ['makesafe', 'SW - MAKESAFE'], ['Insurance', 'SW - INSURANCE WORK'], ['restoration', 'SW - RESTORATION'],
   ]
-  for (const [word, option] of words) assertEquals(divisionTrackingOption({ stock_division: word }), option, word)
-  // The stock division wins over the job.
-  assertEquals(divisionTrackingOption({ stock_division: 'fencing', job_number: 'SWP-ZZTEST01' }), 'SW - FENCING')
-  // Unknown words do not invent a division.
-  assertEquals(divisionTrackingOption({ stock_division: 'carpentry' }), '')
-  assertEquals(divisionTrackingOption({ stock_division: 'carpentry', job_number: 'SWF-ZZTEST01' }), 'SW - FENCING')
+  for (const [word, option] of words) assertEquals(await pick({ stock_division: word }), option, word)
+  assertEquals(await pick({ stock_division: 'fencing', job_number: 'SWP-ZZTEST01' }), 'SW - FENCING')
+  assertEquals(await pick({ stock_division: 'carpentry' }), '')
+  assertEquals(await pick({ stock_division: 'carpentry', job_number: 'SWF-ZZTEST01' }), 'SW - FENCING')
 })
 
-Deno.test('settled loose divisions require stored authority, and expenses default to SW Group', () => {
+Deno.test('settled draft divisions require switch and stored active option; expenses use SW Group', async () => {
+  const client = fakeClient({
+    feature_flags: { data: [{ enabled: true }], error: null },
+    xero_tracking_options: { data: [{ option_name: 'Private Renovations' }], error: null },
+  })
+  for (const job_type of ['granny_flat', ' GRANNY_FLAT ']) {
+    assertEquals(await draftDivisionTrackingOption(client, 'org-1', { job_type, job_number: 'SWP-ZZTEST03' }), 'SecureBuild')
+  }
   for (const job_type of ['misc', 'miscellaneous', 'general']) {
-    assertEquals(divisionTrackingOption({ job_type, job_number: 'SWP-ZZTEST03' }), '')
-    assertEquals(divisionTrackingOption({ job_type, activeOptions: new Set(['Private Renovations']) }), 'Private Renovations')
-    assertEquals(divisionTrackingOption({ job_type, activeOptions: new Set(['SW - PATIOS']) }), '')
+    assertEquals(await draftDivisionTrackingOption(client, 'org-1', { job_type, job_number: 'SWP-ZZTEST03' }), 'Private Renovations')
+  }
+  const optionCalls = client.calls.filter((c) => c.table === 'xero_tracking_options')
+  assertEquals(optionCalls.length, 3)
+  for (const call of optionCalls) {
+    assertEquals(call.filters, [['org_id', 'org-1'], ['status', 'ACTIVE'], ['option_name', 'Private Renovations']])
   }
   for (const stock_division of ['fuel', 'PARKING', 'meals']) {
-    assertEquals(divisionTrackingOption({ stock_division }), 'SW Group')
+    assertEquals(await draftDivisionTrackingOption(client, 'org-1', { stock_division }), 'SW Group')
   }
+  // Enabling new drafts does not change the existing invoice path.
+  assertEquals(_trackingCategoryForJob('SWP-ZZTEST03', 'granny_flat'), '')
+  assertEquals(_trackingCategoryForJob('SWP-ZZTEST03', 'general'), 'SW - PATIOS')
+})
+
+Deno.test('draft rules off, missing, malformed or unreadable reproduce every legacy example and ignore stock', async () => {
+  const answers = [
+    { data: [{ enabled: false }], error: null },
+    { data: [], error: null },
+    { data: [{ enabled: 'true' }], error: null },
+    { data: [{ enabled: true }], error: { message: 'unreadable' } },
+  ]
+  for (const answer of answers) {
+    const client = fakeClient({ feature_flags: answer })
+    for (const e of examples) {
+      assertEquals(await draftDivisionTrackingOption(client, 'org-1', { ...e, stock_division: 'fuel' }), e.expect)
+    }
+    assert(client.calls.every((c) => c.table === 'feature_flags'))
+    assertEquals(client.calls[0].filters, [['flag_name', 'xero_draft_standard_v1']])
+  }
+  const client = { from() { throw new Error('unreadable') } }
+  assertEquals(await draftDivisionTrackingOption(client, 'org-1', { job_type: 'granny_flat' }), '')
+  assertEquals(await draftDivisionTrackingOption(client, 'org-1', { job_number: 'SWP-ZZTEST03', job_type: 'general' }), 'SW - PATIOS')
+})
+
+Deno.test('loose draft division stays unknown for absent, wrong or unreadable stored option', async () => {
+  for (const optionAnswer of [
+    { data: [], error: null },
+    { data: [{ option_name: 'SW - PATIOS' }], error: null },
+    { data: [{ option_name: 'Private Renovations' }], error: { message: 'unreadable' } },
+  ]) {
+    const client = fakeClient({
+      feature_flags: { data: [{ enabled: true }], error: null },
+      xero_tracking_options: optionAnswer,
+    })
+    for (const job_type of ['misc', 'miscellaneous', 'general']) {
+      assertEquals(await draftDivisionTrackingOption(client, 'org-1', { job_type, job_number: 'SWP-ZZTEST03' }), '')
+    }
+  }
+  const flags = fakeClient({ feature_flags: { data: [{ enabled: true }], error: null } })
+  const client = { from(table: string) {
+    if (table === 'feature_flags') return flags.from(table)
+    throw new Error('option read failed')
+  } }
+  assertEquals(await draftDivisionTrackingOption(client, 'org-1', { job_type: 'general' }), '')
 })
 
 const rules: XeroAccountRule[] = [
@@ -79,6 +146,7 @@ function fakeClient(answers: Record<string, { data: unknown; error: unknown }>) 
       calls.push(call)
       const q = {
         select: () => q,
+        limit: () => q,
         eq: (col: string, val: unknown) => {
           call.filters.push([col, val])
           return q
