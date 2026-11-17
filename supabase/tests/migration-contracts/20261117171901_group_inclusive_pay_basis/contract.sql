@@ -32,11 +32,11 @@ BEGIN
     RAISE EXCEPTION 'ZZTEST inclusive group share was not bound';
   END IF;
   INSERT INTO public.trade_invoices(org_id,user_id,status,subtotal_ex,gross_earned,gst,total_inc,gst_on,super_rate,super_amount,net_pay,super_basis,invoice_number)
-    VALUES('00000000-0000-0000-0000-000000000001','f1171901-0000-4000-8000-000000000003','pending_acknowledgment',336,336,0,336,false,.12,40.32,336,'employer_12_v2','ZZTEST-P4-WRONG') RETURNING id INTO inv;
+    VALUES('00000000-0000-0000-0000-000000000001','f1171901-0000-4000-8000-000000000002','pending_acknowledgment',672,672,0,672,false,.12,80.64,672,'employer_12_v2','ZZTEST-P4-WRONG') RETURNING id INTO inv;
   refused := false;
   BEGIN
     INSERT INTO public.trade_invoice_lines(trade_invoice_id,job_id,line_type,line_total_ex)
-      VALUES(inv,'f1171901-0000-4000-8000-000000000101','group share',336);
+      VALUES(inv,'f1171901-0000-4000-8000-000000000101','group share',672);
   EXCEPTION WHEN check_violation THEN refused := SQLERRM='group_super_basis_mismatch'; END;
   IF NOT refused THEN RAISE EXCEPTION 'ZZTEST inclusive group accepted an employer invoice'; END IF;
 END $$;

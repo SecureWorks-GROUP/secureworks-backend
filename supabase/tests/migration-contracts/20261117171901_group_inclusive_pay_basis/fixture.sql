@@ -31,6 +31,6 @@ BEGIN
   INSERT INTO public.job_media(id,job_id,phase,type,storage_url)
     VALUES('f1171901-0000-4000-8000-000000000401',job,'signature','photo','data:image/png;base64,iVBORw0KGgo=');
   INSERT INTO public.job_client_signoffs(job_id,method,signed_name,happy,signature_media_id,captured_by_actor,created_at)
-    VALUES(job,'share_link','ZZTEST customer',true,'f1171901-0000-4000-8000-000000000401','ZZTEST customer',clock_timestamp()+interval '1 second');
+    VALUES(job,'share_link','ZZTEST customer',true,'f1171901-0000-4000-8000-000000000401','ZZTEST customer',clock_timestamp()+interval '1 day');
   RETURN grp;
 END $$;
