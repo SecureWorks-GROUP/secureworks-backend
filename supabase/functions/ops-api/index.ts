@@ -10646,8 +10646,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         let gateConfirmed = false
         const gate = url.searchParams.get('gate')
         const token = url.searchParams.get('gate_token') || ''
+        // Both helpers report some failures as values so the remaining work
+        // can finish. Those runs must still retry on the next two-minute tick.
+        const issueFailed = Array.isArray(issued.results) && issued.results.some(entry => entry?.reason === 'issue_failed')
+        const releaseFailed = groupReleases.some(entry => entry !== null && typeof entry === 'object' && (
+          'error' in entry || 'xero_push_error' in entry
+          || ('xero_push' in entry && entry.xero_push === 'unconfirmed')
+          || ('crew_bills' in entry && Array.isArray(entry.crew_bills) && entry.crew_bills.some(bill =>
+            bill !== null && typeof bill === 'object' && ('error' in bill || 'xero_push_error' in bill || bill.xero_push === 'unconfirmed')))
+        ))
         if (switches.sweep_gate_v1 && gate === 'job-work-order-auto-issue' && /^[a-f0-9]{32}$/.test(token)
-          && issueError === null && !groupReleases.some(entry => entry !== null && typeof entry === 'object' && 'error' in entry)) {
+          && issueError === null && !issueFailed && !releaseFailed) {
           const { error: confirmError } = await client.rpc('sweep_gate_confirm', { p_name: gate, p_token: token })
           if (confirmError) console.error('[ops-api] work order sweep gate confirmation failed:', confirmError.message)
           else gateConfirmed = true
