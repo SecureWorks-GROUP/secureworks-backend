@@ -1,6 +1,35 @@
 -- Follow-up 26, story-only stored Job Profit reader. Seeded off, no installs.
 -- Before (director, 17 Nov): story card 12.4 s / 51 calls; one-job profit
 -- 7.4 s / 62 calls. This migration makes no live performance claim.
+-- Output-key guard delegation declarations, not removals: the book returns
+-- the complete guarded main implementation from *_profit_live/stored. The
+-- static checker cannot follow those calls. The own contract compares every
+-- returned JSON field, including all nested fields, with the original book.
+-- output-key-guard: drop public.context_job_story_book complete
+-- output-key-guard: drop public.context_job_story_book cost_flag
+-- output-key-guard: drop public.context_job_story_book digest
+-- output-key-guard: drop public.context_job_story_book facts
+-- output-key-guard: drop public.context_job_story_book incomplete
+-- output-key-guard: drop public.context_job_story_book incomplete_line
+-- output-key-guard: drop public.context_job_story_book invoices_emailed_unplaced
+-- output-key-guard: drop public.context_job_story_book job_id
+-- output-key-guard: drop public.context_job_story_book job_lines
+-- output-key-guard: drop public.context_job_story_book likely_unplaced_bills
+-- output-key-guard: drop public.context_job_story_book lines
+-- output-key-guard: drop public.context_job_story_book margin_ok
+-- output-key-guard: drop public.context_job_story_book money_sig
+-- output-key-guard: drop public.context_job_story_book orders_unpriced_open
+-- output-key-guard: drop public.context_job_story_book priced_orders_open
+-- output-key-guard: drop public.context_job_story_book reason
+-- output-key-guard: drop public.context_job_story_book reasons
+-- output-key-guard: drop public.context_job_story_book revenue_flag
+-- output-key-guard: drop public.context_job_story_book signed_off
+-- output-key-guard: drop public.context_job_story_book source
+-- output-key-guard: drop public.context_job_story_book started
+-- output-key-guard: drop public.context_job_story_book v
+-- output-key-guard: drop public.context_job_story_book version
+-- output-key-guard: drop public.context_job_story_book work_order
+
 SET LOCAL lock_timeout = '5s';
 
 -- Capture only the exact bodies now on main. Re-apply retains these originals.
