@@ -728,6 +728,8 @@ import {
 import {
   resolveTradePayBasis,
   resolveTradePayBasisForPreview,
+  readTradePaySettings,
+  tradePayTaxPercent,
   TRADE_PAY_PRIOR_INVOICE_COLUMNS,
   TRADE_PAY_RULE_UNREADABLE_WORDS,
   type TradePayPriorInvoice,
@@ -890,6 +892,7 @@ import {
   shouldOpenBlankJobWorkOrder,
 } from './job_work_order_office.ts'
 import { releaseVoidedTradeInvoice, VoidedTradeInvoiceReleaseError } from './trade_invoice_voided_release.ts'
+import { buildPayView, payViewRepayment, readPayViewRepayments, type PayViewOptions } from './trade_pay_view.ts'
 import { presentTradeInvoiceBillOutcome } from './trade_invoice_bill_outcome.ts'
 import { TradeJobRateError, tradeJobRateNote, tradeTypedJobRate } from './trade_rate_per_job.ts'
 import { ExtraRateRuleError, extraLineRateHold, listExtraRateRules, loadExtraRateRules, setExtraRateRule, type ExtraRateHold } from './trade_invoice_extra_rate_rule.ts'
@@ -2387,9 +2390,10 @@ async function tradePayBasisForSave(
   client: any,
   prior: TradePayPriorInvoice,
   payDay: unknown,
+  settingsRead?: ReturnType<typeof readTradePaySettings>,
 ): Promise<TradeInvoiceSuperBasis | null> {
   try {
-    return await resolveTradePayBasis(client, prior, payDay)
+    return await resolveTradePayBasis(client, prior, payDay, settingsRead)
   } catch (error) {
     if (error instanceof TradePayRuleUnreadable) {
       throw new ApiError(TRADE_PAY_RULE_UNREADABLE_WORDS, 503, {
@@ -2518,11 +2522,12 @@ async function noteTradeRecurringDeductionNotTaken(
 
 function presentTradeInvoice<T extends Record<string, unknown>>(
   rawInvoice: T,
+  payViewOptions?: Pick<PayViewOptions, 'taxSetAsidePercent' | 'repayment'>,
 ): T & { trade_payable: number | null } & Record<string, unknown> {
   // A bill voided or deleted in Xero says so on every read.
   const invoice = { ...rawInvoice, ...presentTradeInvoiceBillOutcome(rawInvoice) } as T
   try {
-    const presented = presentTradeInvoiceMoney(withTradeRecurringDeductionOfficeNote(invoice))
+    const presented = presentTradeInvoiceMoney(withTradeRecurringDeductionOfficeNote(invoice), payViewOptions)
     if (String(invoice.invoice_source || '') !== 'weekly_work_order') {
       return presented
     }
@@ -13504,9 +13509,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 if (l?.job_id && refByJob[l.job_id]) l.external_ref = refByJob[l.job_id]
               }
             }
+            const [paySettings, repayments] = await Promise.all([
+              readTradePaySettings(client), readPayViewRepayments(client, [inv]),
+            ])
             return json({
               invoice: {
-                ...presentTradeInvoice(inv),
+                ...presentTradeInvoice(inv, { taxSetAsidePercent: tradePayTaxPercent(paySettings), repayment: payViewRepayment(inv, repayments) }),
                 office_note: tradeInvoiceOfficeNote(inv, detailLines),
               },
             })
@@ -14581,6 +14589,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           case 'dispute_hours': return json(await disputeHours(client, tradeUser.id, body))
 
           case 'generate_trade_invoice': {
+            const paySettingsRead = readTradePaySettings(client)
             const groupInvoiceBasis = await assertAllInGroupInvoiceStandalone(client, {userId:tradeUser.id,orgId:tradeUser.orgId,role:tradeUser.role,isStaff:false},body)
               .catch((error) => groupWorkOrderApiError(error))
             const { week_start, extra_items, notes: invoiceNotes, draft_id, manual_assignments } = body
@@ -14718,7 +14727,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             }
             const priorDraftId: string | null = priorDraft?.id || null
             const invoiceSuperBasis = groupInvoiceBasis.superBasis ??
-              await tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10))
+              await tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead)
             const reimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(extra_items) ? extra_items : [], invoiceSuperBasis)
             const invoiceExtraItems = weeklyInvoice
               ? weeklyInvoiceLineRows(weeklyInvoice).map((line: any) => ({
@@ -16569,6 +16578,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               })
             }
 
+            const payView = buildPayView(money, {
+              reimbursementsEx: Math.round((money.gross_earned - (money.super_base_ex ?? money.gross_earned)) * 100) / 100,
+              taxSetAsidePercent: tradePayTaxPercent(await paySettingsRead),
+              repayment: (tradeRecurringDeductionResponse(recurringDeduction).repayment as PayViewOptions['repayment']) ?? null,
+            })
             const groupCrewRelease = officeReviewHold && money.super_basis === TRADE_INVOICE_EMPLOYER_SUPER_BASIS
               ? await releaseGroupCrewBills(client, String(invoice.id), `user:${tradeUser.id}`)
               : null
@@ -16582,6 +16596,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 invoice_number: invoiceNumber,
                 total_hours: totalHours,
                 ...tradeInvoiceMoneyResponse(money),
+                ...(payView ? { pay_view: payView } : {}),
                 skipped_items: reimbursements.skipped_items,
                 ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
@@ -16606,6 +16621,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 invoice_number: invoiceNumber,
                 total_hours: totalHours,
                 ...tradeInvoiceMoneyResponse(money),
+                ...(payView ? { pay_view: payView } : {}),
                 skipped_items: reimbursements.skipped_items,
                 ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
@@ -16628,6 +16644,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               invoice_number: invoiceNumber,
               total_hours: totalHours,
               ...tradeInvoiceMoneyResponse(money),
+                ...(payView ? { pay_view: payView } : {}),
                 skipped_items: reimbursements.skipped_items,
               ...tradeRecurringDeductionResponse(recurringDeduction),
               ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
@@ -58016,7 +58033,8 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   // One super rule (P1-01.3): the preview shows the rule this week will be
   // priced under. An unreadable rule shows no money figures
   // (money_unavailable); the hours still show.
-  const previewRule = await resolveTradePayBasisForPreview(client, null, weekStart || weekEnding)
+  const paySettingsRead = readTradePaySettings(client)
+  const previewRule = await resolveTradePayBasisForPreview(client, null, weekStart || weekEnding, paySettingsRead)
   let previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding, previewRule.basis)
   let previewRecurringDeduction: TradeRecurringDeductionDecision | null = null
   try {
@@ -58026,6 +58044,12 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   } catch (deductionErr) {
     console.error('[ops-api] my_hours: weekly deduction unreadable:', (deductionErr as Error)?.message)
   }
+  const previewPayView = previewRule.unavailable ? null : buildPayView(previewMoney, {
+    reimbursementsEx: 0,
+    taxSetAsidePercent: tradePayTaxPercent(await paySettingsRead),
+    repayment: previewRecurringDeduction
+      ? (tradeRecurringDeductionResponse(previewRecurringDeduction).repayment as PayViewOptions['repayment']) ?? null : null,
+  })
   const gst = previewMoney.gst_amount
 
   // How each job is invoiced (trade_invoice_mode.ts: group work order, work
@@ -58095,6 +58119,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
         // The split as one object, with the rule it was worked out on
         // (super_basis null: the old rule). trade.html reads super_basis.
         money: { ...tradeInvoiceMoneyResponse(previewMoney), super_basis: previewMoney.super_basis ?? null },
+        ...(previewPayView ? { pay_view: previewPayView } : {}),
         money_unavailable: false as const,
       }),
     subtotal,
@@ -58140,9 +58165,9 @@ const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, note
 // presentTradeInvoice throws MONEY_SPLIT_INVALID on a legacy row whose split
 // does not reconcile. One such row is live; it used to 500 the whole list.
 // Degrade that row to "figures unavailable" and keep the rest.
-function presentTradeInvoiceSafe(inv: any): any {
+function presentTradeInvoiceSafe(inv: any, payViewOptions?: Pick<PayViewOptions, 'taxSetAsidePercent' | 'repayment'>): any {
   try {
-    return presentTradeInvoice(inv)
+    return presentTradeInvoice(inv, payViewOptions)
   } catch (error) {
     const code = (error as any)?.code || (error as any)?.message || 'MONEY_SPLIT_INVALID'
     console.warn('[ops-api] trade invoice ' + inv?.id + ' figures unavailable: ' + code)
@@ -58184,8 +58209,11 @@ async function myTradeInvoices(client: any, userId: string) {
       else reviewLinesByInvoice.set(key, [line])
     }
   }
+  const [paySettings, repayments] = await Promise.all([
+    readTradePaySettings(client), readPayViewRepayments(client, data || []),
+  ])
   const invoices = (data || []).map(({ query_note: rawNote, ...inv }: any) => ({
-    ...presentTradeInvoiceSafe(inv),
+    ...presentTradeInvoiceSafe(inv, { taxSetAsidePercent: tradePayTaxPercent(paySettings), repayment: payViewRepayment(inv, repayments) }),
     office_note: tradeInvoiceOfficeNote({ status: inv.status, query_note: rawNote }, reviewLinesByInvoice.get(String(inv.id)) || []),
     week_ending: inv.week_end,
     total: inv.total_inc ?? 0,

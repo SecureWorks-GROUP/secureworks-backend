@@ -273,6 +273,11 @@ handlerTest("pay rule: a week on or after the start date is priced inclusive", a
   const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 20, 56)], ON_FROM);
   assertSaved(out);
   const inv = out.invoiceRows[0];
+  assertEquals(out.body.pay_view, {
+    basis: "inclusive_12_112_v1", total_inc_super: 1120, paid_to_super: 120,
+    paid_to_you: 1000, reimbursements: 0, gst: 0, repayment: null,
+    into_bank: 1000, tax_set_aside: null, gst_set_aside: 0,
+  });
   assertEquals(
     [inv.super_basis, inv.gross_earned, inv.super_amount, inv.net_pay, inv.gst, inv.total_inc],
     ["inclusive_12_112_v1", 1120, 120, 1000, 0, 1120],
@@ -437,7 +442,7 @@ handlerTest("pay rule: every save door and the work order retry use the one deci
   assertEquals(src.match(/tradePayBasisForSave\(/g)?.length, 5); // definition + three save doors + switched-on receipt list
   assertStringIncludes(src, "tradePayBasisForSave(client, retryDrafts[0] ?? null, woInvoiceDate)");
   assertStringIncludes(src, "tradePayBasisForSave(client, existingDraft, draftWeekStart || draftWeekEnd)");
-  assertStringIncludes(src, "tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10))");
+  assertStringIncludes(src, "tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead)");
   assert(src.includes("const draftSuperBasis = resolvedShares.length > 0\n              ? null"), "group shares retain their existing draft pricing");
   assertStringIncludes(src, ".select(`id, user_id, status, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)");
 });
