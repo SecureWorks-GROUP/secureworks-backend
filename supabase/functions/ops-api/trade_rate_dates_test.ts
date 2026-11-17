@@ -3,7 +3,6 @@ import "./trade_app_visibility_rules_test_env.ts";
 import {
   assertEquals,
   assertRejects,
-  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { FakeTime } from "https://deno.land/std@0.224.0/testing/time.ts";
 import {
@@ -46,6 +45,7 @@ function store(rates: Row[], fault?: "select" | "update") {
     job_assignments: [],
   };
   const writes: string[] = [];
+  const reads: string[] = [];
   const client = {
     from(table: string) {
       const predicates: Array<(r: Row) => boolean> = [];
@@ -62,6 +62,7 @@ function store(rates: Row[], fault?: "select" | "update") {
         throw new Error(`unsupported ${op}`);
       };
       const run = () => {
+        if (operation === "select") reads.push(table);
         if (table === "trade_rates" && operation === fault) {
           return {
             data: null,
@@ -159,7 +160,7 @@ function store(rates: Row[], fault?: "select" | "update") {
       return query;
     },
   };
-  return { client, tables, writes };
+  return { client, tables, writes, reads };
 }
 
 async function onDay(day: string, run: () => Promise<void>) {
@@ -180,8 +181,7 @@ Deno.test("Set Rate refuses a scheduled future row before changing any rate", ()
       ApiError,
     );
     assertEquals(error.status, 409);
-    assertStringIncludes(error.message, "rate-future-fixture");
-    assertStringIncludes(error.message, changeDay);
+    assertEquals(error.message, `This trade has a new rate starting ${changeDay}. Nothing was changed. Tell the director if the rate needs to change before then.`);
     assertEquals(s.tables.trade_rates, before);
     assertEquals(s.writes, []);
   }));
@@ -284,6 +284,20 @@ function attendance(day: string) {
   };
 }
 
+Deno.test("Ops rate panel keeps only the newest effective row per person", () =>
+  onDay(changeDay, async () => {
+    const s = store([
+      oldRate(),
+      nextRate(),
+      { ...oldRate(), user_id: "second-trade-fixture" },
+    ]);
+    const out = await _listTradeInvoicesForTest(s.client, new URLSearchParams());
+    assertEquals(out.rates.map((row: Row) => [row.user_id, row.hourly_rate]), [
+      ["trade-fixture", 31], ["second-trade-fixture", 23],
+    ]);
+    assertEquals(s.writes, []);
+  }));
+
 const costScreens = {
   office: (s: ReturnType<typeof store>) =>
     _labourReconciliationForTest(
@@ -311,6 +325,7 @@ for (const [label, screen] of Object.entries(costScreens)) {
       assertEquals(out.trades[0].cost, 108);
       assertEquals(out.trades[0].rate, 27);
       assertEquals(out.total_labour_cost ?? out.total_cost, 108);
+      assertEquals(s.reads.filter((table) => table === "trade_rates").length, 1);
       assertEquals(s.writes, []);
     }));
 
@@ -348,5 +363,24 @@ for (const [label, screen] of Object.entries(costScreens)) {
       const out = await screen(s);
       assertEquals(out.trades[0].rate, 31);
       assertEquals(out.trades[0].cost, 62);
+    }));
+
+  Deno.test(`${label} labour screen reads once per trade and respects gaps in rate history`, () =>
+    onDay(today, async () => {
+      const s = store([
+        { ...oldRate(), effective_to: "2031-02-10" }, nextRate(),
+        { ...oldRate(), user_id: "second-trade-fixture", hourly_rate: 17 },
+      ]);
+      s.tables.job_assignments = [
+        attendance(today), attendance(changeDay),
+        { ...attendance(today), user_id: "second-trade-fixture" },
+        { ...attendance(changeDay), user_id: "second-trade-fixture" },
+      ];
+      const out = await screen(s);
+      assertEquals(out.trades.map((row: Row) => ({ user_id: row.user_id, cost: row.cost })), [
+        { user_id: "trade-fixture", cost: 62 },
+        { user_id: "second-trade-fixture", cost: 68 },
+      ]);
+      assertEquals(s.reads.filter((table) => table === "trade_rates").length, 2);
     }));
 }
