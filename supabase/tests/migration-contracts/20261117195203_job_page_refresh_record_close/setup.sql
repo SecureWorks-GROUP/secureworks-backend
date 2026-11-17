@@ -19,12 +19,17 @@ SELECT to_regprocedure('public.context_reconcile_raise(text,uuid,text,text,jsonb
  AND to_regprocedure('public.context_reconcile_raise(text,uuid,text,text,jsonb)') IS NULL AS record_needs_queue \gset
 \if :record_needs_queue
 CREATE TABLE IF NOT EXISTS public.record_close_fixture_queue(subject text PRIMARY KEY,suggestions jsonb,open boolean DEFAULT true);
-CREATE FUNCTION public.context_reconcile_raise(text,uuid,text,text,jsonb) RETURNS uuid LANGUAGE plpgsql AS $s$
+CREATE FUNCTION public.context_reconcile_raise(text,uuid,text,text,jsonb) RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $s$
 BEGIN
  INSERT INTO public.record_close_fixture_queue(subject,suggestions) VALUES($3,$5)
  ON CONFLICT(subject) DO NOTHING; RETURN NULL;
 END $s$;
-CREATE FUNCTION public.context_reconcile_withdraw(text,text,text) RETURNS void LANGUAGE sql AS $s$
+CREATE FUNCTION public.context_reconcile_withdraw(text,text,text) RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path=public,pg_temp AS $s$
  UPDATE public.record_close_fixture_queue SET open=false WHERE subject=$2
 $s$;
+-- Fixture helpers obey the same private API boundary as the real adapter.
+REVOKE ALL ON FUNCTION public.context_reconcile_raise(text,uuid,text,text,jsonb),
+ public.context_reconcile_withdraw(text,text,text) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.context_reconcile_raise(text,uuid,text,text,jsonb),
+ public.context_reconcile_withdraw(text,text,text) TO service_role;
 \endif
