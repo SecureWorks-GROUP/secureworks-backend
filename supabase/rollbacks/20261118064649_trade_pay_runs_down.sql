@@ -1,4 +1,4 @@
--- Rollback of 20261118063929_trade_pay_runs.
+-- Rollback of 20261118064649_trade_pay_runs.
 --
 -- Refuses while any pay run is recorded: those rows are the record of who
 -- approved which invoices. Otherwise drops, in reverse order, the approve

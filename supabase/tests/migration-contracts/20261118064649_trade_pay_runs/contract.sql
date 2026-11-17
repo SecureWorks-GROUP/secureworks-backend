@@ -11,8 +11,8 @@ CREATE TABLE public.reconcile_item_kinds (kind text PRIMARY KEY,
   words text NOT NULL,
   card text NOT NULL CHECK (card IN ('cost','message','pay_claim','pay_line','weekly','generic')));
 \endif
-\ir ../../../migrations/20261118063929_trade_pay_runs.sql
-\ir ../../../migrations/20261118063929_trade_pay_runs.sql
+\ir ../../../migrations/20261118064649_trade_pay_runs.sql
+\ir ../../../migrations/20261118064649_trade_pay_runs.sql
 
 CREATE FUNCTION pg_temp.zz_assert(ok boolean, words text) RETURNS void
 LANGUAGE plpgsql AS $$ BEGIN
