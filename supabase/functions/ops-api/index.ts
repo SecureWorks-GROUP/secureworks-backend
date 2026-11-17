@@ -63025,7 +63025,7 @@ async function getAnnotations(client: any, params: URLSearchParams) {
 }
 
 // POST: Resolve an annotation with response
-async function resolveAnnotation(client: any, body: any) {
+export async function resolveAnnotation(client: any, body: any) {
   const { annotation_id, response_value, response_text, operator_email } = body
   if (!annotation_id) throw new Error('annotation_id required')
 
