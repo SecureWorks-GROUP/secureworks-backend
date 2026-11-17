@@ -23,7 +23,7 @@ BEGIN
   PERFORM public.job_cost_lines_set_state(a,'on_job',parts,'matcher',NULL,NULL);
   d := jsonb_set(d,'{lines,0,amount_ex}','120');
   PERFORM public.job_cost_lines_upsert_documents(jsonb_build_array(d));
-  IF (SELECT amount_ex FROM public.job_cost_line_parts WHERE line_id = a) <> 120 THEN
+  IF (SELECT amount_ex FROM public.job_cost_line_parts WHERE line_id = a) IS DISTINCT FROM 120 THEN
     RAISE EXCEPTION 'writer: automatic part did not follow amount'; END IF;
   parts := jsonb_set(parts,'{0,amount_ex}','120');
   PERFORM public.job_cost_lines_set_state(a,'on_job',parts,'person',7,NULL);
@@ -62,7 +62,7 @@ BEGIN
   UPDATE public.job_cost_lines SET follows_document_id='ZZTEST-split' WHERE id=credit;
   PERFORM public.job_cost_lines_refollow('xero_bill','ZZTEST-split');
   IF (SELECT array_agg(amount_ex ORDER BY part_no) FROM public.job_cost_line_parts WHERE line_id=credit)
-    <> ARRAY[-60.00,-30.00,-10.00]::numeric[] THEN RAISE EXCEPTION 'writer: negative proportional parts'; END IF;
+    IS DISTINCT FROM ARRAY[-60.00,-30.00,-10.00]::numeric[] THEN RAISE EXCEPTION 'writer: negative proportional parts'; END IF;
   d := jsonb_set(d,'{lines,0,amount_ex}','3');
   PERFORM public.job_cost_lines_upsert_documents(jsonb_build_array(d));
   PERFORM public.job_cost_lines_set_state(a,'split',
@@ -70,7 +70,7 @@ BEGIN
   UPDATE public.job_cost_lines SET amount_ex=100 WHERE id=credit;
   PERFORM public.job_cost_lines_refollow('xero_bill','ZZTEST-split');
   IF (SELECT array_agg(amount_ex ORDER BY part_no) FROM public.job_cost_line_parts WHERE line_id=credit)
-    <> ARRAY[33.33,33.33,33.34]::numeric[] THEN RAISE EXCEPTION 'writer: cents remainder'; END IF;
+    IS DISTINCT FROM ARRAY[33.33,33.33,33.34]::numeric[] THEN RAISE EXCEPTION 'writer: cents remainder'; END IF;
   d := jsonb_set(d,'{live}','false');
   PERFORM public.job_cost_lines_upsert_documents(jsonb_build_array(d));
   IF NOT EXISTS (SELECT 1 FROM public.job_cost_lines WHERE id=a AND state IS NULL AND not_counted_reason='document_not_live')

@@ -27,7 +27,7 @@ BEGIN
   '[{"target":"job","job_id":"40000000-0000-4000-8000-000000000001","amount_ex":600},{"target":"job","job_id":"40000000-0000-4000-8000-000000000002","amount_ex":400}]','matcher',NULL,NULL);
  PERFORM public.job_cost_lines_sync_credit_notes(ARRAY['ZZTEST-credit-sync']);
  IF (SELECT array_agg(amount_ex ORDER BY part_no) FROM public.job_cost_line_parts WHERE line_id=credit)
-   <> ARRAY[-60,-40]::numeric[] THEN RAISE EXCEPTION 'credit sync: split proportions'; END IF;
+   IS DISTINCT FROM ARRAY[-60,-40]::numeric[] THEN RAISE EXCEPTION 'credit sync: split proportions'; END IF;
  PERFORM public.job_cost_lines_set_state(bill,'needs_person','[]','source',NULL,'new');
  PERFORM public.job_cost_lines_sync_credit_notes(ARRAY['ZZTEST-credit-sync']);
  IF NOT EXISTS(SELECT 1 FROM public.job_cost_lines WHERE id=credit AND state='needs_person' AND needs_reason='follows_undecided')
