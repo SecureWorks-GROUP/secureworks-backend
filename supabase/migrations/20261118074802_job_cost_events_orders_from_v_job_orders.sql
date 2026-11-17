@@ -1,16 +1,23 @@
 -- P2-10.2. A sent Dispatch order shows as committed (or ordered, cost not known)
--- on its job until a counted cost line names it. Only the cost-line reader
+-- on its job until a counted cost line naming it is allocated to that job. Only
+-- the cost-line reader
 -- changes; v_job_cost_events still reads legacy until the switch and cutover.
 -- No trigger, schedule or switch change on merge: the order trigger is installed
 -- by install_dispatch_order_commitment() after proof on a ZZTEST job.
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '120s';
 
 -- Built from main's reader (P2-01.7 plus P2-03.1). Every existing arm stays
 -- byte-identical: one arm is appended. A purchase order already closes when
 -- v_job_orders.matched is true: the job_cost_lines CHECK makes state IS NOT
 -- NULL the same test as not_counted_reason IS NULL.
 -- c98dd14a: main after P2-03.1 (live read d8ccd9fe was taken before it merged).
--- 6bcae603: this migration's own result, so a re-apply changes nothing.
+-- 90b424e4: this migration's own result, so a re-apply changes nothing.
+-- A Dispatch order closes only when a counted line naming it has a part on the
+-- order's own job (the cost the actual arm adds). v_job_orders.matched alone is
+-- not enough: a needs_person line matches but puts no cost on the job.
+-- job_cost_lines_order_idx finds the lines; job_cost_line_parts is read by its
+-- (line_id, part_no) unique index.
 DO $view$
 DECLARE d text;
 /* block */ BEGIN
@@ -27,9 +34,13 @@ DECLARE d text;
   false,NULL::text,NULL::numeric,NULL::text,NULL::text,'dispatch_order.job_id'::text,false,
   NULL::uuid,NULL::text
  FROM public.v_job_orders o
- WHERE o.order_kind='dispatch_order' AND o.job_id IS NOT NULL AND o.job_live AND NOT o.matched$arm$;
+ WHERE o.order_kind='dispatch_order' AND o.job_id IS NOT NULL AND o.job_live
+  AND NOT EXISTS(SELECT 1 FROM public.job_cost_lines l
+   JOIN public.job_cost_line_parts p ON p.line_id=l.id
+   WHERE l.order_kind=o.order_kind AND l.order_id=o.order_id AND l.state IS NOT NULL
+    AND p.target='job' AND p.job_id=o.job_id)$arm$;
   EXECUTE 'CREATE OR REPLACE VIEW public.v_job_cost_events_lines AS '||d;
- ELSIF md5(d)<>'6bcae603f8c25b97fc5ea9d9d7669a9d' THEN
+ ELSIF md5(d)<>'90b424e43450a35382e013b01a0d2462' THEN
   RAISE EXCEPTION 'P2-10.2: cost line reader pre-image differs';
  END IF;
 END $view$;

@@ -4,7 +4,7 @@ SET LOCAL lock_timeout = '5s';
 DO $guard$ DECLARE h text;
 /* block */ BEGIN
  h:=md5(pg_get_viewdef('public.v_job_cost_events_lines'::regclass,true));
- IF h NOT IN ('6bcae603f8c25b97fc5ea9d9d7669a9d','c98dd14a51e982b78493c3385b25c9d9') THEN
+ IF h NOT IN ('90b424e43450a35382e013b01a0d2462','c98dd14a51e982b78493c3385b25c9d9') THEN
   RAISE EXCEPTION 'P2-10.2 rollback: cost line reader changed'; END IF;
 END $guard$;
 DROP TRIGGER IF EXISTS dispatch_order_commitment ON public.dispatch_supplier_order_emails;
