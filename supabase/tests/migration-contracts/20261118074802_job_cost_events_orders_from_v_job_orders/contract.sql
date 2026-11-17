@@ -276,26 +276,8 @@ FROM generate_series(1,12000) n;
 INSERT INTO public.job_cost_lines(org_id,kind,document_kind,document_id,line_key,lane,amount_ex,state,source_hash,party_id,party_name,order_kind,order_id)
 SELECT '00000000-0000-0000-0000-000000000001','supplier_bill','xero_bill','ZZTEST-HIST-'||n,'1','materials',10,'needs_person','ZZTEST',
  'ZZTEST-contact-1021','ZZTEST Steel','purchase_order','ZZTEST-PO-HIST-'||n FROM generate_series(1,6000) n;
--- Dispatch order lines with parts on job B: the allocation probe reads by index.
-INSERT INTO public.job_cost_lines(id,org_id,kind,document_kind,document_id,line_key,lane,amount_ex,state,source_hash,order_kind,order_id)
-SELECT ('10210000-0000-4000-9000-'||lpad(n::text,12,'0'))::uuid,'00000000-0000-0000-0000-000000000001','supplier_bill','xero_bill',
- 'ZZTEST-ALLOC-'||n,'1','materials',10,'on_job','ZZTEST','dispatch_order','ZZTEST-DO-HIST-'||n FROM generate_series(1,6000) n;
-INSERT INTO public.job_cost_line_parts(line_id,part_no,target,job_id,lane,amount_ex)
-SELECT ('10210000-0000-4000-9000-'||lpad(n::text,12,'0'))::uuid,1,'job','10210000-0000-4000-8000-00000000000b','materials',10
-FROM generate_series(1,6000) n;
--- O1's bill counted, but its part is on job B: O1 stays committed on job A.
-UPDATE public.job_cost_lines SET state='on_job',not_counted_reason=NULL
- WHERE id='10210000-0000-4000-8000-000000000071';
-INSERT INTO public.job_cost_line_parts(line_id,part_no,target,job_id,lane,amount_ex)
-VALUES('10210000-0000-4000-8000-000000000071',1,'job','10210000-0000-4000-8000-00000000000b','materials',2000);
-DO $otherjob$ BEGIN
- IF NOT EXISTS(SELECT 1 FROM public.v_job_cost_events WHERE source_id='10210000-0000-4000-8000-000000000001'
-  AND job_id='10210000-0000-4000-8000-00000000000a' AND amount_ex=2000 AND source='po_committed') THEN
-  RAISE EXCEPTION 'P2-10.2 a bill on another job must not close the order'; END IF;
-END $otherjob$;
 ANALYZE public.reconcile_items;
 ANALYZE public.job_cost_lines;
-ANALYZE public.job_cost_line_parts;
 DO $plan$ DECLARE plan jsonb; BEGIN
  EXECUTE $q$EXPLAIN (ANALYZE,FORMAT JSON) SELECT * FROM public.dispatch_order_rematch_subjects(
   '00000000-0000-0000-0000-000000000001','ZZTEST-contact-1021','zzteststeel')$q$ INTO plan;
@@ -314,6 +296,30 @@ DO $plan$ DECLARE plan jsonb; BEGIN
  IF EXISTS(SELECT 1 FROM jsonb_path_query(plan,'strict $.** ? (@."Relation Name" == "job_cost_lines")') node
   WHERE node->>'Node Type'='Seq Scan' AND (node->>'Actual Loops')::numeric>0) THEN
   RAISE EXCEPTION 'P2-10.2 order close test must use an index: %',plan; END IF;
+END $plan$;
+ROLLBACK TO plan_fixture;
+
+SAVEPOINT alloc_fixture;
+-- Dispatch order lines with parts on job B: the allocation probe reads by index.
+INSERT INTO public.job_cost_lines(id,org_id,kind,document_kind,document_id,line_key,lane,amount_ex,state,source_hash,order_kind,order_id)
+SELECT ('10210000-0000-4000-9000-'||lpad(n::text,12,'0'))::uuid,'00000000-0000-0000-0000-000000000001','supplier_bill','xero_bill',
+ 'ZZTEST-ALLOC-'||n,'1','materials',10,'on_job','ZZTEST','dispatch_order','ZZTEST-DO-HIST-'||n FROM generate_series(1,6000) n;
+INSERT INTO public.job_cost_line_parts(line_id,part_no,target,job_id,lane,amount_ex)
+SELECT ('10210000-0000-4000-9000-'||lpad(n::text,12,'0'))::uuid,1,'job','10210000-0000-4000-8000-00000000000b','materials',10
+FROM generate_series(1,6000) n;
+-- O1's bill counted, but its part is on job B: O1 stays committed on job A.
+UPDATE public.job_cost_lines SET state='on_job',not_counted_reason=NULL
+ WHERE id='10210000-0000-4000-8000-000000000071';
+INSERT INTO public.job_cost_line_parts(line_id,part_no,target,job_id,lane,amount_ex)
+VALUES('10210000-0000-4000-8000-000000000071',1,'job','10210000-0000-4000-8000-00000000000b','materials',2000);
+DO $otherjob$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM public.v_job_cost_events WHERE source_id='10210000-0000-4000-8000-000000000001'
+  AND job_id='10210000-0000-4000-8000-00000000000a' AND amount_ex=2000 AND source='po_committed') THEN
+  RAISE EXCEPTION 'P2-10.2 a bill on another job must not close the order'; END IF;
+END $otherjob$;
+ANALYZE public.job_cost_lines;
+ANALYZE public.job_cost_line_parts;
+DO $allocplan$ DECLARE plan jsonb; BEGIN
  EXECUTE $q$EXPLAIN (ANALYZE,FORMAT JSON) SELECT * FROM public.v_job_cost_events_lines
   WHERE match_method='dispatch_order.job_id' AND job_id='10210000-0000-4000-8000-00000000000a'$q$ INTO plan;
  IF EXISTS(SELECT 1 FROM jsonb_path_query(plan,'strict $.** ? (@."Relation Name" == "job_cost_lines" || @."Relation Name" == "job_cost_line_parts")') node
@@ -321,8 +327,8 @@ DO $plan$ DECLARE plan jsonb; BEGIN
  OR NOT EXISTS(SELECT 1 FROM jsonb_path_query(plan,'strict $.** ? (@."Relation Name" == "job_cost_line_parts")') node
   WHERE node->>'Node Type' IN ('Index Scan','Index Only Scan','Bitmap Heap Scan') AND (node->>'Actual Loops')::numeric>0) THEN
   RAISE EXCEPTION 'P2-10.2 allocation probe must use an index: %',plan; END IF;
-END $plan$;
-ROLLBACK TO plan_fixture;
+END $allocplan$;
+ROLLBACK TO alloc_fixture;
 
 SELECT 'PASS P2-10.2: dispatch orders committed until counted, unknown cost NULL, matched purchase orders close, off parity, guarded queue and mark';
 ROLLBACK;
