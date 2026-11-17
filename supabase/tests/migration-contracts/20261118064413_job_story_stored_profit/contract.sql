@@ -3,15 +3,13 @@ BEGIN;
 SET LOCAL jit=off;
 SET LOCAL TimeZone='UTC';
 SET LOCAL statement_timeout='120s';
--- Rule 17: FU26.0's objects are re-applied; this case's own objects are
--- re-applied only when missing, so the deliberate-break proof survives.
+-- Rule 17: FU26.0's objects and this case's own are re-applied first.
 \ir ../../../migrations/20261118024514_context_story_book_speed.sql
-SELECT to_regprocedure('public.job_story_stored_profit_as_at(uuid,timestamptz)') IS NOT NULL
-   AND to_regprocedure('public.context_job_story_book_switch(uuid,timestamptz)') IS NOT NULL AS sp_present \gset
-\if :sp_present
-\else
 \ir ../../../migrations/20261118064413_job_story_stored_profit.sql
-\endif
+-- Rule 17: an earlier contract in the shard may have rebuilt the stored tables.
+-- These are the store's own job indexes (20261117195801), restored if missing.
+CREATE INDEX IF NOT EXISTS job_cost_events_stored_job_idx ON public.job_cost_events_stored(job_id);
+CREATE INDEX IF NOT EXISTS job_revenue_events_stored_job_idx ON public.job_revenue_events_stored(job_id);
 CREATE FUNCTION pg_temp.sp_assert(ok boolean,msg text) RETURNS void LANGUAGE plpgsql AS $f$
 BEGIN IF ok IS NOT TRUE THEN RAISE EXCEPTION 'FU26.1: %',msg; END IF; END $f$;
 
@@ -79,10 +77,16 @@ INSERT INTO public.feature_flags(flag_name,enabled) VALUES('job_story_stored_pro
 SELECT pg_temp.sp_assert(NOT EXISTS(SELECT 1 FROM sp_before b WHERE b.answer IS DISTINCT FROM pg_temp.sp_front(b.job_id,b.kind)),'switch on, refresh off, differs');
 -- The profit refresh is installed as job_profit_refresh_install does (its
 -- triggers; no pg_cron here) and switched on. Nothing stored yet.
+-- Stand-in for job_profit_refresh_install (its pg_cron step is absent locally):
+-- its own trigger statements, made idempotent, and its switch on.
 DO $c$ DECLARE m text[]; BEGIN
- FOR m IN SELECT regexp_matches(prosrc,'(CREATE TRIGGER[^;]+;)','g') FROM pg_proc WHERE oid='public.job_profit_refresh_install()'::regprocedure LOOP EXECUTE m[1]; END LOOP;
+ FOR m IN SELECT regexp_matches(prosrc,'(CREATE TRIGGER job_profit_changed[^;]+ ON (public\.[a-z_]+)[^;]+;)','g') FROM pg_proc WHERE oid='public.job_profit_refresh_install()'::regprocedure LOOP
+  EXECUTE 'DROP TRIGGER IF EXISTS job_profit_changed ON '||m[2]; EXECUTE m[1];
+ END LOOP;
 END $c$;
-UPDATE public.feature_flags SET enabled=true WHERE flag_name='job_profit_refresh_v1';
+SELECT pg_temp.sp_assert((SELECT count(*)=11 FROM pg_trigger WHERE tgname='job_profit_changed' AND tgenabled<>'D'),'refresh triggers not installed');
+INSERT INTO public.feature_flags(flag_name,enabled) VALUES('job_profit_refresh_v1',true) ON CONFLICT(flag_name) DO UPDATE SET enabled=true;
+DELETE FROM public.job_profit_change_events; DELETE FROM public.job_profit_dirty;
 SELECT pg_temp.sp_assert(NOT EXISTS(SELECT 1 FROM sp_before b WHERE b.answer IS DISTINCT FROM pg_temp.sp_front(b.job_id,b.kind)),'missing stored rows differ');
 
 -- 4. A complete refresh: the stored book equals the installed book in every
