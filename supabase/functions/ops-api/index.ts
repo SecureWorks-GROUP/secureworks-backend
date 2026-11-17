@@ -58165,12 +58165,26 @@ async function setTradeRate(client: any, authUserId: string | null, body: any) {
 
   const today = getAWSTDate()
 
-  // Close current active rate
-  await client
+  // Refuse before writing: an office edit must not erase a scheduled change.
+  const { data: futureRate, error: futureError } = await client.from('trade_rates')
+    .select('id, effective_from')
+    .eq('user_id', targetUserId)
+    .gt('effective_from', today)
+    .order('effective_from', { ascending: true })
+    .limit(1).maybeSingle()
+  if (futureError) throw futureError
+  if (futureRate) {
+    throw new ApiError(`Scheduled rate ${futureRate.id} starts on ${futureRate.effective_from}. No rates were changed. Ask the office to review that scheduled change before setting another rate.`, 409)
+  }
+
+  // The date guard also preserves a future row added after the read above.
+  const { error: closeError } = await client
     .from('trade_rates')
     .update({ effective_to: new Date(new Date(today + 'T00:00:00Z').getTime() - 86400000).toISOString().slice(0, 10) })
     .eq('user_id', targetUserId)
     .is('effective_to', null)
+    .lte('effective_from', today)
+  if (closeError) throw closeError
 
   // Insert new rate
   const { data, error } = await client
@@ -58190,6 +58204,8 @@ async function setTradeRate(client: any, authUserId: string | null, body: any) {
 }
 
 // ── list_trade_invoices: ops dashboard view ──
+export const _setTradeRateForTest = setTradeRate
+
 async function listTradeInvoices(client: any, params: URLSearchParams) {
   const limit = parseInt(params.get('limit') || '50')
   const status = params.get('status')
@@ -58234,12 +58250,15 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
   const stuckRows = stuck.data || []
   const stuckCapHit = stuckRows.length > STUCK_TRADE_BILLS_CAP
 
-  // Also get trade rates for display
-  const { data: rates } = await client
+  // The rates panel shows today's rate, including a row ending at changeover.
+  const today = getAWSTDate()
+  const { data: rates, error: ratesError } = await client
     .from('trade_rates')
     .select('user_id, hourly_rate, effective_from, users:user_id(name)')
-    .is('effective_to', null)
+    .lte('effective_from', today)
+    .or(`effective_to.is.null,effective_to.gte.${today}`)
     .order('effective_from', { ascending: false })
+  if (ratesError) throw ratesError
 
   return {
     invoices: mergeTradeBillRows(weekly.data || [], noWeek.data || [], stuckRows.slice(0, STUCK_TRADE_BILLS_CAP))
@@ -58270,6 +58289,42 @@ export function mergeTradeBillRows(weekly: any[], noWeek: any[], stuck: any[] = 
     })
     .sort((a: any, b: any) => key(b).localeCompare(key(a)) ||
       String(b?.created_at || '').localeCompare(String(a?.created_at || '')))
+}
+
+// Both cost screens price completed work on its booked day, not on read day.
+// Undated legacy work uses its Perth start day. A mixed-rate total displays
+// the weighted rate; cost is summed before rounding, as for a single rate.
+async function loadDatedTradeLabour(client: any, assignments: any[], unnamedTrade: string) {
+  const trades: Record<string, { name: string, hours: number, rate: number, cost: number }> = {}
+  const ratesByDay = new Map<string, number>()
+  const mixedRates = new Set<string>()
+  for (const a of assignments) {
+    const hours = Math.round(((new Date(a.completed_at).getTime() - new Date(a.started_at).getTime()) / 3600000) * 100) / 100
+    const userId = String(a.user_id)
+    const day = a.scheduled_date || getAWSTDate(new Date(a.started_at))
+    const key = `${userId}:${day}`
+    if (!ratesByDay.has(key)) {
+      const { data: rateRow, error } = await client.from('trade_rates')
+        .select('hourly_rate')
+        .eq('user_id', userId)
+        .lte('effective_from', day)
+        .or(`effective_to.is.null,effective_to.gte.${day}`)
+        .order('effective_from', { ascending: false })
+        .limit(1).maybeSingle()
+      if (error) throw error
+      ratesByDay.set(key, rateRow ? Number(rateRow.hourly_rate) : 0)
+    }
+    const rate = ratesByDay.get(key)!
+    const trade = trades[userId] ||= { name: a.users?.name || unnamedTrade, hours: 0, rate, cost: 0 }
+    if (trade.rate !== rate) mixedRates.add(userId)
+    trade.hours += hours
+    trade.cost += hours * rate
+  }
+  for (const [userId, trade] of Object.entries(trades)) {
+    if (trade.hours && mixedRates.has(userId)) trade.rate = Math.round(trade.cost / trade.hours * 100) / 100
+    trade.cost = Math.round(trade.cost * 100) / 100
+  }
+  return trades
 }
 
 // ── labour_reconciliation: labour PO budget vs trade hours per job ──
@@ -58322,34 +58377,8 @@ async function labourReconciliation(client: any, params: URLSearchParams) {
     .not('completed_at', 'is', null)
     .order('scheduled_date')
 
-  // Calculate hours per trade
-  const tradeHours: Record<string, { name: string, hours: number, rate: number, cost: number }> = {}
-  let totalHours = 0
-
-  for (const a of (assignments || [])) {
-    const hours = Math.round(((new Date(a.completed_at).getTime() - new Date(a.started_at).getTime()) / 3600000) * 100) / 100
-    totalHours += hours
-    const userId = a.user_id
-    const name = (a.users as any)?.name || 'Unknown'
-    if (!tradeHours[userId]) {
-      tradeHours[userId] = { name, hours: 0, rate: 0, cost: 0 }
-    }
-    tradeHours[userId].hours += hours
-  }
-
-  // Look up rates for each trade
-  for (const userId of Object.keys(tradeHours)) {
-    const { data: rateRow } = await client.from('trade_rates')
-      .select('hourly_rate')
-      .eq('user_id', userId)
-      .is('effective_to', null)
-      .order('effective_from', { ascending: false })
-      .limit(1).maybeSingle()
-
-    const rate = rateRow ? Number(rateRow.hourly_rate) : 0
-    tradeHours[userId].rate = rate
-    tradeHours[userId].cost = Math.round(tradeHours[userId].hours * rate * 100) / 100
-  }
+  const tradeHours = await loadDatedTradeLabour(client, assignments || [], 'Unknown')
+  const totalHours = Object.values(tradeHours).reduce((sum, trade) => sum + trade.hours, 0)
 
   // Get trade invoices that reference this job
   const jobNumber = job?.job_number || ''
@@ -58394,6 +58423,8 @@ async function labourReconciliation(client: any, params: URLSearchParams) {
 }
 
 // ── trade_labour_budget: labour budget view for lead installer ──
+export const _labourReconciliationForTest = labourReconciliation
+
 async function tradeLabourBudget(
   client: any,
   params: URLSearchParams,
@@ -58446,33 +58477,15 @@ async function tradeLabourBudget(
 
   // Get all trade hours for this job
   const { data: assignments } = await client.from('job_assignments')
-    .select('user_id, started_at, completed_at, users:user_id(name)')
+    .select('user_id, scheduled_date, started_at, completed_at, users:user_id(name)')
     .eq('job_id', jobId)
     .eq('status', 'complete')
     .not('started_at', 'is', null)
     .not('completed_at', 'is', null)
 
-  let totalHours = 0
-  const trades: any[] = []
-  const byUser: Record<string, { name: string, hours: number }> = {}
-
-  for (const a of (assignments || [])) {
-    const hours = Math.round(((new Date(a.completed_at).getTime() - new Date(a.started_at).getTime()) / 3600000) * 100) / 100
-    totalHours += hours
-    const uid = a.user_id
-    const name = (a.users as any)?.name || 'Trade'
-    if (!byUser[uid]) byUser[uid] = { name, hours: 0 }
-    byUser[uid].hours += hours
-  }
-
-  // Get rates
-  for (const [uid, data] of Object.entries(byUser)) {
-    const { data: rateRow } = await client.from('trade_rates')
-      .select('hourly_rate').eq('user_id', uid).is('effective_to', null)
-      .order('effective_from', { ascending: false }).limit(1).maybeSingle()
-    const rate = rateRow ? Number(rateRow.hourly_rate) : 0
-    trades.push({ user_id: uid, name: data.name, hours: data.hours, rate, cost: Math.round(data.hours * rate * 100) / 100 })
-  }
+  const byUser = await loadDatedTradeLabour(client, assignments || [], 'Trade')
+  const trades = Object.entries(byUser).map(([user_id, data]) => ({ user_id, ...data }))
+  const totalHours = trades.reduce((sum, trade) => sum + trade.hours, 0)
 
   const totalCost = trades.reduce((s: number, t: any) => s + t.cost, 0)
 
