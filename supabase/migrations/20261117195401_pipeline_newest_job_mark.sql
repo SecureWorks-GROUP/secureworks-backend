@@ -12,9 +12,9 @@ RETURNS TABLE(last_marked_at timestamptz)
 LANGUAGE sql STABLE SECURITY INVOKER AS $fn$
  SELECT e.marked_at AS last_marked_at
  FROM public.job_change_mark_events e
- WHERE EXISTS (
-  SELECT 1 FROM public.jobs j WHERE j.id=e.job_id AND j.org_id=p_org_id
- )
+ -- Keep the ownership check as a scalar primary-key probe. An EXISTS can
+ -- become a hash join that scans and sorts the entire marks heap before LIMIT.
+ WHERE (SELECT j.org_id FROM public.jobs j WHERE j.id=e.job_id)=p_org_id
  ORDER BY e.marked_at DESC
  LIMIT 1
 $fn$;
