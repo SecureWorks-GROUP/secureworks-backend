@@ -3,6 +3,7 @@
 // verification on, which refuses every x-api-key caller at the gateway (401).
 import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
 import { listExpenseReceipts } from './expense_list.ts'
+import { factReadOn } from './fact_reader_switch.ts'
 import { rejectTradeInvoiceStorage } from './trade_invoice_rejection.ts'
 import { syncConversationCache } from './conversation_cache_write.ts'
 import { isMoneyAction, moneyActionGate, readMoneyActionFlags } from "./money_actions.ts"
@@ -21058,6 +21059,7 @@ async function resolveJobs(client: any, body: any) {
 }
 
 async function getJobContextFacts(client: any, body: any) {
+  if (!(await factReadOn(client))) return { rows: [], facts_retired: true }
   const jobUuids: string[] = Array.isArray(body?.job_uuids) ? body.job_uuids : []
   if (jobUuids.length === 0) return { rows: [] }
   const limit = typeof body?.limit === 'number' && body.limit > 0
@@ -21539,6 +21541,7 @@ async function assembleJobDossier(client: any, body: any) {
   // read-only SQL functions, instead of the heavy reads below.
   if (mode === 'story') return await buildStoryDossier(client, jobRow, body)
 
+  const factsRetired = !(await factReadOn(client))
   const jobId: string = jobRow.id
   const jobNumber: string = jobRow.job_number
   const ghlContactId: string | null = jobRow.ghl_contact_id || null
@@ -21667,7 +21670,7 @@ async function assembleJobDossier(client: any, body: any) {
   const conversationAsc = [...conversationRead.data].reverse()
 
   // SQL view filters retired/expired facts BEFORE this bounded order/limit.
-  const factsRead = await safeRead('current_job_context_facts', async () => {
+  const factsRead = factsRetired ? { data: [], status: { ok: true, count: 0 } } : await safeRead('current_job_context_facts', async () => {
     const { data, error } = await client.from('current_job_context_facts')
       .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at, expires_at, _context_store')
       .eq('job_id', jobId)
@@ -21712,7 +21715,7 @@ async function assembleJobDossier(client: any, body: any) {
     readScopeSignOff(client, jobId),
     readScopeRevisionAlignment(client, jobId, jobRow.scope_json, jobRow.type),
     readJobFreshness(client, jobId),
-    safeRead('job_brief', async () => {
+    factsRetired ? { data: [], status: { ok: true, count: 0 } } : safeRead('job_brief', async () => {
       const { data, error } = await client.from('current_job_context_facts')
         .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at, expires_at, _context_store')
         .eq('job_id', jobId)
@@ -21756,8 +21759,9 @@ async function assembleJobDossier(client: any, body: any) {
 
   // ── Diagnostics ──
   const warnings: string[] = []
+  if (factsRetired) warnings.push('The old AI facts list is retired. Read the job story for what was said and what is owed.')
   if (excludedFacts) warnings.push(`facts: ${excludedFacts} superseded, retracted, untrusted or expired rows withheld from this bounded read`)
-  if (factsRead.status.ok && currentFacts.length === 0) {
+  if (!factsRetired && factsRead.status.ok && currentFacts.length === 0) {
     warnings.push('facts: no current rows returned; historical or out-of-window evidence may still exist')
   }
   warnings.push('reasoning/outcomes: Layer 7 schema not yet job-linked')
@@ -21839,6 +21843,7 @@ async function assembleJobDossier(client: any, body: any) {
     events: eventsRead.data,
     conversation: conversationAsc,
     facts: readableFacts,
+    ...(factsRetired ? { facts_retired: true } : {}),
     temporaryFacts,
     // How current `facts` are (context K4, cadence design section 4).
     freshness: freshnessRead.freshness,

@@ -17,6 +17,7 @@
 // one door call per invoice.
 
 import { isLunaSubscriptionFact } from "./context_visibility.ts";
+import { factReadOn } from "./fact_reader_switch.ts";
 import { DEBT_CHASE_HISTORY_FILTER } from "./debt_chase_history.ts";
 import {
   currentPriceIncGst,
@@ -449,8 +450,11 @@ async function factsCountByJob(
   deps: InvoiceContextDeps,
   jobIds: string[],
   warnings: string[],
-): Promise<{ counts: Map<string, number>; status: SourceStatus }> {
+): Promise<{ counts: Map<string, number>; status: SourceStatus; facts_retired?: true }> {
   const counts = new Map<string, number>();
+  if (!(await factReadOn(deps.client))) {
+    return { counts, status: { ok: true, count: 0 }, facts_retired: true };
+  }
   const now = (deps.now ?? (() => new Date()))().getTime();
   const read = await safeRead("current_job_context_facts", async () => {
     const rows: any[] = [];
@@ -823,6 +827,7 @@ export async function invoiceContext(
     );
   }
   const inv = invRows[0];
+  const factsRetired = !(await factReadOn(client));
 
   const sources: Record<string, SourceStatus> = {
     invoice: { ok: true, count: 1 },
@@ -912,7 +917,7 @@ export async function invoiceContext(
               }).limit(1),
             ),
         ),
-        safeRead(
+        factsRetired ? { data: [], status: { ok: true, count: 0 } } : safeRead(
           "current_job_context_facts",
           async () =>
             unwrap(
@@ -1152,7 +1157,7 @@ export async function invoiceContext(
         sources.facts.error ?? "unknown error"
       }); whether Luna has extracted this job is unknown`,
     });
-  } else if (job && facts.length === 0) {
+  } else if (!factsRetired && job && facts.length === 0) {
     blockers.push({
       code: "facts_missing",
       owner: "CIO",
@@ -1198,7 +1203,7 @@ export async function invoiceContext(
       warnings.push(`${label}: read failed (${s.error ?? "unknown"})`);
     }
   }
-  if (job && sources.facts?.ok && facts.length === 0) {
+  if (!factsRetired && job && sources.facts?.ok && facts.length === 0) {
     warnings.push("facts: 0 rows, extractor has not written for this job yet");
   }
 
@@ -1269,6 +1274,7 @@ export async function invoiceContext(
       provenance: f.provenance ?? null,
       updated_at: f.updated_at ?? null,
     })),
+    ...(factsRetired ? { facts_retired: true } : {}),
     conversation: {
       messages: conversation.map((m: any) => ({
         at: m.occurred_at ?? null,
@@ -1449,7 +1455,7 @@ export async function debtContextCoverage(
     }
     if (jobId && job && !ghlKnown) blockers.push("no_ghl_contact");
     if (jobId && !factsOk) blockers.push("facts_unreadable");
-    else if (jobId && factsCount === 0) blockers.push("facts_missing");
+    else if (!facts.facts_retired && jobId && factsCount === 0) blockers.push("facts_missing");
     if (jobId && !conversationOk) blockers.push("conversation_unreadable");
     else if (jobId && clientCount === 0) blockers.push("conversation_missing");
     if (!xeroFresh) blockers.push("xero_stale");
@@ -1484,6 +1490,7 @@ export async function debtContextCoverage(
       contact_known: contactKnown,
       ghl_contact_known: jobId ? ghlKnown : null,
       facts_count: jobId && factsOk ? factsCount : null,
+      ...(facts.facts_retired ? { facts_retired: true } : {}),
       conversation_count: jobId && conversationOk ? clientCount : null,
       conversation_sources: c
         ? {
