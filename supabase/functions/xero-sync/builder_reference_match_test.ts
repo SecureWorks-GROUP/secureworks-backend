@@ -379,6 +379,8 @@ function fakeClient(o: {
       not: (...a: unknown[]) => { call.filters.push({ op: "not", args: a }); return b; },
       ilike: (...a: unknown[]) => { call.filters.push({ op: "ilike", args: a }); return b; },
       order: () => b,
+      range: () => b,
+      like: (...a: unknown[]) => { call.filters.push({ op: "like", args: a }); return b; },
       limit: () => b,
       maybeSingle: () => Promise.resolve({ data: null, error: null }),
       then: (resolve: any, reject?: any) => {
@@ -461,7 +463,7 @@ Deno.test("Matcher: several candidates become one person's item and no contact-n
 
 Deno.test("Matcher: an invoice a person already resolved or dismissed is not raised again", async () => {
   const sale = { ...SALE_1775, reference: "MLB-27580", line_items: [{ Description: "make-safe attendance", Tracking: MAKESAFE }] };
-  const { client, calls, inserts } = fakeClient({ sales: [sale], candidates: { data: SIBLINGS, error: null }, annotations: [{ id: "ann-dismissed" }] });
+  const { client, calls, inserts } = fakeClient({ sales: [sale], candidates: { data: SIBLINGS, error: null }, annotations: [{ source_ref: "sync:unlinked:xero-1775", status: "dismissed" }] });
   const r: any = await matchUnlinkedInvoices(client);
   assertEquals(r.flagged, 1);
   assertEquals(inserts.filter((i) => i.table === "ai_annotations").length, 0);
@@ -477,7 +479,7 @@ Deno.test("Matcher: a failed candidate read links nothing by the rule and the co
     const r: any = await matchUnlinkedInvoices(client);
     assertEquals([r.matched, r.builder_reference.ready, r.builder_reference.error], [0, false, "boom"]);
     assert(!calls.some((c) => c.table === "xero_invoices" && c.update));
-    assert(calls.some((c) => c.table === "jobs" && c.filters.some((f) => f.op === "ilike")), "contact-name match ran");
+    assert(calls.some((c) => c.table === "jobs" && c.select?.includes("client_name")), "contact-name candidates were read");
   } finally {
     console.error = orig;
   }

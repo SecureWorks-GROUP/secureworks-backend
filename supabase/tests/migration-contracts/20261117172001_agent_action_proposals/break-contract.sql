@@ -1,0 +1,1 @@
+DROP INDEX public.agent_action_proposals_one_pending;

@@ -29,6 +29,7 @@ import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldown
 import { createXeroSyncTransport } from './xero_transport.ts'
 import { syncBankTransactionLines } from './bank_transactions.ts'
 import { syncXeroAccounts } from './accounts.ts'
+import { trackingOptionRows } from './tracking_options.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
 import { runInvoiceMirrorCheck } from './xero_mirror_check.ts'
 import { autoReleaseVoidedTradeInvoices } from '../ops-api/trade_invoice_voided_release.ts'
@@ -41,6 +42,7 @@ import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_
 import { incrementalModifiedSince } from './sync_window.ts'
 import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { syncSupplierCreditNotes } from './supplier_credit_notes.ts'
+import { billCostDocument } from './cost_lines.ts'
 import { syncCustomerAllocations } from './customer_allocations.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { BILLS_WINDOW_COLUMNS, readBillsInWindow } from './bills_window_read.ts'
@@ -753,6 +755,33 @@ async function syncInvoices(sb: any) {
   const receiptResults: { xero_invoice_id: string; action: string }[] = []
   const { accessToken, tenantId } = await getToken(sb)
   let tradePdfBackfilled = 0
+  const costLinesChanged = new Set<string>()
+  let costLinesWritten = 0
+  const costLinesErrors: string[] = []
+  let costLinesOn = false
+  const costMirrorBillIds = new Set<string>()
+  try {
+    const { data, error } = await sb.from('feature_flags').select('enabled')
+      .eq('flag_name', 'job_cost_lines_sync_v1').maybeSingle()
+    if (error) throw error
+    costLinesOn = data?.enabled === true
+    if (costLinesOn) {
+      // Page the one mirror read so the PostgREST row ceiling cannot admit a mirror.
+      for (let start = 0;; start += 1000) {
+        const { data: mirrors, error: mirrorError } = await sb.from('trade_invoices')
+          .select('xero_bill_id').eq('org_id', DEFAULT_ORG_ID).not('xero_bill_id', 'is', null)
+          .order('id').range(start, start + 999)
+        if (mirrorError || !Array.isArray(mirrors)) throw mirrorError ?? new Error('Mirror read unavailable')
+        for (const row of mirrors) costMirrorBillIds.add(row.xero_bill_id)
+        if (mirrors.length < 1000) break
+      }
+    }
+  } catch (e) {
+    costLinesOn = false
+    const message = (e as Error).message
+    costLinesErrors.push(message)
+    console.error('[xero-sync] Cost line admission failed:', message)
+  }
 
   // Find last Xero-side update time (not our sync time) for incremental fetch.
   // Using updated_at (Xero's UpdatedDateUTC) ensures we catch all changes
@@ -804,6 +833,7 @@ async function syncInvoices(sb: any) {
         break
       }
 
+      const costDocuments: NonNullable<ReturnType<typeof billCostDocument>>[] = []
       // Upsert each invoice — preserve existing job_id linkage
       for (const inv of invoices) {
         // Check if this invoice already has a job link (set by createInvoice)
@@ -855,6 +885,10 @@ async function syncInvoices(sb: any) {
           console.error(`Failed to upsert invoice ${inv.InvoiceNumber}:`, error.message)
         } else {
           totalSynced++
+          if (costLinesOn) {
+            const document = billCostDocument(record, { orgId: DEFAULT_ORG_ID, mirrorBillIds: costMirrorBillIds })
+            if (document) costDocuments.push(document)
+          }
 
           // Auto-link invoice to job via SW reference number in Reference field.
           // Matches patterns like SWP-25001, SWF-25002, SW1615, etc.
@@ -1143,6 +1177,18 @@ async function syncInvoices(sb: any) {
         }
       }
 
+      if (costDocuments.length) {
+        try {
+          const { data, error } = await sb.rpc('job_cost_lines_upsert_documents', { p_docs: costDocuments })
+          if (error) throw error
+          costLinesWritten += Number(data?.lines_written ?? 0)
+          for (const id of data?.changed ?? []) costLinesChanged.add(id)
+        } catch (e) {
+          const message = (e as Error).message
+          costLinesErrors.push(message)
+          console.error('[xero-sync] Bill cost lines failed:', message)
+        }
+      }
       // Xero returns max 100 per page
       hasMore = invoices.length === 100
       page++
@@ -1201,7 +1247,7 @@ async function syncInvoices(sb: any) {
   const contactAddressSweep = await sweepContactAddresses(sb, accessToken, tenantId)
 
   // ── Match unlinked invoices after sync ──
-  const matchResult = await matchUnlinkedInvoices(sb)
+  const matchResult = await matchUnlinkedInvoicesOnChange(sb, totalSynced)
 
   // ── Invoice evidence onto its job (B-4) ──
   // Rows about an invoice that now has a job go to that job in this pass, so a payment
@@ -1323,11 +1369,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
+    payload: { synced: totalSynced, cost_lines: { lines_written: costLinesWritten }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
+  return { success: true, synced: totalSynced, cost_lines: { lines_written: costLinesWritten }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
 }
 
 
@@ -1371,6 +1417,31 @@ async function invoiceMirrorCheck(sb: any, force: boolean) {
 // ════════════════════════════════════════════════════════════
 
 /** Exported for regression tests (M1 Strategy 2 / silent-400 guard). */
+export async function matchUnlinkedInvoicesOnChange(client: any, totalSynced: number, now = new Date()) {
+  let onChange = false
+  try {
+    const { data, error } = await client.from('feature_flags').select('enabled')
+      .eq('flag_name', 'xero_unlinked_match_on_change_v1').maybeSingle()
+    onChange = !error && data?.enabled === true
+  } catch {
+    // An unreadable switch preserves the existing every-run behaviour.
+  }
+  if (onChange && totalSynced === 0) {
+    const { data, error } = await client.from('xero_sync_state').select('cursor_at')
+      .eq('key', 'unlinked_match_last_run_at').maybeSingle()
+    const lastRun = error ? NaN : Date.parse(data?.cursor_at ?? '')
+    if (Number.isFinite(lastRun) && now.getTime() - lastRun <= 60 * 60 * 1000) {
+      return { matched: 0, flagged: 0, skipped: 'no_change' }
+    }
+  }
+  const result = await matchUnlinkedInvoices(client)
+  const { error } = await client.from('xero_sync_state').upsert({
+    key: 'unlinked_match_last_run_at', cursor_at: now.toISOString(),
+  }, { onConflict: 'key' })
+  if (error) console.error('[xero-sync] Unlinked match timestamp write failed:', error.message)
+  return result
+}
+
 export async function matchUnlinkedInvoices(client: any) {
   let matched = 0
   let flagged = 0
@@ -1399,6 +1470,39 @@ export async function matchUnlinkedInvoices(client: any) {
 
     if (unlinked.length === 0) return { matched: 0, flagged: 0 }
 
+    const jobs = await readAll<any>(() => client.from('jobs')
+      .select('id, job_number, client_name, type, status, legacy, org_id, created_at').order('id'))
+    if (!jobs) {
+      console.error('[xero-sync] Unlinked match jobs unreadable')
+      return { matched: 0, flagged: 0, error: 'jobs unreadable' }
+    }
+    const jobsByNumber = new Map<string, any[]>()
+    const liveByName = new Map<string, any[]>()
+    for (const job of jobs) {
+      const numbered = jobsByNumber.get(job.job_number) || []
+      numbered.push(job)
+      jobsByNumber.set(job.job_number, numbered)
+      if (job.org_id !== DEFAULT_ORG_ID || job.legacy !== false ||
+          ['cancelled', 'lost', 'draft'].includes(job.status)) continue
+      const name = String(job.client_name || '').toLowerCase()
+      const named = liveByName.get(name) || []
+      named.push(job)
+      liveByName.set(name, named)
+    }
+    for (const named of liveByName.values()) {
+      named.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+    }
+    // Both annotation producers use this prefix. Read once before any link so
+    // a failed annotation read cannot turn into missing review evidence.
+    const annotations = await readAll<any>(() => client.from('ai_annotations')
+      .select('source_ref, status').like('source_ref', 'sync:unlinked:%').order('source_ref'))
+    if (!annotations) {
+      console.error('[xero-sync] Unlinked match annotations unreadable')
+      return { matched: 0, flagged: 0, error: 'annotations unreadable' }
+    }
+    const anyRef = new Set(annotations.map((row) => row.source_ref))
+    const activeRef = new Set(annotations.filter((row) => row.status === 'active').map((row) => row.source_ref))
+
     // One candidate read for every customer invoice in this pass. A failed read
     // links nothing by the builder rule; every other strategy runs as before.
     const builderRef = await loadBuilderReferenceCandidates(client, unlinkedSales || [])
@@ -1416,10 +1520,8 @@ export async function matchUnlinkedInvoices(client: any) {
       // this one. extractJobNumber() catches SW(MS|<letter>)-#### uniformly.
       const jobNum = extractJobNumber(ref)
       if (jobNum) {
-        const { data: job } = await client.from('jobs')
-          .select('id, job_number, type')
-          .eq('job_number', jobNum)
-          .maybeSingle()
+        const list = jobsByNumber.get(jobNum) || []
+        const job = list.length === 1 ? list[0] : null
 
         if (job) {
           const refusal = await sealedSesXeroLinkRefusal(
@@ -1537,10 +1639,12 @@ export async function matchUnlinkedInvoices(client: any) {
           // One item per invoice, ever: once a person has resolved or dismissed it,
           // the 15-minute sync does not raise it again.
           const annotation = builderReferenceAnnotation(inv, decision, DEFAULT_ORG_ID)
-          const { data: existingAnn } = await client.from('ai_annotations')
-            .select('id').eq('source_ref', annotation.source_ref).limit(1)
-          if (!existingAnn || existingAnn.length === 0) {
-            await client.from('ai_annotations').insert(annotation).then(() => undefined, () => undefined)
+          if (!anyRef.has(annotation.source_ref)) {
+            const { error } = await client.from('ai_annotations').insert(annotation)
+            if (!error) {
+              anyRef.add(annotation.source_ref)
+              activeRef.add(annotation.source_ref)
+            }
           }
           flagged++
           builderRefResult.flagged++
@@ -1550,23 +1654,7 @@ export async function matchUnlinkedInvoices(client: any) {
 
       // Strategy 2: Contact name matches a job client_name exactly
       if (contactName) {
-        const { data: jobs, error: jobsErr } = await client.from('jobs')
-          .select('id, job_number, client_name, pricing_json, type')
-          .eq('org_id', '00000000-0000-0000-0000-000000000001')
-          .eq('legacy', false)
-          .ilike('client_name', contactName)
-          // A draft is a sales lead with no work: never a name-match home
-          // for money, and never a rival that blocks the real job's link.
-          .not('status', 'in', '("cancelled","lost","draft")')
-          .order('created_at', { ascending: false })
-          .limit(5)
-
-        // A failed lookup must not read as "no candidate jobs" — that is
-        // indistinguishable from a genuine miss and silently skips the link.
-        if (jobsErr) {
-          console.error(`[xero-sync] Strategy 2 job lookup failed for invoice ${inv.invoice_number} (contact "${contactName}"):`, jobsErr.message)
-          continue
-        }
+        const jobs = (liveByName.get(contactName.toLowerCase()) || []).slice(0, 5)
 
         if (jobs && jobs.length === 1) {
           // Exact single match — high confidence, auto-link
@@ -1614,10 +1702,8 @@ export async function matchUnlinkedInvoices(client: any) {
         if (jobs && jobs.length > 1) {
           // Write annotation instead of alert — shows in Inbox with resolution buttons
           const _srcRef = `sync:unlinked:${inv.xero_invoice_id}`
-          const { data: _existingAnn } = await client.from('ai_annotations')
-            .select('id').eq('source_ref', _srcRef).eq('status', 'active').limit(1)
-          if (!_existingAnn || _existingAnn.length === 0) {
-            await client.from('ai_annotations').insert({
+          if (!activeRef.has(_srcRef)) {
+            const { error } = await client.from('ai_annotations').insert({
               org_id: '00000000-0000-0000-0000-000000000001',
               entity_type: 'invoice',
               entity_id: null,
@@ -1640,7 +1726,11 @@ export async function matchUnlinkedInvoices(client: any) {
               source: 'xero-sync',
               source_ref: _srcRef,
               confidence: 0.5,
-            }).then(() => undefined, () => undefined)
+            })
+            if (!error) {
+              anyRef.add(_srcRef)
+              activeRef.add(_srcRef)
+            }
           }
 
           flagged++
@@ -2740,6 +2830,19 @@ async function syncTrackingPL(sb: any) {
   const now = new Date()
   const results: any[] = []
 
+  let optionsSynced: number | null = null
+  try {
+    const cats = await xeroGet('/TrackingCategories', accessToken, tenantId, { includeArchived: 'true' })
+    const rows = trackingOptionRows(cats, DEFAULT_ORG_ID, TRACKING_CATEGORY_ID, now.toISOString())
+    if (rows.length > 0) {
+      const { error } = await sb.from('xero_tracking_options').upsert(rows, { onConflict: 'org_id,option_id' })
+      if (error) throw error
+    }
+    optionsSynced = rows.length
+  } catch (error) {
+    console.error('[xero-sync] tracking options not stored', error)
+  }
+
   // Fetch P&L by tracking category for last 12 months (one month at a time)
   for (let i = 0; i < 12; i++) {
     const monthStart = new Date(now.getFullYear(), now.getMonth() - i, 1)
@@ -2834,6 +2937,7 @@ async function syncTrackingPL(sb: any) {
   return {
     success: true,
     months_synced: results.filter(r => r.status === 'ok').length,
+    options_synced: optionsSynced,
     months_failed: results.filter(r => r.status === 'error').length,
     results,
   }

@@ -107,7 +107,7 @@ Deno.test("xeroDay: DateString's own day, /Date()/ as UTC, anything else null", 
 type Row = Record<string, unknown>;
 type Call = { path: string; params: Record<string, string>; headers: Record<string, string> };
 
-function fake(opts: { flag?: boolean | "error"; state?: Row[]; rpc?: (args: Row) => { data: unknown; error: unknown } } = {}) {
+function fake(opts: { flag?: boolean | "error"; state?: Row[]; costError?: boolean; rpc?: (args: Row) => { data: unknown; error: unknown } } = {}) {
   const state: Row[] = structuredClone(opts.state ?? []);
   const rpcs: Row[] = [];
   const client = {
@@ -143,6 +143,9 @@ function fake(opts: { flag?: boolean | "error"; state?: Row[]; rpc?: (args: Row)
     },
     rpc(fn: string, args: Row) {
       rpcs.push({ fn, ...args });
+      if (fn === "job_cost_lines_sync_credit_notes") return Promise.resolve(opts.costError
+        ? { data: null, error: { message: "cost sync refused" } }
+        : { data: { documents: (args.p_credit_note_ids as string[]).length }, error: null });
       return Promise.resolve(opts.rpc ? opts.rpc(args) : { data: "written", error: null });
     },
   };
@@ -176,7 +179,7 @@ Deno.test("credit note sync: first run reads everything, asks for ACCPAYCREDIT o
     params: { where: 'Type=="ACCPAYCREDIT"', page: "1", pageSize: "100", order: "CreditNoteID ASC" },
     headers: {},
   }]);
-  assertEquals(f.rpcs.map((c) => [c.fn, c.p_org_id, (c.p_note as Row).xero_credit_note_id, c.p_allocations === null]), [
+  assertEquals(f.rpcs.filter(c => c.fn === "xero_supplier_credit_note_copy").map((c) => [c.fn, c.p_org_id, (c.p_note as Row).xero_credit_note_id, c.p_allocations === null]), [
     ["xero_supplier_credit_note_copy", ORG, CN1, false],
     ["xero_supplier_credit_note_copy", ORG, CN2, true],
   ]);
@@ -227,4 +230,21 @@ Deno.test("credit note sync: a stale answer is counted, not an error", async () 
   const f = fake({ flag: true, rpc: () => ({ data: "stale", error: null }) });
   const r = await syncSupplierCreditNotes(f.client, ORG, TENANT, provider([{ CreditNotes: [NOTE] }]).get, () => NOW);
   assertEquals(r.ran && [r.written, r.stale], [0, 1]);
+});
+
+Deno.test("credit cost sync: written ids only; errors preserve successful copy", async () => {
+  for (const costError of [false,true]) {
+    const f = fake({ flag: true, costError });
+    const r = await syncSupplierCreditNotes(f.client, ORG, TENANT,
+      provider([{ CreditNotes: [NOTE,{ ...NOTE,CreditNoteID: CN2 }] }]).get, () => NOW);
+    assertEquals(r.ran && r.written,2);
+    assertEquals(f.rpcs.filter(c => c.fn === "job_cost_lines_sync_credit_notes").map(c => c.p_credit_note_ids), [[CN1,CN2]]);
+    assertEquals(r.ran && r.cost_lines.error, costError ? "cost sync refused" : undefined);
+  }
+  const f = fake({ flag: true });
+  await syncSupplierCreditNotes(f.client,ORG,TENANT,provider([{ CreditNotes: [] }]).get,() => NOW);
+  assertEquals(f.rpcs.length,0);
+  const stale = fake({ flag: true,rpc: () => ({ data: "stale",error: null }) });
+  await syncSupplierCreditNotes(stale.client,ORG,TENANT,provider([{ CreditNotes: [NOTE] }]).get,() => NOW);
+  assertEquals(stale.rpcs.filter(c => c.fn === "job_cost_lines_sync_credit_notes"),[]);
 });

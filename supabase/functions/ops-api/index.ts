@@ -2,6 +2,8 @@
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
 import { REIMBURSEMENT_FLAG, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
+import { isMoneyAction, moneyActionGate, readMoneyActionFlags } from "./money_actions.ts"
+import { agentProposalAction } from "./agent_proposals.ts"
 import { setCouncilRequired } from './council_mark.ts'
 import { JobLabourPayReadError, readHourlyCappedJobs, readHourlyLabourLimits } from './job_labour_cap.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
@@ -32,6 +34,7 @@ import {
   normaliseExtraItem,
 } from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
+import { divisionTrackingOption } from '../_shared/xero_draft_standard.ts'
 import { commissionCapCodeFromDbError, commissionCapRefusal, readJobCommissionRecords } from './job_commission.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
@@ -1659,6 +1662,7 @@ import {
   setReviewOptOut,
 } from './job_closeout.ts'
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
+import { readPipelineStamp } from './pipeline_stamp.ts'
 import {
   type AutoStartDeps,
   loadJobAutoStartCandidates,
@@ -6483,7 +6487,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     // the routine cannot reach anything privileged here regardless (deny-list + gates).
     const authModeLegacy: 'api_key' | 'jwt' = authMode === 'jwt' ? 'jwt' : 'api_key'
 
+    const fromPerson = authMode === 'jwt' && !!authUser
+    if (!fromPerson && isMoneyAction(action || '', body)) {
+      const moneyFlags = await readMoneyActionFlags(client)
+      const moneyProposal = await moneyActionGate(client, {
+        action: action || '', method: req.method, body,
+        actor: requestActor.actor || 'actor_missing', authMode, fromPerson,
+      }, moneyFlags)
+      if (moneyProposal) return json(moneyProposal.body, moneyProposal.status)
+    }
+
     switch (action) {
+      case 'list_agent_proposals':
+      case 'carry_out_agent_proposal':
+      case 'decline_agent_proposal': {
+        const proposal = await agentProposalAction(client, {
+          action, method: req.method, body, query: url.searchParams,
+          authMode, user: authUser, staff: _opsApiStaffOperatorRole(authUser?.role),
+          url: req.url, headers: req.headers,
+        })
+        return json(proposal.body, proposal.status)
+      }
       case 'sales_performance_write':
       case 'sales_performance_read':
       case 'sales_performance_note': {
@@ -6726,6 +6750,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // The paid close-out block reads service-role close-out tables: staff only.
         includeCloseout: _opsApiCallerIsStaffOperator(authMode, authUser),
       }))
+      // The Jobs board's change stamp (P0-15.1, pipeline_stamp.ts): three small reads
+      // so the 5 minute refresh loads the board only when something changed.
+      case 'pipeline_stamp': {
+        if (authMode !== 'jwt' || !_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: 'A signed-in operator session is required.', code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+        const { stamp } = await readPipelineStamp(client, String(authUser?.orgId || ''))
+        return json({ ok: true, stamp })
+      }
       case 'makesafe_board': {
         // Outer JWT / projection gates live in makesafeBoardAction so the trade
         // envelope is one function the HTTP case and the deterministic proof share.
@@ -11710,7 +11744,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'scope_availability': return json(await scopeAvailability(client, url.searchParams))
       case 'dismiss_alert': return json(await dismissAlert(client, body))
       case 'annotations': return json(await getAnnotations(client, url.searchParams))
-      case 'resolve_annotation': return json(await resolveAnnotation(client, body))
+      case 'resolve_annotation': return json(await resolveAnnotation(client, body, {
+        authMode, role: authUser?.role, requestActor,
+      }))
       case 'set_availability': return json(await setAvailability(client, body))
       case 'confirm_assignment': return json(await confirmAssignment(client, body))
       case 'bulk_confirm': return json(await bulkConfirm(client, body))
@@ -42968,59 +43004,14 @@ async function addPOEvent(client: any, body: any) {
 }
 
 // ── Tracking category helper ──
-// Maps a job to its Xero "Business Unit" tracking option.
-//
-// SWR- IS NOW AMBIGUOUS, AND THIS FUNCTION REFUSES TO GUESS.
-//
-// The prefix was already shared by renovation and roofing; repair makes it three
-// ways. An insurance repair is SES insurance work and books where the make-safe /
-// SES insurance work books — NOT 'SW - PRIVATE ROOFING', which is private
-// roofing revenue. So a bare SWR- number can no longer decide a business unit,
-// and returning a wrong category is worse than returning none: every caller
-// already handles the empty answer (they skip Tracking, or fall back to
-// 'Construction' in a description), whereas a wrong one silently misfiles
-// revenue and nobody notices until month end.
-//
-// Pass the job type wherever a job row is in hand and the answer is exact.
-// Callers holding only a job-number string (supplier bills, WO cost lines) get
-// '' for SWR-. Every OTHER prefix is untouched and answers exactly as before.
-//
-// The pre-merge premise (PR #771) was that production held zero renovation
-// jobs, zero roofing jobs and zero SWR- job numbers, so no existing row changed
-// answer. That premise is spent: the repair SWR- mint lane went live 2026-08-28,
-// which is exactly why a bare SWR- number must keep resolving to '' rather than
-// being taught a default. Re-measure production before assuming any count here.
-//
-// 'SW - MAKESAFE' for repair is inherited from the make-safe route, and the
-// captain confirmed the intent behind it on 2026-08-31: repair revenue books as
-// make-safe / insurance work, so it tracks where SES insurance work already
-// tracks. Read that intent, not the string — a future tracking split follows the
-// insurance work, not the 'repair' label. (Closes what this comment carried as
-// OPEN RISK #2; OPEN RISK #1, captain signoff on the money-seal path, is a
-// different question and stays open in the 20260826000001 migration header.)
+// Maps a job to its Xero "Business Unit" tracking option. The rule, and why a
+// bare SWR- number answers '', live in divisionTrackingOption
+// (_shared/xero_draft_standard.ts). New draft rules have a separate opt-in entry.
 // The only Business Unit options ensure_xero_tracking_option may add.
 const XERO_TRACKING_OPTIONS_WE_MAY_ADD = ['SW - RESTORATION']
 
 function trackingCategoryForJob(jobNumber: string, jobType?: string | null): string {
-  // An explicit type always wins, including when the job has no number yet.
-  const type = String(jobType || '').trim().toLowerCase()
-  // Granny-flat accounting is unresolved. Never infer a division from its retained number.
-  if (type === 'granny_flat') return ''
-  if (type === 'repair') return 'SW - MAKESAFE'
-  if (type === 'roofing' || type === 'renovation') return 'SW - PRIVATE ROOFING'
-  if (!jobNumber) return ''
-  const upper = jobNumber.toUpperCase()
-  // SWRESTO- (restoration) has its own Business Unit option (owner, 12 Nov
-  // 2026); it must be read before the 'SWR' slice below, which answers ''.
-  if (upper.startsWith('SWRESTO-')) return 'SW - RESTORATION'
-  if (upper.startsWith('SWMS-') || upper.startsWith('AJBR') || upper.startsWith('MS1') || upper.startsWith('BWCWA') || upper.startsWith('WB6')) return 'SW - MAKESAFE'
-  const prefix = upper.slice(0, 3)
-  if (prefix === 'SWP') return 'SW - PATIOS'
-  if (prefix === 'SWF') return 'SW - FENCING'
-  if (prefix === 'SWD') return 'SW - DECKING'
-  if (prefix === 'SWI') return 'SW - INSURANCE WORK'
-  // 'SWR' deliberately falls through to '': renovation | roofing | repair.
-  return ''
+  return divisionTrackingOption(jobNumber, jobType)
 }
 
 // Builds Xero Tracking array for a line item
@@ -58002,6 +57993,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     row.invoice_mode = mode?.invoice_mode ?? null
     row.invoice_mode_reason = mode?.invoice_mode_reason ?? null
     row.can_claim_commission = mode ? mode.can_claim_commission : null
+    row.commission = mode?.commission ?? { state: 'not_known', offer_ex: null }
     // The trade's own pay for the job: the approved job work order's agreed
     // labour, which the trade bills exactly (Marnin, 12 Nov 2026). Null when
     // there is none or it could not be read.
@@ -63052,8 +63044,11 @@ async function getAnnotations(client: any, params: URLSearchParams) {
 }
 
 // POST: Resolve an annotation with response
-async function resolveAnnotation(client: any, body: any) {
-  const { annotation_id, response_value, response_text, operator_email } = body
+export async function resolveAnnotation(client: any, body: any, caller?: {
+  authMode: string; role?: string; requestActor: ReturnType<typeof resolveRequestActor>;
+}) {
+  const { annotation_id, response_value, response_text } = body
+  let operator_email = body.operator_email
   if (!annotation_id) throw new Error('annotation_id required')
 
   // Fetch annotation
@@ -63064,10 +63059,27 @@ async function resolveAnnotation(client: any, body: any) {
     .single()
   if (fetchErr || !ann) throw new Error('Annotation not found or already resolved')
 
+  let guardedLink = false
+  if (ann.annotation_type === 'unlinked_invoice') {
+    try {
+      const flag = await client.from('feature_flags').select('enabled')
+        .eq('flag_name', 'inbox_link_v1').maybeSingle()
+      guardedLink = !flag.error && flag.data?.enabled === true
+    } catch { /* Missing or unreadable switch keeps the legacy path. */ }
+    if (guardedLink) {
+      if (caller?.authMode !== 'jwt' || !_opsApiStaffOperatorRole(caller.role) ||
+          caller.requestActor.source !== 'jwt' || caller.requestActor.missing) {
+        throw new ApiError('person_session_required', 403)
+      }
+      operator_email = caller.requestActor.actor
+      await applyGuardedAnnotationInvoiceLink(client, ann, body)
+    }
+  }
+
   // F8 sibling preflight: an annotation must remain active when a forbidden
   // sealed-SES link is refused, and neither the invoice nor annotation may be
   // changed before the typed fence result is returned.
-  if (ann.annotation_type === 'unlinked_invoice') {
+  if (ann.annotation_type === 'unlinked_invoice' && !guardedLink) {
     if (response_value === 'link' && ann.structured_data?.job_id) {
       await assertLegacySesMoneyActionAllowedForJob(
         client,
@@ -63113,6 +63125,7 @@ async function resolveAnnotation(client: any, body: any) {
   // Type-specific dispatch
   switch (ann.annotation_type) {
     case 'unlinked_invoice': {
+      if (guardedLink) break
       if (response_value === 'link' && ann.structured_data?.job_id) {
         // Link the invoice(s) to the job
         const candidateIds = (ann.structured_data.candidate_invoices || []).map((c: any) => c.id).filter(Boolean)
@@ -63296,6 +63309,65 @@ async function resolveAnnotation(client: any, body: any) {
   } catch { /* non-blocking */ }
 
   return { success: true, annotation_id, action }
+}
+
+// Switch-on Inbox Link validates every candidate before changing any invoice.
+async function applyGuardedAnnotationInvoiceLink(client: any, ann: any, body: any) {
+  const response = body.response_value
+  const sd = ann.structured_data || {}
+  let targetJobId: string
+  let invoices: any[]
+  if (response === 'link' && sd.job_id) {
+    targetJobId = sd.job_id
+    const ids = collectUniqueStringIds((sd.candidate_invoices || []).map((row: any) => row.id))
+    const read = await client.from('xero_invoices')
+      .select('id,invoice_type,job_id,invoice_obligation_revision_id,ses_external_token').in('id', ids)
+    if (read.error) throw new ApiError(read.error.message, 500)
+    if (!ids.length || read.data?.length !== ids.length) throw new ApiError('invoice_not_found', 404)
+    invoices = read.data
+  } else if (typeof response === 'string' && response.startsWith('link:')) {
+    targetJobId = response.slice(5)
+    const read = await client.from('xero_invoices')
+      .select('id,invoice_type,job_id,invoice_obligation_revision_id,ses_external_token')
+      .eq('xero_invoice_id', sd.xero_invoice_id).maybeSingle()
+    if (read.error) throw new ApiError(read.error.message, 500)
+    if (!read.data) throw new ApiError('invoice_not_found', 404)
+    invoices = [read.data]
+  } else {
+    return // Dismiss still resolves, under the signed-in staff identity.
+  }
+  if (invoices.some((invoice) => invoice.invoice_type === 'ACCPAY')) {
+    throw new ApiError('use_reconcile', 409, { error: 'use_reconcile', message: 'Bills are placed in Reconcile.' })
+  }
+  const target = await client.from('jobs').select('id,job_number,status').eq('id', targetJobId).maybeSingle()
+  if (target.error) throw new ApiError(target.error.message, 500)
+  if (!target.data || ['cancelled', 'lost'].includes(target.data.status)) throw new ApiError('job_not_live', 409)
+  for (const invoice of invoices) {
+    if (invoice.invoice_obligation_revision_id || invoice.ses_external_token) {
+      throw new SesActionError(409, sealedSesMoneyRefusal('resolve_annotation invoice link', {
+        job_id: invoice.job_id || null,
+        invoice_obligation_revision_id: invoice.invoice_obligation_revision_id || null,
+        has_ses_external_token: !!invoice.ses_external_token,
+      }))
+    }
+    await assertNoSyntheticLivefireJobs(client, [targetJobId, invoice.job_id], 'resolve_annotation invoice link')
+    if (invoice.job_id && invoice.job_id !== targetJobId && body.confirm_replace !== true) {
+      const current = await client.from('jobs').select('job_number').eq('id', invoice.job_id).maybeSingle()
+      if (current.error) throw new ApiError(current.error.message, 500)
+      const currentNumber = current.data?.job_number || invoice.job_id
+      throw new ApiError('link_would_replace', 409, {
+        error: 'link_would_replace', current_job_number: currentNumber, new_job_number: target.data.job_number,
+        message: `This invoice is on ${currentNumber}. Move it to ${target.data.job_number}?`,
+      })
+    }
+  }
+  for (const invoice of invoices) {
+    let update = client.from('xero_invoices').update({ job_id: targetJobId }).eq('id', invoice.id)
+    update = invoice.job_id ? update.eq('job_id', invoice.job_id) : update.is('job_id', null)
+    const result = await update.select('id')
+    if (result.error) throw new ApiError(result.error.message, 500)
+    if (!result.data?.length) throw new ApiError('invoice_link_changed', 409)
+  }
 }
 
 // Dedup helper: check if source_ref already exists as active, insert if not
