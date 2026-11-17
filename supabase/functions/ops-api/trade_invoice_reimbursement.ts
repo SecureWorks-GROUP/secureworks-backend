@@ -1,3 +1,5 @@
+import { TRADE_PAY_PRIOR_INVOICE_COLUMNS, type TradePayPriorInvoice } from "./trade_pay_rule.ts";
+
 export const REIMBURSEMENT_LINE_TYPE = "reimbursement";
 export const REIMBURSEMENT_FLAG = "trade_reimbursement_line_v1";
 const words = {
@@ -29,6 +31,27 @@ export function reimbursementSkip(
     words: words[code],
   };
 }
+// Only the caller's explicit undated draft may release its own receipt claim.
+// The atomic persist rechecks these coordinates while holding the draft lock.
+export async function loadUndatedReimbursementDraft(
+  client: any,
+  input: { userId: string; orgId: string; draftId: unknown; flagOn: boolean },
+): Promise<({ id: string } & NonNullable<TradePayPriorInvoice>) | null> {
+  if (!input.flagOn || !input.draftId) return null;
+  // trade_invoices_pkey: one explicit row, never a scan of undated drafts.
+  const { data, error } = await client.from("trade_invoices")
+    .select(`id, org_id, user_id, status, invoice_source, week_start, week_end, xero_bill_id, xero_pushed_at, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)
+    .eq("id", String(input.draftId)).maybeSingle();
+  if (error) throw new Error("Could not read the selected undated draft");
+  if (!data || data.org_id !== input.orgId || data.user_id !== input.userId ||
+      data.status !== "draft" || data.invoice_source !== "hourly" ||
+      data.week_start != null || data.week_end != null ||
+      data.xero_bill_id != null || data.xero_pushed_at != null) {
+    throw new Error("The selected undated draft is no longer replaceable");
+  }
+  return data;
+}
+
 export async function receiptHasLiveTradeInvoice(
   client: any,
   receiptId: string,
