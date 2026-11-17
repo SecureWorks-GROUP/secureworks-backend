@@ -1,7 +1,7 @@
 // JWT flag: --no-verify-jwt. Keep this line at the top: the deploy workflow reads
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
-import { REIMBURSEMENT_FLAG, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
+import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
 import { listExpenseReceipts } from './expense_list.ts'
 import { rejectTradeInvoiceStorage } from './trade_invoice_rejection.ts'
 import { syncConversationCache } from './conversation_cache_write.ts'
@@ -2363,11 +2363,14 @@ function tradeInvoiceMoney(
   }
 }
 
-async function invoiceReimbursements(client: any, userId: string, items: any[], basis: unknown = null, replacingDraftId: string | null = null) {
+async function invoiceReimbursements(client: any, userId: string, items: any[], basis: unknown = null, replacingDraftId: string | null = null, resolvedFlagOn?: boolean) {
   const requested = (items || []).filter(isReimbursementItem)
   if (!requested.length) return { lines: [], skipped_items: [], basis }
-  const { data: flag } = await client.from('feature_flags').select('enabled').eq('flag_name', REIMBURSEMENT_FLAG).maybeSingle()
-  return { ...await resolveReimbursementExtras(client, { userId, items: requested, flagOn: flag?.enabled === true, basis, replacingDraftId }), basis }
+  if (resolvedFlagOn === undefined) {
+    const { data: flag } = await client.from('feature_flags').select('enabled').eq('flag_name', REIMBURSEMENT_FLAG).maybeSingle()
+    resolvedFlagOn = flag?.enabled === true
+  }
+  return { ...await resolveReimbursementExtras(client, { userId, items: requested, flagOn: resolvedFlagOn, basis, replacingDraftId }), basis }
 }
 
 async function markTradeInvoiceJobsChanged(client: any, lines: any[]) {
@@ -14188,6 +14191,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (existingDraftErr) throw new Error('Failed to load existing draft: ' + existingDraftErr.message)
               existingDraft = hourlyDraft?.id ? hourlyDraft : null
             }
+            // FU17: keep an undated receipt on its explicit draft. Switch-off
+            // keeps the existing undated write path and does not read a draft.
+            let undatedReimbursementSave = false
+            if (!weeklyShape && !draftWeekStart && (body?.draft_id || (Array.isArray(draftExtras) && draftExtras.some(isReimbursementItem)))) {
+              const { data: undatedFlag } = await client.from('feature_flags').select('enabled').eq('flag_name', REIMBURSEMENT_FLAG).maybeSingle()
+              undatedReimbursementSave = undatedFlag?.enabled === true
+              existingDraft = await loadUndatedReimbursementDraft(client, {
+                userId: tradeUser.id, orgId: tradeUser.orgId, draftId: body?.draft_id, flagOn: undatedReimbursementSave,
+              })
+            }
             const existingDraftId: string | null = existingDraft?.id || null
             const weeklyInvoice = weeklyShape
               ? await _resolveWeeklyWorkOrderInvoice(
@@ -14250,7 +14263,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const draftSuperBasis = resolvedShares.length > 0
               ? null
               : await tradePayBasisForSave(client, existingDraft, draftWeekStart || draftWeekEnd)
-            const draftReimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(draftExtras) ? draftExtras : [], draftSuperBasis, draftWeekStart ? existingDraftId : null)
+            // Reuse the undated flag read: an unreadable/off first read must
+            // not turn on at a second read after we skipped draft selection.
+            const draftReimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(draftExtras) ? draftExtras : [], draftSuperBasis, existingDraftId, draftWeekStart ? undefined : undatedReimbursementSave)
             let labourTotal = 0
             for (const l of plainLabour) labourTotal += roundMoney(Number(l.line_total_ex || 0))
             let extraTotal = 0
@@ -14400,7 +14415,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 weeklyInvoiceWithReimbursements(weeklyInvoice, draftReimbursements.lines),
                 existingDraftId,
               )
-              : draftWeekStart
+              : draftWeekStart || (undatedReimbursementSave && draftReimbursements.lines.length > 0)
               ? await _persistTradeInvoiceWeekDraft(
                 client,
                 hourlyDraftPayload,
@@ -14456,7 +14471,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 draftSubtotal = (weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)) + draftReimbursementEx
                 ;({ money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(client, tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd, draftSuperBasis, 0, draftReimbursementEx), { userId: tradeUser.id, weekStart: draftWeekStart || null }))
                 Object.assign(hourlyDraftPayload, tradeInvoiceMoneyFields(draftMoney), { subtotal_ex: draftMoney.gross_earned, gst: draftMoney.gst_amount, total_inc: draftMoney.total_inc }, tradeRecurringDeductionInvoiceFields(draftRecurringDeduction))
-              }, draftWeekStart ? existingDraftId : null)
+              }, existingDraftId)
             await markTradeInvoiceJobsChanged(client, hourlyDraftLineRows)
             return json({
               success: true,
