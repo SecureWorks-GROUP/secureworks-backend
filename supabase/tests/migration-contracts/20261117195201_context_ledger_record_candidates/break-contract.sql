@@ -1,0 +1,1 @@
+CREATE OR REPLACE FUNCTION public.context_ledger_record_candidates(p_job_id uuid,p_closes_on text,p_about_key text,p_opened_at timestamptz,p_from_role text DEFAULT NULL) RETURNS TABLE(table_name text,record_id text,closes_at timestamptz,key text,label text) LANGUAGE sql AS $$ SELECT NULL::text,NULL::text,NULL::timestamptz,NULL::text,NULL::text WHERE false $$;
