@@ -9,7 +9,7 @@ SELECT public.remove_job_cost_events_from_cost_lines();
 -- options and comments. Drop without CASCADE: an unsupported dependent object
 -- refuses the whole rollback rather than silently losing it.
 DO $restore$
-DECLARE v record; a record; c record; f record; legacy text;
+DECLARE v record; acl_entry record; c record; f record; legacy text;
 /* block */ BEGIN
  legacy:=pg_get_viewdef('public.v_job_cost_events_legacy'::regclass,true);
  IF md5(legacy)<>'b48997c55913ce3c90e3a3c947533fd3'
@@ -58,16 +58,16 @@ DECLARE v record; a record; c record; f record; legacy text;
    CASE WHEN v.depth=0 THEN legacy ELSE v.def END);
   EXECUTE format('ALTER VIEW %I.%I OWNER TO %I',v.nspname,v.relname,v.owner);
   -- Revoke default privileges too, before reproducing the saved ACL.
-  FOR a IN SELECT DISTINCT grantee FROM aclexplode(coalesce(
+  FOR acl_entry IN SELECT DISTINCT grantee FROM aclexplode(coalesce(
    (SELECT relacl FROM pg_class WHERE oid=to_regclass(format('%I.%I',v.nspname,v.relname))),
    acldefault('r',(SELECT oid FROM pg_roles WHERE rolname=v.owner)))) LOOP
    EXECUTE format('REVOKE ALL ON %I.%I FROM %s',v.nspname,v.relname,
-    CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(a.grantee)) END);
+    CASE WHEN acl_entry.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(acl_entry.grantee)) END);
   END LOOP;
-  FOR a IN SELECT * FROM aclexplode(coalesce(v.relacl,acldefault('r',(SELECT oid FROM pg_roles WHERE rolname=v.owner)))) LOOP
-   EXECUTE format('GRANT %s ON %I.%I TO %s%s',a.privilege_type,v.nspname,v.relname,
-    CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(a.grantee)) END,
-    CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+  FOR acl_entry IN SELECT * FROM aclexplode(coalesce(v.relacl,acldefault('r',(SELECT oid FROM pg_roles WHERE rolname=v.owner)))) LOOP
+   EXECUTE format('GRANT %s ON %I.%I TO %s%s',acl_entry.privilege_type,v.nspname,v.relname,
+    CASE WHEN acl_entry.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(acl_entry.grantee)) END,
+    CASE WHEN acl_entry.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
   END LOOP;
   EXECUTE format('COMMENT ON VIEW %I.%I IS %L',v.nspname,v.relname,v.comment);
   FOR c IN SELECT * FROM cost_events_restore_columns WHERE oid=v.oid AND comment IS NOT NULL LOOP
@@ -77,16 +77,16 @@ DECLARE v record; a record; c record; f record; legacy text;
  FOR f IN SELECT * FROM cost_events_restore_functions ORDER BY oid LOOP
   EXECUTE f.def;
   EXECUTE format('ALTER FUNCTION %I.%I(%s) OWNER TO %I',f.nspname,f.proname,f.args,f.owner);
-  FOR a IN SELECT DISTINCT grantee FROM aclexplode(coalesce(
+  FOR acl_entry IN SELECT DISTINCT grantee FROM aclexplode(coalesce(
    (SELECT proacl FROM pg_proc WHERE oid=to_regprocedure(format('%I.%I(%s)',f.nspname,f.proname,f.reg_args))),
    acldefault('f',(SELECT oid FROM pg_roles WHERE rolname=f.owner)))) LOOP
    EXECUTE format('REVOKE ALL ON FUNCTION %I.%I(%s) FROM %s',f.nspname,f.proname,f.args,
-    CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(a.grantee)) END);
+    CASE WHEN acl_entry.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(acl_entry.grantee)) END);
   END LOOP;
-  FOR a IN SELECT * FROM aclexplode(coalesce(f.proacl,acldefault('f',(SELECT oid FROM pg_roles WHERE rolname=f.owner)))) LOOP
-   EXECUTE format('GRANT %s ON FUNCTION %I.%I(%s) TO %s%s',a.privilege_type,f.nspname,f.proname,f.args,
-    CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(a.grantee)) END,
-    CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+  FOR acl_entry IN SELECT * FROM aclexplode(coalesce(f.proacl,acldefault('f',(SELECT oid FROM pg_roles WHERE rolname=f.owner)))) LOOP
+   EXECUTE format('GRANT %s ON FUNCTION %I.%I(%s) TO %s%s',acl_entry.privilege_type,f.nspname,f.proname,f.args,
+    CASE WHEN acl_entry.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(acl_entry.grantee)) END,
+    CASE WHEN acl_entry.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
   END LOOP;
   EXECUTE format('COMMENT ON FUNCTION %I.%I(%s) IS %L',f.nspname,f.proname,f.args,f.comment);
  END LOOP;
