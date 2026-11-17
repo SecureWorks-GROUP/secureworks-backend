@@ -1,6 +1,11 @@
 name: PR Check — Edge Functions
 
 on:
+  # Main and manual runs expose the same four contract shards and final result.
+  # PR-only jobs below stay on pull_request; no second workflow duplicates them.
+  push:
+    branches: [main]
+  workflow_dispatch: {}
   pull_request:
     # Do not restrict to main. That filter matches the PR base, so stacked
     # packet PRs targeting cio/context-b*-recovery never ran deno-check,
@@ -85,6 +90,7 @@ permissions:
 
 jobs:
   deno-check:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
 
     steps:
@@ -1070,6 +1076,7 @@ jobs:
   # here: it writes real product artifacts and sends real email, so it stays a
   # deliberate one-command manual run — see docs/ses-reporting-proof-harness.md.
   ses-proof-harness:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
 
     # The harness npm project lives here, not at the repo root. A root
