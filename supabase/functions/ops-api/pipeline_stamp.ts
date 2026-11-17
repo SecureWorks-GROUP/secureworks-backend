@@ -7,11 +7,13 @@
 //
 //   stamp = <newest jobs.updated_at for the org>
 //         | <newest job_events.created_at>
-//         | <newest job_change_marks.last_marked_at>
+//         | <newest job_change_mark_events.marked_at for the org>
 //
-// jobs.updated_at is kept by trg_jobs_updated. job_change_marks is the shared
-// changed-job mark table (phase 4, P0-02); until it exists its read fails and counts
-// as an empty value, so the stamp still works and is more exact once it lands.
+// jobs.updated_at is kept by trg_jobs_updated. Job pages appends marks from its
+// 14 source tables to job_change_mark_events. Read that heap through
+// pipeline_newest_job_mark, not the job_change_marks aggregate view. The RPC uses
+// job_change_mark_events_newest plus jobs_pkey to select this org's newest event.
+// An unavailable mark reader retains the original empty-value fallback.
 //
 // stamp null means "not known: load the board". That is the answer whenever the jobs
 // or job_events read fails, so a failed stamp can never hide a change.
@@ -55,8 +57,7 @@ export async function readPipelineStamp(client: Client, orgId: string): Promise<
       "created_at",
     ),
     readNewest(
-      client.from("job_change_marks").select("last_marked_at")
-        .order("last_marked_at", newestFirst).limit(1),
+      client.rpc("pipeline_newest_job_mark", { p_org_id: orgId }, { get: true }),
       "last_marked_at",
     ),
   ]);
