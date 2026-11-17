@@ -1,3 +1,4 @@
+\ir ../20261118020617_job_story_stored_profit/unwind-successor.sql
 -- 20261111100000 (RQ-15.g office variations) also extends context_job_story_money_sig: when the stack has it, it
 -- is taken off first so the money signature downs below find the body they pin, and put back at the end.
 SELECT md5(prosrc) = '7a7798901a26351b8e910da3f1392509' AS rq15g_sig_20261028190000 FROM pg_proc WHERE oid = to_regprocedure('public.context_job_story_money_sig(uuid)') \gset
@@ -386,3 +387,5 @@ ROLLBACK;
 \ir ../../../migrations/20261114040000_job_profit_expected_from_budget.sql
 \endif
 \endif
+
+\ir ../20261118020617_job_story_stored_profit/restore-successor.sql
