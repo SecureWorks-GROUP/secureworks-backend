@@ -10618,8 +10618,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           console.error('[ops-api] group release sweep failed:', (e as Error).message)
           groupReleases.push({ error: 'group release sweep failed' })
         }
+        let gateConfirmed = false
+        const gate = url.searchParams.get('gate')
+        const token = url.searchParams.get('gate_token') || ''
+        if (gate === 'job-work-order-auto-issue' && /^[a-f0-9]{32}$/.test(token)
+          && issueError === null && !groupReleases.some(entry => entry !== null && typeof entry === 'object' && 'error' in entry)) {
+          const { error: confirmError } = await client.rpc('sweep_gate_confirm', { p_name: gate, p_token: token })
+          if (confirmError) console.error('[ops-api] work order sweep gate confirmation failed:', confirmError.message)
+          else gateConfirmed = true
+        }
         if (issueError) throw issueError
-        return json({ ...issued, group_releases: groupReleases, patio_drafts: patioDrafts, patio_groups: patioGroups, fence_drafts: fenceDrafts, fence_groups: fenceGroups })
+        return json({ ...issued, group_releases: groupReleases, patio_drafts: patioDrafts, patio_groups: patioGroups, fence_drafts: fenceDrafts, fence_groups: fenceGroups, gate_confirmed: gateConfirmed })
       }
       // Blank and draft job work orders for the office. The queue is a read.
       // Fill and approve stay named-approver writes. Line review is any
