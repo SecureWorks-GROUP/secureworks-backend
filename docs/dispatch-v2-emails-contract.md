@@ -498,7 +498,8 @@ Please confirm when you can, thank you.
 
 Rules for the body:
 
-- The subject is `Material Order Ref <job number>`. The job number is not repeated in the body.
+- The subject is `Material Order Ref <job number>`. The job number is not repeated in the body, except by the line below.
+- P2-10.4, switched off until the owner approves the words: while `feature_flags.dispatch_order_quote_ref_line_v1` is on (migration `20261117130000`, seeded off), the body ends with a blank line and `Please quote this reference on your invoice: <job number>`, after `Please confirm when you can, thank you.` and before Shaun's signature. The switch is read when the email is made (`readDispatchOrderQuoteRefSwitch`, `dispatch_v2_store.ts`): a missing row, an explicit false or a failed read is off, and the body is then exactly as above. A held email keeps the body it was made with, so turning the switch on or off changes only emails made (or rebuilt) after. A job with no number gets no line. No price or dollar figure is ever added.
 - The body has no sign-off of its own. Shaun's signature is added by send-outlook-email (`signature: shaun` from admin@: Kind regards, the logo, Shaun Lee, Operations Coordinator, 0489 267 771, admin@secureworkswa.com.au), on the real send and the TEST copy alike.
 - Long dashes become commas.
 - A line reads `<qty>[ <unit>] x <description>`, then its detail lines, `Profile:` and `Colour:`.
