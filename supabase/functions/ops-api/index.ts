@@ -10038,14 +10038,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // The weekly pay run (P1-10.2): the week's invoices clean or stopped
       // (pay-run check v2 plus the standing checks), the clean totals, super
       // owed per person and the hash P1-10.3 approves against. Read only;
-      // staff by the front door (not in any trade, routine or agent-read list).
+      // staff by the front door (not in any trade, routine or agent-read list),
+      // then the pay run approver list only (ruling 34.13), checked in readPayRun
+      // before any pay is read.
       case 'pay_run': {
         try {
           return json(await readPayRun(payRunReadsFromClient(client), {
             weekStart: url.searchParams.get('week_start'),
             // Never substitute the server org for a JWT caller with a missing profile org.
             orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
-            // The server key is no person, so it can never approve.
+            // The server key is no person: refused 403 like any non-approver.
             actorUserId: authMode === 'jwt' ? (authUser?.id || null) : null,
           }))
         } catch (err) {

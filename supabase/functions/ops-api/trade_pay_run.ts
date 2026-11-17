@@ -14,8 +14,11 @@
 // invoices, joins the two answers and adds up the money. It never writes and
 // never calls Xero.
 //
-// Staff only: the action is in no trade, routine or agent-read list, so the
-// ops-api front door admits only the staff operator set or the server key.
+// Approvers only (ruling 34.13: only the approver list sees named pay). The
+// front door admits the staff operator set or the server key (the action is in
+// no trade, routine or agent-read list); this read then refuses 403
+// pay_run_approver_only to anyone not on the approver list, the server key
+// included, before any pay is read.
 // Any read that fails is 503 pay_run_unreadable, never a smaller or empty week.
 // ════════════════════════════════════════════════════════════
 
@@ -370,7 +373,7 @@ export function payRunReadsFromClient(client: any): PayRunReads {
       return await allPages(
         (from, to) =>
           client.from("trade_pay_run_invoices").select("invoice_id, pushed_at")
-            .eq("pay_run_id", runId).order("invoice_id").range(from, to),
+            .eq("run_id", runId).order("invoice_id").range(from, to),
         "the run's invoices",
       );
     },
@@ -521,6 +524,16 @@ function validV2(
   return out;
 }
 
+/** The six results pay-run-standing-v1 always returns, each exactly once. */
+export const STANDING_CHECK_CODES = [
+  "pay_equals_job_cost",
+  "nobody_above_work_order",
+  "super_is_12_over_112",
+  "no_paid_line_without_work_order",
+  "nothing_lost",
+  "crew_accepted",
+] as const;
+
 function validStanding(data: any, stage: string, cleanIds: Set<string>) {
   if (
     !data || typeof data !== "object" || data.rule !== "pay-run-standing-v1" ||
@@ -538,6 +551,21 @@ function validStanding(data: any, stage: string, cleanIds: Set<string>) {
       throw unreadable("the standing checks");
     }
     stopped.set(s.invoice_id, stops);
+  }
+  // Every one of the six results, once each, with a pass answer. Missing or
+  // extra results are an answer this read cannot trust, never "no difference
+  // found".
+  const seen = new Set<string>();
+  for (const c of data.checks) {
+    if (
+      !c || typeof c !== "object" || typeof c.code !== "string" ||
+      !(STANDING_CHECK_CODES as readonly string[]).includes(c.code) ||
+      seen.has(c.code) || typeof c.pass !== "boolean"
+    ) throw unreadable("the standing checks");
+    seen.add(c.code);
+  }
+  if (seen.size !== STANDING_CHECK_CODES.length) {
+    throw unreadable("the standing checks");
   }
   return {
     checks: data.checks,
@@ -578,6 +606,19 @@ export async function readPayRun(
     );
   }
   const week = payRunWeek(opts.weekStart, opts.now ?? new Date());
+
+  // Ruling 34.13: named pay is for the approver list only. The signed-in
+  // caller is checked before any pay is read; the server key is no person.
+  const approvers = await reads.approvers();
+  const actor = String(opts.actorUserId ?? "").trim();
+  if (actor === "" || !approvers.includes(actor)) {
+    throw new TradePayRunError(
+      "pay_run_approver_only",
+      "Only a pay run approver can read the pay run.",
+      403,
+    );
+  }
+
   const asOf = addDays(week, 6);
   const fromWeek = addDays(week, -7 * (PAY_RUN_CHECK_WEEKS - 1));
 
@@ -714,22 +755,27 @@ export async function readPayRun(
   const held = await reads.heldLines(orgId, week);
   const byReason = new Map<string, { lines: number; c: number }>();
   for (const l of held) {
+    // A held line with no amount is unreadable, never counted as 0.
+    const raw = l.line_total_ex;
+    const amount = typeof raw === "number"
+      ? raw
+      : typeof raw === "string" && raw.trim() !== ""
+      ? Number(raw)
+      : NaN;
+    if (!Number.isFinite(amount)) throw unreadable("a held line's amount");
     const reason = l.hold_reason ?? "unknown";
     const e = byReason.get(reason) ?? { lines: 0, c: 0 };
     e.lines += 1;
-    e.c += cents(Number(l.line_total_ex ?? 0));
+    e.c += cents(amount);
     byReason.set(reason, e);
   }
-
-  const approvers = await reads.approvers();
-  const actor = String(opts.actorUserId ?? "").trim();
 
   return {
     ok: true,
     week_start: week,
     cut_off: payRunCutOff(week),
     run: run ?? null,
-    can_approve: actor !== "" && approvers.includes(actor),
+    can_approve: true, // only an approver reaches this answer
     stage,
     counts: {
       clean: clean.length,

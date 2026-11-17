@@ -15,8 +15,10 @@ import {
   payRunEligible,
   payRunPlacement,
   type PayRunReads,
+  payRunReadsFromClient,
   payRunWeek,
   readPayRun,
+  STANDING_CHECK_CODES,
   TradePayRunError,
 } from "./trade_pay_run.ts";
 import {
@@ -119,19 +121,37 @@ function reads(w: World, calls: Record<string, any[]> = {}): PayRunReads {
     standing: (p) => {
       log("standing", p);
       failIf("standing");
-      return Promise.resolve({
-        rule: "pay-run-standing-v1",
-        stage: p.p_stage,
-        checks: [{ code: "zztest", ok: true }],
-        stopped_invoices: Object.entries(w.standingStops ?? {})
-          .filter(([k]) => p.p_invoice_ids.includes(k))
-          .map(([invoice_id, stops]) => ({ invoice_id, stops })),
-        run_blocked: w.runBlocked ?? false,
-        run_blocked_words: w.runBlocked
-          ? "ZZTEST pay and job cost differ"
-          : null,
-      });
+      const stopped = Object.entries(w.standingStops ?? {})
+        .filter(([k]) => p.p_invoice_ids.includes(k))
+        .map(([invoice_id, stops]) => ({ invoice_id, stops }));
+      return Promise.resolve(standingAnswer(p.p_stage, stopped, w.runBlocked));
     },
+  };
+}
+
+/** The six results, as pay-run-standing-v1 returns them; a stop named
+ * standing_<code> fails that result and lists its invoice. */
+function standingAnswer(
+  stage: string,
+  stopped: Array<{ invoice_id: string; stops: Array<{ code: string }> }>,
+  runBlocked = false,
+) {
+  return {
+    rule: "pay-run-standing-v1",
+    stage,
+    checks: STANDING_CHECK_CODES.map((code) => {
+      const failed = stopped.filter((s) =>
+        s.stops.some((x) => x.code === `standing_${code}`)
+      );
+      return {
+        code,
+        pass: failed.length === 0,
+        invoices: failed.map((s) => ({ invoice_id: s.invoice_id })),
+      };
+    }),
+    stopped_invoices: stopped,
+    run_blocked: runBlocked,
+    run_blocked_words: runBlocked ? "ZZTEST pay and job cost differ" : null,
   };
 }
 
@@ -222,7 +242,10 @@ Deno.test("pay run: a standing check stop takes the invoice out of the totals an
     ]),
   );
   assertEquals(out.run_blocked, false);
-  assertEquals(out.standing, [{ code: "zztest", ok: true }]);
+  assertEquals(
+    out.standing.map((c: any) => [c.code, c.pass]),
+    STANDING_CHECK_CODES.map((c) => [c, c !== "super_is_12_over_112"]),
+  );
 });
 
 Deno.test("pay run: the hash changes when one amount changes by a cent", async () => {
@@ -243,15 +266,51 @@ Deno.test("pay run: the hash changes when one amount changes by a cent", async (
   ]);
 });
 
-Deno.test("pay run: only a named approver can approve; the server key never can", async () => {
+Deno.test("pay run: only the approver list sees named pay; office and the server key get none", async () => {
+  // Ruling 34.13. The test changed from "can_approve false" (named figures
+  // were still returned) to a refusal before any pay is read.
   const rows = [invoice(1)];
   assertEquals((await run({ rows }, APPROVER) as any).can_approve, true);
-  assertEquals((await run({ rows }, OFFICE) as any).can_approve, false);
-  assertEquals((await run({ rows }, null) as any).can_approve, false);
-  assertEquals(
-    (await run({ rows, approvers: [] }, APPROVER) as any).can_approve,
-    false,
-  );
+  for (
+    const [label, actor, approvers] of [
+      ["office non-approver", OFFICE, [APPROVER]],
+      ["server key", null, [APPROVER]],
+      ["empty approver list", APPROVER, []],
+    ] as Array<[string, string | null, string[]]>
+  ) {
+    const calls: Record<string, any[]> = {};
+    let payRead = false;
+    const r = reads({ rows, approvers }, calls);
+    for (
+      const k of [
+        "run",
+        "candidates",
+        "invoicesById",
+        "lines",
+        "heldLines",
+        "checkV2",
+        "standing",
+      ] as const
+    ) {
+      (r as any)[k] = () => {
+        payRead = true;
+        return Promise.resolve(null);
+      };
+    }
+    const err = await assertRejects(
+      () =>
+        readPayRun(r, {
+          orgId: ORG,
+          weekStart: WEEK,
+          actorUserId: actor,
+          now: NOW,
+        }),
+      TradePayRunError,
+    );
+    assertEquals([err.status, err.code], [403, "pay_run_approver_only"], label);
+    assert(!payRead, `${label}: pay was read before the refusal`);
+    assert(!JSON.stringify(err).includes("ZZTEST Trade"), label);
+  }
 });
 
 Deno.test("pay run: reimbursements and GST from the trade's own pay view", async () => {
@@ -312,24 +371,34 @@ Deno.test("pay run: every failed read is 503, never a smaller week", async () =>
         v2Entry(rows[1]),
       ],
     });
-  await assertRejects(
-    () => readPayRun(bad, { orgId: ORG, weekStart: WEEK, now: NOW }),
+  const badErr = await assertRejects(
+    () =>
+      readPayRun(bad, {
+        orgId: ORG,
+        weekStart: WEEK,
+        actorUserId: APPROVER,
+        now: NOW,
+      }),
     TradePayRunError,
   );
+  assertEquals([badErr.status, badErr.code], [503, "pay_run_unreadable"]);
   // A standing answer naming an invoice it was not given.
   const odd = reads({ rows, standingStops: {} });
   odd.standing = () =>
-    Promise.resolve({
-      rule: "pay-run-standing-v1",
-      stage: "before_xero",
-      checks: [],
-      stopped_invoices: [{ invoice_id: id(9), stops: STOP }],
-      run_blocked: false,
-    });
-  await assertRejects(
-    () => readPayRun(odd, { orgId: ORG, weekStart: WEEK, now: NOW }),
+    Promise.resolve(
+      standingAnswer("before_xero", [{ invoice_id: id(9), stops: STOP }]),
+    );
+  const oddErr = await assertRejects(
+    () =>
+      readPayRun(odd, {
+        orgId: ORG,
+        weekStart: WEEK,
+        actorUserId: APPROVER,
+        now: NOW,
+      }),
     TradePayRunError,
   );
+  assertEquals([oddErr.status, oddErr.code], [503, "pay_run_unreadable"]);
 });
 
 Deno.test("pay run: an invoice older than eight weeks is stopped by hand", async () => {
@@ -495,6 +564,7 @@ Deno.test("pay run: the open decision is one line, its default kept", async () =
   const off: any = await readPayRun(reads({ rows: [invoice(1), billed] }), {
     orgId: ORG,
     weekStart: WEEK,
+    actorUserId: APPROVER,
     now: NOW,
   });
   assertEquals(off.invoices.map((i: any) => i.invoice_id), [id(1)]);
@@ -503,6 +573,7 @@ Deno.test("pay run: the open decision is one line, its default kept", async () =
     {
       orgId: ORG,
       weekStart: WEEK,
+      actorUserId: APPROVER,
       now: NOW,
       reach: { skipBilledInXero: false },
     },
@@ -511,4 +582,221 @@ Deno.test("pay run: the open decision is one line, its default kept", async () =
     id(1),
     id(2),
   ]);
+});
+
+function approverRead(r: PayRunReads) {
+  return readPayRun(r, {
+    orgId: ORG,
+    weekStart: WEEK,
+    actorUserId: APPROVER,
+    now: NOW,
+  });
+}
+
+Deno.test("pay run: a held line with no amount is 503, never counted as 0", async () => {
+  for (const bad of [null, undefined, "", "abc"]) {
+    const err = await assertRejects(
+      () =>
+        approverRead(reads({
+          rows: [invoice(1)],
+          held: [
+            { hold_reason: "no_work_order", line_total_ex: 10 },
+            { hold_reason: "no_work_order", line_total_ex: bad },
+          ],
+        })),
+      TradePayRunError,
+    );
+    assertEquals(
+      [err.status, err.code],
+      [503, "pay_run_unreadable"],
+      String(bad),
+    );
+  }
+  // A numeric string from the database still reads.
+  const out: any = await approverRead(reads({
+    rows: [invoice(1)],
+    held: [{ hold_reason: "no_work_order", line_total_ex: "12.30" }],
+  }));
+  assertEquals(out.held.amount_ex, 12.3);
+});
+
+Deno.test("pay run: the standing answer needs all six results, else 503 and nothing clean", async () => {
+  const rows = [invoice(1), invoice(2)];
+  const full = standingAnswer("before_xero", []);
+  const faults: Array<[string, any]> = [
+    ["empty checks, no stops, not blocked", { ...full, checks: [] }],
+    ["one result missing", { ...full, checks: full.checks.slice(1) }],
+    ["a result twice", { ...full, checks: [...full.checks, full.checks[0]] }],
+    ["an unknown result", {
+      ...full,
+      checks: [...full.checks.slice(1), { code: "zztest", pass: true }],
+    }],
+    ["a result with no pass answer", {
+      ...full,
+      checks: full.checks.map((c, n) => n === 2 ? { code: c.code } : c),
+    }],
+  ];
+  for (const [label, answer] of faults) {
+    const r = reads({ rows });
+    r.standing = () => Promise.resolve(answer);
+    const err = await assertRejects(() => approverRead(r), TradePayRunError);
+    assertEquals([err.status, err.code], [503, "pay_run_unreadable"], label);
+  }
+});
+
+// ── The production reader against the installed schema ─────────────────────
+// payRunReadsFromClient is driven through a stand-in PostgREST client whose
+// trade_pay_runs and trade_pay_run_invoices columns are read from the P1-10.1
+// migration itself. A column the tables do not have answers like PostgREST
+// (42703, no data), so a wrong name is a 503 here exactly as it is live.
+
+async function installedColumns(): Promise<Map<string, Set<string>>> {
+  // Found by name, not number, so a rename-only renumber keeps this test.
+  const dir = new URL("../../migrations/", import.meta.url);
+  let file: URL | null = null;
+  for await (const e of Deno.readDir(dir)) {
+    if (e.name.endsWith("_trade_pay_runs.sql")) file = new URL(e.name, dir);
+  }
+  assert(file, "the P1-10.1 migration is not in supabase/migrations");
+  const sql = await Deno.readTextFile(file);
+  const tables = new Map<string, Set<string>>();
+  for (
+    const m of sql.matchAll(
+      /CREATE TABLE IF NOT EXISTS public\.(\w+) \(([\s\S]*?)\n\);/g,
+    )
+  ) {
+    const cols = new Set<string>();
+    for (const line of m[2].split("\n")) {
+      const word = line.trim().match(/^(\w+)\s/)?.[1];
+      if (word && !/^(PRIMARY|UNIQUE|CHECK|CONSTRAINT|FOREIGN)$/i.test(word)) {
+        cols.add(word);
+      }
+    }
+    tables.set(m[1], cols);
+  }
+  return tables;
+}
+
+function schemaClient(
+  schema: Map<string, Set<string>>,
+  data: Record<string, any[]>,
+  rpc: Record<string, (p: any) => any>,
+) {
+  const bad = (col: string) => ({
+    data: null,
+    error: { code: "42703", message: `column ${col} does not exist` },
+  });
+  return {
+    rpc: (name: string, params: any) =>
+      Promise.resolve({ data: rpc[name](params), error: null }),
+    from(table: string) {
+      const known = schema.get(table);
+      const filters: Array<(r: any) => boolean> = [];
+      const used: string[] = [];
+      let range: [number, number] | null = null;
+      let single = false;
+      const q: any = {
+        select(cols: string) {
+          used.push(...cols.split(",").map((c) => c.trim()));
+          return q;
+        },
+        eq(col: string, v: unknown) {
+          used.push(col);
+          filters.push((r) => r[col] === v);
+          return q;
+        },
+        in(col: string, vs: unknown[]) {
+          used.push(col);
+          filters.push((r) => vs.includes(r[col]));
+          return q;
+        },
+        is(col: string, v: unknown) {
+          used.push(col);
+          filters.push((r) => (r[col] ?? null) === v);
+          return q;
+        },
+        not(col: string) {
+          used.push(col);
+          return q;
+        },
+        or() {
+          return q;
+        },
+        order(col: string) {
+          used.push(col);
+          return q;
+        },
+        range(a: number, b: number) {
+          range = [a, b];
+          return q;
+        },
+        maybeSingle() {
+          single = true;
+          return q;
+        },
+        then(resolve: (v: any) => unknown, reject: (e: unknown) => unknown) {
+          const missing = known && used.find((c) => !known.has(c));
+          if (missing) {
+            return Promise.resolve(bad(missing)).then(resolve, reject);
+          }
+          let rows = (data[table] ?? []).filter((r) =>
+            filters.every((f) => f(r))
+          );
+          if (range) rows = rows.slice(range[0], range[1] + 1);
+          return Promise.resolve({
+            data: single ? rows[0] ?? null : rows,
+            error: null,
+          }).then(resolve, reject);
+        },
+      };
+      return q;
+    },
+  };
+}
+
+Deno.test("pay run: the production reader reads a recorded week against the installed run tables", async () => {
+  const schema = await installedColumns();
+  assert(schema.get("trade_pay_run_invoices")?.has("run_id"));
+  assert(!schema.get("trade_pay_run_invoices")?.has("pay_run_id"));
+  const RUN = "0a200000-0000-4000-8000-000000000501";
+  const rows = [
+    invoice(1, { pay_run_id: RUN, status: "approved" }),
+    invoice(2),
+  ];
+  const client = schemaClient(schema, {
+    trade_pay_runs: [{
+      id: RUN,
+      org_id: ORG,
+      week_start: WEEK,
+      check_rule: "v2",
+      approved_by: APPROVER,
+      approved_at: "2026-11-24T01:00:00Z",
+      standing: {},
+      invoice_count: 1,
+      total_pays: 1000,
+      super_total: 120,
+      status: "approved",
+    }],
+    trade_pay_run_invoices: [
+      { run_id: RUN, invoice_id: id(1), pushed_at: null, verdict: "clean" },
+      { run_id: RUN, invoice_id: id(2), pushed_at: null, verdict: "stopped" },
+    ],
+    trade_invoices: rows,
+    trade_invoice_lines: [],
+    trade_pay_settings: [{ id: 1, pay_run_approver_user_ids: [APPROVER] }],
+  }, {
+    trade_pay_run_check_v2: (p) => ({
+      rule: "trade-pay-check-v2",
+      stage: p.p_stage,
+      invoices: [v2Entry(rows[0]), v2Entry(rows[1], STOP)],
+    }),
+    trade_pay_run_standing_checks: (p) => standingAnswer(p.p_stage, []),
+  });
+  const out: any = await approverRead(payRunReadsFromClient(client));
+  assertEquals(out.run.id, RUN);
+  assertEquals(out.stage, "after_xero");
+  assertEquals(
+    out.invoices.map((i: any) => [i.invoice_id, i.verdict]),
+    [[id(2), "stopped"], [id(1), "clean"]],
+  );
 });
