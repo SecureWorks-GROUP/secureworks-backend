@@ -146,19 +146,46 @@ export function invoicePayWeek(row: PayRunInvoiceRow): string | null {
   return sent ? perthMonday(sent) : null;
 }
 
+// Two open director decisions, one line each. Change the value, nothing else.
+export type PayRunReach = {
+  /**
+   * pay-run-history. true: an invoice already billed in Xero the one-off way
+   * is not run material (pay_run_id is new and null on every older invoice,
+   * so without this the first run lists the whole history). false: the
+   * ticket as written.
+   */
+  skipBilledInXero: boolean;
+  /**
+   * run-invoice-unique. true (the ticket as written): an invoice recorded in
+   * an earlier run without being approved (stopped there) is listed again;
+   * approve_trade_pay_run then refuses that week while it is in the snapshot.
+   * false: it is left out of every later run.
+   */
+  relistEarlierRunInvoices: boolean;
+};
+export const PAY_RUN_REACH: PayRunReach = {
+  skipBilledInXero: true, // pay-run-history: default until the director rules
+  relistEarlierRunInvoices: true, // run-invoice-unique: as written until ruled
+};
+
 /**
  * Could this invoice be in a pay run at all? Standard or follow-on (a holding
- * invoice never is), not draft or sent back, not already in a run, and not
- * already billed in Xero the one-off way. The last rule is not in the ticket:
- * without it every invoice ever sent would come into the first run, because
- * pay_run_id is new and null on all of them (decision asked:
- * pay-run-history). Change the run's reach here and nowhere else.
+ * invoice never is), not draft or sent back, not already approved in a run,
+ * then the two open decisions above. Change the run's reach here and nowhere
+ * else.
  */
-export function payRunEligible(row: PayRunInvoiceRow): boolean {
+export function payRunEligible(
+  row: PayRunInvoiceRow,
+  reach: PayRunReach = PAY_RUN_REACH,
+  recordedInEarlierRun: ReadonlySet<string> = new Set(),
+): boolean {
   const kind = row.invoice_kind ?? "standard";
   return (kind === "standard" || kind === "follow_on") &&
     row.status !== "draft" && row.status !== "ops-reject" &&
-    !row.pay_run_id && !row.xero_bill_id;
+    !row.pay_run_id &&
+    !(reach.skipBilledInXero && row.xero_bill_id) &&
+    (reach.relistEarlierRunInvoices ||
+      !recordedInEarlierRun.has(String(row.id)));
 }
 
 export type PayRunPlacement = "in_run" | "late" | "not_yet";
@@ -264,7 +291,13 @@ export type PayRunReads = {
     runId: string,
   ): Promise<Array<{ invoice_id: string; pushed_at: string | null }>>;
   /** Every invoice of the org that could be in a run up to week W. */
-  candidates(orgId: string, week: string): Promise<PayRunInvoiceRow[]>;
+  candidates(
+    orgId: string,
+    week: string,
+    reach: PayRunReach,
+  ): Promise<PayRunInvoiceRow[]>;
+  /** Which of these invoices are recorded on any run (decision run-invoice-unique). */
+  recordedOnARun(ids: string[]): Promise<Set<string>>;
   invoicesById(ids: string[]): Promise<PayRunInvoiceRow[]>;
   lines(
     invoiceIds: string[],
@@ -351,19 +384,33 @@ export function payRunReadsFromClient(client: any): PayRunReads {
         "the run's invoices",
       );
     },
-    async candidates(orgId, week) {
+    async candidates(orgId, week, reach) {
       return await allPages(
-        (from, to) =>
-          client.from("trade_invoices").select(RUN_INVOICE_COLUMNS)
+        (from, to) => {
+          let q = client.from("trade_invoices").select(RUN_INVOICE_COLUMNS)
             .eq("org_id", orgId)
             .in("invoice_kind", ["standard", "follow_on"])
             .not("status", "in", "(draft,ops-reject)")
-            .is("pay_run_id", null)
-            .is("xero_bill_id", null)
-            .or(`week_start.lte.${week},week_start.is.null`)
-            .order("id").range(from, to),
+            .is("pay_run_id", null);
+          if (reach.skipBilledInXero) q = q.is("xero_bill_id", null);
+          return q.or(`week_start.lte.${week},week_start.is.null`)
+            .order("id").range(from, to);
+        },
         "the week's invoices",
       );
+    },
+    async recordedOnARun(ids) {
+      // trade_pay_run_invoices invoice_id unique index.
+      const rows = await byIdChunks(
+        ids,
+        (chunk) =>
+          client.from("trade_pay_run_invoices").select("invoice_id").in(
+            "invoice_id",
+            chunk,
+          ),
+        "the earlier runs",
+      );
+      return new Set(rows.map((r: any) => String(r.invoice_id)));
     },
     async invoicesById(ids) {
       return await byIdChunks(
@@ -541,6 +588,8 @@ export async function readPayRun(
     weekStart?: string | null;
     actorUserId?: string | null;
     now?: Date;
+    /** Tests only: the live read always uses PAY_RUN_REACH. */
+    reach?: PayRunReach;
   },
 ): Promise<Record<string, unknown>> {
   const orgId = String(opts.orgId ?? "").trim();
@@ -560,9 +609,12 @@ export async function readPayRun(
 
   // Every invoice that could be in a run up to this week: the late ones for
   // this week come from here even once the run is recorded.
-  const candidates = (await reads.candidates(orgId, week)).filter(
-    payRunEligible,
-  );
+  const reach = opts.reach ?? PAY_RUN_REACH;
+  const fetched = await reads.candidates(orgId, week, reach);
+  const recorded = reach.relistEarlierRunInvoices
+    ? new Set<string>()
+    : await reads.recordedOnARun(fetched.map((r) => String(r.id)));
+  const candidates = fetched.filter((r) => payRunEligible(r, reach, recorded));
   const late = candidates.filter((r) => payRunPlacement(r, week) === "late");
 
   // The run's invoices: once a run is recorded, exactly the ones it recorded;

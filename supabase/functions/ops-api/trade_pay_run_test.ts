@@ -10,6 +10,7 @@ import {
 import {
   cleanIdsHash,
   defaultPayRunWeek,
+  PAY_RUN_REACH,
   payRunCutOff,
   payRunEligible,
   payRunPlacement,
@@ -83,6 +84,7 @@ type World = {
   held?: any[];
   approvers?: string[];
   fail?: string;
+  recorded?: string[];
 };
 
 function reads(w: World, calls: Record<string, any[]> = {}): PayRunReads {
@@ -95,7 +97,15 @@ function reads(w: World, calls: Record<string, any[]> = {}): PayRunReads {
   return {
     run: () => (failIf("run"), Promise.resolve(w.run ?? null)),
     runInvoices: () => Promise.resolve(w.runInvoices ?? []),
-    candidates: () => (failIf("candidates"), Promise.resolve(w.rows)),
+    candidates: (_o, _w, reach) => (
+      failIf("candidates"), log("reach", reach), Promise.resolve(w.rows)
+    ),
+    recordedOnARun: (ids) => (
+      log("recorded", ids),
+        Promise.resolve(
+          new Set(ids.filter((i) => (w.recorded ?? []).includes(i))),
+        )
+    ),
     invoicesById: (ids) =>
       Promise.resolve(w.rows.filter((r) => ids.includes(r.id))),
     lines: () => Promise.resolve(w.lines ?? []),
@@ -483,4 +493,51 @@ Deno.test("pay run: staff only at the ops-api front door", () => {
   assertEquals(_opsApiActionNeedsStaffRole(url), true);
   assertEquals(AGENT_READ_ALLOWED_ACTIONS.has("pay_run"), false);
   assertEquals(LEAD_INSTALLER_READ_ACTIONS.has("pay_run"), false);
+});
+
+Deno.test("pay run: the two open decisions are one line each, defaults kept", async () => {
+  assertEquals(PAY_RUN_REACH, {
+    skipBilledInXero: true,
+    relistEarlierRunInvoices: true,
+  });
+  // pay-run-history: an invoice billed in Xero the one-off way.
+  const billed = invoice(2, { xero_bill_id: "ZZTEST-BILL" });
+  const off: any = await readPayRun(reads({ rows: [invoice(1), billed] }), {
+    orgId: ORG,
+    weekStart: WEEK,
+    now: NOW,
+  });
+  assertEquals(off.invoices.map((i: any) => i.invoice_id), [id(1)]);
+  const asWritten: any = await readPayRun(
+    reads({ rows: [invoice(1), billed] }),
+    {
+      orgId: ORG,
+      weekStart: WEEK,
+      now: NOW,
+      reach: { skipBilledInXero: false, relistEarlierRunInvoices: true },
+    },
+  );
+  assertEquals(asWritten.invoices.map((i: any) => i.invoice_id).sort(), [
+    id(1),
+    id(2),
+  ]);
+  // run-invoice-unique: an invoice stopped in an earlier run.
+  const calls: Record<string, any[]> = {};
+  const relisted: any = await readPayRun(
+    reads({ rows: [invoice(1), invoice(2)], recorded: [id(2)] }, calls),
+    { orgId: ORG, weekStart: WEEK, now: NOW },
+  );
+  assertEquals(relisted.invoices.length, 2);
+  assertEquals(calls.recorded, undefined); // default reads nothing extra
+  const dropped: any = await readPayRun(
+    reads({ rows: [invoice(1), invoice(2)], recorded: [id(2)] }, calls),
+    {
+      orgId: ORG,
+      weekStart: WEEK,
+      now: NOW,
+      reach: { skipBilledInXero: true, relistEarlierRunInvoices: false },
+    },
+  );
+  assertEquals(dropped.invoices.map((i: any) => i.invoice_id), [id(1)]);
+  assertEquals(calls.recorded.length, 1);
 });
