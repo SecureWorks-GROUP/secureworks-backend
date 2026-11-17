@@ -40,7 +40,7 @@ import {
 } from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { divisionTrackingOption } from '../_shared/xero_draft_standard.ts'
-import { commissionCapCodeFromDbError, commissionCapRefusal, commissionLineState, readJobCommissionRecords, readJobCommissionRecordsReusing, type JobCommissionRecord } from './job_commission.ts'
+import { commissionCapCodeFromDbError, commissionCapRefusal, commissionLineState, loggableClientLineId, readJobCommissionRecords, readJobCommissionRecordsReusing, type JobCommissionRecord } from './job_commission.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
@@ -15434,7 +15434,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 const serverResolvedCommissionLine = serverCommissionAmount !== null
                 if (serverResolvedCommissionLine && ['rate', 'unit_rate', 'amount', 'commission_amount', 'line_total_ex'].some((key) => Object.hasOwn(rawItem, key))) {
                   const lineId = rawItem.line_id ?? rawItem.id
-                  console.warn('[ops-api] commission_client_amount_ignored', { line_id: typeof lineId === 'string' ? lineId : null })
+                  console.warn('[ops-api] commission_client_amount_ignored', { line_id: loggableClientLineId(lineId) })
                 }
                 const officeHourly = weekAutofill && !serverResolvedWeeklyLine && !isWorkOrderInvoiceItem(rawItem) && (rawItem.row_type === 'labour' || isTradeInvoiceTimeLineType(rawItem.type))
                 const item = serverResolvedCommissionLine

@@ -165,6 +165,16 @@ export async function readJobCommissionRecordsReusing(
   return out;
 }
 
+// A screen line id is logged only in a shape the apps generate: a UUID, or
+// the Trade App's local line id (`il-<ms>-<base36>`). Anything else (an
+// email, a name, free text typed into the field) is logged as null, so a
+// warning never carries what a person typed.
+const LOGGABLE_LINE_ID = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|il-\d{10,16}-[0-9a-z]{1,8})$/i;
+
+export function loggableClientLineId(value: unknown): string | null {
+  return typeof value === "string" && LOGGABLE_LINE_ID.test(value) ? value : null;
+}
+
 function isMissingRelation(error: any): boolean {
   const code = String(error?.code ?? "");
   return code === "42P01" || code === "PGRST205" || code === "PGRST200";

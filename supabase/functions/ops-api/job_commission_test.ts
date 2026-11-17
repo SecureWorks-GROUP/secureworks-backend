@@ -14,6 +14,7 @@ import {
   commissionCapCodeFromDbError,
   commissionCapRefusal,
   jobCommissionAction,
+  loggableClientLineId,
   type JobCommissionRecord,
   readJobCommissionRecords,
   readJobCommissionRecordsReusing,
@@ -361,5 +362,13 @@ Deno.test("commission line state: only the named salesperson with a known remain
   for (const remaining_ex_gst of [0, -1]) {
     assertEquals(commissionLineState(rec({ remaining_ex_gst }), ME), { state: "claimed", remaining_ex: null });
     assertEquals(commissionLineState(rec({ remaining_ex_gst }), OTHER), { state: "not_yours", remaining_ex: null });
+  }
+});
+
+Deno.test("loggableClientLineId keeps only app-generated line ids", () => {
+  assertEquals(loggableClientLineId("6c0a0a52-0000-4000-8000-00000000a001"), "6c0a0a52-0000-4000-8000-00000000a001");
+  assertEquals(loggableClientLineId("il-1763420000000-ab12"), "il-1763420000000-ab12");
+  for (const bad of ["someone@example.com", "il-1763420000000-ab12 someone@example.com", "", "extra", "il-12-x", null, undefined, 42, {}]) {
+    assertEquals(loggableClientLineId(bad), null, String(bad));
   }
 });
