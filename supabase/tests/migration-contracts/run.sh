@@ -46,6 +46,25 @@ if [ ! -d "${case_directories[0]}" ]; then
   exit 2
 fi
 
+# Optional case names select assertions/proofs only. Every shard still builds
+# ALL prerequisites and migrations in order; a subset is not a smaller schema.
+selected_cases=("$@")
+for selected_case in "${selected_cases[@]}"; do
+  if [[ "$selected_case" != 20* || "$selected_case" == */* ]] \
+    || [ ! -d "$CONTRACT_ROOT/$selected_case" ]; then
+    echo "error: unknown migration contract case $selected_case" >&2
+    exit 2
+  fi
+done
+case_selected() {
+  [ "${#selected_cases[@]}" -eq 0 ] && return 0
+  local selected_case
+  for selected_case in "${selected_cases[@]}"; do
+    [ "$selected_case" = "$1" ] && return 0
+  done
+  return 1
+}
+
 for case_directory in "${case_directories[@]}"; do
   case_name=$(basename "$case_directory")
   migration="$REPO_ROOT/supabase/migrations/$case_name.sql"
@@ -162,7 +181,7 @@ reset_contract_database
 for case_directory in "${case_directories[@]}"; do
   case_name=$(basename "$case_directory")
   run_sql_file "$case_name prerequisites" "$case_directory/setup.sql"
-  if [ -f "$case_directory/preexisting-failure.sql" ]; then
+  if case_selected "$case_name" && [ -f "$case_directory/preexisting-failure.sql" ]; then
     if [ ! -f "$case_directory/preexisting-failure.expected" ]; then
       echo "error: missing $case_directory/preexisting-failure.expected" >&2
       exit 2
@@ -186,6 +205,7 @@ psql "$ADMIN_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
   -c "CREATE DATABASE \"$STACK_DATABASE\" TEMPLATE \"$CONTRACT_DATABASE\";" >/dev/null
 for case_directory in "${case_directories[@]}"; do
   case_name=$(basename "$case_directory")
+  case_selected "$case_name" || continue
   run_sql_file "$case_name contract" "$case_directory/contract.sql"
   run_concurrent_case "$case_directory"
 done
@@ -199,7 +219,7 @@ for case_directory in "${case_directories[@]}"; do
   case_name=$(basename "$case_directory")
   run_sql_file "$case_name prerequisites" "$case_directory/setup.sql"
   run_sql_file "$case_name migration" "$REPO_ROOT/supabase/migrations/$case_name.sql"
-  if [ -f "$case_directory/rollback-contract.sql" ]; then
+  if case_selected "$case_name" && [ -f "$case_directory/rollback-contract.sql" ]; then
     copy_database_to_proof "$CONTRACT_DATABASE"
     if [ -f "$case_directory/rollback-before.sql" ]; then
       run_sql_file "$case_name rollback before" "$case_directory/rollback-before.sql"
@@ -218,7 +238,7 @@ done
 # starts from a copy of the full stack as it stood before any contract ran.
 for case_directory in "${case_directories[@]}"; do
   case_name=$(basename "$case_directory")
-  if [ -f "$case_directory/break-contract.sql" ]; then
+  if case_selected "$case_name" && [ -f "$case_directory/break-contract.sql" ]; then
     if [ ! -f "$case_directory/break-contract.expected" ]; then
       echo "error: missing $case_directory/break-contract.expected" >&2
       exit 2
