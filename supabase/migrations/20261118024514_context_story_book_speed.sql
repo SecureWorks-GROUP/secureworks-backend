@@ -1,7 +1,8 @@
 -- FU26.0: the original entry points stay byte-identical until explicit install.
 -- No switch, trigger, timer or cache is enabled by this migration.
--- New version is main's latest (20261117235501) plus one second, rule 19.
+-- Version uses the current rework timestamp after main's latest, rule 19.
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '120s';
 
 -- The direct lane reuses context_story_trade_lines_job. These two expression
 -- indexes mirror the resolver's other two coordinates, not a new identity rule.

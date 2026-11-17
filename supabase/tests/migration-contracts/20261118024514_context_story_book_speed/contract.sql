@@ -5,7 +5,7 @@ SET LOCAL jit=off;
 SET LOCAL TimeZone='UTC';
 SET LOCAL statement_timeout='120s';
 -- Rule 17: recreate this case's own objects after predecessor rollback proofs.
-\ir ../../../migrations/20261117235502_context_story_book_speed.sql
+\ir ../../../migrations/20261118024514_context_story_book_speed.sql
 CREATE FUNCTION pg_temp.bs_assert(ok boolean,msg text) RETURNS void LANGUAGE plpgsql AS $f$
 BEGIN IF ok IS NOT TRUE THEN RAISE EXCEPTION 'FU26.0: %',msg; END IF; END $f$;
 SELECT pg_temp.bs_assert((SELECT md5(prosrc)='fc9a1c8f605a1dfd6c7d1ef7667bfa0d' FROM pg_proc WHERE oid='public.context_job_story_book(uuid,timestamptz)'::regprocedure),'merge changed main book');
@@ -64,7 +64,7 @@ INSERT INTO bs_before SELECT id,'wrong_card',public.context_job_story_text_get(i
 INSERT INTO bs_before SELECT id,'writer_card',public.context_job_story_text_get(id,public.context_job_story_writer_input(id)->'card',true) FROM bs_jobs;
 SELECT public.install_context_story_book_speed();
 SELECT public.install_context_story_book_speed();
-\ir ../../../migrations/20261117235502_context_story_book_speed.sql
+\ir ../../../migrations/20261118024514_context_story_book_speed.sql
 DO $front_door$ DECLARE r record; got jsonb; BEGIN
  FOR r IN SELECT * FROM bs_before LOOP
   got:=CASE r.kind
