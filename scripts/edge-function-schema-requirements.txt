@@ -1268,3 +1268,8 @@ ghl-proxy|supabase/migrations/20261116114500_quote_send_sealed_revision_guard.sq
 ops-api|supabase/migrations/20261117010000_job_work_order_agent_approval.sql|column|work_orders.approved_by_actor
 ops-api|supabase/migrations/20261117010000_job_work_order_agent_approval.sql|column|work_orders.approved_by_name
 ops-api|supabase/migrations/20261117010000_job_work_order_agent_approval.sql|function|approve_job_work_order_by_agent
+# One super rule (P1-01): ops-api reads trade_pay_settings for the start date
+# whenever the switch is on, and the persists carry super_basis through.
+ops-api|supabase/migrations/20261117020000_trade_pay_inclusive_super.sql|table|trade_pay_settings
+ops-api|supabase/migrations/20261117020000_trade_pay_inclusive_super.sql|column|trade_pay_settings.inclusive_super_from
+ops-api|supabase/migrations/20261117020000_trade_pay_inclusive_super.sql|function|trade_pay_rule_on

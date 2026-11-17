@@ -240,7 +240,11 @@ Deno.test("audit 7: my_hours preview money equals calculateTradeInvoiceMoney", a
     assignments: [completeAssignment("asn-1", { hours_worked: 8 })],
     rates: [{ hourly_rate: 50, effective_from: "2026-01-01" }],
   });
-  const preview = await myHours(client, USER_ID, new URLSearchParams({ week_ending: WEEK_END }));
+  const read = await myHours(client, USER_ID, new URLSearchParams({ week_ending: WEEK_END }));
+  // The pay rule read fine (switch off), so the money fields are there.
+  assertEquals(read.money_unavailable, false);
+  if (read.money_unavailable) throw new Error("unreachable");
+  const preview = read;
   const expected = calculateTradeInvoiceMoney({ grossEarned: 400, gstOn: true, earningsDate: WEEK_END });
   assertEquals(preview.subtotal, 400);
   assertEquals(preview.gst, expected.gst_amount);
