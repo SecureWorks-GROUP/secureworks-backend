@@ -129,7 +129,7 @@ END $c$;
 TABLE worker_followup_plans;
 -- Run after the plan checks so reapply cannot heal a deliberately dropped index
 -- before the runner's broken-contract phase gets to observe it.
-\ir ../../../migrations/20261117194201_context_worker_state_indexes.sql
+\ir ../../../migrations/20261117194402_context_worker_state_indexes.sql
 DO $c$ BEGIN
   IF pg_get_functiondef('public.context_worker_state()'::regprocedure) IS DISTINCT FROM
     (SELECT replace(definition,
