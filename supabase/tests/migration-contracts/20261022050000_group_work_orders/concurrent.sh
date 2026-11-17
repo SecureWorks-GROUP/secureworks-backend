@@ -360,7 +360,10 @@ if [ "$p_status" -ne 0 ] && [ "$g_status" -ne 0 ]; then
   cat "$tmp/p.out" "$tmp/p.err" "$tmp/g.out" "$tmp/g.err" >&2
   exit 1
 fi
-if ! grep -q -E 'work_order_claim_blocked_by_group_share|group_open_blocked_by_work_order_claim' \
+# The draft ordinary-pay line is unresolved hours under 20261106160000:
+# docs/group-work-orders-v1.md, "Crew already paid by the hour". If pay wins,
+# opening the group may therefore refuse with the hours-specific reason.
+if ! grep -q -E 'work_order_claim_blocked_by_group_share|group_open_blocked_by_work_order_claim|group_open_blocked_by_hours_claim' \
   "$tmp/p.err" "$tmp/g.err"; then
   echo 'the losing pay-or-group session failed for a different reason' >&2
   cat "$tmp/p.out" "$tmp/p.err" "$tmp/g.out" "$tmp/g.err" >&2
