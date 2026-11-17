@@ -6,8 +6,8 @@
 -- stand-ins; Job Profit and job page marks run only where main has them (CI).
 SELECT to_regprocedure('public.reconcile_item_raise(text,text,text,uuid[],jsonb,jsonb,text)') IS NULL AS isolated_decide_setup \gset
 \if :isolated_decide_setup
-\ir ../20261118064402_reconcile_item_raise/setup.sql
-\ir ../../../migrations/20261118064402_reconcile_item_raise.sql
+\ir ../20261118064828_reconcile_item_raise/setup.sql
+\ir ../../../migrations/20261118064828_reconcile_item_raise.sql
 \endif
 SELECT to_regprocedure('public.job_cost_lines_set_state(uuid,text,jsonb,text,bigint,text)') IS NULL AS isolated_decide_writer \gset
 \if :isolated_decide_writer
