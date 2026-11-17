@@ -1096,7 +1096,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261116011500", "trade_pay_run_check"),
                       # Agent job-work-order approval: the actor, the required
                       # name and the seal time (job_work_orders.ts).
-                      ("20261117010000", "job_work_order_agent_approval")]:
+                      ("20261117010000", "job_work_order_agent_approval"),
+                      # One super rule (P1-01): the start date and the
+                      # pay-day test (trade_pay_rule.ts).
+                      ("20261117020000", "trade_pay_inclusive_super")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
