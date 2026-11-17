@@ -1740,6 +1740,56 @@ solarspan.com.au tie to it. The old Solarspan entry is retired (kept, not
 active). An order sent before the on-send clock started (SWP-26100, 10 Nov) is
 picked up only by the catch-up (3g.2, dry run first).
 
+## 3h. Book install from the Install row (item 4, approved by Shaun 16 Nov 2026)
+
+Picture: `.lavish/dispatch-book-install-mockup.html` ("i like it all").
+Module: `dispatch_v2_install_booking.ts`. One read and four presses, gated as
+every other Dispatch action (staff session or the privileged ops key) and by
+the job's assignment gate (`assertAssignmentMutationAuthz`). The job must be
+Dispatch work (fencing, patio, decking or a repair), else 409
+`not_dispatch_work`.
+
+**Every write goes through the Calendar's own booking functions**
+(`createAssignment`, `confirmAssignment`, `rescheduleJobBookings`,
+`updateAssignment`, `deleteAssignment`), so the ghost observer rows (Shaun on
+every job, Nithin on patio), `scheduled_end`, `crew_name`, `job_events`,
+`business_events` and the GHL custom-field push are exactly what a Calendar
+booking makes.
+
+**The install** is the job's install bookings as the board counts them
+(`isDispatchInstallBooking`: `assignment_type = 'install'`, not cancelled,
+never a ghost or observer row).
+
+| Action | Method | Body | What it does |
+|---|---|---|---|
+| `dispatch_v2_install` | GET or POST | `job_id` | Answers `{ install }` (below). Writes nothing. |
+| `dispatch_v2_install_book` | POST | `job_id`, `first_day` (YYYY-MM-DD), `days` (1 to 20, default 1), `lead: { user_id, name }`, `helpers: [{ user_id, name }]` (up to 8 people in all), `note` | One `create_assignment` per person per working day: `scheduled_date = scheduled_end` = that day, `duration_days` 1, `assignment_type` install, role `lead_installer` or `helper`, `confirmationStatus: 'tentative'`, `suppress_notifications: true`, `keep_job_status: true`. Weekends are skipped (a Saturday or Sunday first day starts on the Monday). Nobody is texted. 409 `already_booked` when the job already has an install (Move or Remove it first). A crew id not on `users` is 400 `crew_unknown` before any write. If any row fails, every row this press made is removed again and the answer is 500 `book_failed` (with `left_on_calendar`). |
+| `dispatch_v2_install_confirm` | POST | `job_id` | `confirm_assignment` on every install booking not yet confirmed, `notifyClient: false` (the client is never texted). Then each crew member whose booking was just confirmed gets ONE text, `create_assignment`'s own "New job assigned" words with that person's install days (`Date:` or `Dates:`), from +61489267771, recipientRole crew with the job as aboutJobId. `crew_notified_at` is stamped on the rows a text went for. Answers `texted`, `no_phone` and `text_failed` by name. 409 `already_confirmed` / `not_booked`. |
+| `dispatch_v2_install_move` | POST | `job_id`, `new_start` | One `reschedule_job_bookings` move (every live crew booking of the job, all days together, one transaction; JB409/JB404 refusals come back as they do for the Calendar). A booking that was confirmed goes back to tentative (`update_assignment`, as the Calendar's "Reschedule confirmed job"), so the crew hears of the new days only when Confirm is pressed again. Nobody is texted by the move. |
+| `dispatch_v2_install_remove` | POST | `job_id` | `delete_assignment` on every install booking. An invoiced booking is refused by `delete_assignment` and named in `failed`. Nobody is texted. |
+
+Every answer carries `install` and `job_status_changed: false`.
+
+```json
+{ "install": {
+    "job_id": "uuid", "booked": true,
+    "state": "tentative | confirmed | mixed | none",
+    "days": ["2026-11-20", "2026-11-23"], "first_day": "2026-11-20", "last_day": "2026-11-23",
+    "people": [{ "user_id": "uuid", "name": "Henry", "role": "lead_installer", "days": ["2026-11-20", "2026-11-23"] }],
+    "booking_ids": ["uuid"], "booked_at": "2026-11-16T06:10:00Z" } }
+```
+
+**Never:** a job stage or status move (`create_assignment`'s old
+`accepted -> processing` step is switched off for these rows by
+`keep_job_status: true`; every other caller keeps it), a client text, a clash
+warning or a materials check.
+
+**Not changed by this, and worth knowing:** the noon schedule reminder sweep
+(`job_schedule_reminders.ts`, switched live) texts the client of a job that is
+already in Scheduled about its first install booking, tentative or not. That
+holds for a Calendar booking today too; a Dispatch booking on a Scheduled job
+is counted the same way.
+
 ## Tweak 4: the approved supplier names on the board (5 Nov 2026)
 
 Full rules: docs/dispatch-v2-emails-contract.md, section "Tweak 4".

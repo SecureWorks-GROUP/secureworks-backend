@@ -430,6 +430,7 @@ import { runDispatchV2MaterialStageAction } from './dispatch_v2_material_stage_w
 import { dispatchDateTrigger, runDispatchV2OrderConfirmed, type DispatchOrderConfirmedDeps } from './dispatch_v2_order_confirmed_write.ts'
 import { sweepDispatchV2OrderDocuments } from './dispatch_v2_order_documents.ts'
 import { runDispatchV2PaymentAction } from './dispatch_v2_payment_write.ts'
+import { DispatchInstallError, postgrestDispatchInstallReads, runDispatchV2InstallAction } from './dispatch_v2_install_booking.ts'
 import {
   DISPATCH_DELIVERY_LIST_SELECT,
   dispatchDeliveryListFields,
@@ -7847,6 +7848,51 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // AGENT_READ_ALLOWED_ACTIONS and LEAD_INSTALLER_READ_ACTIONS. Writes the
       // supplier box's three material stage columns and one job_events row: no
       // send, no Xero, never a job stage or status.
+      // Dispatch v2: Book install from the job's Install row
+      // (docs/dispatch-v2-board-contract.md, section 3h;
+      // dispatch_v2_install_booking.ts). One read and four presses, gated as
+      // the other Dispatch actions and by the job's assignment gate. Every
+      // write goes through the Calendar's own booking functions. Book, Move
+      // and Remove text nobody; Confirm texts each crew member once "New job
+      // assigned" from +61489267771 and never the client. None moves the
+      // job's stage or status. Absent from ROUTINE_ALLOWED_ACTIONS,
+      // AGENT_READ_ALLOWED_ACTIONS and LEAD_INSTALLER_READ_ACTIONS.
+      case 'dispatch_v2_install':
+      case 'dispatch_v2_install_book':
+      case 'dispatch_v2_install_confirm':
+      case 'dispatch_v2_install_move':
+      case 'dispatch_v2_install_remove': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if (action !== 'dispatch_v2_install' && req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const installJobId = String(url.searchParams.get('job_id') || body?.job_id || '').trim()
+        if (installJobId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(installJobId)) {
+          await assertAssignmentMutationAuthz(client, authMode, authUser, { jobId: installJobId })
+        }
+        const installOperatorEmail = (authMode === 'jwt' ? authUser?.email : null) || cleanReviewedString(body?.operator_email) || null
+        try {
+          return json(await runDispatchV2InstallAction(action, url.searchParams, body, {
+            operatorEmail: installOperatorEmail,
+            operatorUserId: authMode === 'jwt' ? (authUser?.id || null) : null,
+          }, {
+            ...postgrestDispatchInstallReads(client),
+            createAssignment: (b) => createAssignment(client, b),
+            confirmAssignment: (b) => confirmAssignment(client, b),
+            updateAssignment: (b) => updateAssignment(client, b),
+            deleteAssignment: (b) => deleteAssignment(client, b),
+            rescheduleJobBookings: (b) => rescheduleJobBookings(client, b, jobBookingsDeps(client)),
+            sendCrewText: (phone, message, jobId) =>
+              sendSmsViaGhl(phone, message, '+61489267771', { role: 'crew', aboutJobId: jobId }),
+          }))
+        } catch (e) {
+          if (e instanceof DispatchInstallError) throw new ApiError(e.message, e.status, e.body)
+          if (e instanceof JobBookingsError) {
+            throw new ApiError(e.message, e.status, { error: e.message, code: e.code, ...e.details })
+          }
+          throw e
+        }
+      }
       case 'dispatch_v2_set_material_stage': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
           return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
@@ -37882,7 +37928,10 @@ export async function createAssignment(client: any, body: any) {
   // Auto-update job status when crew is assigned
   // processing jobs with crew assigned can auto-advance (kept for backwards compat)
   // Legacy 'accepted' jobs also auto-advance to 'processing'
-  if (currentJob?.status === 'accepted') {
+  // keep_job_status: Dispatch's Book install (dispatch_v2_install_booking.ts)
+  // books crew without ever moving the job's stage or status (Shaun, 16 Nov
+  // 2026), so it switches this old step off. Every other caller is unchanged.
+  if (currentJob?.status === 'accepted' && body.keep_job_status !== true) {
     await client.from('jobs').update({ status: 'processing', processing_at: new Date().toISOString() }).eq('id', jId)
   }
 

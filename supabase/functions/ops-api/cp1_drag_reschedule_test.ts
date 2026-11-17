@@ -864,3 +864,51 @@ Deno.test("streetFromAddress: street name only — numbers, units and suburb tai
   assertEquals(streetFromAddress(null), "your property");
   assertEquals(streetFromAddress(""), "your property");
 });
+
+// ── keep_job_status (Dispatch Book install, 16 Nov 2026) ───────────────────
+// create_assignment's old step moves an `accepted` job to `processing` when
+// crew is booked. Dispatch's Book install never moves the job's stage or
+// status, so it passes keep_job_status: true. Every other caller is unchanged.
+Deno.test("keep_job_status: an accepted job stays accepted when Dispatch books it", async () => {
+  const { restore } = stubFetch();
+  try {
+    const store = baseStore();
+    store.jobs!["job-1"].status = "accepted";
+    await createAssignment(makeClient(store), {
+      jobId: "job-1",
+      userId: "inst-1",
+      scheduledDate: "2026-11-20",
+      scheduledEnd: "2026-11-20",
+      crewName: "Hugo",
+      confirmationStatus: "tentative",
+      suppress_notifications: true,
+      keep_job_status: true,
+    });
+    assertEquals(
+      store.updates!.filter((u) => u.table === "jobs" && "status" in u.row).length,
+      0,
+    );
+  } finally {
+    restore();
+  }
+});
+
+Deno.test("keep_job_status: without it the old accepted -> processing step still runs", async () => {
+  const { restore } = stubFetch();
+  try {
+    const store = baseStore();
+    store.jobs!["job-1"].status = "accepted";
+    await createAssignment(makeClient(store), {
+      jobId: "job-1",
+      userId: "inst-1",
+      scheduledDate: "2026-11-20",
+      crewName: "Hugo",
+      confirmationStatus: "tentative",
+    });
+    const flips = store.updates!.filter((u) => u.table === "jobs" && "status" in u.row);
+    assertEquals(flips.length, 1);
+    assertEquals(flips[0].row.status, "processing");
+  } finally {
+    restore();
+  }
+});
