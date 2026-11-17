@@ -49,6 +49,33 @@ SELECT pg_temp.zz_assert((SELECT count(*) FROM pg_attribute WHERE attrelid = 'pu
   AND NOT attisdropped AND (attname, atttypid) IN (('pay_run_id','uuid'::regtype),('reviewed_by','uuid'::regtype),
   ('reviewed_at','timestamptz'::regtype))) = 3, 'three invoice columns');
 
+-- Column ownership: a column of one of the three names that this migration
+-- did not create (no "P1-10.1:" comment) is never touched. The apply refuses
+-- it and the rollback refuses to drop it. Each run inside a savepoint; with
+-- ON_ERROR_ROLLBACK each later statement still runs, so the last error is the
+-- refusal itself.
+\set ON_ERROR_STOP off
+\set ON_ERROR_ROLLBACK on
+SAVEPOINT zz_owner;
+COMMENT ON COLUMN public.trade_invoices.reviewed_at IS 'ZZTEST another change owns this';
+\ir ../../../migrations/20261118064649_trade_pay_runs.sql
+ROLLBACK TO SAVEPOINT zz_owner;
+SELECT :'LAST_ERROR_MESSAGE' AS apply_error \gset
+SAVEPOINT zz_owner;
+COMMENT ON COLUMN public.trade_invoices.reviewed_by IS NULL;
+\ir ../../../rollbacks/20261118064649_trade_pay_runs_down.sql
+ROLLBACK TO SAVEPOINT zz_owner;
+SELECT :'LAST_ERROR_MESSAGE' AS down_error \gset
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP on
+SELECT pg_temp.zz_assert(:'apply_error' LIKE '%trade_invoices already has reviewed_at, not created by this migration%',
+  'apply must refuse a column it does not own: ' || :'apply_error');
+SELECT pg_temp.zz_assert(:'down_error' LIKE '%trade_invoices.reviewed_by not created by this migration%',
+  'rollback must refuse to drop a column it does not own: ' || :'down_error');
+SELECT pg_temp.zz_assert((SELECT count(*) FROM pg_attribute WHERE attrelid = 'public.trade_invoices'::regclass AND NOT attisdropped
+  AND attname IN ('pay_run_id','reviewed_at','reviewed_by')
+  AND col_description(attrelid, attnum) LIKE 'P1-10.1:%') = 3, 'all three columns owned after the refusals');
+
 -- Historical fixtures need not satisfy today's write guards; the guards stay
 -- on the run tables, and every foreign key and unique constraint stays.
 DO $$ DECLARE t text; c record; BEGIN
@@ -163,6 +190,35 @@ SELECT pg_temp.zz_assert(pg_temp.zz_approve('2026-11-16', :'approver',
   'snapshot super that differs from the invoice must be refused');
 SELECT pg_temp.zz_assert(pg_temp.zz_nothing_written(), 'super drift wrote something');
 
+-- One cent of pay drift with super unchanged: refused, nothing written.
+SELECT pg_temp.zz_assert(pg_temp.zz_approve('2026-11-16', :'approver',
+  jsonb_set(pg_temp.zz_snapshot('{2}'), '{invoices,0,pays}', '100.01')) = 'pay_run_changed_since_shown',
+  'one cent of pay drift must be refused');
+SELECT pg_temp.zz_assert(pg_temp.zz_nothing_written(), 'pay drift wrote something');
+
+-- A clean invoice missing a stored figure is refused, never read as 0.
+SELECT pg_temp.zz_snapshot('{2}') AS shown \gset
+SAVEPOINT zz_missing;
+UPDATE public.trade_invoices SET net_pay = NULL WHERE invoice_number = 'ZZTEST-P101-INV-1';
+SELECT pg_temp.zz_assert(pg_temp.zz_approve('2026-11-16', :'approver', :'shown') = 'pay_run_figures_unreadable',
+  'a clean invoice with no stored net pay must be refused');
+SELECT pg_temp.zz_assert(pg_temp.zz_nothing_written(), 'missing figure wrote something');
+ROLLBACK TO SAVEPOINT zz_missing;
+
+-- An invoice already approved, pushed or paid, or already billed in Xero,
+-- labelled clean: refused before anything is written.
+SAVEPOINT zz_paid;
+UPDATE public.trade_invoices SET status = 'paid' WHERE invoice_number = 'ZZTEST-P101-INV-1';
+SELECT pg_temp.zz_assert(pg_temp.zz_approve('2026-11-16', :'approver', :'shown') = 'pay_run_changed_since_shown',
+  'a paid invoice labelled clean must be refused');
+UPDATE public.trade_invoices SET status = 'pending_ops_review', xero_bill_id = 'ZZTEST-BILL'
+  WHERE invoice_number = 'ZZTEST-P101-INV-1';
+SELECT pg_temp.zz_assert(pg_temp.zz_approve('2026-11-16', :'approver', :'shown') = 'pay_run_changed_since_shown',
+  'an invoice billed in Xero labelled clean must be refused');
+SELECT pg_temp.zz_assert(NOT EXISTS (SELECT 1 FROM public.trade_pay_runs)
+  AND NOT EXISTS (SELECT 1 FROM public.trade_pay_run_invoices), 'paid invoice wrote something');
+ROLLBACK TO SAVEPOINT zz_paid;
+
 -- A run the standing checks block writes nothing. P1-08.3 only blocks after
 -- the bills are drafted, so a stand-in answer is used inside a savepoint.
 SAVEPOINT zz_blocked;
@@ -179,6 +235,23 @@ RETURNS jsonb LANGUAGE sql AS $$ SELECT NULL::jsonb $$;
 SELECT pg_temp.zz_assert(pg_temp.zz_approve('2026-11-16', :'approver', pg_temp.zz_snapshot('{2}')) = 'pay_run_standing_check_unreadable',
   'unreadable standing answer must be refused');
 SELECT pg_temp.zz_assert(pg_temp.zz_nothing_written(), 'unreadable answer wrote something');
+-- Any stop on an invoice sent as clean refuses: a malformed entry ([{}]) is
+-- unreadable, a named clean invoice means the week changed.
+CREATE OR REPLACE FUNCTION public.trade_pay_run_standing_checks(p_org_id uuid, p_invoice_ids uuid[], p_stage text)
+RETURNS jsonb LANGUAGE sql AS $$
+  SELECT '{"rule":"zztest","checks":[],"stopped_invoices":[{}],"run_blocked":false}'::jsonb
+$$;
+SELECT pg_temp.zz_assert(pg_temp.zz_approve('2026-11-16', :'approver', pg_temp.zz_snapshot('{2}')) = 'pay_run_standing_check_unreadable',
+  'stopped_invoices [{}] must be refused');
+SELECT pg_temp.zz_assert(pg_temp.zz_nothing_written(), 'malformed stop wrote something');
+CREATE OR REPLACE FUNCTION public.trade_pay_run_standing_checks(p_org_id uuid, p_invoice_ids uuid[], p_stage text)
+RETURNS jsonb LANGUAGE sql AS $$
+  SELECT jsonb_build_object('rule','zztest','checks','[]'::jsonb,'run_blocked',false,
+    'stopped_invoices', jsonb_build_array(jsonb_build_object('invoice_id', p_invoice_ids[1], 'stops', '[]'::jsonb)))
+$$;
+SELECT pg_temp.zz_assert(pg_temp.zz_approve('2026-11-16', :'approver', pg_temp.zz_snapshot('{2}')) = 'pay_run_changed_since_shown',
+  'a stop on a clean invoice must be refused');
+SELECT pg_temp.zz_assert(pg_temp.zz_nothing_written(), 'stop on a clean invoice wrote something');
 ROLLBACK TO SAVEPOINT zz_blocked;
 
 -- Three clean and one stopped (the one-cent invoice): one run, four rows,
@@ -215,5 +288,64 @@ SELECT pg_temp.zz_assert(NOT EXISTS (SELECT 1 FROM public.trade_invoices
   WHERE (reviewed_at IS NOT NULL OR reviewed_by IS NOT NULL OR pay_run_id IS NOT NULL)
     AND invoice_number NOT IN ('ZZTEST-P101-INV-1','ZZTEST-P101-INV-3','ZZTEST-P101-INV-4')), 'other invoices untouched');
 
+-- Ruling A: the invoice stopped in week 16 is listed again in week 23 and,
+-- now right, is paid there; an invoice can never be paid by a second run.
+UPDATE public.trade_invoices SET super_amount = 24, net_pay = 200 WHERE invoice_number = 'ZZTEST-P101-INV-2';
+CREATE FUNCTION pg_temp.zz_only(p_number text, p_verdict text) RETURNS jsonb LANGUAGE sql AS $$
+  SELECT jsonb_build_object('check_rule', 'v2', 'invoices', jsonb_agg(e || jsonb_build_object('verdict', p_verdict)))
+  FROM jsonb_array_elements(pg_temp.zz_snapshot('{}')->'invoices') e
+  JOIN public.trade_invoices i ON i.id = (e->>'invoice_id')::uuid AND i.invoice_number = p_number
+$$;
+SELECT pg_temp.zz_assert(pg_temp.zz_approve('2026-11-23', :'approver', pg_temp.zz_only('ZZTEST-P101-INV-2', 'clean')) IS NULL,
+  'a stopped invoice must list again and be paid next week');
+SELECT pg_temp.zz_assert((SELECT count(*) = 2 AND count(*) FILTER (WHERE ri.verdict = 'clean' AND r.week_start = '2026-11-23'
+    AND ri.pays = 200 AND ri.super_amount = 24) = 1
+  FROM public.trade_pay_run_invoices ri JOIN public.trade_pay_runs r ON r.id = ri.run_id
+  JOIN public.trade_invoices i ON i.id = ri.invoice_id WHERE i.invoice_number = 'ZZTEST-P101-INV-2'),
+  'invoice 2: stopped in one run, paid by the next');
+SELECT pg_temp.zz_assert((SELECT r.total_pays = 200 AND r.super_total = 24 AND r.invoice_count = 1
+  FROM public.trade_pay_runs r WHERE r.week_start = '2026-11-23'), 'second run totals from the locked row');
+-- A clean invoice cannot join a second run, as clean or as a stray row.
+SELECT pg_temp.zz_assert(pg_temp.zz_approve('2026-11-30', :'approver', pg_temp.zz_only('ZZTEST-P101-INV-1', 'clean'))
+  = 'pay_run_changed_since_shown', 'a paid invoice must not be approved by a second run');
+SELECT pg_temp.zz_assert(pg_temp.zz_error($$INSERT INTO public.trade_pay_run_invoices (run_id, invoice_id, verdict, pays, super_amount)
+  SELECT r.id, i.id, 'clean', 100, 12 FROM public.trade_pay_runs r, public.trade_invoices i
+  WHERE r.week_start = '2026-11-23' AND i.invoice_number = 'ZZTEST-P101-INV-1'$$) LIKE '%trade_pay_run_invoices_clean_once%',
+  'a second clean row for one invoice must be refused by the table');
+SELECT pg_temp.zz_assert((SELECT count(*) FROM public.trade_pay_runs) = 2
+  AND (SELECT count(*) FROM public.trade_pay_run_invoices) = 5, 'ruling A refusals wrote something');
+
+-- Rule 16, on populated tables: the approval's lock read and its paid-run
+-- check read a few rows by index, never the whole table.
+INSERT INTO public.trade_invoices (id, org_id, invoice_number, status, invoice_kind)
+  SELECT gen_random_uuid(), '00000000-0000-0000-0000-000000000009', 'ZZTEST-BULK-' || n, 'approved', 'standard'
+  FROM generate_series(1, 20000) n;
+INSERT INTO public.trade_pay_runs (org_id, week_start, check_rule, approved_by, snapshot, standing, invoice_count, total_pays, super_total)
+  SELECT '00000000-0000-0000-0000-000000000009', '2020-01-06'::date + 7 * n, 'v2', :'approver', '{}', '{}', 0, 0, 0
+  FROM generate_series(1, 200) n;
+INSERT INTO public.trade_pay_run_invoices (run_id, invoice_id, verdict, pays, super_amount)
+  SELECT r.id, i.id, 'stopped', 1, 0
+  FROM (SELECT id, row_number() OVER (ORDER BY week_start) w FROM public.trade_pay_runs
+        WHERE org_id = '00000000-0000-0000-0000-000000000009') r
+  JOIN (SELECT id, row_number() OVER (ORDER BY invoice_number) k FROM public.trade_invoices
+        WHERE invoice_number LIKE 'ZZTEST-BULK-%') i ON (i.k - 1) / 100 + 1 = r.w;
+ANALYZE public.trade_invoices;
+ANALYZE public.trade_pay_run_invoices;
+CREATE FUNCTION pg_temp.zz_plan(p_sql text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE line text; plan text := '';
+BEGIN
+  FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) ' || p_sql LOOP
+    plan := plan || line || E'\n';
+  END LOOP;
+  RETURN plan;
+END $$;
+SELECT pg_temp.zz_plan(format($q$SELECT 1 FROM public.trade_invoices i WHERE i.id = ANY(%L::uuid[]) ORDER BY i.id FOR UPDATE$q$,
+  (SELECT array_agg(id) FROM public.trade_invoices WHERE invoice_number LIKE 'ZZTEST-P101-INV-%'))) AS lock_plan \gset
+SELECT pg_temp.zz_assert(:'lock_plan' NOT LIKE '%Seq Scan on trade_invoices%', 'lock read scanned trade_invoices: ' || :'lock_plan');
+SELECT pg_temp.zz_plan(format($q$SELECT 1 FROM public.trade_pay_run_invoices ri WHERE ri.invoice_id = %L AND ri.verdict = 'clean'$q$,
+  (SELECT id FROM public.trade_invoices WHERE invoice_number = 'ZZTEST-BULK-5'))) AS run_plan \gset
+SELECT pg_temp.zz_assert(:'run_plan' NOT LIKE '%Seq Scan on trade_pay_run_invoices%', 'paid-run check scanned the run rows: ' || :'run_plan');
+SELECT pg_temp.zz_assert((SELECT count(*) FROM public.trade_pay_run_invoices) = 20005, 'bulk run rows loaded');
+
 ROLLBACK;
-\echo 'PASS: P1-10.1 pay run record, approval, refusals and kind row.'
+\echo 'PASS: P1-10.1 pay run record, approval, refusals, ruling A, plans and kind row.'
