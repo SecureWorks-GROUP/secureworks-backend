@@ -8,12 +8,12 @@ INSERT INTO public.jobs(id,org_id,job_number,type,status) VALUES
  ('00000000-0000-4000-8000-000000000401','00000000-0000-4000-8000-000000000401','ZZTEST-401','fencing','accepted');
 INSERT INTO public.users(id,org_id,name,role) VALUES
  ('00000000-0000-4000-8000-000000004019','00000000-0000-4000-8000-000000000401','Office','ops_manager');
-INSERT INTO public.context_ledger_generations(id,job_id,kind,status,reader)
- VALUES ('00000000-0000-4000-8000-000000000401','00000000-0000-4000-8000-000000000401','rebuild','live','fixture');
+INSERT INTO public.context_ledger_generations(id,job_id,kind,status,reader,promoted_at)
+ VALUES ('00000000-0000-4000-8000-000000000401','00000000-0000-4000-8000-000000000401','rebuild','live','fixture','2026-11-17 00:00Z');
 INSERT INTO public.context_ledger_items(id,generation_id,job_id,item_key,item_type,status,from_role,what,opened_at,opened_by,written_by)
  VALUES ('00000000-0000-4000-8000-000000000401','00000000-0000-4000-8000-000000000401',
  '00000000-0000-4000-8000-000000000401','note:fixture','claim','open','unknown','Note',
- '2026-11-17 00:00Z','[]','model:fixture');
+ '2026-11-17 00:00Z','[{"table":"business_events","id":"00000000-0000-4000-8000-000000000401","excerpt":"Note"}]','model:fixture');
 INSERT INTO public.context_ledger_transitions(item_id,generation_id,job_id,from_status,to_status,at,by,evidence)
  VALUES ('00000000-0000-4000-8000-000000000401','00000000-0000-4000-8000-000000000401',
  '00000000-0000-4000-8000-000000000401',NULL,'open','2026-11-17 01:00Z','rule:record_close_v1',NULL);
