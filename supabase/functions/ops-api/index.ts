@@ -14,6 +14,7 @@ import { JobLabourPayReadError, readHourlyCappedJobs, readHourlyLabourLimits } f
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
 import { SelfAllocationRefusal, selfAllocateForInvoice } from './trade_self_allocation.ts'
+import { readMySavingsGoal, setMySavingsGoal } from './trade_savings_goal.ts'
 import {
   isWorkOrderInvoiceItem,
   loadTradeInvoiceJobModes,
@@ -5333,6 +5334,10 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'freeze_group_work_order',
   'group_work_order_preview_client_link',
   'my_money',
+  // A trade's own savings goal (trade_savings_goal.ts, P1-07.4): the session's
+  // user only; never on the owner's preview reads.
+  'my_savings_goal',
+  'set_my_savings_goal',
   'unlock_makesafe_report',
   'upload_photo',
   'get_upload_url',
@@ -13234,6 +13239,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'freeze_group_work_order':
       case 'group_work_order_preview_client_link':
       case 'my_money':
+      case 'my_savings_goal':
+      case 'set_my_savings_goal':
       case 'unlock_makesafe_report':
       case 'upload_photo':
       case 'get_upload_url':
@@ -13484,6 +13491,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             return await groupWorkOrderJson(previewGroupClientLink(client, groupCaller, groupPayload))
           }
           case 'my_money': return json(await myMoney(client, tradeUser, url.searchParams))
+          // P1-07.4: the goal is always the session trade's (tradeUser.id). A
+          // user id in the body or query string is never read.
+          case 'my_savings_goal': {
+            if (req.method !== 'GET') return json({ error: 'my_savings_goal requires GET' }, 405)
+            const answer = await readMySavingsGoal(client, tradeUser.id)
+            return json(answer.body, answer.status)
+          }
+          case 'set_my_savings_goal': {
+            if (req.method !== 'POST') return json({ error: 'set_my_savings_goal requires POST' }, 405)
+            const answer = await setMySavingsGoal(client, tradeUser.id, body)
+            return json(answer.body, answer.status)
+          }
           case 'unlock_makesafe_report': return json(await unlockMakesafeReport(client, body, tradeUser, tradeJobAccess, isDispatcher))
           case 'my_hours': return json(await myHours(client, tradeUser.id, url.searchParams))
           case 'submit_trade_invoice': return json(await submitTradeInvoice(client, tradeUser.id, body))
