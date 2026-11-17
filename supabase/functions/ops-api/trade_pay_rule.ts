@@ -10,17 +10,18 @@
 //     or after that day. Pay day: week_start when the invoice has one, else
 //     the day it is made. Null is off.
 //
-// The rule is stamped on the invoice (super_basis) when it is priced. Every
-// read, retry and Xero check follows the stamp and never this switch, so an
-// invoice keeps the rule it was priced under and earlier weeks never move.
+// The rule is stamped on the invoice (super_basis) when it is priced. Dated
+// invoices keep that rule on reads, retries and Xero checks; earlier weeks
+// never move. An undated draft's split is provisional: its chosen pay date
+// decides the rule when it is dated or sent.
 // A group share keeps its group's own basis: callers pass
 // groupBasis ?? resolveTradePayBasis(...).
 //
 // resolveTradePayBasis is the one decision for every money door. Given the
 // stored invoice the save replaces (a draft, or a retried draft) it returns
-// that invoice's stored basis whenever it is priced, a stored null being the
-// old rule, and reads the switch only for a new or unpriced invoice. So a
-// draft saved again after the switch moves keeps its rule and split. A door
+// that invoice's stored basis whenever it is priced and dated, a stored null
+// being the old rule. New, unpriced and explicitly undated drafts read the
+// switch for the incoming pay date. A door
 // reads the prior with TRADE_PAY_PRIOR_INVOICE_COLUMNS.
 //
 // A save refuses (503, nothing saved) when the switch or the start date
@@ -125,10 +126,14 @@ export function tradePayBasisFor(
 }
 
 /** The columns a door reads from the stored invoice its save replaces. */
-export const TRADE_PAY_PRIOR_INVOICE_COLUMNS = "gross_earned, super_basis, super_base_ex";
+export const TRADE_PAY_PRIOR_INVOICE_COLUMNS = "gross_earned, super_basis, super_base_ex, week_start, week_end, invoice_source";
 
 /** The stored invoice a save replaces, as read with those columns. */
 export type TradePayPriorInvoice = {
+  status?: unknown;
+  invoice_source?: unknown;
+  week_start?: unknown;
+  week_end?: unknown;
   gross_earned?: unknown;
   super_basis?: unknown;
   super_base_ex?: unknown;
@@ -158,9 +163,9 @@ export function tradePayStoredBasis(
 
 /**
  * The one decision for a write that saves an invoice. A priced prior keeps
- * its stored basis; a new or unpriced invoice takes the current rule for its
- * pay day. Refuses (TradePayRuleUnreadable) when the rule it needs cannot be
- * read.
+ * its stored basis unless it is explicitly an undated draft. A new, unpriced
+ * or undated draft takes the current rule for its incoming pay day. Refuses
+ * (TradePayRuleUnreadable) when the rule it needs cannot be read.
  */
 export async function resolveTradePayBasis(
   client: any,
@@ -169,9 +174,15 @@ export async function resolveTradePayBasis(
   settingsRead?: ReturnType<typeof readTradePaySettings>,
 ): Promise<TradeInvoiceSuperBasis | null> {
   const stored = tradePayStoredBasis(prior);
-  if (stored.priced) return stored.basis;
+  // Explicit null dates distinguish a provisional draft from a priced invoice.
+  // Missing coordinates never grant permission to reprice a stored invoice.
+  const undatedDraft = prior?.status === "draft" && prior.invoice_source === "hourly" &&
+    prior.week_start === null && prior.week_end === null;
+  if (stored.priced && !undatedDraft) return stored.basis;
   const read = await readTradePayRule(client, settingsRead);
   if (!read.ok) throw new TradePayRuleUnreadable(read.error);
+  // An inactive or unconfigured changeover preserves main's stored split.
+  if (stored.priced && (!read.on || !read.from)) return stored.basis;
   return tradePayBasisFor(read, payDay);
 }
 

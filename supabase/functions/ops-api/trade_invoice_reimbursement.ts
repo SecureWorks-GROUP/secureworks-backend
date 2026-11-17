@@ -41,7 +41,7 @@ export async function loadUndatedReimbursementDraft(
   if (!input.flagOn || !input.draftId) return null;
   // trade_invoices_pkey: one explicit row, never a scan of undated drafts.
   const { data, error } = await client.from("trade_invoices")
-    .select(`id, org_id, user_id, status, invoice_source, week_start, week_end, xero_bill_id, xero_pushed_at, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)
+    .select(`id, org_id, user_id, status, xero_bill_id, xero_pushed_at, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)
     .eq("id", String(input.draftId)).maybeSingle();
   if (error) throw new Error("Could not read the selected undated draft");
   if (!data || data.org_id !== input.orgId || data.user_id !== input.userId ||
