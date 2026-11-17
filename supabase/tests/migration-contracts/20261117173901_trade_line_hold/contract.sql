@@ -30,20 +30,23 @@ DECLARE
 BEGIN
   INSERT INTO public.users (id, org_id, name, role)
     VALUES (crew, org, 'ZZTEST crew', 'crew');
-  -- An old caller omits every new field.
+  -- An existing caller supplies the required money split but omits hold fields.
   INSERT INTO public.trade_invoices (org_id, user_id, invoice_number, status,
-    subtotal_ex, gst, total_inc)
-    VALUES (org, crew, 'ZZTEST-HOLD-STANDARD', 'draft', 0, 0, 0)
+    subtotal_ex, gst, total_inc, gst_on, super_rate, super_amount, gross_earned, net_pay)
+    VALUES (org, crew, 'ZZTEST-HOLD-STANDARD', 'draft', 0, 0, 0, false, 0.12, 0, 0, 0)
     RETURNING id, invoice_kind INTO standard, kind;
   PERFORM pg_temp.zztest_assert(kind = 'standard', 'old insert lost standard default');
   UPDATE public.trade_invoices SET send_id = send WHERE id = standard;
   INSERT INTO public.trade_invoices (org_id, user_id, invoice_number, status,
-    subtotal_ex, gst, total_inc, invoice_kind, send_id)
-    VALUES (org, crew, 'ZZTEST-HOLD-HELD', 'draft', 0, 0, 0, 'held', send)
+    subtotal_ex, gst, total_inc, gst_on, super_rate, super_amount, gross_earned, net_pay,
+    invoice_kind, send_id)
+    VALUES (org, crew, 'ZZTEST-HOLD-HELD', 'draft', 0, 0, 0, false, 0.12, 0, 0, 0,
+      'held', send)
     RETURNING id INTO held;
   INSERT INTO public.trade_invoices (org_id, user_id, invoice_number, status,
-    subtotal_ex, gst, total_inc, invoice_kind, send_id, follows_invoice_id)
-    VALUES (org, crew, 'ZZTEST-HOLD-FOLLOW', 'draft', 0, 0, 0,
+    subtotal_ex, gst, total_inc, gst_on, super_rate, super_amount, gross_earned, net_pay,
+    invoice_kind, send_id, follows_invoice_id)
+    VALUES (org, crew, 'ZZTEST-HOLD-FOLLOW', 'draft', 0, 0, 0, false, 0.12, 0, 0, 0,
       'follow_on', send, standard) RETURNING id INTO follow_on;
   PERFORM pg_temp.zztest_refuses(format(
     'UPDATE public.trade_invoices SET invoice_kind = %L WHERE id = %L',
