@@ -57909,7 +57909,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     let { data: groupHourRows, error: groupHourErr } = await client
       .from('group_work_orders')
       .select(weekAutofill
-        ? 'id, job_id, status, claim_state, group_work_order_participants(user_id), group_work_order_time_entries(user_id, hours)'
+        ? 'id, job_id, status, claim_state, group_work_order_participants(user_id)'
         : 'id, job_id, status')
       .in('job_id', groupHoursJobIds)
     if (groupHourErr && weekAutofill) {

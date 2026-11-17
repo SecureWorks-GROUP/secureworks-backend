@@ -156,6 +156,63 @@ export function weekSummary(cards: readonly Row[], opts: SummaryOptions) {
   };
 }
 
+// Only identity coordinates leave this bounded read, never another trade's hours.
+// uq_group_work_order_time_entries starts with group_id; each URL holds at most 25 ids.
+const GROUP_CONFIRMATION_LIMIT = 1000;
+async function readGroupConfirmationCounts(
+  client: any,
+  groups: readonly Row[],
+  userId: string,
+  weekStart: string,
+  weekEnding: string,
+): Promise<{ waitingOnCrew: number; waitingOnOffice: number }> {
+  const active = groups.filter((group) => group.status !== "void");
+  const ids = [...new Set(active.map((group) => String(group.id || "")))];
+  if (ids.includes("") || ids.length >= GROUP_CONFIRMATION_LIMIT) {
+    throw new Error("group_confirmation_unreadable");
+  }
+  const confirmedByGroup = new Map<string, Set<string>>();
+  let remaining = GROUP_CONFIRMATION_LIMIT;
+  for (let offset = 0; offset < ids.length; offset += 25) {
+    const { data, error } = await client.from("group_work_order_time_entries")
+      .select("group_id, user_id").in(
+        "group_id",
+        ids.slice(offset, offset + 25),
+      )
+      .gte("work_date", weekStart).lte("work_date", weekEnding)
+      .gt("hours", 0).limit(remaining);
+    // A full page may be truncated. Never publish a partial crew confirmation.
+    if (error || !Array.isArray(data) || data.length >= remaining) {
+      throw new Error("group_confirmation_unreadable");
+    }
+    remaining -= data.length;
+    for (const row of data) {
+      const key = String(row.group_id);
+      const confirmed = confirmedByGroup.get(key) || new Set<string>();
+      confirmed.add(String(row.user_id));
+      confirmedByGroup.set(key, confirmed);
+    }
+  }
+  let waitingOnCrew = 0;
+  let waitingOnOffice = 0;
+  for (const group of active) {
+    const participants = group.group_work_order_participants;
+    if (!Array.isArray(participants)) {
+      throw new Error("group_confirmation_unreadable");
+    }
+    if (["with_office", "disputed"].includes(group.claim_state)) {
+      waitingOnOffice++;
+    }
+    const confirmed = confirmedByGroup.get(String(group.id)) ||
+      new Set<string>();
+    if (
+      confirmed.has(userId) &&
+      participants.some((row: Row) => !confirmed.has(String(row.user_id)))
+    ) waitingOnCrew++;
+  }
+  return { waitingOnCrew, waitingOnOffice };
+}
+
 type ReadOptions = {
   enabled: boolean;
   userId: string;
@@ -211,28 +268,14 @@ export async function addWeekSuggestions(
       if (week.accepted_untouched !== true) break;
       streak++;
     }
-    let waitingOnCrew = 0;
-    let waitingOnOffice = 0;
-    for (const group of opts.groups) {
-      if (group.status === "void") continue;
-      const participants = group.group_work_order_participants;
-      const entries = group.group_work_order_time_entries;
-      if (!Array.isArray(participants) || !Array.isArray(entries)) {
-        throw new Error("group_confirmation_unreadable");
-      }
-      if (["with_office", "disputed"].includes(group.claim_state)) {
-        waitingOnOffice++;
-      }
-      const confirmed = new Set(
-        entries.filter((row: Row) => Number(row.hours) > 0).map((row: Row) =>
-          String(row.user_id)
-        ),
+    const { waitingOnCrew, waitingOnOffice } =
+      await readGroupConfirmationCounts(
+        client,
+        opts.groups,
+        opts.userId,
+        response.week_start,
+        response.week_ending,
       );
-      if (
-        confirmed.has(opts.userId) &&
-        participants.some((row: Row) => !confirmed.has(String(row.user_id)))
-      ) waitingOnCrew++;
-    }
     return {
       ...response,
       assignments,
