@@ -64,7 +64,7 @@ function makeClient(opts: {
         return { data: null, error: { code: "42703", message: "read failed" } };
       }
       const rows = table === "jobs" ? (opts.jobs ?? []) : table === "xero_invoices" ? invoices : table === "ai_annotations" ? annotations : events;
-      if (call.mode === "insert") { rows.push(call.row!); return { data: null, error: null }; }
+      if (call.mode === "insert") { rows.push(table === "ai_annotations" ? { status: "active", ...call.row } : call.row!); return { data: null, error: null }; }
       let selected = rows.filter(matches);
       if (call.mode === "update") {
         if (table === "xero_invoices" && opts.linkWrite) return { data: [], error: opts.linkWrite === "error" ? { message: "write failed" } : null };
