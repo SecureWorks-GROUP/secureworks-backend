@@ -31,7 +31,7 @@ INSERT INTO public.work_orders(id,job_id,kind,agreed_labour_ex) VALUES(md5('ZZTE
 INSERT INTO public.trade_invoices(id,user_id,org_id,invoice_number,invoice_source,week_start,status,
  subtotal_ex,gross_earned,super_amount,net_pay,super_basis,invoice_kind,gst_on,gst)
 SELECT md5('ZZTEST invoice '||n)::uuid,md5('ZZTEST role '||n)::uuid,md5('ZZTEST org')::uuid,
- 'ZZTEST-'||n,'ZZTEST','2026-11-23','approved',1120,1120,120,1000,'inclusive_12_112_v1','standard',false,0
+ 'ZZTEST-'||n,'ZZTEST','2026-11-23','approved',1120,1120,120.00,1000.00,'inclusive_12_112_v1','standard',false,0
  FROM generate_series(1,1)n;
 INSERT INTO public.trade_invoice_lines(id,trade_invoice_id,job_id,job_number,line_type,line_total_ex,job_work_order_id)
  VALUES(md5('ZZTEST line 1')::uuid,md5('ZZTEST invoice 1')::uuid,md5('ZZTEST job')::uuid,'ZZTEST-1','work order',1120,md5('ZZTEST work order')::uuid);
