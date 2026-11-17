@@ -50,13 +50,21 @@ END $c$;
 SELECT public.job_mark_changed('00000000-0000-4000-8000-000000000452','invoice');
 SELECT public.job_mark_changed('00000000-0000-4000-8000-000000000452','booking');
 DO $c$
+DECLARE v_until timestamptz:=clock_timestamp(); v_expected integer; v_actual integer;
 BEGIN
  IF (SELECT count(*) FROM public.job_change_marks WHERE job_id='00000000-0000-4000-8000-000000000452')<>1
   OR NOT EXISTS(SELECT 1 FROM public.job_change_marks WHERE job_id='00000000-0000-4000-8000-000000000452'
    AND sources=ARRAY['invoice','booking']) THEN RAISE EXCEPTION 'queue safety: append collapse lost sources'; END IF;
- IF public.job_marks_notes_seen(clock_timestamp())<>3 OR public.job_marks_notes_seen(clock_timestamp())<>0 THEN
-  RAISE EXCEPTION 'queue safety: notes acknowledgement differs';
+ -- Nightly also marks other eligible stack fixtures. Compare with the actual
+ -- due population instead of assuming this contract owns the whole database.
+ SELECT count(*) INTO v_expected FROM public.job_change_marks
+ WHERE last_marked_at<=v_until AND (notes_done_at IS NULL OR last_marked_at>notes_done_at);
+ v_actual:=public.job_marks_notes_seen(v_until);
+ IF v_actual<>v_expected THEN
+  RAISE EXCEPTION 'queue safety: notes acknowledgement differs: expected %, got %',v_expected,v_actual;
  END IF;
+ v_actual:=public.job_marks_notes_seen(v_until);
+ IF v_actual<>0 THEN RAISE EXCEPTION 'queue safety: notes acknowledgement repeated % rows',v_actual; END IF;
  IF EXISTS(SELECT 1 FROM pg_trigger WHERE NOT tgisinternal AND starts_with(tgname,'job_mark_changed_')) THEN
   RAISE EXCEPTION 'queue safety: migration installed a trigger';
  END IF;
