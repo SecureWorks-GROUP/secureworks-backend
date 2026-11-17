@@ -1,18 +1,21 @@
--- Rollback of 20261117020000_trade_super_inclusive.
+-- Rollback of 20261117020000_trade_pay_inclusive_super.
 --
 -- Refuses while any invoice is priced super inclusive: the old checks would
 -- reject it. Re-price or remove those invoices by hand first. Otherwise
--- restores the 20261112090000 split check and basis check, takes the two
--- columns back out of the persist inserts, removes the unfreeze refusal, and
--- drops the start date table and the switch. Roll back the matching ops-api
--- first: it reads the switch and the start date.
+-- restores the 20261112090000 split check and basis check, the group share
+-- line guard, takes the two columns back out of the persist inserts, removes
+-- the unfreeze refusal, and drops trade_pay_rule_on, trade_pay_settings and
+-- the switch. Roll back the matching ops-api first: it reads the switch and
+-- the settings.
 
+-- <refusal>
 DO $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM public.trade_invoices WHERE super_basis = 'super_inclusive_v1') THEN
-    RAISE EXCEPTION 'trade_super_inclusive rollback: invoices are priced super inclusive; re-price them by hand first';
+  IF EXISTS (SELECT 1 FROM public.trade_invoices WHERE super_basis = 'inclusive_12_112_v1') THEN
+    RAISE EXCEPTION 'trade_pay_inclusive_super rollback: invoices are priced super inclusive; re-price them by hand first';
   END IF;
 END $$;
+-- </refusal>
 
 DO $unfreeze$
 DECLARE
@@ -23,16 +26,16 @@ DECLARE
     || E'    JOIN public.trade_invoice_lines l ON l.group_share_id = s.id\n'
     || E'    JOIN public.trade_invoices i ON i.id = l.trade_invoice_id\n'
     || E'    WHERE s.group_id = p_group_id\n'
-    || E'      AND i.super_basis = ''super_inclusive_v1''\n'
+    || E'      AND i.super_basis = ''inclusive_12_112_v1''\n'
     || E'  ) THEN\n'
-    || E'    RAISE EXCEPTION ''group_split_super_inclusive_invoice'' USING ERRCODE = ''23514'';\n'
+    || E'    RAISE EXCEPTION ''group_split_inclusive_super_invoice'' USING ERRCODE = ''23514'';\n'
     || E'  END IF;\n\n';
 BEGIN
-  IF position('group_split_super_inclusive_invoice' IN v_def) = 0 THEN
+  IF position('group_split_inclusive_super_invoice' IN v_def) = 0 THEN
     RETURN;
   END IF;
   IF (length(v_def) - length(replace(v_def, v_guard, ''))) / length(v_guard) <> 1 THEN
-    RAISE EXCEPTION 'trade_super_inclusive rollback: unfreeze_group_work_order_split body changed; restore it by hand';
+    RAISE EXCEPTION 'trade_pay_inclusive_super rollback: unfreeze_group_work_order_split body changed; restore it by hand';
   END IF;
   EXECUTE replace(v_def, v_guard, '');
 END;
@@ -64,7 +67,7 @@ BEGIN
     END IF;
     IF (length(v_def) - length(replace(v_def, v_target.cols_new, ''))) / length(v_target.cols_new) <> 1
        OR (length(v_def) - length(replace(v_def, v_target.vals_new, ''))) / length(v_target.vals_new) <> 1 THEN
-      RAISE EXCEPTION 'trade_super_inclusive rollback: % insert changed; restore it by hand', v_target.signature;
+      RAISE EXCEPTION 'trade_pay_inclusive_super rollback: % insert changed; restore it by hand', v_target.signature;
     END IF;
     v_new := replace(v_def, v_target.cols_new, v_target.cols_old);
     v_new := replace(v_new, v_target.vals_new, v_target.vals_old);
@@ -97,5 +100,24 @@ ALTER TABLE public.trade_invoices ADD CONSTRAINT trade_invoices_super_basis_chec
 COMMENT ON COLUMN public.trade_invoices.super_basis IS
   'Null: the ordinary split (6% withheld from the worker, 6% company). employer_12_v2: a group share where the company pays all 12% super inside the share; net_pay equals gross_earned.';
 
-DROP TABLE IF EXISTS public.trade_super_inclusive_settings;
-DELETE FROM public.feature_flags WHERE flag_name = 'trade_super_inclusive_v1';
+DO $guard$
+DECLARE
+  v_def text := pg_get_functiondef('public.trade_invoice_lines_group_share_snapshot()'::regprocedure);
+  v_old text := 'i.super_basis IS NOT NULL';
+  v_new text := 'i.super_basis = ''employer_12_v2''';
+  v_count int;
+BEGIN
+  v_count := (length(v_def) - length(replace(v_def, v_new, ''))) / length(v_new);
+  IF v_count = 0 AND position(v_old IN v_def) > 0 THEN
+    RETURN; -- already restored
+  END IF;
+  IF v_count <> 1 THEN
+    RAISE EXCEPTION 'trade_pay_inclusive_super rollback: expected the narrowed group share line guard once, found % times', v_count;
+  END IF;
+  EXECUTE replace(v_def, v_new, v_old);
+END;
+$guard$;
+
+DROP FUNCTION IF EXISTS public.trade_pay_rule_on(date);
+DROP TABLE IF EXISTS public.trade_pay_settings;
+DELETE FROM public.feature_flags WHERE flag_name = 'trade_pay_inclusive_super_v1';
