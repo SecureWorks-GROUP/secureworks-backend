@@ -43,13 +43,13 @@ CREATE OR REPLACE FUNCTION public.agent_action_proposals_expire()
 RETURNS integer
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $$
-DECLARE affected integer;
-BEGIN
-  UPDATE public.agent_action_proposals SET status = 'expired'
-  WHERE status = 'pending' AND expires_at <= now();
-  GET DIAGNOSTICS affected = ROW_COUNT;
-  RETURN affected;
-END;
+  DECLARE affected integer;
+  BEGIN
+    UPDATE public.agent_action_proposals SET status = 'expired'
+    WHERE status = 'pending' AND expires_at <= now();
+    GET DIAGNOSTICS affected = ROW_COUNT;
+    RETURN affected;
+  END;
 $$;
 REVOKE ALL ON FUNCTION public.agent_action_proposals_expire() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.agent_action_proposals_expire() TO service_role;
