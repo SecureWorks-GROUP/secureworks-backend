@@ -17,7 +17,10 @@ DECLARE r public.expense_receipts%ROWTYPE; line public.job_cost_lines%ROWTYPE; d
   doc := jsonb_build_object('org_id',r.org_id,'document_kind','expense_receipt','document_id',doc_id,
     'document_date',r.receipt_date,'document_status',r.status,'party_kind','supplier',
     'party_name',r.vendor_name,'lines',jsonb_build_array(jsonb_build_object(
-      'kind','receipt','line_key','whole','line_no',1,
+      -- Party and date are repeated on the line so the writer's line hash sees a
+      -- vendor-only or date-only edit; the document-level values overlay them unchanged.
+      'kind','receipt','line_key','whole','line_no',1,'party_kind','supplier',
+      'party_name',r.vendor_name,'document_date',r.receipt_date,
       'amount_ex',r.total_amount - coalesce(r.gst_amount,0),'gst',r.gst_amount,
       'lane',CASE WHEN r.category IN ('materials','tools','consumables') THEN 'materials' ELSE 'other' END,
       'event_source','receipt')));
@@ -53,7 +56,8 @@ DECLARE r public.expense_receipts%ROWTYPE; line public.job_cost_lines%ROWTYPE; d
     AND document_kind='expense_receipt' AND document_id=doc_id AND line_key='whole' FOR UPDATE;
   -- A line this receipt marked when it was own money counts again once it is company
   -- money, unless a trade invoice line still pays the receipt back
-  -- (trade_invoice_lines_one_receipt index; trade_invoices primary key).
+  -- (the unique partial index on trade_invoice_lines.expense_receipt_id from P2-06.1;
+  -- trade_invoices primary key).
   IF live AND line.not_counted_reason='counted_by_trade_invoice' AND NOT EXISTS (
     SELECT 1 FROM public.trade_invoice_lines til JOIN public.trade_invoices ti ON ti.id=til.trade_invoice_id
     WHERE til.expense_receipt_id=r.id AND ti.status IS DISTINCT FROM 'ops-reject') THEN

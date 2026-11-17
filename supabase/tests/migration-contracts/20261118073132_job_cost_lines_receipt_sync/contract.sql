@@ -5,7 +5,7 @@ SET LOCAL statement_timeout = '120s';
 SELECT to_regprocedure('public.job_cost_lines_sync_receipt(uuid)') IS NULL
   OR to_regprocedure('public.job_cost_lines_install_receipt_trigger()') IS NULL AS zz_reapply \gset
 \if :zz_reapply
-\ir ../../../migrations/20261118072742_job_cost_lines_receipt_sync.sql
+\ir ../../../migrations/20261118073132_job_cost_lines_receipt_sync.sql
 \endif
 DO $$ BEGIN
  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='job_cost_lines_receipt_sync') THEN
@@ -106,6 +106,14 @@ DO $$ BEGIN
    RAISE EXCEPTION 'receipt sync: re-save duplicated the line or queue row'; END IF;
 END $$;
 
+-- A vendor-only edit on a counted line reaches it and keeps its state.
+UPDATE public.expense_receipts SET vendor_name='ZZTEST Supplier Renamed' WHERE id='60000000-0000-4000-8000-000000000010';
+DO $$ DECLARE l public.job_cost_lines; BEGIN
+ l := pg_temp.zz_line('60000000-0000-4000-8000-000000000010');
+ IF l.party_name IS DISTINCT FROM 'ZZTEST Supplier Renamed' OR l.state IS DISTINCT FROM 'needs_person' THEN
+   RAISE EXCEPTION 'receipt sync: vendor-only edit on a counted line wrong %',to_jsonb(l); END IF;
+END $$;
+
 -- Own money and supplier account receipts make no line.
 INSERT INTO public.expense_receipts(id,receipt_photo_url,total_amount,gst_amount,payment_method)
   VALUES('60000000-0000-4000-8000-000000000020','ZZTEST-own',55,5,'personal_card'),
@@ -157,13 +165,24 @@ UPDATE public.expense_receipts SET status='pending' WHERE id='60000000-0000-4000
 -- A line the card line already counts changes only its source fields.
 UPDATE public.job_cost_lines SET state=NULL, needs_reason=NULL, not_counted_reason='counted_by_bank_line'
   WHERE document_id='60000000-0000-4000-8000-000000000010';
-UPDATE public.expense_receipts SET vendor_name='ZZTEST Supplier Two', category='fuel'
-  WHERE id='60000000-0000-4000-8000-000000000010';
+-- A vendor-only edit and a date-only edit each reach the line.
+UPDATE public.expense_receipts SET vendor_name='ZZTEST Supplier Two' WHERE id='60000000-0000-4000-8000-000000000010';
+DO $$ BEGIN
+ IF (pg_temp.zz_line('60000000-0000-4000-8000-000000000010')).party_name IS DISTINCT FROM 'ZZTEST Supplier Two' THEN
+   RAISE EXCEPTION 'receipt sync: vendor-only edit did not reach the line'; END IF;
+END $$;
+UPDATE public.expense_receipts SET receipt_date='2026-11-17' WHERE id='60000000-0000-4000-8000-000000000010';
+DO $$ BEGIN
+ IF (pg_temp.zz_line('60000000-0000-4000-8000-000000000010')).document_date IS DISTINCT FROM '2026-11-17' THEN
+   RAISE EXCEPTION 'receipt sync: date-only edit did not reach the line'; END IF;
+END $$;
+-- Category is not a trigger column; it reaches the line with the next listed-field edit.
+UPDATE public.expense_receipts SET category='fuel', vendor_name='ZZTEST Supplier Three' WHERE id='60000000-0000-4000-8000-000000000010';
 UPDATE public.expense_receipts SET payment_method='personal_card' WHERE id='60000000-0000-4000-8000-000000000010';
 DO $$ DECLARE l public.job_cost_lines; BEGIN
  l := pg_temp.zz_line('60000000-0000-4000-8000-000000000010');
  IF l.not_counted_reason IS DISTINCT FROM 'counted_by_bank_line' OR l.state IS NOT NULL
-   OR l.party_name<>'ZZTEST Supplier Two' OR l.lane<>'other' THEN
+   OR l.party_name<>'ZZTEST Supplier Three' OR l.lane<>'other' THEN
    RAISE EXCEPTION 'receipt sync: bank line coverage disturbed %',to_jsonb(l); END IF;
 END $$;
 
