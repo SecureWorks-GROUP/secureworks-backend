@@ -928,17 +928,18 @@ Deno.test("inclusive super: spec test 9, the Xero draft bill carries the three f
 
 Deno.test("inclusive super: a GST trade's reimbursement is held back from Xero, never sent with GST on it", () => {
   const m = inclusiveMoney(1200, { reimbursementEx: 80, gstOn: true });
+  const withReimbursement: TradeInvoiceXeroLine[] = [
+    ...INCLUSIVE_LINES,
+    { Description: "ZZTEST reimbursement", Quantity: 1, UnitAmount: 80, AccountCode: "310" } as TradeInvoiceXeroLine,
+  ];
   assertThrows(
-    () => splitTradeInvoiceXeroLines(INCLUSIVE_LINES, m, { superAccountCode: "478" }),
+    () => splitTradeInvoiceXeroLines(withReimbursement, m, { superAccountCode: "478" }),
     TradeInvoiceMoneyError,
     "reimbursement",
   );
   // Without GST the bill goes, with the reimbursement named on the super line.
   const noGst = inclusiveMoney(1200, { reimbursementEx: 80 });
-  const lines = splitTradeInvoiceXeroLines([
-    ...INCLUSIVE_LINES,
-    { Description: "ZZTEST reimbursement", Quantity: 1, UnitAmount: 80, AccountCode: "310" } as TradeInvoiceXeroLine,
-  ], noGst, { superAccountCode: "478" });
+  const lines = splitTradeInvoiceXeroLines(withReimbursement, noGst, { superAccountCode: "478" });
   assertStringIncludes(String(lines.at(-1)?.Description), "Reimbursements $80.00 carry no super.");
   const total = lines.reduce((sum, l) => sum + Number(l.Quantity ?? 1) * Number(l.UnitAmount ?? 0), 0);
   assertEquals(Math.round(total * 100) / 100, 1080);
