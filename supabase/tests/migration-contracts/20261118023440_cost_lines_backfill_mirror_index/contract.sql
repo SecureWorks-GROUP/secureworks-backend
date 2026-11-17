@@ -1,7 +1,7 @@
 -- Keep all fixture schema and rows inside a rolled-back transaction. The real
 -- table (including every trigger, constraint, later migration and row) survives.
 BEGIN;
-\ir ../../../migrations/20261117235502_cost_lines_backfill_mirror_index.sql
+\ir ../../../migrations/20261118023440_cost_lines_backfill_mirror_index.sql
 DROP INDEX public.trade_invoices_org_xero_bill_idx;
 ALTER TABLE public.trade_invoices RENAME TO cx1547_saved_trade_invoices;
 CREATE TABLE public.trade_invoices (
@@ -9,9 +9,9 @@ CREATE TABLE public.trade_invoices (
   org_id uuid NOT NULL,
   xero_bill_id text
 );
-\ir ../../../migrations/20261117235502_cost_lines_backfill_mirror_index.sql
+\ir ../../../migrations/20261118023440_cost_lines_backfill_mirror_index.sql
 -- Reapply proves idempotence; plans below judge the access, never index names.
-\ir ../../../migrations/20261117235502_cost_lines_backfill_mirror_index.sql
+\ir ../../../migrations/20261118023440_cost_lines_backfill_mirror_index.sql
 INSERT INTO public.trade_invoices(id,org_id,xero_bill_id)
 SELECT md5('cx1547:'||o||':'||n)::uuid,
        md5('cx1547:org:'||o)::uuid,
