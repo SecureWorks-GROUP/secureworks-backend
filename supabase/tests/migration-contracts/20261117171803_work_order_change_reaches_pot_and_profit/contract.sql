@@ -11,6 +11,13 @@ BEGIN
   INSERT INTO public.job_assignments(id,job_id,user_id,scheduled_date,status) VALUES(gen_random_uuid(),'ee180000-0000-4000-8000-000000000101',crew,'2099-01-05','scheduled');
   INSERT INTO public.group_work_order_time_entries(group_id,user_id,work_date,start_time,finish_time,break_minutes,hours)
     VALUES(grp,crew,'2099-01-05','08:00','09:00',0,1);
+  -- The real split gate needs confirmation newer than the synthetic hours.
+  INSERT INTO public.job_client_signoffs(org_id,job_id,method,signed_name,happy,
+    captured_by,captured_by_actor,capture_auth_source,capture_request_id,
+    capture_payload_hash,confirmation_kind,confirmation_reference,client_confirmed_on,work_done)
+    VALUES(org,'ee180000-0000-4000-8000-000000000101','office_on_behalf','ZZTEST client',true,
+      actor,'user:'||actor::text,'jwt',gen_random_uuid(),'sha256:'||repeat('a',64),
+      'written_confirmation','ZZTEST confirmation reference',CURRENT_DATE,'ZZTEST agreed work');
   r:=public.project_group_work_order_split(grp);
   SELECT sum((x->>'share_ex')::numeric) INTO total FROM jsonb_array_elements(r->'shares') x;
   IF total<>2240 THEN RAISE EXCEPTION 'initial pot incorrect: %',r; END IF;
