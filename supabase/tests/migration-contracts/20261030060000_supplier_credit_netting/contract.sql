@@ -34,6 +34,12 @@
 --   CN-Q  Jan 2032, 88, Xero sent no RemainingCredit (unknown)
 --   CN-U  no date, 22 left on the note
 BEGIN;
+-- P2-01.7 successor: restore this proof's original definition before it
+-- inspects or rewrites that definition. Existing assertions stay unchanged.
+SELECT to_regclass('public.v_job_cost_events_legacy') IS NOT NULL AS p2017_unwind \gset
+\if :p2017_unwind
+\ir ../../../rollbacks/20261117210402_job_cost_events_from_cost_lines_down.sql
+\endif
 -- 20261115100000 gave the tie-out Job Profit's own rule. 20261030060000 and its down refuse that body by its
 -- comment; 20261029121500 has no such guard and would replace or drop it without a word. This contract is about its own slice's function, so it rolls 20261115100000 back first, inside this
 -- transaction: the ROLLBACK at the end puts it back.

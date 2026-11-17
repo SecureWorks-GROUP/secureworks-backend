@@ -4,6 +4,12 @@
 -- the very same rows. All fixture writes roll back. Self-run checks (Claude), no production.
 \set ON_ERROR_STOP on
 BEGIN;
+-- P2-01.7 successor: restore this proof's original definition before it
+-- inspects or rewrites that definition. Existing assertions stay unchanged.
+SELECT to_regclass('public.v_job_cost_events_legacy') IS NOT NULL AS p2017_unwind \gset
+\if :p2017_unwind
+\ir ../../../rollbacks/20261117210402_job_cost_events_from_cost_lines_down.sql
+\endif
 CREATE TEMP TABLE c3_checks(name text, passed boolean);
 CREATE FUNCTION pg_temp.prove(n text, p boolean) RETURNS void LANGUAGE plpgsql AS $$ BEGIN
   IF p IS DISTINCT FROM true THEN RAISE EXCEPTION 'C3 cost view speed: %', n; END IF;
