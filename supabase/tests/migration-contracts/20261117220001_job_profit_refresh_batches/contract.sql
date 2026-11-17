@@ -1,6 +1,22 @@
 BEGIN;
 SET LOCAL statement_timeout='120s';
 SET LOCAL TimeZone='UTC';
+-- Rule 17: protect this contract from prerequisite objects removed by another
+-- case, without repairing the deliberately corrupted body in the break proof.
+SELECT to_regclass('public.job_profit_stored') IS NULL
+ OR to_regclass('public.job_cost_events_stored') IS NULL
+ OR to_regclass('public.job_revenue_events_stored') IS NULL
+ OR to_regclass('public.job_profit_dirty') IS NULL
+ OR to_regprocedure('public.job_profit_refresh(uuid)') IS NULL
+ OR to_regprocedure('public.job_profit_refresh_all()') IS NULL
+ OR to_regprocedure('public.job_profit_refresh_many(uuid[])') IS NULL AS restore_stored_prerequisite \gset
+\if :restore_stored_prerequisite
+\ir ../../../migrations/20261117195801_job_profit_stored.sql
+\endif
+SELECT :'restore_stored_prerequisite'::boolean OR to_regprocedure('public.job_profit_refresh_all(uuid,integer)') IS NULL AS restore_batch_prerequisite \gset
+\if :restore_batch_prerequisite
+\ir ../../../migrations/20261117220001_job_profit_refresh_batches.sql
+\endif
 -- No view stand-ins: exercise every real Job Profit column on the full engine.
 INSERT INTO public.organisations(id,name) VALUES('f0210000-0000-4000-8000-000000000001','ZZTEST organisation');
 INSERT INTO public.jobs(id,org_id,status,type,job_number,metadata,pricing_json,created_at)
