@@ -1,0 +1,2 @@
+-- The source-refresh migration supplies the real trigger functions.
+-- No stand-in function is created here.
