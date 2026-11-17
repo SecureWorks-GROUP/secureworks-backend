@@ -60,7 +60,7 @@ BEGIN
  UPDATE public.context_ledger_items SET to_role=NULL WHERE id='00000000-0000-4000-8000-000000000403';
  v:=public.context_ledger_close_on_records('00000000-0000-4000-8000-000000000403',false);
  IF v->>'closed'<>'0' THEN RAISE EXCEPTION 'FU19: missing payee guessed supplier'; END IF;
- UPDATE public.context_ledger_items SET to_role='supplier',what='Pay the supplier bill.',about_key='payment:supplier'
+ UPDATE public.context_ledger_items SET to_role='supplier',what='Pay the supplier bill.',about_key='bill:00000000-0000-4000-8000-000000000403'
  WHERE id='00000000-0000-4000-8000-000000000403';
  v:=public.context_ledger_close_on_records('00000000-0000-4000-8000-000000000403',false);
  IF v->>'closed'<>'1' THEN RAISE EXCEPTION 'FU19: identified supplier control'; END IF;
