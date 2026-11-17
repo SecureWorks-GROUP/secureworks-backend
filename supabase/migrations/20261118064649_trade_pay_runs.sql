@@ -18,9 +18,18 @@
 --                     "pays": number, "super_amount": number,
 --                     "stops": array (optional) } ] }
 -- A missing or non-numeric key raises pay_run_snapshot_invalid; nothing
--- defaults to 0. invoice_count, total_pays and super_total count the clean
--- invoices only (what this run pays). A clean invoice whose stored
--- super_amount differs from the snapshot's was changed since it was shown.
+-- defaults to 0. "pays" is what goes into the trade's bank: net_pay plus GST
+-- when GST is on, less a taken recurring deduction. A clean invoice is checked
+-- against its locked row: both figures must equal what is stored, or it was
+-- changed since it was shown. invoice_count, total_pays and super_total are
+-- summed from the locked rows of the clean invoices only (what this run pays).
+--
+-- One invoice can be shown in several runs (stopped each time) but paid by
+-- one only (director ruling A, 18 Nov 06:55): unique on invoice_id where the
+-- verdict is clean.
+
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 
 -- ── 1. the switch ───────────────────────────────────────────────────────────
 
@@ -50,7 +59,7 @@ CREATE TABLE IF NOT EXISTS public.trade_pay_runs (
 );
 CREATE TABLE IF NOT EXISTS public.trade_pay_run_invoices (
   run_id uuid NOT NULL REFERENCES public.trade_pay_runs(id),
-  invoice_id uuid NOT NULL UNIQUE REFERENCES public.trade_invoices(id),
+  invoice_id uuid NOT NULL REFERENCES public.trade_invoices(id),
   verdict text NOT NULL CHECK (verdict IN ('clean','stopped')),
   stops jsonb NOT NULL DEFAULT '[]'::jsonb,
   pays numeric(12,2) NOT NULL,
@@ -59,34 +68,40 @@ CREATE TABLE IF NOT EXISTS public.trade_pay_run_invoices (
   xero_bill_id text,
   PRIMARY KEY (run_id, invoice_id)
 );
-ALTER TABLE public.trade_invoices ADD COLUMN IF NOT EXISTS pay_run_id uuid REFERENCES public.trade_pay_runs(id);
-CREATE INDEX IF NOT EXISTS trade_invoices_pay_run_idx ON public.trade_invoices (pay_run_id) WHERE pay_run_id IS NOT NULL;
+-- Ruling A: a clean row pays the invoice; only one clean row per invoice.
+CREATE UNIQUE INDEX IF NOT EXISTS trade_pay_run_invoices_clean_once
+  ON public.trade_pay_run_invoices (invoice_id) WHERE verdict = 'clean';
 
 -- Director ruling 18 Nov 06:30: the office's pay-run review is its own fact,
--- never acknowledged_*. Two new columns, null on every existing row. Guard: a
--- column of either name already present with another type refuses the apply.
+-- never acknowledged_*. Three new trade_invoices columns, null on every
+-- existing row. This migration owns a column only when its comment starts
+-- "P1-10.1:" (written below); a column of any of these names that is already
+-- there without that comment belongs to someone else, so the apply refuses
+-- and the rollback never drops it.
 DO $guard$
 DECLARE
   v_bad text;
 /* block */ BEGIN
-  SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, a.atttypmod), ', ') INTO v_bad
+  SELECT string_agg(a.attname, ', ' ORDER BY a.attname) INTO v_bad
   FROM pg_attribute a
   WHERE a.attrelid = 'public.trade_invoices'::regclass AND a.attnum > 0 AND NOT a.attisdropped
-    AND ((a.attname = 'reviewed_at' AND a.atttypid <> 'timestamp with time zone'::regtype)
-      OR (a.attname = 'reviewed_by' AND a.atttypid <> 'uuid'::regtype));
+    AND a.attname IN ('pay_run_id', 'reviewed_at', 'reviewed_by')
+    AND coalesce(col_description(a.attrelid, a.attnum), '') NOT LIKE 'P1-10.1:%';
   IF v_bad IS NOT NULL THEN
-    RAISE EXCEPTION 'trade_pay_runs: trade_invoices already has %, not the expected type', v_bad;
+    RAISE EXCEPTION 'trade_pay_runs: trade_invoices already has %, not created by this migration', v_bad;
   END IF;
 END;
 $guard$;
 ALTER TABLE public.trade_invoices
+  ADD COLUMN IF NOT EXISTS pay_run_id uuid REFERENCES public.trade_pay_runs(id),
   ADD COLUMN IF NOT EXISTS reviewed_at timestamptz,
   ADD COLUMN IF NOT EXISTS reviewed_by uuid REFERENCES public.users(id);
+CREATE INDEX IF NOT EXISTS trade_invoices_pay_run_idx ON public.trade_invoices (pay_run_id) WHERE pay_run_id IS NOT NULL;
 
 COMMENT ON TABLE public.trade_pay_runs IS
   'P1-10.1: one weekly pay run per organisation and pay week. Written only by approve_trade_pay_run; status moves to pushed when every clean invoice is a Xero draft (P1-10.5).';
 COMMENT ON TABLE public.trade_pay_run_invoices IS
-  'P1-10.1: every invoice the approver was shown in a pay run, clean or stopped, with the stops and the amounts shown.';
+  'P1-10.1: every invoice the approver was shown in a pay run, clean or stopped, with the stops and the amounts. A stopped invoice can be shown again in a later run; a clean row (the one that pays it) is unique per invoice.';
 COMMENT ON COLUMN public.trade_invoices.pay_run_id IS
   'P1-10.1: the weekly pay run that approved this invoice. Null until a run approves it.';
 COMMENT ON COLUMN public.trade_invoices.reviewed_at IS
@@ -168,12 +183,10 @@ DECLARE
   END IF;
 
   SELECT coalesce(array_agg((e->>'invoice_id')::uuid), '{}'::uuid[]),
-         coalesce(array_agg((e->>'invoice_id')::uuid) FILTER (WHERE e->>'verdict' = 'clean'), '{}'::uuid[]),
-         count(*) FILTER (WHERE e->>'verdict' = 'clean'),
-         coalesce(sum((e->>'pays')::numeric) FILTER (WHERE e->>'verdict' = 'clean'), 0),
-         coalesce(sum((e->>'super_amount')::numeric) FILTER (WHERE e->>'verdict' = 'clean'), 0)
-    INTO v_all, v_clean, v_invoice_count, v_total_pays, v_super_total
+         coalesce(array_agg((e->>'invoice_id')::uuid) FILTER (WHERE e->>'verdict' = 'clean'), '{}'::uuid[])
+    INTO v_all, v_clean
   FROM jsonb_array_elements(p_snapshot->'invoices') e;
+  v_invoice_count := cardinality(v_clean);
   IF cardinality(v_all) <> (SELECT count(DISTINCT x) FROM unnest(v_all) x) THEN
     RAISE EXCEPTION 'pay_run_snapshot_invalid';
   END IF;
@@ -186,20 +199,47 @@ DECLARE
     RAISE EXCEPTION 'pay_run_snapshot_invalid';
   END IF;
 
-  -- Moved since the server built the snapshot: already in a run, sent back,
-  -- back to a draft, or its super changed.
+  -- A clean invoice's stored figures must all be there; none is read as 0.
+  IF EXISTS (
+    SELECT 1 FROM public.trade_invoices i
+    WHERE i.id = ANY(v_clean)
+      AND (i.net_pay IS NULL OR i.super_amount IS NULL OR i.gst_on IS NULL
+           OR (i.gst_on AND i.gst IS NULL)))
+  THEN
+    RAISE EXCEPTION 'pay_run_figures_unreadable';
+  END IF;
+
+  -- Moved since the server built the snapshot: already paid by a run, or,
+  -- for a clean invoice, no longer waiting for review (sent back, a draft,
+  -- approved, pushed or paid), already billed in Xero, or either figure no
+  -- longer what is stored. trade_pay_run_invoices_clean_once serves the run
+  -- check.
   IF EXISTS (
     SELECT 1 FROM public.trade_invoices i
     JOIN jsonb_array_elements(p_snapshot->'invoices') e ON (e->>'invoice_id')::uuid = i.id
     WHERE i.pay_run_id IS NOT NULL
-       OR EXISTS (SELECT 1 FROM public.trade_pay_run_invoices ri WHERE ri.invoice_id = i.id)
+       OR EXISTS (SELECT 1 FROM public.trade_pay_run_invoices ri
+                  WHERE ri.invoice_id = i.id AND ri.verdict = 'clean')
        OR (e->>'verdict' = 'clean' AND (
-            i.status IN ('draft', 'ops-reject')
-            OR i.super_amount IS DISTINCT FROM (e->>'super_amount')::numeric)))
+            i.status NOT IN ('pending_ops_review', 'queried')
+            OR i.xero_bill_id IS NOT NULL
+            OR i.super_amount <> (e->>'super_amount')::numeric
+            OR round(i.net_pay + CASE WHEN i.gst_on THEN i.gst ELSE 0 END
+                     - coalesce(i.recurring_deduction_amount, 0), 2) <> (e->>'pays')::numeric)))
   THEN
     RAISE EXCEPTION 'pay_run_changed_since_shown';
   END IF;
 
+  -- Totals from the locked rows, never from the snapshot.
+  SELECT coalesce(sum(round(i.net_pay + CASE WHEN i.gst_on THEN i.gst ELSE 0 END
+                            - coalesce(i.recurring_deduction_amount, 0), 2)), 0),
+         coalesce(sum(i.super_amount), 0)
+    INTO v_total_pays, v_super_total
+  FROM public.trade_invoices i WHERE i.id = ANY(v_clean);
+
+  -- Only clean ids go to the standing checks, so any stop at all means the
+  -- week changed since it was shown; an entry that names no clean invoice is
+  -- an answer this function cannot read.
   v_standing := public.trade_pay_run_standing_checks(p_org_id, v_clean, 'before_xero');
   IF v_standing IS NULL OR jsonb_typeof(v_standing->'run_blocked') IS DISTINCT FROM 'boolean'
      OR jsonb_typeof(v_standing->'stopped_invoices') IS DISTINCT FROM 'array' THEN
@@ -208,8 +248,13 @@ DECLARE
   IF (v_standing->>'run_blocked')::boolean THEN
     RAISE EXCEPTION 'pay_run_standing_check_failed';
   END IF;
-  IF EXISTS (SELECT 1 FROM jsonb_array_elements(v_standing->'stopped_invoices') s
-             WHERE (s->>'invoice_id')::uuid = ANY(v_clean)) THEN
+  IF jsonb_array_length(v_standing->'stopped_invoices') > 0 THEN
+    IF EXISTS (SELECT 1 FROM jsonb_array_elements(v_standing->'stopped_invoices') s
+               WHERE jsonb_typeof(s) IS DISTINCT FROM 'object'
+                  OR coalesce(s->>'invoice_id', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  OR NOT ((s->>'invoice_id')::uuid = ANY(v_clean))) THEN
+      RAISE EXCEPTION 'pay_run_standing_check_unreadable';
+    END IF;
     RAISE EXCEPTION 'pay_run_changed_since_shown';
   END IF;
 
@@ -223,17 +268,27 @@ DECLARE
     RAISE EXCEPTION 'pay_run_already_approved';
   END;
 
+  -- A clean row records the locked figures; a stopped row what was shown.
   INSERT INTO public.trade_pay_run_invoices (run_id, invoice_id, verdict, stops, pays, super_amount)
-  SELECT v_run, (e->>'invoice_id')::uuid, e->>'verdict', coalesce(e->'stops', '[]'::jsonb),
-         (e->>'pays')::numeric, (e->>'super_amount')::numeric
-  FROM jsonb_array_elements(p_snapshot->'invoices') e;
+  SELECT v_run, i.id, e->>'verdict', coalesce(e->'stops', '[]'::jsonb),
+         CASE WHEN e->>'verdict' = 'clean'
+              THEN round(i.net_pay + CASE WHEN i.gst_on THEN i.gst ELSE 0 END
+                         - coalesce(i.recurring_deduction_amount, 0), 2)
+              ELSE (e->>'pays')::numeric END,
+         CASE WHEN e->>'verdict' = 'clean' THEN i.super_amount ELSE (e->>'super_amount')::numeric END
+  FROM jsonb_array_elements(p_snapshot->'invoices') e
+  JOIN public.trade_invoices i ON i.id = (e->>'invoice_id')::uuid;
   GET DIAGNOSTICS v_rows = ROW_COUNT;
 
-  -- The invoice stamp (director ruling A: own review columns).
+  -- The invoice stamp (director ruling A: own review columns). Every clean
+  -- invoice must take it, or nothing is written.
   UPDATE public.trade_invoices i
      SET status = 'approved', reviewed_at = now(), reviewed_by = p_actor, pay_run_id = v_run
-   WHERE i.id = ANY(v_clean) AND i.status IN ('pending_ops_review', 'queried');
+   WHERE i.id = ANY(v_clean) AND i.status IN ('pending_ops_review', 'queried') AND i.pay_run_id IS NULL;
   GET DIAGNOSTICS v_approved = ROW_COUNT;
+  IF v_rows <> cardinality(v_all) OR v_approved <> v_invoice_count THEN
+    RAISE EXCEPTION 'pay_run_changed_since_shown';
+  END IF;
 
   RETURN jsonb_build_object(
     'run_id', v_run,
