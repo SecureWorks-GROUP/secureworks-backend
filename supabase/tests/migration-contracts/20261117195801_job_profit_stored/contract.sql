@@ -1,5 +1,7 @@
 BEGIN;
 SET LOCAL TimeZone='UTC';
+-- Refresh calls now require a deadline set before their statement starts.
+SET LOCAL statement_timeout='120s';
 DO $schema$ DECLARE rel text; v text; BEGIN
  FOREACH rel IN ARRAY ARRAY['job_profit_stored','job_cost_events_stored','job_revenue_events_stored','job_profit_dirty'] LOOP
   IF to_regclass('public.'||rel) IS NULL THEN RAISE EXCEPTION 'stored profit table missing: %',rel; END IF;
