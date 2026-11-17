@@ -897,6 +897,7 @@ import {
 import { releaseVoidedTradeInvoice, VoidedTradeInvoiceReleaseError } from './trade_invoice_voided_release.ts'
 import { buildPayView, payViewRepayment, type PayViewOptions } from './trade_pay_view.ts'
 import { addWeekSuggestions } from './trade_week_suggestion.ts'
+import { bookedLineEvidence, officeRateForDay, readWeekSendEvidence, todayPerth, typedRateEvidence, weekAcceptance } from './trade_week_submission.ts'
 import { presentTradeInvoiceBillOutcome } from './trade_invoice_bill_outcome.ts'
 import { TradeJobRateError, tradeJobRateNote, tradeTypedJobRate } from './trade_rate_per_job.ts'
 import { ExtraRateRuleError, extraLineRateHold, listExtraRateRules, loadExtraRateRules, setExtraRateRule, type ExtraRateHold } from './trade_invoice_extra_rate_rule.ts'
@@ -2376,9 +2377,12 @@ async function invoiceReimbursements(client: any, userId: string, items: any[], 
   return { ...await resolveReimbursementExtras(client, { userId, items: requested, flagOn: resolvedFlagOn, basis, replacingDraftId }), basis }
 }
 
-async function markTradeInvoiceJobsChanged(client: any, lines: any[]) {
+async function markTradeInvoiceJobsChanged(client: any, lines: any[], source = 'phase1:trade_invoice') {
   for (const jobId of new Set(lines.map((line: any) => String(line.job_id || '')).filter(Boolean))) {
-    try { await client.rpc('job_mark_changed', { p_job_id: jobId, p_source: 'phase1:trade_invoice' }) } catch { /* The owning phase may not be installed yet. */ }
+    try {
+      const { error } = await client.rpc('job_mark_changed', { p_job_id: jobId, p_source: source })
+      if (error) console.error('[ops-api] trade invoice job mark failed:', error.message)
+    } catch (error) { console.error('[ops-api] trade invoice job mark failed:', String(error)) }
   }
 }
 
@@ -13650,6 +13654,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }
 
           case 'submit_work_order_invoice': {
+            const weekAutofill = await readFlag(client, 'trade_week_autofill_v1')
             const { work_order_id } = body
             if (!work_order_id) throw new ApiError('Something went wrong submitting. Reload and try again, and tell the office if it keeps happening.', 400)
 
@@ -13799,7 +13804,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             }
 
             // Get user info (include email for contact auto-create)
-            const { data: tradeXeroUser } = await client.from('users')
+            const { data: tradeXeroUser, error: tradeXeroUserError } = await client.from('users')
               .select('xero_contact_id, name, email, abn, trade_details')
               .eq('id', tradeUser.id)
               .single()
@@ -13809,7 +13814,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const woJobNum = woJob?.job_number || ''
             const woDivision = trackingCategoryForJob(woJobNum)
             const woClientLine = [woJob?.client_name, woJob?.site_address, woJob?.site_suburb].filter(Boolean).join(', ')
-            const woGstOn = tradeInvoiceGstOn(body)
+            if (weekAutofill && (tradeXeroUserError || !tradeXeroUser)) throw new ApiError('Your trade details could not be read. Nothing was saved. Try again.', 503)
+            const woGstOn = weekAutofill ? tradeXeroUser?.trade_details?.gstRegistered === true : tradeInvoiceGstOn(body)
             const woTaxType = woGstOn ? 'INPUT' : 'NONE'
 
             const pricedScope = _pricedWorkOrderInvoiceScopeLines(scopeItems, woJobNum)
@@ -13934,6 +13940,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               },
               workOrderLines,
               retryDrafts[0]?.id || null,
+              weekAutofill ? { onPersisted: () => markTradeInvoiceJobsChanged(client, workOrderLines, 'trade_invoice') } : {},
             )
             const tradeInvoiceId = workOrderBoundary.invoiceId
             const tradeInv = { id: tradeInvoiceId }
@@ -14644,6 +14651,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           case 'dispute_hours': return json(await disputeHours(client, tradeUser.id, body))
 
           case 'generate_trade_invoice': {
+            const weekAutofill = await readFlag(client, 'trade_week_autofill_v1')
             const paySettingsRead = readTradePaySettings(client)
             const groupInvoiceBasis = await assertAllInGroupInvoiceStandalone(client, {userId:tradeUser.id,orgId:tradeUser.orgId,role:tradeUser.role,isStaff:false},body)
               .catch((error) => groupWorkOrderApiError(error))
@@ -14781,6 +14789,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 priorDraft = existingDraft
               }
             }
+            const weekEvidence = weekAutofill ? await readWeekSendEvidence(client, tradeUser.id, week_start || null, weekEnd) : null
             const priorDraftId: string | null = priorDraft?.id || null
             const invoiceSuperBasis = groupInvoiceBasis.superBasis ??
               await tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead)
@@ -14816,6 +14825,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               resolvedRate = rateRow ? Number(rateRow.hourly_rate) : 0
             }
 
+            // The new path resolves every work day, never a typed or stale card rate.
+            let dayRates: any[] = []
+            if (weekAutofill && !weeklyInvoice) {
+              const dates = [...manualAssignmentsIn.map((row: any) => row.work_date),
+                ...(Array.isArray(invoiceExtraItems) ? invoiceExtraItems.map((row: any) => row.work_date || row.date) : [])]
+                .filter((value: any) => /^\d{4}-\d{2}-\d{2}$/.test(String(value))).map(String).sort()
+              const from = [week_start || todayPerth(), ...dates].sort()[0]
+              const to = [weekEnd || todayPerth(), ...dates].sort().at(-1)!
+              // idx_trade_rates_user bounds one trade's dated windows.
+              const { data, error } = await client.from('trade_rates').select('hourly_rate,effective_from,effective_to')
+                .eq('user_id', tradeUser.id).lte('effective_from', to)
+                .or(`effective_to.is.null,effective_to.gte.${from}`).order('effective_from', { ascending: false }).limit(201)
+              if (error || !Array.isArray(data) || data.length >= 201) throw new ApiError('Your office rate could not be read. Nothing was saved. Try again.', 503)
+              dayRates = data
+            }
+            const dayRate = (date: string) => {
+              const rate = officeRateForDay(dayRates, date)
+              if (rate <= 0) throw new ApiError('No office rate is set for this work day. Contact the office before submitting.', 422, { code: 'RATE_NOT_CONFIGURED' })
+              return rate
+            }
+
             // Get assignments to bill. Two sources:
             //   • manual_assignments — the trade typed hours per job card (new path)
             //   • completed clocked assignments — legacy auto-fill (still honoured)
@@ -14827,7 +14857,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               // typed on a card is read below (owner, 15 Nov 2026), but a
               // missing office rate still blocks the submission instead of
               // trusting the client.  [audit 2026-09]
-              if (resolvedRate <= 0) {
+              if (!weekAutofill && resolvedRate <= 0) {
                 // B3: RATE_NOT_CONFIGURED — structured error the FE can surface as a toast
                 return json({
                   ok: false,
@@ -14918,15 +14948,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 // is never read.  [audit 2026-09]
                 let typedRate: number | null = null
                 try {
-                  typedRate = manualRow.rate_source === 'client_entered'
+                  typedRate = !weekAutofill && manualRow.rate_source === 'client_entered'
                     ? tradeTypedJobRate(manualRow.rate, resolvedRate, `the job card for ${a.scheduled_date || 'a day'}`)
                     : null
                 } catch (rateErr) {
                   if (rateErr instanceof TradeJobRateError) throw new ApiError(rateErr.message, 422)
                   throw rateErr
                 }
+                const officeRate = weekAutofill ? dayRate(row.entry?.work_date || a.scheduled_date) : resolvedRate
                 assignments.push({
-                  id: a.id, job_id: a.job_id, hours_worked: h, hourly_rate: typedRate ?? resolvedRate,
+                  ...(weekAutofill ? typedRateEvidence(manualRow.rate, officeRate) : {}),
+                  id: a.id, job_id: a.job_id, hours_worked: h, hourly_rate: typedRate ?? officeRate,
                   rate_source: typedRate != null ? 'client_entered' : 'server_resolved',
                   description: manualRow.description || null,
                   // M4 U1: carry the trade's variation explanation (trade-app capture
@@ -14938,7 +14970,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   // One line is one job on one day: a card with a time entry is
                   // its own line. A card without one still groups per job.
                   _timeEntry: row.entry,
-                  _lineKey: row.entry ? `${a.job_id}#${entryIndex}` : null,
+                  _lineKey: row.entry || weekAutofill ? `${a.job_id}#${entryIndex}` : null,
                 })
               })
             } else if (!weeklyInvoice && week_start && weekEnd) {
@@ -14983,7 +15015,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               // each card is refused by name below.
               assignments = clockedBillable.map((a: any) => ({
                 ...a,
-                hourly_rate: resolvedRate > 0 ? resolvedRate : (a.hourly_rate || 0),
+                hourly_rate: weekAutofill ? dayRate(a.scheduled_date) : resolvedRate > 0 ? resolvedRate : (a.hourly_rate || 0),
+                ...(weekAutofill ? { _lineKey: String(a.id) } : {}),
               }))
             }
 
@@ -14992,11 +15025,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             if (assignments.length === 0 && !hasExtras) throw new ApiError('Nothing to invoice yet. Tick at least one job card, or add a line with hours, before submitting.', 400)
 
             // Get user's default rate + cached Xero supplier contact ID (used by the auto-push below).
-            const { data: userProfile } = await client.from('users')
+            const { data: userProfile, error: userProfileError } = await client.from('users')
               .select('default_hourly_rate, name, xero_contact_id, trade_details')
               .eq('id', tradeUser.id)
               .maybeSingle()
-            const gstOn = tradeInvoiceGstOn(body)
+            if (weekAutofill && (userProfileError || !userProfile)) throw new ApiError('Your trade details could not be read. Nothing was saved. Try again.', 503)
+            const gstOn = weekAutofill ? userProfile?.trade_details?.gstRegistered === true : tradeInvoiceGstOn(body)
             const taxType = gstOn ? 'INPUT' : 'NONE'
 
             // Group by job
@@ -15124,6 +15158,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 assignment_ids: assignmentIds,
                 description: descriptions.length > 0 ? descriptions.join('; ') : null,
                 ...tradeInvoiceTimeEntryColumns(lineTimeEntry),
+                ...(weekAutofill ? {
+                  line_date: lineTimeEntry?.work_date || assigns[0].scheduled_date,
+                  ...bookedLineEvidence(weekEvidence?.cards.find((card: any) => String(card.id) === String(assigns[0].id)), weekEvidence, { total_hours: jobHours, work_date: lineTimeEntry?.work_date || assigns[0].scheduled_date }),
+                  ...typedRateEvidence(assigns[0].sent_values?.typed_rate, rate),
+                } : {}),
                 query_note: hoursFlag?.flagged
                   ? hoursFlag.queryNote + ' | ' + rateNote
                   : rateNote,
@@ -15144,6 +15183,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               const extraItemsIn: any[] = weeklyInvoice
                 ? invoiceExtraItems
                 : (invoiceExtraItems || []).map(normaliseExtraItem)
+              const bookedWorkOrderModes = new Map<string, TradeInvoiceJobMode>()
               const requestedJobIds = [...new Set(extraItemsIn.map((i: any) => i?.job_id).filter(Boolean))]
               const requestedJobNumbers = [...new Set(extraItemsIn.map((i: any) => String(i?.job_number || '').trim()).filter(Boolean))]
               const activeJobSelect = 'id, job_number, client_name, type, site_address, site_suburb, status'
@@ -15302,6 +15342,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                       normaliseManagedVerticals: _normalizeManagedVerticals,
                     })
                     woModes = new Map(modes.jobs.map((m) => [m.job_id, m]))
+                    for (const mode of modes.jobs) bookedWorkOrderModes.set(mode.job_id, mode)
                   } catch (error) {
                     if (error instanceof TradeInvoiceModeReadError) {
                       console.error('[ops-api] generate_trade_invoice: agreed work order unreadable:', error.message)
@@ -15383,7 +15424,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     label: rawItem.job_number || rawItem.job_id || 'extra',
                   })
                   : null
-                const item = extraTimeEntry ? { ...rawItem, quantity: extraTimeEntry.hours } : rawItem
+                const officeHourly = weekAutofill && !serverResolvedWeeklyLine && !isWorkOrderInvoiceItem(rawItem) && (rawItem.row_type === 'labour' || isTradeInvoiceTimeLineType(rawItem.type))
+                const item = { ...(extraTimeEntry ? { ...rawItem, quantity: extraTimeEntry.hours } : rawItem),
+                  ...(officeHourly ? { rate: dayRate(extraTimeEntry?.work_date || rawItem.date || todayPerth()) } : {}) }
                 const qty = Number(item.quantity || 0)
                 const rate = Number(item.rate || 0)
                 if (week_start) {
@@ -15396,7 +15439,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 if (week_start && !resolvedJob && item.type !== 'final_payout_deduction') throw new ApiError('Manual invoice job is not active or does not exist: ' + (item.job_number || item.job_id), 422)
                 // Only a line the server priced itself is server_resolved. The
                 // client's own rate_source is never trusted (B14).
-                const rateSource = serverResolvedWeeklyLine ? 'server_resolved' : 'client_entered'
+                const rateSource = serverResolvedWeeklyLine || officeHourly ? 'server_resolved' : 'client_entered'
                 if (week_start && rateSource === 'client_entered') clientPricedExtraCount++
                 const amt = Math.round((Number(item.quantity || 1) * Number(item.rate || 0)) * 100) / 100
                 if (serverResolvedWeeklyLine && Math.abs(amt - Number(item.line_total_ex)) > 0.01) {
@@ -15411,7 +15454,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   : extraLineRateHold({
                     lineType: item.type,
                     rate,
-                    serverResolved: Boolean(serverResolvedWeeklyLine),
+                    serverResolved: Boolean(serverResolvedWeeklyLine) || officeHourly,
                     rules: extraRateRules,
                     tradeHourlyRate: resolvedRate > 0 ? resolvedRate : null,
                   })
@@ -15470,6 +15513,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   )
                 }
 
+                const bookedWorkOrderCard = weekAutofill && isWoRow
+                  ? weekEvidence?.cards.find((card: any) => String(card.job_id) === String(resolvedJob?.id)) : null
+                const bookedMode = bookedWorkOrderModes.get(String(resolvedJob?.id))
+                const suggestionFields = bookedWorkOrderCard && bookedMode
+                  ? bookedLineEvidence({ ...bookedWorkOrderCard, invoice_mode: 'work_order', work_order_agreed_ex: bookedMode.work_order_agreed_ex }, weekEvidence, {})
+                  : { suggested: { source: 'added_by_trade' }, changed_from_suggestion: null }
                 extraLineItems.push({
                   line_type: extraLineType(item),
                   description: woDescription || item.description || item.type || 'Extra item',
@@ -15484,6 +15533,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   // The day worked is the line's date when the entry says it.
                   line_date: extraTimeEntry?.work_date || item.date || null,
                   ...tradeInvoiceTimeEntryColumns(extraTimeEntry),
+                  ...(weekAutofill ? { ...suggestionFields,
+                    ...(officeHourly ? typedRateEvidence(rawItem.rate, rate) : {}),
+                  } : {}),
                   division: item.division || resolvedJob?.type || null,
                   job_id: resolvedJob?.id || item.job_id || null,
                   job_number: resolvedJob?.job_number || item.job_number || null,
@@ -15738,6 +15790,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const invoicePayload = {
               ...(weeklyInvoice ? { org_id: tradeUser.orgId } : {}),
               user_id: tradeUser.id,
+              ...(weekAutofill ? weekAcceptance(weekEvidence, [...lineItems, ...extraLineItems], body.confirm_ms) : {}),
               week_start: week_start || null,
               week_end: weekEnd,
               total_hours: Math.round(totalHours * 100) / 100,
@@ -15796,7 +15849,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 query_note: dbLine.query_note || null,
                 line_type: dbLine.line_type || 'labour',
                 expense_receipt_id: dbLine.expense_receipt_id || null,
-                office_review_note: isReimbursementItem(dbLine) ? dbLine.office_review_note : null,
+                office_review_note: isReimbursementItem(dbLine) || weekAutofill ? dbLine.office_review_note ?? null : null,
+                ...(weekAutofill ? { suggested: dbLine.suggested ?? { source: 'added_by_trade' }, changed_from_suggestion: dbLine.changed_from_suggestion ?? null, ...(dbLine.sent_values ? { sent_values: dbLine.sent_values } : {}) } : {}),
                 description: dbLine.description || null,
                 quantity: dbLine.quantity ?? null,
                 unit: dbLine.unit || null,
@@ -15978,12 +16032,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               }
             }
             const invoiceId = await retryReimbursementClaims(client, reimbursements, async () => await persistWithFreeNumber(() => weeklyInvoice
-              ? _persistWeeklyTradeInvoice(
-                client,
-                invoicePayload,
-                weeklyInvoiceWithReimbursements(weeklyInvoice, reimbursements.lines),
-                priorDraftId,
-              )
+              ? weekAutofill
+                ? _persistTradeInvoiceWeekDraft(client, invoicePayload, [
+                  ...lineItems.map((line: any) => toTradeInvoiceLineRow('', line, { line_type: 'labour' })),
+                  ...extraLineItems.map((line: any) => toTradeInvoiceLineRow('', line)),
+                ], priorDraftId)
+                : _persistWeeklyTradeInvoice(
+                  client, invoicePayload, weeklyInvoiceWithReimbursements(weeklyInvoice, reimbursements.lines), priorDraftId,
+                )
               : week_start && reimbursements.lines.length > 0
               ? _persistTradeInvoiceWeekDraft(client, { ...invoicePayload, org_id: tradeUser.orgId }, [
                   ...lineItems.map((line: any) => toTradeInvoiceLineRow('', line, { line_type: 'labour' })),
@@ -16046,7 +16102,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 if (weeklyInvoice) Object.assign(invoicePayload, { job_grand_total_ex: weeklyInvoice.grand_total + reimbursementEx, to_be_paid_ex: weeklyInvoice.to_be_paid + reimbursementEx })
               }, week_start ? priorDraftId : null)
             const invoice = { id: invoiceId }
-            await markTradeInvoiceJobsChanged(client, [...lineItems, ...extraLineItems])
+            await markTradeInvoiceJobsChanged(client, [...lineItems, ...extraLineItems], weekAutofill ? 'trade_invoice' : 'phase1:trade_invoice')
 
             // B14: one audit event per held typed rate. No amounts in the
             // reason; the line itself carries them.
@@ -18347,7 +18403,7 @@ export async function _persistTradeInvoiceWeekDraft(
   // (20261012180000_trade_invoice_time_entries.sql). v3 is v2 unchanged plus
   // the recurring-deduction stamp on the invoice it inserted
   // (20261013143700_trade_recurring_deductions.sql).
-  const { data, error } = await client.rpc('persist_weekly_trade_invoice_v3', {
+  const { data, error } = await client.rpc(Object.hasOwn(invoicePayload, 'accepted_untouched') ? 'persist_weekly_trade_invoice_v4' : 'persist_weekly_trade_invoice_v3', {
     p_invoice: invoicePayload,
     p_lines: lineRows.map((line, linePosition) => ({
       ...line,
@@ -18487,11 +18543,13 @@ export async function _claimWorkOrderInvoiceBeforeXero(
   dependencies: {
     persistWorkOrderInvoice?: typeof _persistWorkOrderInvoice
     openXeroBoundary?: typeof getToken
+    onPersisted?: () => Promise<void>
   } = {},
 ): Promise<{ invoiceId: string; accessToken: string; tenantId: string }> {
   const invoiceId = await (
     dependencies.persistWorkOrderInvoice || _persistWorkOrderInvoice
   )(client, invoicePayload, lineRows, requestedPriorDraftId)
+  await dependencies.onPersisted?.()
   const { accessToken, tenantId } = await (
     dependencies.openXeroBoundary || getToken
   )(client)

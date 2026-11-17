@@ -393,6 +393,34 @@ EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON)
    AND org_id='00000000-0000-0000-0000-000000000001')
  SELECT sum(c.amount_ex) FROM public.v_job_cost_events c JOIN inv i ON c.document_id=i.id::text
  WHERE c.is_actual AND c.source IN ('trade_line','trade_employer_super');
+-- Rule 15 collision: another body at this signature is never replaced by a
+-- re-apply, nor dropped by the rollback. Each run inside a savepoint; with
+-- ON_ERROR_ROLLBACK each later statement still runs, so the captured last
+-- error is the refusal itself (a live apply stops at it).
+\set ON_ERROR_STOP off
+\set ON_ERROR_ROLLBACK on
+SAVEPOINT zztest_collide;
+CREATE OR REPLACE FUNCTION public.trade_pay_run_standing_checks(p_org_id uuid,p_invoice_ids uuid[],p_stage text)
+RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"rule":"zztest another owner"}'::jsonb $other$;
+\ir ../../../migrations/20261118063223_trade_pay_run_standing_checks.sql
+ROLLBACK TO SAVEPOINT zztest_collide;
+SELECT :'LAST_ERROR_MESSAGE' AS collide_apply_error \gset
+SAVEPOINT zztest_collide;
+CREATE OR REPLACE FUNCTION public.trade_pay_run_standing_checks(p_org_id uuid,p_invoice_ids uuid[],p_stage text)
+RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"rule":"zztest another owner"}'::jsonb $other$;
+\ir ../../../rollbacks/20261118063223_trade_pay_run_standing_checks_down.sql
+SELECT to_regprocedure('public.trade_pay_run_standing_checks(uuid,uuid[],text)') IS NOT NULL AS collide_kept \gset
+ROLLBACK TO SAVEPOINT zztest_collide;
+SELECT :'LAST_ERROR_MESSAGE' AS collide_down_error \gset
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP on
+SELECT pg_temp.zztest_assert(:'collide_apply_error' LIKE '%Rule 15, another body is installed%',
+ 'a re-apply must refuse another body: '||:'collide_apply_error');
+SELECT pg_temp.zztest_assert(:'collide_down_error' LIKE '%another body is installed%refusing to drop it%'
+ AND :'collide_kept'::boolean, 'the rollback must refuse to drop another body: '||:'collide_down_error');
+SELECT pg_temp.zztest_assert((SELECT md5(prosrc) FROM pg_proc
+ WHERE oid='public.trade_pay_run_standing_checks(uuid,uuid[],text)'::regprocedure)='b734f7d74eecc7dfee162613f38935a4',
+ 'own body restored after the collision proofs');
 \ir ../../../rollbacks/20261118063223_trade_pay_run_standing_checks_down.sql
 SELECT pg_temp.zztest_assert(to_regprocedure('public.trade_pay_run_standing_checks(uuid,uuid[],text)') IS NULL,'rollback left the function');
 
