@@ -29,6 +29,7 @@ import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldown
 import { createXeroSyncTransport } from './xero_transport.ts'
 import { syncBankTransactionLines } from './bank_transactions.ts'
 import { syncXeroAccounts } from './accounts.ts'
+import { trackingOptionRows } from './tracking_options.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
 import { runInvoiceMirrorCheck } from './xero_mirror_check.ts'
 import { autoReleaseVoidedTradeInvoices } from '../ops-api/trade_invoice_voided_release.ts'
@@ -2784,6 +2785,19 @@ async function syncTrackingPL(sb: any) {
   const now = new Date()
   const results: any[] = []
 
+  let optionsSynced: number | null = null
+  try {
+    const cats = await xeroGet('/TrackingCategories', accessToken, tenantId, { includeArchived: 'true' })
+    const rows = trackingOptionRows(cats, DEFAULT_ORG_ID, TRACKING_CATEGORY_ID, now.toISOString())
+    if (rows.length > 0) {
+      const { error } = await sb.from('xero_tracking_options').upsert(rows, { onConflict: 'org_id,option_id' })
+      if (error) throw error
+    }
+    optionsSynced = rows.length
+  } catch (error) {
+    console.error('[xero-sync] tracking options not stored', error)
+  }
+
   // Fetch P&L by tracking category for last 12 months (one month at a time)
   for (let i = 0; i < 12; i++) {
     const monthStart = new Date(now.getFullYear(), now.getMonth() - i, 1)
@@ -2878,6 +2892,7 @@ async function syncTrackingPL(sb: any) {
   return {
     success: true,
     months_synced: results.filter(r => r.status === 'ok').length,
+    options_synced: optionsSynced,
     months_failed: results.filter(r => r.status === 'error').length,
     results,
   }
