@@ -65,19 +65,3 @@ REVOKE ALL ON FUNCTION public.job_pages_install() FROM PUBLIC, anon, authenticat
 REVOKE ALL ON FUNCTION public.job_pages_remove() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.job_pages_install() TO service_role;
 GRANT EXECUTE ON FUNCTION public.job_pages_remove() TO service_role;
-
-CREATE OR REPLACE FUNCTION public.job_pages_remove() RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $remove$
-DECLARE v_job bigint;
-BEGIN
- IF to_regclass('cron.job') IS NOT NULL THEN
-  FOR v_job IN SELECT jobid FROM cron.job WHERE jobname IN ('job-pages-refresh','job-pages-nightly') LOOP
-   PERFORM cron.unschedule(v_job);
-  END LOOP;
- END IF;
- PERFORM public.job_change_mark_triggers_remove();
-END $remove$;
-REVOKE ALL ON FUNCTION public.job_pages_install() FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.job_pages_install() TO service_role;
-REVOKE ALL ON FUNCTION public.job_pages_remove() FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.job_pages_remove() TO service_role;
