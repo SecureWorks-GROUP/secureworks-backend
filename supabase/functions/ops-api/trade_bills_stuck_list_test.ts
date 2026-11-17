@@ -46,6 +46,20 @@ function tableClient(tables: Record<string, Row[]>) {
         preds.push((row) => String(row?.[column] ?? "") === String(value));
         return api;
       },
+      lte(column: string, value: string) {
+        preds.push((row) => row[column] != null && row[column] <= value);
+        return api;
+      },
+      or(terms: string) {
+        const alternatives = terms.split(",").map((term) => {
+          const [column, operator, value] = term.split(".");
+          if (operator === "is" && value === "null") return (row: Row) => row[column] == null;
+          if (operator === "gte") return (row: Row) => row[column] != null && row[column] >= value;
+          throw new Error(`unsupported ${term}`);
+        });
+        preds.push((row) => alternatives.some((test) => test(row)));
+        return api;
+      },
       is(column: string, value: unknown) {
         filters.push(`${column} is ${value}`);
         preds.push((row) => (row?.[column] ?? null) === value);
