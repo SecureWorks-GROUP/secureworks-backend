@@ -32,6 +32,12 @@ type Bill = {
   raw_json?: { LineAmountTypes?: string };
 };
 
+// PostgreSQL numeric round breaks ties away from zero on either sign.
+function roundSix(amount: number): number {
+  return Math.sign(amount) *
+    Math.round((Math.abs(amount) + Number.EPSILON) * 1e6) / 1e6;
+}
+
 type Context = {
   mirrorBillIds: Set<string>;
   orgId: string;
@@ -128,10 +134,7 @@ export function billCostDocument(bill: Bill, ctx: Context) {
         kind: "employer_super",
         line_key: `${parent.line_key}:employer_super`,
         follows_line_key: parent.line_key,
-        amount_ex: Math.round(
-          (Math.round(parent.amount_ex * companySuper / baseEx * 1e6) / 1e6 +
-            Number.EPSILON) * 100,
-        ) / 100,
+        amount_ex: roundSix(parent.amount_ex * companySuper / baseEx),
         gst: 0,
         paid: false,
         paid_on: null,

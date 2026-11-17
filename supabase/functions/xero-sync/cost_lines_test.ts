@@ -169,3 +169,39 @@ Deno.test("bill costs: an unknown no-line total stays unknown", () => {
     null,
   );
 });
+
+Deno.test("bill costs: employer super preserves six places for database cents rounding", () => {
+  const d = billCostDocument({
+    ...bill,
+    line_items: [
+      { LineAmount: -100.10, Description: "Adjustment" },
+      { LineAmount: 1100.10, Description: "Work" },
+      {
+        LineAmount: -10,
+        Description: "Super guarantee. Company contribution $50",
+      },
+    ],
+  }, { ...ctx, employerSuperOn: true })!;
+  assertEquals(
+    d.lines.filter((l) => l.kind === "employer_super").map((l) => l.amount_ex),
+    [-5.005, 55.005],
+  );
+});
+
+Deno.test("bill costs: six-place rounding breaks negative ties away from zero", () => {
+  const d = billCostDocument({
+    ...bill,
+    line_items: [
+      { LineAmount: -1, Description: "Adjustment" },
+      { LineAmount: 1000001, Description: "Work" },
+      {
+        LineAmount: -1,
+        Description: "Super guarantee. Company contribution $0.50",
+      },
+    ],
+  }, { ...ctx, employerSuperOn: true })!;
+  assertEquals(
+    d.lines.filter((l) => l.kind === "employer_super").map((l) => l.amount_ex),
+    [-0.000001, 0.500001],
+  );
+});

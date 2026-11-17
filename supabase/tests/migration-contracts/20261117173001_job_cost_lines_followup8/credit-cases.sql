@@ -66,6 +66,14 @@ BEGIN
  PERFORM public.job_cost_lines_sync_credit_notes(ARRAY['ZZTEST-credit-sync']);
  IF EXISTS(SELECT 1 FROM public.job_cost_lines WHERE document_id='ZZTEST-credit-sync' AND state IS NOT NULL) THEN
    RAISE EXCEPTION 'credit sync: voided credit counted'; END IF;
+ -- The bill converter retains the legacy six-place formula. PostgreSQL owns
+ -- the final numeric(12,2) rounding, including negative half-cent ties.
+ PERFORM public.job_cost_lines_upsert_documents(jsonb_build_array(jsonb_build_object('org_id',org,
+  'document_kind','xero_bill','document_id','ZZTEST-super-rounding','document_status','AUTHORISED','live',true,
+  'lines','[{"line_key":"a","kind":"employer_super","lane":"labour","amount_ex":-5.005},
+    {"line_key":"b","kind":"employer_super","lane":"labour","amount_ex":55.005}]'::jsonb)));
+ IF (SELECT array_agg(amount_ex ORDER BY line_key) FROM public.job_cost_lines WHERE document_id='ZZTEST-super-rounding')
+   IS DISTINCT FROM ARRAY[-5.01,55.01]::numeric[] THEN RAISE EXCEPTION 'followup8: employer super storage rounding'; END IF;
  IF has_function_privilege('authenticated','public.job_cost_lines_sync_credit_notes(text[])','EXECUTE') THEN
    RAISE EXCEPTION 'credit sync: browser execution allowed'; END IF;
 END $$;
