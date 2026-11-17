@@ -11,7 +11,7 @@
 -- (md5(prosrc) c2aea6de53237a5c3ae7d166d153cac5); a re-run at this
 -- migration's body returns; any other body refuses.
 -- No table write, no schedule, no switch change.
--- Rollback: supabase/rollbacks/20261118073800_trade_line_hold_commission_cap_down.sql.
+-- Rollback: supabase/rollbacks/20261118075000_trade_line_hold_commission_cap_down.sql.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 

@@ -6,8 +6,8 @@ DO $$ BEGIN
     RAISE EXCEPTION 'weekly split rollback: main body not restored';
   END IF;
 END $$;
-\ir ../../../migrations/20261118073801_trade_line_hold_weekly_split.sql
-\ir ../../../migrations/20261118073801_trade_line_hold_weekly_split.sql
+\ir ../../../migrations/20261118075001_trade_line_hold_weekly_split.sql
+\ir ../../../migrations/20261118075001_trade_line_hold_weekly_split.sql
 DO $$ BEGIN
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.persist_weekly_trade_invoice_v1(jsonb,jsonb,uuid)'::regprocedure)
        IS DISTINCT FROM 'fe44f464f3c5c62b35149122f7655cb9' THEN

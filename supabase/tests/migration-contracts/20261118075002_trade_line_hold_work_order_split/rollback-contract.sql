@@ -5,8 +5,8 @@ DO $$ BEGIN
     RAISE EXCEPTION 'work-order split rollback: main body not restored';
   END IF;
 END $$;
-\ir ../../../migrations/20261118073802_trade_line_hold_work_order_split.sql
-\ir ../../../migrations/20261118073802_trade_line_hold_work_order_split.sql
+\ir ../../../migrations/20261118075002_trade_line_hold_work_order_split.sql
+\ir ../../../migrations/20261118075002_trade_line_hold_work_order_split.sql
 DO $$ BEGIN
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.persist_trade_work_order_invoice_v1(jsonb,jsonb,uuid)'::regprocedure)
        IS DISTINCT FROM '7405ac7533156a6e08de5ae94c37c16f' THEN
