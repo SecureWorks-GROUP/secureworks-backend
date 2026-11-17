@@ -6,18 +6,15 @@ INSERT INTO public.automation_switches (id, all_stop, extraction, attribution, c
 VALUES (1, false, false, false, false);
 DELETE FROM public.business_events;
 DELETE FROM public.context_catchup_jobs;
-DELETE FROM public.job_change_marks_base;
-DELETE FROM public.job_change_mark_events;
 
 DO $c$
 DECLARE before_body text; actual text;
 BEGIN
   SELECT definition INTO before_body FROM public.worker_state_followup_preimage;
   SELECT pg_get_functiondef('public.context_worker_state()'::regprocedure) INTO actual;
-  IF actual IS DISTINCT FROM replace(replace(before_body,
+  IF actual IS DISTINCT FROM replace(before_body,
     'CASE WHEN EXISTS (SELECT 1 FROM public.context_extraction_candidates(1)) THEN 1 ELSE 0 END',
-    'public.context_worker_facts_present()'),
-    '(SELECT max(m.last_marked_at) FROM public.job_change_marks m)', 'public.context_worker_marks_newest()') THEN
+    'public.context_worker_facts_present()') THEN
     RAISE EXCEPTION 'worker state follow-up: unexpected state delta';
   END IF;
   IF public.context_worker_facts_present() <> 0 THEN
@@ -28,12 +25,6 @@ BEGIN
     OR has_function_privilege('authenticated', 'public.context_worker_facts_present()', 'EXECUTE') THEN
     RAISE EXCEPTION 'worker state follow-up: service-role permission differs';
   END IF;
-  IF public.context_worker_marks_newest() IS NOT NULL
-    OR NOT has_function_privilege('service_role', 'public.context_worker_marks_newest()', 'EXECUTE')
-    OR has_function_privilege('anon', 'public.context_worker_marks_newest()', 'EXECUTE')
-    OR has_function_privilege('authenticated', 'public.context_worker_marks_newest()', 'EXECUTE') THEN
-    RAISE EXCEPTION 'worker state follow-up: empty newest or permissions differ';
-  END IF;
 END $c$;
 
 -- A large irrelevant population must not be inspected by either existence probe.
@@ -42,29 +33,8 @@ SELECT gen_random_uuid(), gen_random_uuid(), now(), '{"written_as":"authenticate
 FROM generate_series(1, 20000);
 INSERT INTO public.context_catchup_jobs (job_id, job_number, priority, done_at, done_run_id)
 SELECT gen_random_uuid(), 'ZZTEST-CATCHUP-' || g, 1, now(), gen_random_uuid() FROM generate_series(1, 20000) g;
-WITH fixture_jobs AS (
-  INSERT INTO public.jobs (id, org_id, type, status, job_number)
-  SELECT gen_random_uuid(), '00000000-0000-0000-0000-000000000001', 'fencing', 'accepted', 'ZZTEST-WAKE-' || g
-  FROM generate_series(1, 20000) g RETURNING id
-)
-INSERT INTO public.job_change_marks_base (job_id, last_marked_at, notes_done_at)
-SELECT id, now() - row_number() OVER () * interval '1 minute', now() + interval '1 hour' FROM fixture_jobs;
--- Prove the raw-event plan at meaningful volume as well as the folded-base
--- plan. A two-row raw table can correctly use a tiny sequential scan and sort.
-INSERT INTO public.job_change_mark_events (job_id, marked_at, source, page_pending)
-SELECT job_id, last_marked_at - interval '1 minute', 'fixture-history', false
-FROM public.job_change_marks_base;
--- Raw events include an acknowledged newest mark and a later orphan. The view
--- excludes the orphan, so the optimized read must also exclude it.
-INSERT INTO public.job_change_mark_events (job_id, marked_at, source, page_pending)
-SELECT job_id, now() + interval '1 minute', 'fixture', false FROM public.job_change_marks_base LIMIT 1;
-INSERT INTO public.job_change_mark_events (job_id, marked_at, source, page_pending)
-VALUES (gen_random_uuid(), now() + interval '1 day', 'fixture-orphan', false);
 ANALYZE public.business_events;
 ANALYZE public.context_catchup_jobs;
-ANALYZE public.job_change_marks_base;
-ANALYZE public.job_change_mark_events;
-ANALYZE public.jobs;
 UPDATE public.automation_switches SET extraction = true WHERE id = 1;
 
 CREATE TEMP TABLE worker_followup_plans (label text, plan text) ON COMMIT DROP;
@@ -119,7 +89,7 @@ ANALYZE public.business_events;
 ANALYZE public.context_catchup_jobs;
 SELECT pg_temp.worker_followup_plan('lane on, sparse live work');
 DO $c$
-DECLARE line text; plan text := ''; query text; s jsonb;
+DECLARE s jsonb;
 BEGIN
   IF public.context_worker_facts_present() <> 1 THEN
     RAISE EXCEPTION 'worker state follow-up: live candidate missed';
@@ -127,28 +97,6 @@ BEGIN
   s := public.context_worker_state();
   IF s->'due'->>'facts' IS DISTINCT FROM '1' THEN
     RAISE EXCEPTION 'worker state follow-up: state does not consume wake signal';
-  END IF;
-  SELECT prosrc INTO query FROM pg_proc WHERE oid = 'public.context_worker_marks_newest()'::regprocedure;
-  FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) ' || query LOOP
-    plan := plan || line || E'\n';
-  END LOOP;
-  INSERT INTO worker_followup_plans VALUES ('newest mark, every row acknowledged', plan);
-  IF plan NOT LIKE '%Index Only Scan using job_change_marks_base_newest%'
-    OR plan NOT LIKE '%Index Only Scan using job_change_mark_events_newest%'
-    OR plan LIKE '%Seq Scan on job_change_marks_base%' OR plan LIKE '%Seq Scan on job_change_mark_events%' THEN
-    RAISE EXCEPTION 'worker state follow-up: newest plan not index served: %', plan;
-  END IF;
-  IF (s->>'marks_newest')::timestamptz IS DISTINCT FROM (SELECT max(last_marked_at) FROM public.job_change_marks) THEN
-    RAISE EXCEPTION 'worker state follow-up: newest mark differs';
-  END IF;
-  IF public.context_worker_marks_newest() IS DISTINCT FROM now() + interval '1 minute' THEN
-    RAISE EXCEPTION 'worker state follow-up: acknowledged event or orphan differs';
-  END IF;
-  UPDATE public.job_change_marks_base SET last_marked_at = now() + interval '2 minutes'
-    WHERE job_id = (SELECT job_id FROM public.job_change_marks_base LIMIT 1);
-  IF public.context_worker_marks_newest() IS DISTINCT FROM now() + interval '2 minutes'
-    OR public.context_worker_marks_newest() IS DISTINCT FROM (SELECT max(last_marked_at) FROM public.job_change_marks) THEN
-    RAISE EXCEPTION 'worker state follow-up: folded base newest differs';
   END IF;
   UPDATE public.automation_switches SET extraction = false WHERE id = 1;
   IF public.context_worker_facts_present() <> 0 OR public.context_worker_state()->'due'->>'facts' <> '0' THEN
@@ -184,13 +132,12 @@ TABLE worker_followup_plans;
 \ir ../../../migrations/20261117194201_context_worker_state_indexes.sql
 DO $c$ BEGIN
   IF pg_get_functiondef('public.context_worker_state()'::regprocedure) IS DISTINCT FROM
-    (SELECT replace(replace(definition,
+    (SELECT replace(definition,
       'CASE WHEN EXISTS (SELECT 1 FROM public.context_extraction_candidates(1)) THEN 1 ELSE 0 END',
-      'public.context_worker_facts_present()'),
-      '(SELECT max(m.last_marked_at) FROM public.job_change_marks m)', 'public.context_worker_marks_newest()')
+      'public.context_worker_facts_present()')
       FROM public.worker_state_followup_preimage) THEN
     RAISE EXCEPTION 'worker state follow-up: reapply changed state';
   END IF;
 END $c$;
-SELECT 'PASS: P0-03.1 conservative facts signal, lane-on indexed plans, acknowledged newest mark, permissions and missing-index controls' AS result;
+SELECT 'PASS: P0-03.1 conservative facts signal, lane-on indexed plans, unchanged newest read, permissions and missing-index controls' AS result;
 ROLLBACK;

@@ -1,1 +1,1 @@
-DROP INDEX public.job_change_marks_base_newest;
+DROP INDEX public.business_events_worker_facts_present;

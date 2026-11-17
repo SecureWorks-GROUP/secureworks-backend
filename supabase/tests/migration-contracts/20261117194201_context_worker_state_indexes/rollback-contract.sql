@@ -2,11 +2,9 @@ DO $c$ BEGIN
   IF pg_get_functiondef('public.context_worker_state()'::regprocedure)
     IS DISTINCT FROM (SELECT definition FROM public.worker_state_followup_preimage)
     OR to_regprocedure('public.context_worker_facts_present()') IS NOT NULL
-    OR to_regprocedure('public.context_worker_marks_newest()') IS NOT NULL
     OR to_regclass('public.business_events_worker_facts_present') IS NOT NULL
     OR to_regclass('public.context_catchup_jobs_worker_present') IS NOT NULL
-    OR to_regclass('public.job_change_marks_base_newest') IS NOT NULL
-    OR to_regclass('public.job_change_mark_events_newest') IS NOT NULL THEN
+    THEN
     RAISE EXCEPTION 'worker state follow-up: rollback did not restore exact state';
   END IF;
 END $c$;
