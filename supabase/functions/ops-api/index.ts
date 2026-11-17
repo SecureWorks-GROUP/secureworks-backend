@@ -716,6 +716,7 @@ import {
 } from './trade_invoice_money.ts'
 import {
   getRunningInvoiceDraft,
+  requireRunningDraftAgentCaller,
   RunningDraftError,
   runningInvoiceDraftEnabled,
   saveRunningInvoiceDraft,
@@ -13003,6 +13004,26 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         try {
           return json(await saveRunningInvoiceDraft(client, String(body?.user_id || ''), body, 'agent'))
+        } catch (error) {
+          runningDraftApiError(error)
+        }
+      }
+      // The draft the Trade App opens for this person and week. Server secret
+      // plus an agent:<account> actor only. A public key, the routine key and
+      // a staff session use get_running_invoice_draft with the person's own
+      // login. This does not submit or create a Xero bill.
+      case 'agent_get_running_invoice_draft': {
+        try {
+          requireRunningDraftAgentCaller({
+            authMode,
+            serverSecretPresented,
+            actor: requestActor,
+          })
+          return json(await getRunningInvoiceDraft(
+            client,
+            String(body?.user_id || url.searchParams.get('user_id') || ''),
+            String(body?.week_start || url.searchParams.get('week_start') || ''),
+          ))
         } catch (error) {
           runningDraftApiError(error)
         }
