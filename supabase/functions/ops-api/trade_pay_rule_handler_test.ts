@@ -429,4 +429,3 @@ for (const action of ["save_trade_invoice_draft", "generate_trade_invoice"]) {
     });
   }
 }
-
