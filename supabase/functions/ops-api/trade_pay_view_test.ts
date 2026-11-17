@@ -2,7 +2,7 @@ import {
   assertEquals,
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { calculateTradeInvoiceMoney } from "./trade_invoice_money.ts";
+import { calculateTradeInvoiceMoney, withTradeInvoiceRecurringDeduction } from "./trade_invoice_money.ts";
 import { buildPayView } from "./trade_pay_view.ts";
 
 const opts = { reimbursementsEx: 0, taxSetAsidePercent: null, repayment: null };
@@ -83,7 +83,7 @@ import {
   readTradePaySettings,
   tradePayTaxPercent,
 } from "./trade_pay_rule.ts";
-import { payViewRepayment, readPayViewRepayments } from "./trade_pay_view.ts";
+import { payViewRepayment } from "./trade_pay_view.ts";
 
 Deno.test("ZZTEST-P1: persisted presenter keeps the work total separate from receipts", () => {
   const split = money(80, true);
@@ -170,42 +170,70 @@ Deno.test("ZZTEST-P1: one settings read serves pricing and tax; failures stay un
   );
 });
 
-Deno.test("ZZTEST-P1: history repayments use only rules carried on the returned invoices", async () => {
+Deno.test("ZZTEST-P1: history uses only the deduction saved on its invoice", () => {
   const invoice = {
-    id: "ZZTEST-invoice",
-    super_basis: "inclusive_12_112_v1",
+    recurring_deduction_label: "ZZTEST repayment",
+    recurring_deduction_amount: 10,
+  };
+  assertEquals(payViewRepayment(invoice), { label: "ZZTEST repayment", amount: 10 });
+  assertEquals(payViewRepayment({}), null);
+  assertEquals(payViewRepayment({ ...invoice, recurring_deduction_amount: 0 }), null);
+  assertEquals(payViewRepayment({ ...invoice, recurring_deduction_amount: "bad" }), null);
+});
+
+Deno.test("ZZTEST-P1 HOLD: a Xero read keeps the existing office-change presentation", () => {
+  const split = money();
+  const invoice = {
+    ...split,
+    gst: split.gst_amount,
+    subtotal_ex: 1120,
+    week_start: "2026-12-07",
+    xero_adjustments_ex: 25,
+    xero_adjustment_lines: [{ description: "ZZTEST office change", amount: 25 }],
+    xero_bill_total: 1025,
+    xero_bill_status: "AUTHORISED",
+  };
+  const presented = presentTradeInvoiceMoney(invoice, opts);
+  assertEquals(presented.pay_view, undefined);
+  assertEquals(presented.payable_after_xero, 1025);
+  assertEquals(presented.xero_pays, 1025);
+  assertEquals(presented, presentTradeInvoiceMoney(invoice));
+  assertEquals(presentTradeInvoiceMoney({ ...invoice, xero_adjustments_ex: 0 }, opts).pay_view, undefined);
+});
+
+Deno.test("ZZTEST-P1 HOLD: recurring hire has a row explaining the bank total", () => {
+  const split = withTradeInvoiceRecurringDeduction(money(), {
+    id: "ZZTEST-hire", label: "ZZTEST ute hire", amount: 40,
+  });
+  const view = buildPayView(split, opts);
+  assertEquals(view?.repayment, { label: "ZZTEST ute hire", amount: 40 });
+  assertEquals(view?.into_bank, 960);
+  assertEquals(view!.paid_to_you - view!.repayment!.amount, view!.into_bank);
+});
+
+Deno.test("ZZTEST-P1 HOLD: historical repayment never labels today's balance as invoice-time balance", () => {
+  const invoice = {
     recurring_deduction_id: "ZZTEST-rule",
     recurring_deduction_label: "ZZTEST repayment",
     recurring_deduction_amount: 10,
   };
-  const client = {
-    from() {
-      const query = {
-        select: () => query,
-        in: (_key: string, ids: string[]) => {
-          assertEquals(ids, ["ZZTEST-rule"]);
-          return {
-            data: [{ id: "ZZTEST-rule", kind: "repayment" }],
-            error: null,
-          };
-        },
-      };
-      return query;
-    },
-    rpc(_name: string, args: unknown) {
-      assertEquals(args, { p_id: "ZZTEST-rule" });
-      return { data: 20, error: null };
-    },
-  };
-  const balances = await readPayViewRepayments(client, [invoice, invoice]);
-  assertEquals(payViewRepayment(invoice, balances), {
-    label: "ZZTEST repayment",
-    amount: 10,
-    balance_left: 20,
+  assertEquals(payViewRepayment(invoice), {
+    label: "ZZTEST repayment", amount: 10,
   });
-  assertEquals(
-    (await readPayViewRepayments(client, [{ ...invoice, super_basis: null }]))
-      .size,
-    0,
-  );
+});
+
+Deno.test("ZZTEST-P1 HOLD: saved invoice presentation needs no repayment service", () => {
+  const invoice = {
+    ...money(), gst: 0, subtotal_ex: 1120, week_start: "2026-12-07",
+    recurring_deduction_id: "ZZTEST-rule",
+    recurring_deduction_label: "ZZTEST repayment",
+    recurring_deduction_amount: 10,
+  };
+  // No rule or balance service is available: list and detail still present
+  // the invoice's saved amount, never a current balance or a missing invoice.
+  const presented = presentTradeInvoiceMoney(invoice, {
+    ...opts, repayment: payViewRepayment(invoice),
+  });
+  assertEquals(presented.pay_view?.repayment, { label: "ZZTEST repayment", amount: 10 });
+  assertEquals(presented.pay_view?.into_bank, 990);
 });

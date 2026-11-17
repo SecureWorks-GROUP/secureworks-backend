@@ -892,7 +892,7 @@ import {
   shouldOpenBlankJobWorkOrder,
 } from './job_work_order_office.ts'
 import { releaseVoidedTradeInvoice, VoidedTradeInvoiceReleaseError } from './trade_invoice_voided_release.ts'
-import { buildPayView, payViewRepayment, readPayViewRepayments, type PayViewOptions } from './trade_pay_view.ts'
+import { buildPayView, payViewRepayment, type PayViewOptions } from './trade_pay_view.ts'
 import { presentTradeInvoiceBillOutcome } from './trade_invoice_bill_outcome.ts'
 import { TradeJobRateError, tradeJobRateNote, tradeTypedJobRate } from './trade_rate_per_job.ts'
 import { ExtraRateRuleError, extraLineRateHold, listExtraRateRules, loadExtraRateRules, setExtraRateRule, type ExtraRateHold } from './trade_invoice_extra_rate_rule.ts'
@@ -13509,12 +13509,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 if (l?.job_id && refByJob[l.job_id]) l.external_ref = refByJob[l.job_id]
               }
             }
-            const [paySettings, repayments] = await Promise.all([
-              readTradePaySettings(client), readPayViewRepayments(client, [inv]),
-            ])
+            const paySettings = await readTradePaySettings(client)
             return json({
               invoice: {
-                ...presentTradeInvoice(inv, { taxSetAsidePercent: tradePayTaxPercent(paySettings), repayment: payViewRepayment(inv, repayments) }),
+                ...presentTradeInvoice(inv, { taxSetAsidePercent: tradePayTaxPercent(paySettings), repayment: payViewRepayment(inv) }),
                 office_note: tradeInvoiceOfficeNote(inv, detailLines),
               },
             })
@@ -58214,11 +58212,9 @@ async function myTradeInvoices(client: any, userId: string) {
       else reviewLinesByInvoice.set(key, [line])
     }
   }
-  const [paySettings, repayments] = await Promise.all([
-    readTradePaySettings(client), readPayViewRepayments(client, data || []),
-  ])
+  const paySettings = await readTradePaySettings(client)
   const invoices = (data || []).map(({ query_note: rawNote, ...inv }: any) => ({
-    ...presentTradeInvoiceSafe(inv, { taxSetAsidePercent: tradePayTaxPercent(paySettings), repayment: payViewRepayment(inv, repayments) }),
+    ...presentTradeInvoiceSafe(inv, { taxSetAsidePercent: tradePayTaxPercent(paySettings), repayment: payViewRepayment(inv) }),
     office_note: tradeInvoiceOfficeNote({ status: inv.status, query_note: rawNote }, reviewLinesByInvoice.get(String(inv.id)) || []),
     week_ending: inv.week_end,
     total: inv.total_inc ?? 0,

@@ -17,6 +17,7 @@
 // deno-lint-ignore-file no-explicit-any
 import "./trade_app_visibility_rules_test_env.ts";
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
+import { calculateTradeInvoiceMoney } from "./trade_invoice_money.ts";
 import { _opsApiRequestHandlerForTest } from "./index.ts";
 
 const TRADE_ID = "6c2f0a52-0000-4000-8000-00000000aa01";
@@ -79,6 +80,8 @@ function filterValues(url: URL, column: string): string[] | null {
 }
 
 type World = {
+  historyInvoices?: Record<string, unknown>[];
+  failRepaymentRead?: "rules" | "balance";
   failWorkOrders?: boolean;
   payRuleOn?: boolean;
   payRuleFrom?: string | null;
@@ -110,6 +113,9 @@ async function submit(extra_items: any[], world: World = {}): Promise<Captured> 
     }
     if (url.pathname.startsWith("/rest/v1/rpc/")) {
       const name = url.pathname.slice("/rest/v1/rpc/".length);
+      if (name === "trade_repayment_balance" && world.failRepaymentRead === "balance") {
+        return Promise.resolve(Response.json({ code: "XX000", message: "ZZTEST balance unavailable" }, { status: 500 }));
+      }
       writes.push("RPC " + name);
       rpcArgs.push({ name, args: typeof init?.body === "string" ? JSON.parse(init.body) : null });
       return Promise.resolve(Response.json("6c2f0a52-0000-4000-8000-00000000d001"));
@@ -168,6 +174,11 @@ async function submit(extra_items: any[], world: World = {}): Promise<Captured> 
         (!statuses || statuses.includes(row.status))
       ));
     }
+    if (table === "trade_recurring_deductions" && world.failRepaymentRead) {
+      return world.failRepaymentRead === "rules"
+        ? Promise.resolve(Response.json({ code: "XX000", message: "ZZTEST rules unavailable" }, { status: 500 }))
+        : reply([{ id: "ZZTEST-rule", kind: "repayment" }]);
+    }
     if (table === "trade_rates") return reply([{ hourly_rate: 50, effective_from: "2026-01-01" }]);
     if (table === "feature_flags") {
       const names = filterValues(url, "flag_name");
@@ -190,6 +201,7 @@ async function submit(extra_items: any[], world: World = {}): Promise<Captured> 
       if (method === "PATCH" || method === "DELETE") {
         return reply([{ id: "6c2f0a52-0000-4000-8000-00000000d001" }]);
       }
+      if (world.historyInvoices) return reply(world.historyInvoices);
       const statuses = filterValues(url, "status");
       if (world.priorDraft && statuses?.includes("draft")) return reply([world.priorDraft]);
       return reply([]);
@@ -446,3 +458,23 @@ handlerTest("pay rule: every save door and the work order retry use the one deci
   assert(src.includes("const draftSuperBasis = resolvedShares.length > 0\n              ? null"), "group shares retain their existing draft pricing");
   assertStringIncludes(src, ".select(`id, user_id, status, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)");
 });
+
+for (const failRepaymentRead of ["rules", "balance"] as const) {
+  handlerTest(`ZZTEST-P1 HOLD: invoice list survives unavailable repayment ${failRepaymentRead}`, async () => {
+    const split = calculateTradeInvoiceMoney({
+      grossEarned: 1120, gstOn: false, superBasis: "inclusive_12_112_v1", earningsDate: "2026-12-07",
+    });
+    const invoice = {
+      ...split, id: "ZZTEST-invoice", status: "paid", week_start: "2026-12-07", gst: 0,
+      subtotal_ex: 1120, recurring_deduction_id: "ZZTEST-rule",
+      recurring_deduction_label: "ZZTEST repayment", recurring_deduction_amount: 10,
+    };
+    const out = await submit([], { action: "my_trade_invoices", historyInvoices: [invoice], failRepaymentRead });
+    assertEquals(out.status, 200, JSON.stringify(out.body));
+    assertEquals(out.body.invoices.length, 1);
+    assertEquals(out.body.invoices[0].id, invoice.id);
+    assertEquals(out.body.invoices[0].pay_view.repayment, { label: "ZZTEST repayment", amount: 10 });
+    assertEquals(out.body.invoices[0].pay_view.into_bank, 990);
+    assertEquals(out.writes, []);
+  });
+}

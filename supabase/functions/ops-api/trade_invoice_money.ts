@@ -804,7 +804,9 @@ export function presentTradeInvoiceMoney<
 
   const money = validatePersistedTradeInvoiceMoney(invoice);
   const xero = presentTradeInvoiceXeroAdjustments(invoice, money.trade_payable);
-  const view = payViewOptions ? buildPayView(money, {
+  // Xero's recorded answer owns the displayed bank amount once read. Keep
+  // the existing office-change rows instead of masking them with pay_view.
+  const view = payViewOptions && !xero.xero_adjustments ? buildPayView(money, {
     ...payViewOptions,
     reimbursementsEx: round2(money.gross_earned - (money.super_base_ex ?? money.gross_earned)),
   }) : null;
