@@ -1,6 +1,6 @@
 BEGIN;
 SET LOCAL statement_timeout = '120s';
-\ir ../../../migrations/20261118050934_group_claims_escalate.sql
+\ir ../../../migrations/20261118062307_group_claims_escalate.sql
 CREATE FUNCTION pg_temp.zztest_group_fixture() RETURNS uuid LANGUAGE plpgsql AS $fixture$
 DECLARE job uuid:=gen_random_uuid(); wo uuid; grp uuid:=gen_random_uuid();
  org uuid:='00000000-0000-0000-0000-000000000001';
@@ -82,20 +82,26 @@ UPDATE public.group_work_orders SET claim_state='waiting_hours',claim_deadline_a
 DO $$ BEGIN
  IF public.group_claims_escalate_due()<>1 THEN RAISE EXCEPTION 'ZZTEST absent office writer broke sweep'; END IF;
 END $$;
--- Enough future rows make the due predicate selective without disabling sequential scans.
-INSERT INTO public.group_work_orders(org_id,job_id,work_order_id,share_token,claim_state,claim_deadline_at)
- SELECT g.org_id,g.job_id,gen_random_uuid(),'ZZTEST-escalate-'||i,'waiting_hours',
-  CASE WHEN i<=51 THEN now()-interval '2 hours' ELSE now()+interval '1 year' END
- FROM public.group_work_orders g CROSS JOIN generate_series(1,10000) i
+-- An older void group must neither escalate nor take one of the 50 places.
+-- Future rows make the due predicate selective without disabling sequential scans.
+INSERT INTO public.group_work_orders(org_id,job_id,work_order_id,share_token,status,claim_state,claim_deadline_at)
+ SELECT g.org_id,g.job_id,gen_random_uuid(),'ZZTEST-escalate-'||i,
+  CASE WHEN i=0 THEN 'void' ELSE 'open' END,'waiting_hours',
+  CASE WHEN i=0 THEN now()-interval '3 hours'
+       WHEN i<=51 THEN now()-interval '2 hours' ELSE now()+interval '1 year' END
+ FROM public.group_work_orders g CROSS JOIN generate_series(0,10000) i
  WHERE g.share_token='ZZTEST-P4-share-token';
 ANALYZE public.group_work_orders;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF)
- SELECT id FROM public.group_work_orders
+ SELECT id, job_id, work_order_id, claim_state, claim_deadline_at FROM public.group_work_orders
  WHERE claim_state IN ('waiting_hours','waiting_approval','disputed') AND claim_deadline_at<=now()
+   AND status <> 'void'
  ORDER BY claim_deadline_at LIMIT 50 FOR UPDATE SKIP LOCKED;
 DO $$ DECLARE plan jsonb; BEGIN
- EXECUTE $q$EXPLAIN (ANALYZE, FORMAT JSON) SELECT id FROM public.group_work_orders
+ EXECUTE $q$EXPLAIN (ANALYZE, FORMAT JSON)
+  SELECT id, job_id, work_order_id, claim_state, claim_deadline_at FROM public.group_work_orders
   WHERE claim_state IN ('waiting_hours','waiting_approval','disputed') AND claim_deadline_at<=now()
+    AND status <> 'void'
   ORDER BY claim_deadline_at LIMIT 50 FOR UPDATE SKIP LOCKED$q$ INTO plan;
  IF plan::text LIKE '%Seq Scan%' OR plan::text NOT LIKE '%Index Scan%'
     OR (plan->0->'Plan'->>'Actual Rows')::int<>50 THEN
@@ -103,6 +109,12 @@ DO $$ DECLARE plan jsonb; BEGIN
  IF public.group_claims_escalate_due()<>50 THEN RAISE EXCEPTION 'ZZTEST sweep exceeded 50'; END IF;
  IF public.group_claims_escalate_due()<>1 THEN RAISE EXCEPTION 'ZZTEST sweep lost remainder'; END IF;
  IF public.group_claims_escalate_due()<>0 THEN RAISE EXCEPTION 'ZZTEST sweep retry repeated'; END IF;
+ IF NOT EXISTS(
+  SELECT 1 FROM public.group_work_orders g
+  WHERE g.share_token='ZZTEST-escalate-0' AND g.status='void' AND g.claim_state='waiting_hours'
+    AND g.claim_deadline_at=now()-interval '3 hours'
+    AND NOT EXISTS(SELECT 1 FROM public.group_work_order_events e WHERE e.group_id=g.id AND e.action='escalate')
+ ) THEN RAISE EXCEPTION 'ZZTEST void group changed during escalation'; END IF;
  IF has_function_privilege('anon','public.group_claims_escalate_due()','EXECUTE')
   OR has_function_privilege('authenticated','public.group_claims_escalate_due()','EXECUTE')
   OR NOT has_function_privilege('service_role','public.group_claims_escalate_due()','EXECUTE') THEN
@@ -118,7 +130,7 @@ $cron$;
 CREATE FUNCTION cron.unschedule(bigint) RETURNS boolean LANGUAGE sql AS $cron$
  WITH removed AS(DELETE FROM cron.job WHERE jobid=$1 RETURNING 1) SELECT EXISTS(SELECT 1 FROM removed);
 $cron$;
-\ir ../../../migrations/20261118050934_group_claims_escalate.sql
+\ir ../../../migrations/20261118062307_group_claims_escalate.sql
 DO $$ BEGIN
  IF EXISTS(SELECT 1 FROM cron.job) THEN RAISE EXCEPTION 'ZZTEST merge installed a schedule'; END IF;
 END $$;
@@ -126,14 +138,19 @@ SELECT public.install_group_claims_escalate();
 SELECT public.install_group_claims_escalate();
 DO $$ BEGIN
  IF (SELECT count(*) FROM cron.job WHERE jobname='group-claims-escalate'
-   AND schedule='*/15 * * * *' AND command='SELECT public.group_claims_escalate_due();')<>1 THEN
+   AND schedule='*/15 * * * *'
+   AND command=$cmd$SET LOCAL statement_timeout = '120s'; SELECT public.group_claims_escalate_due();$cmd$)<>1 THEN
   RAISE EXCEPTION 'ZZTEST repeated install differs from one timer'; END IF;
+ IF EXISTS (
+  SELECT 1 FROM pg_catalog.pg_proc p, unnest(p.proconfig) AS setting
+  WHERE p.oid='public.group_claims_escalate_due()'::regprocedure AND setting LIKE 'statement_timeout=%'
+ ) THEN RAISE EXCEPTION 'ZZTEST escalation function overrides the caller timeout'; END IF;
 END $$;
-\ir ../../../rollbacks/20261118050934_group_claims_escalate_down.sql
+\ir ../../../rollbacks/20261118062307_group_claims_escalate_down.sql
 \ir rollback-contract.sql
 DO $$ BEGIN
  IF EXISTS(SELECT 1 FROM cron.job WHERE jobname='group-claims-escalate') THEN
   RAISE EXCEPTION 'ZZTEST rollback kept the timer'; END IF;
 END $$;
-SELECT 'PASS: P1-13.9 due state, retry, office failures, 50-row bound and indexed plan' AS result;
+SELECT 'PASS: P1-13.9 due state, void exclusion, retry, office failures, indexed 50-row bound and cron timeout' AS result;
 ROLLBACK;

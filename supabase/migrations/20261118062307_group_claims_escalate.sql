@@ -1,7 +1,7 @@
 -- P1-13.9: dormant, bounded office escalation. No schedule is installed on merge.
 CREATE OR REPLACE FUNCTION public.group_claims_escalate_due()
 RETURNS int LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = public, pg_temp SET statement_timeout = '120s' AS $function$
+SET search_path = public, pg_temp AS $function$
 DECLARE g record; moved int := 0; pot numeric; job_number text; BEGIN
   IF NOT EXISTS (SELECT 1 FROM public.feature_flags
     WHERE flag_name = 'group_claim_flow_v1' AND enabled) THEN RETURN 0; END IF;
@@ -10,6 +10,7 @@ DECLARE g record; moved int := 0; pot numeric; job_number text; BEGIN
     FROM public.group_work_orders
     WHERE claim_state IN ('waiting_hours','waiting_approval','disputed')
       AND claim_deadline_at <= now()
+      AND status <> 'void'
     ORDER BY claim_deadline_at LIMIT 50 FOR UPDATE SKIP LOCKED
   LOOP
     UPDATE public.group_work_orders SET claim_state = 'with_office' WHERE id = g.id;
@@ -46,7 +47,7 @@ END; $function$;
 CREATE OR REPLACE FUNCTION public.install_group_claims_escalate()
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $function$ BEGIN
   PERFORM cron.schedule('group-claims-escalate','*/15 * * * *',
-    'SELECT public.group_claims_escalate_due();');
+    $cron$SET LOCAL statement_timeout = '120s'; SELECT public.group_claims_escalate_due();$cron$);
 END; $function$;
 CREATE OR REPLACE FUNCTION public.remove_group_claims_escalate()
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $function$
