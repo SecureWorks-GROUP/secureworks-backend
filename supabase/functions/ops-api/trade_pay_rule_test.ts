@@ -153,3 +153,36 @@ Deno.test("pay rule: a priced stored invoice keeps its basis; only a new or unpr
   );
   assertEquals(err.code, "pay_rule_unreadable");
 });
+
+const undatedDraft = { status: "draft", invoice_source: "hourly", week_start: null, week_end: null, gross_earned: 1120, super_basis: null };
+const changeoverClient = (on = true, fail = false) => fakeClient({
+  feature_flags: { data: [{ enabled: on }] },
+  trade_pay_settings: fail ? { error: "unreadable" } : { data: [{ inclusive_super_from: "2026-11-23" }] },
+});
+
+Deno.test("pay rule: an undated draft dated 22 Nov stays old; 23 Nov and later are inclusive", async () => {
+  for (const [day, expected] of [["2026-11-22", null], ["2026-11-23", INCLUSIVE], ["2026-11-24", INCLUSIVE]] as const) {
+    assertEquals(await resolveTradePayBasis(changeoverClient(), undatedDraft, day), expected);
+  }
+});
+
+Deno.test("pay rule: undated draft off or missing start keeps stored basis; unreadable refuses then retries", async () => {
+  assertEquals(await resolveTradePayBasis(changeoverClient(false, true), undatedDraft, "2026-11-23"), null);
+  assertEquals(await resolveTradePayBasis(changeoverClient(false), { ...undatedDraft, super_basis: INCLUSIVE }, "2026-11-23"), INCLUSIVE);
+  assertEquals(await resolveTradePayBasis(fakeClient({ feature_flags: { data: [{ enabled: true }] } }), undatedDraft, "2026-11-23"), null);
+  await assertRejects(() => resolveTradePayBasis(changeoverClient(true, true), undatedDraft, "2026-11-23"), TradePayRuleUnreadable);
+  assertEquals(await resolveTradePayBasis(changeoverClient(), undatedDraft, "2026-11-23"), INCLUSIVE);
+});
+
+Deno.test("pay rule: office-dated or non-draft stored invoices never change basis", async () => {
+  for (const prior of [
+    { ...undatedDraft, week_start: "2026-11-16", week_end: "2026-11-22" },
+    { ...undatedDraft, week_start: "2026-11-16" },
+    { ...undatedDraft, week_end: "2026-11-22" },
+    { ...undatedDraft, status: "submitted" },
+    { ...undatedDraft, invoice_source: "work_order" },
+    { ...undatedDraft, invoice_source: undefined },
+  ]) {
+    assertEquals(await resolveTradePayBasis(fakeClient({ throws: true }), prior, "2026-11-23"), null);
+  }
+});

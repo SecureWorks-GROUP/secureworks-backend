@@ -2392,8 +2392,9 @@ async function reimbursementXeroAccount(client: any, lines: any[]): Promise<stri
 
 // Which super rule prices an invoice being saved: the one decision in
 // trade_pay_rule.ts. `prior` is the stored invoice this save replaces (null
-// for a new invoice): a priced prior keeps its stored basis, otherwise the
-// rule for the pay day. Unreadable: 503 pay_rule_unreadable, nothing saved.
+// for a new invoice): a dated priced prior keeps its stored basis; an
+// undated draft takes the rule for the incoming pay day.
+// Unreadable: 503 pay_rule_unreadable, nothing saved.
 async function tradePayBasisForSave(
   client: any,
   prior: TradePayPriorInvoice,
@@ -14175,7 +14176,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               ? new Date(new Date(draftWeekStart + 'T00:00:00Z').getTime() + 6 * 86400000).toISOString().slice(0, 10)
               : new Date().toISOString().slice(0, 10)
             // The draft this save replaces, read before pricing so a priced
-            // draft keeps its stored basis (trade_pay_rule.ts).
+            // dated draft keeps its stored basis; an undated draft takes the
+            // incoming pay date's rule (trade_pay_rule.ts).
             let existingDraft: ({ id: string } & NonNullable<TradePayPriorInvoice>) | null = weeklyShape && draftWeekStart
               ? await loadReplaceableWeeklyDraft(client, tradeUser.id, draftWeekStart)
               : null
@@ -14731,11 +14733,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               }
               priorDraft = weeklyDraft
             } else if (draft_id) {
-              const { data: draftToSubmit } = await client.from('trade_invoices')
-                .select(`id, status, week_start, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)
+              const { data: draftToSubmit, error: draftToSubmitErr } = await client.from('trade_invoices')
+                .select(`id, status, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)
                 .eq('id', draft_id)
                 .eq('user_id', tradeUser.id)
                 .maybeSingle()
+              if (draftToSubmitErr) throw new Error('Failed to load selected draft: ' + draftToSubmitErr.message)
               if (draftToSubmit?.status === 'draft') {
                 priorDraft = draftToSubmit
               }
@@ -15563,7 +15566,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // includes super and reimbursement lines carry none. A group
             // share keeps its group's basis.
             // The draft this submit replaces, read before pricing so a priced
-            // draft keeps its stored basis (trade_pay_rule.ts).
+            // dated draft keeps its stored basis; an undated draft takes the
+            // incoming pay date's rule (trade_pay_rule.ts).
             // Recurring deduction (for example Ute hire): taken off the amount
             // payable of a weekly invoice, after super and GST. The lines,
             // subtotal, super and GST below are untouched by it. An invoice
