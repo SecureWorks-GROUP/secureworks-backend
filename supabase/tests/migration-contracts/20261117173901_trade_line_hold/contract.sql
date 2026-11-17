@@ -26,6 +26,7 @@ DECLARE
   rejected_line uuid;
   note_id uuid;
   kind text;
+  money_column text;
 BEGIN
   INSERT INTO public.users (id, org_id, name, role)
     VALUES (crew, org, 'ZZTEST crew', 'crew');
@@ -47,8 +48,12 @@ BEGIN
   PERFORM pg_temp.zztest_refuses(format(
     'UPDATE public.trade_invoices SET invoice_kind = %L WHERE id = %L',
     'ZZTEST-unknown', standard), '23514');
-  PERFORM pg_temp.zztest_refuses(format(
-    'UPDATE public.trade_invoices SET subtotal_ex = 1 WHERE id = %L', held), '23514');
+  FOREACH money_column IN ARRAY ARRAY['subtotal_ex','gst','total_inc','gross_earned',
+    'super_amount','net_pay','super_base_ex','job_grand_total_ex',
+    'final_deductions_total_ex','to_be_paid_ex','recurring_deduction_amount'] LOOP
+    PERFORM pg_temp.zztest_refuses(format(
+      'UPDATE public.trade_invoices SET %I = 1 WHERE id = %L', money_column, held), '23514');
+  END LOOP;
   PERFORM pg_temp.zztest_refuses(format(
     'UPDATE public.trade_invoices SET xero_bill_id = %L WHERE id = %L',
     'ZZTEST-bill', held), '23514');
