@@ -32,6 +32,7 @@ SELECT dblink_exec('queue_timeout','SET statement_timeout=''200ms''');
 CREATE TEMP TABLE queue_timeout_result AS
  SELECT result FROM dblink('queue_timeout','SELECT public.job_pages_refresh_due(1)') AS t(result jsonb);
 DO $c$
+DECLARE v_second jsonb;
 BEGIN
  IF (SELECT result->>'failed' FROM queue_timeout_result) IS DISTINCT FROM '1'
   OR EXISTS(SELECT 1 FROM public.job_change_mark_events
@@ -39,10 +40,14 @@ BEGIN
   OR NOT EXISTS(SELECT 1 FROM public.job_pages
    WHERE job_id='00000000-0000-4000-8000-000000000457' AND status='failed' AND error LIKE '57014 %') THEN
   RAISE EXCEPTION 'queue safety: real timeout in version read blocked the queue'; END IF;
- IF public.job_pages_refresh_due(1)->>'refreshed' IS DISTINCT FROM '1'
+ -- Separate mutation and readback statements: SQL may evaluate the EXISTS
+ -- subplan before a volatile function elsewhere in the same expression.
+ v_second:=public.job_pages_refresh_due(1);
+ IF v_second->>'refreshed' IS DISTINCT FROM '1'
   OR NOT EXISTS(SELECT 1 FROM public.job_pages
    WHERE job_id='00000000-0000-4000-8000-000000000458' AND status='ready') THEN
-  RAISE EXCEPTION 'queue safety: second job blocked after real timeout'; END IF;
+  RAISE EXCEPTION 'queue safety: second job blocked after real timeout: %, %',v_second,
+   (SELECT error FROM public.job_pages WHERE job_id='00000000-0000-4000-8000-000000000458'); END IF;
  EXECUTE 'CREATE OR REPLACE VIEW public.job_change_marks AS '||(SELECT view_body FROM queue_timeout_saved);
  EXECUTE (SELECT story_body FROM queue_timeout_saved);
 END $c$;
