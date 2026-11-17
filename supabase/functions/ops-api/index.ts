@@ -11631,7 +11631,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (tradeInvoiceHasExternalXeroIdentity(rejInv) || rejInv.status === 'pushed_to_xero' || rejInv.status === 'paid') {
           throw new ApiError('Cannot reject an invoice already in Xero/paid', 400)
         }
-        const { data: rejected, error: rejErr } = await rejectTradeInvoiceStorage(client, rejInvId, officeSentBackNote(rejNote))
+        const { data: rejected, error: rejErr } = await rejectTradeInvoiceStorage(client, rejInvId, officeSentBackNote(rejNote), reviewActorLabel(authUser))
         if (rejErr) throw new Error('Failed to reject: ' + rejErr.message)
         if (rejected?.id !== rejInvId) {
           throw new ApiError('Cannot reject an invoice while its Xero identity is being recorded', 409)
