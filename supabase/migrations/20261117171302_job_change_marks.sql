@@ -2,14 +2,19 @@
 -- written only through public.job_mark_changed(job, source). A consumer (the stored job page, the notes reader,
 -- the story writer) is due when last_marked_at is newer than its own done column, and sets that column to the
 -- last_marked_at it read before it started, so a change that lands while it works keeps the job due.
--- This migration adds the table and its two functions only: the triggers that call job_mark_changed come in
+-- This migration adds private mark/acknowledgement storage and its two functions only: trigger definitions come in
 -- P0-02.2, and nothing reads the table yet. Stored Job Profit (P0-09) keeps its own job_profit_dirty table and calls
 -- job_mark_changed(<job>, 'profit'), so any source text is accepted.
--- Rollback: supabase/rollbacks/20261117171001_job_change_marks_down.sql.
+-- Rollback: supabase/rollbacks/20261117171302_job_change_marks_down.sql.
 SET LOCAL lock_timeout = '5s';
+
+CREATE SEQUENCE IF NOT EXISTS public.job_change_mark_version;
+REVOKE ALL ON SEQUENCE public.job_change_mark_version FROM PUBLIC, anon, authenticated;
+GRANT USAGE ON SEQUENCE public.job_change_mark_version TO service_role;
 
 CREATE TABLE IF NOT EXISTS public.job_change_marks (
   job_id uuid PRIMARY KEY REFERENCES public.jobs(id) ON DELETE CASCADE,
+  mark_version bigint NOT NULL DEFAULT nextval('public.job_change_mark_version'),
   first_marked_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   last_marked_at  timestamptz NOT NULL DEFAULT clock_timestamp(),
   sources text[] NOT NULL DEFAULT '{}',
@@ -27,11 +32,23 @@ REVOKE ALL ON public.job_change_marks FROM PUBLIC, anon, authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.job_change_marks TO service_role;
 
 COMMENT ON TABLE public.job_change_marks IS
-  'One row per job that changed. A consumer (page, notes, story) is due when last_marked_at is newer than its own done column. A consumer sets its done column to the last_marked_at it read before it started.';
+  'One row per job that changed. Pages compare mark_version with job_page_marks_seen; only page consumers write that acknowledgement. Notes compare last_marked_at with notes_done_at. Legacy done columns remain for compatibility.';
+
+-- Page consumers acknowledge a version in their own row. They NEVER update/lock a marks row,
+-- even during the save. Business triggers therefore share no writable row with page builds.
+CREATE TABLE IF NOT EXISTS public.job_page_marks_seen (
+ job_id uuid PRIMARY KEY REFERENCES public.jobs(id) ON DELETE CASCADE,
+ mark_version bigint NOT NULL,
+ page_done_at timestamptz NOT NULL,
+ story_done_at timestamptz NOT NULL
+);
+ALTER TABLE public.job_page_marks_seen ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.job_page_marks_seen FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.job_page_marks_seen TO service_role;
 
 -- Mark a job changed. A job whose page was done since its last mark starts a new run of changes (first_marked_at and
 -- sources start again); otherwise the source is added once and last_marked_at moves on. A null job, or a job that
--- does not exist, is a no-op and raises nothing, so a caller's own write never fails because of a mark.
+-- does not exist is a no-op. Page builds never lock this row or wait on this writer.
 CREATE OR REPLACE FUNCTION public.job_mark_changed(p_job_id uuid, p_source text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $fn$
 DECLARE v_src text := coalesce(nullif(btrim(p_source), ''), 'unknown');
@@ -39,11 +56,16 @@ BEGIN
  IF p_job_id IS NULL THEN RETURN; END IF;
  INSERT INTO public.job_change_marks AS m (job_id, sources) VALUES (p_job_id, ARRAY[v_src])
  ON CONFLICT (job_id) DO UPDATE SET
-  first_marked_at = CASE WHEN m.page_done_at IS NOT NULL AND m.page_done_at >= m.last_marked_at
+  first_marked_at = CASE WHEN (m.page_done_at IS NOT NULL AND m.page_done_at >= m.last_marked_at)
+                         OR EXISTS (SELECT 1 FROM public.job_page_marks_seen s
+                                    WHERE s.job_id=m.job_id AND s.mark_version=m.mark_version)
                          THEN clock_timestamp() ELSE m.first_marked_at END,
-  sources = CASE WHEN m.page_done_at IS NOT NULL AND m.page_done_at >= m.last_marked_at THEN ARRAY[v_src]
+  sources = CASE WHEN (m.page_done_at IS NOT NULL AND m.page_done_at >= m.last_marked_at)
+                         OR EXISTS (SELECT 1 FROM public.job_page_marks_seen s
+                                    WHERE s.job_id=m.job_id AND s.mark_version=m.mark_version) THEN ARRAY[v_src]
                  WHEN v_src = ANY(m.sources) THEN m.sources ELSE m.sources || v_src END,
-  last_marked_at = clock_timestamp();
+  last_marked_at = clock_timestamp(),
+  mark_version = nextval('public.job_change_mark_version');
 EXCEPTION WHEN foreign_key_violation THEN RETURN;
 END $fn$;
 

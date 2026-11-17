@@ -1,7 +1,9 @@
 DO $c$
 BEGIN
  IF to_regprocedure('public.job_pages_nightly(integer)') IS NOT NULL
-  OR to_regprocedure('public.job_pages_keep_ready_set()') IS NOT NULL THEN
+  OR to_regprocedure('public.job_pages_keep_ready_set()') IS NOT NULL
+  OR to_regprocedure('public.job_pages_install()') IS NOT NULL
+  OR to_regprocedure('public.job_pages_remove()') IS NOT NULL THEN
   RAISE EXCEPTION 'job pages schedule rollback: schedule function remains';
  END IF;
  IF to_regclass('cron.job') IS NOT NULL THEN

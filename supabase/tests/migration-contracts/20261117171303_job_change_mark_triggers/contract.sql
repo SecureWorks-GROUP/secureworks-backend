@@ -1,5 +1,7 @@
 -- P0-02.2: observable changes and housekeeping writes, rolled back.
 BEGIN;
+SELECT public.job_change_mark_triggers_install();
+SELECT public.job_change_mark_triggers_install();
 SELECT set_config('request.jwt.claims','{"role":"service_role"}',true);
 INSERT INTO public.jobs (id, org_id, type, status, job_number) VALUES
  ('00000000-0000-4000-8000-000000000412','00000000-0000-0000-0000-000000000001','fencing','accepted','ZZTEST-412'),
