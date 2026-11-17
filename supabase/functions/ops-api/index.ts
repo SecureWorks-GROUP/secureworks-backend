@@ -1,8 +1,8 @@
 // JWT flag: --no-verify-jwt. Keep this line at the top: the deploy workflow reads
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
-import { deleteHoldingInvoice, guardedJobs, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, type SendRow, type SortedSend } from './trade_line_send.ts'
-import { type LineHoldFacts } from './trade_line_hold.ts'
+import { deleteHoldingInvoice, guardedJobs, holdLineFromRow, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, type SendRow, type SortedSend } from './trade_line_send.ts'
+import { readLineHoldFacts, type LineHoldFacts } from './trade_line_hold.ts'
 import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
 import { listExpenseReceipts } from './expense_list.ts'
 import { factReadOn } from './fact_reader_switch.ts'
@@ -11701,6 +11701,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const { data: ntiData, error: ntiErr } = await client.from('trade_invoices')
           .select('*, user:user_id(name, email)')
           .eq('org_id', DEFAULT_ORG_ID)
+          .neq('invoice_kind', 'held')
           .order('week_start', { ascending: false })
           .limit(50)
         if (ntiErr) throw new Error(ntiErr.message)
@@ -14377,6 +14378,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 .eq('user_id', tradeUser.id)
                 .eq('week_start', draftWeekStart)
                 .eq('status', 'draft')
+                .neq('invoice_kind', 'held')
                 .order('created_at', { ascending: true })
                 .limit(1)
                 .maybeSingle()
@@ -14937,6 +14939,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 .eq('user_id', tradeUser.id)
                 .eq('week_start', week_start)
                 .eq('status', 'draft')
+                .neq('invoice_kind', 'held')
                 .order('created_at', { ascending: true })
                 .limit(1)
               if (existingDraftErr) {
@@ -17164,6 +17167,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const { data, error } = await client.from('trade_invoices')
               .select('*, lines:trade_invoice_lines(*)')
               .eq('user_id', tradeUser.id)
+              .neq('invoice_kind', 'held')
               .order('week_start', { ascending: false })
               .limit(20)
 
@@ -18977,6 +18981,7 @@ async function loadReplaceableWeeklyDraft(
     .eq('user_id', userId)
     .eq('week_start', weekStart)
     .eq('status', 'draft')
+    .neq('invoice_kind', 'held')
     .order('created_at', { ascending: true })
     .limit(2)
   if (error) throw new Error('Failed to load existing weekly draft: ' + error.message)
@@ -58564,6 +58569,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     .select('id, xero_bill_number:xero_bill_id, status')
     .eq('user_id', userId)
     .eq('week_end', weekEnding)
+    .neq('invoice_kind', 'held')
     .maybeSingle()
 
   const subtotal = Math.round(totalHours * rate * 100) / 100
@@ -58642,6 +58648,35 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   for (const a of enriched) stampInvoiceMode(a, String(a.jobs?.id || ''))
   for (const r of groupRouteJobs) stampInvoiceMode(r, String(r.job_id || ''))
 
+  // P1-05.8: with the held-line rule on for this week, each card says what its
+  // job has left on its approved work order (null: no approved amount), so the
+  // app can say before sending that a line goes to the office. A failed read
+  // says so (job_left_unavailable) rather than reading as "no amount".
+  const lineHoldWeek = await lineHoldSendApplies(client, weekStart || weekEnding, paySettingsRead)
+  let jobLeftUnavailable = false
+  if (lineHoldWeek) {
+    let leftFacts: LineHoldFacts | null = null
+    if (invoiceModeJobIds.length > 0) {
+      try {
+        leftFacts = await readLineHoldFacts(
+          client,
+          userId,
+          invoiceModeJobIds.map((jobId, index) => holdLineFromRow({ job_id: jobId, line_total_ex: 0 }, weekStart || null, index)),
+        )
+      } catch (leftErr) {
+        console.error('[ops-api] my_hours: job amounts unreadable:', (leftErr as Error)?.message)
+        jobLeftUnavailable = true
+      }
+    }
+    const jobLeft = (jobId: string): number | null => {
+      const job = leftFacts?.jobs[jobId]
+      if (!job?.workOrder || job.workOrder.status !== 'approved' || job.workOrder.agreed_ex === null) return null
+      return roundMoney(Number(job.allowed_ex) - Number(job.backed_billed_ex))
+    }
+    for (const a of enriched) a.job_left_ex = jobLeft(String(a.jobs?.id || ''))
+    for (const r of groupRouteJobs) r.job_left_ex = jobLeft(String(r.job_id || ''))
+  }
+
   // Check verification state across assignments
   const pendingVerification = enriched.some((a: any) => a.status === 'submitted')
   const allVerified = enriched.length > 0 && enriched.every((a: any) => a.status === 'verified' || a.status === 'complete')
@@ -58674,6 +58709,8 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
       }),
     subtotal,
     already_submitted: !!existingInvoice,
+    ...(lineHoldWeek ? { line_hold: true as const } : {}),
+    ...(jobLeftUnavailable ? { job_left_unavailable: true as const } : {}),
     running_invoice_draft: runningInvoiceDraftEnabled(userRow?.trade_details),
     // True when how each job is invoiced could not be read; every card's
     // invoice_mode and can_claim_commission are then null.
@@ -58742,6 +58779,7 @@ async function myTradeInvoices(client: any, userId: string) {
     .from('trade_invoices')
     .select(MY_TRADE_INVOICE_COLUMNS + ', query_note')
     .eq('user_id', userId)
+    .neq('invoice_kind', 'held')
     .order('created_at', { ascending: false })
     .limit(100)
 
@@ -58790,6 +58828,7 @@ async function myMoney(client: any, tradeUser: TradeAuthContext, params: URLSear
   const [{ data: userRow, error: userErr }, { data: rows, error: invErr }] = await Promise.all([
     client.from('users').select('id, name, abn, invoice_type, trade_details, xero_contact_id').eq('id', tradeUser.id).maybeSingle(),
     client.from('trade_invoices').select(MY_TRADE_INVOICE_COLUMNS).eq('user_id', tradeUser.id)
+      .neq('invoice_kind', 'held')
       .order('week_end', { ascending: false, nullsFirst: false }).limit(400),
   ])
   if (userErr) throw userErr
@@ -58880,6 +58919,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
     let query = client
       .from('trade_invoices')
       .select(TRADE_BILLS_COLUMNS)
+      .neq('invoice_kind', 'held')
     query = noWeek
       ? query.is('week_start', null).order('created_at', { ascending: false })
       : query.not('week_start', 'is', null).order('week_start', { ascending: false })
@@ -58896,6 +58936,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
     ? client
       .from('trade_invoices')
       .select(TRADE_BILLS_COLUMNS)
+      .neq('invoice_kind', 'held')
       .eq('status', STUCK_TRADE_INVOICE_STATUS)
       .is('xero_bill_id', null)
       .order('created_at', { ascending: false })
@@ -59054,6 +59095,7 @@ async function labourReconciliation(client: any, params: URLSearchParams) {
   const { data: invoices, error: invErr } = await client.from('trade_invoices')
     .select('id, user_id, week_ending:week_end, subtotal:subtotal_ex, total:total_inc, status, xero_bill_number:xero_bill_id, users:user_id(name), trade_invoice_lines!inner(job_id, job_number, total_hours, line_total_ex)')
     .eq('trade_invoice_lines.job_id', jobId)
+    .neq('invoice_kind', 'held')
     .order('week_end', { ascending: false })
   if (invErr) throw invErr
 
