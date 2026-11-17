@@ -248,7 +248,8 @@ Deno.test("the daily digest sends no Pay Now deposit chaser and keeps the ops an
     BASE_ENV,
     () =>
       withFetchSpy(rows, async (calls) => {
-        const res = await handle(serviceRequest(null));
+        // Only the scheduled build (action=build) builds the digest (P0-14).
+        const res = await handle(serviceRequest("build"));
         await res.body?.cancel();
 
         // No Pay Now link text, and nothing else sent to the client.

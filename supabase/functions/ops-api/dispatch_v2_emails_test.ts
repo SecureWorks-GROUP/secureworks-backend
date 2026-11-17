@@ -9,6 +9,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   cleanDispatchV2EmailList,
+  DISPATCH_ORDER_QUOTE_REF_FLAG,
   DISPATCH_V2_ALSO_ATTACHED_TEXT,
   DISPATCH_V2_PHOTO_ONLY_TEXT,
   DISPATCH_V2_STANDING_LINES,
@@ -34,6 +35,7 @@ import {
   dispatchV2MentionsPickup,
   dispatchV2OrderableLines,
   dispatchV2PhotoFileName,
+  dispatchV2QuoteRefLine,
   dispatchV2SameLines,
   dispatchV2SuggestionAllowed,
   dispatchV2TeamCc,
@@ -120,6 +122,114 @@ Deno.test("email: a fencing main supplier email is the wiki template exactly, st
   assert(!built.body_text.includes("SWF-261600"));
   assert(!/Kind regards|Regards|Thanks,/i.test(built.body_text));
   assert(!/[—–]/.test(built.body_text));
+});
+
+// P2-10.4: the "please quote this reference" line, behind a switch seeded off.
+const TEMPLATE_INPUT = {
+  job: JOB,
+  workType: "fencing",
+  isMainSupplier: true,
+  lines: [PANELS, PLINTHS],
+  deliveryDate: "2026-11-04",
+};
+const TEMPLATE_BODY = [
+  "Hi Team, could we please order the following for delivery:",
+  "",
+  "Date: 4 November 2026",
+  "Address: 12 Example Street, Clarkson",
+  "Contact: 0400 000 000 (Jeremy)",
+  "",
+  "Materials Needed:",
+  "",
+  "1. 14 x 1800H standard width panels with 2400H posts",
+  "Profile: Neetascreen",
+  "Colour: Monument",
+  "",
+  "2. 14 x 150mm standard width plinths",
+  "Colour: Monument",
+  "",
+  "3. 4 x bags of quickset",
+  "",
+  "4. Fixings, Post Caps and Screws as necessary",
+  "",
+  "",
+  "Please confirm when you can, thank you.",
+].join("\n");
+
+Deno.test("quote reference line: off (false or left out) the body is byte for byte today's template", () => {
+  assertEquals(DISPATCH_ORDER_QUOTE_REF_FLAG, "dispatch_order_quote_ref_line_v1");
+  for (const quoteRefLine of [false, null, undefined]) {
+    const built = dispatchV2BuildEmail({ ...TEMPLATE_INPUT, quoteRefLine });
+    assertEquals(built.body_text, TEMPLATE_BODY);
+    assertEquals(built.subject, "Material Order Ref SWF-261600");
+    assert(!built.body_text.includes("SWF-261600"));
+  }
+  assertEquals(dispatchV2BuildEmail(TEMPLATE_INPUT).body_text, TEMPLATE_BODY);
+});
+
+Deno.test("quote reference line: on, the exact line with the job number once, last before the signature; no $; subject unchanged", () => {
+  const built = dispatchV2BuildEmail({ ...TEMPLATE_INPUT, quoteRefLine: true });
+  assertEquals(
+    built.body_text,
+    `${TEMPLATE_BODY}\n\nPlease quote this reference on your invoice: SWF-261600`,
+  );
+  assertEquals(built.body_text.split("SWF-261600").length - 1, 1);
+  assertEquals(
+    built.body_text.split("\n").filter((l) =>
+      l === "Please quote this reference on your invoice: SWF-261600"
+    ).length,
+    1,
+  );
+  assert(!built.body_text.includes("$"));
+  assert(!/[—–]/.test(built.body_text));
+  assertEquals(built.subject, "Material Order Ref SWF-261600");
+  // Everything else about the email is the same as with the switch off.
+  const off = dispatchV2BuildEmail(TEMPLATE_INPUT);
+  assertEquals(
+    { ...built, body_text: "" },
+    { ...off, body_text: "" },
+  );
+  // The line does not disturb how the body is read back.
+  assertEquals(dispatchV2FulfilmentOf(built.body_text), "delivery");
+  assertEquals(dispatchV2EmptyDetailLines(built.body_text), []);
+});
+
+Deno.test("quote reference line: on, a pickup and a photo-only order end with the line too", () => {
+  const pickup = dispatchV2BuildEmail({
+    ...TEMPLATE_INPUT,
+    fulfilment: "pickup",
+    quoteRefLine: true,
+  });
+  assert(pickup.body_text.endsWith(
+    "Please confirm when you can, thank you.\n\nPlease quote this reference on your invoice: SWF-261600",
+  ));
+  const photoOnly = dispatchV2BuildEmail({
+    ...TEMPLATE_INPUT,
+    lines: [],
+    photoCount: 1,
+    quoteRefLine: true,
+  });
+  assertEquals(photoOnly.photo_only, true);
+  assert(photoOnly.body_text.endsWith(
+    "Please confirm when you can, thank you.\n\nPlease quote this reference on your invoice: SWF-261600",
+  ));
+  assert(!pickup.body_text.includes("$") && !photoOnly.body_text.includes("$"));
+});
+
+Deno.test("quote reference line: on with no job number leaves the line out, never an empty reference", () => {
+  for (const job_number of [null, "", "   "]) {
+    const built = dispatchV2BuildEmail({
+      ...TEMPLATE_INPUT,
+      job: { ...JOB, job_number },
+      quoteRefLine: true,
+    });
+    assertEquals(built.body_text, TEMPLATE_BODY);
+    assert(!built.body_text.includes("Please quote this reference"));
+  }
+  assertEquals(dispatchV2QuoteRefLine(null), "");
+  assertEquals(dispatchV2QuoteRefLine("  SWF-261600 "), "Please quote this reference on your invoice: SWF-261600");
+  // Passed through the no-long-dash rule like the rest of the body.
+  assertEquals(dispatchV2QuoteRefLine("SWF\u2014261600"), "Please quote this reference on your invoice: SWF, 261600");
 });
 
 Deno.test("email: standing lines never go on a non-main fencing email, a patio or a repair email", () => {

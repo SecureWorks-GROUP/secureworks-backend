@@ -1738,6 +1738,7 @@ async function ingestMaterialsActuals(
     let namedPoPool: Array<{ po_number: string | null; job_id: string | null; xero_bill_id: string | null }> = []
     let blockedJobIds = new Set<string>() // jobs not won, or holding: never a cost by rule
     const jobNumberById = new Map<string, string>()
+    const jobsByDigits = new Map<string, any[]>()
     {
       const pos = await readAll<any>(() =>
         sb.from('purchase_orders')
@@ -1759,7 +1760,15 @@ async function ingestMaterialsActuals(
         sb.from('jobs').select('id, job_number, status, do_not_schedule:metadata->do_not_schedule').eq('org_id', DEFAULT_ORG_ID).order('id')
       )
       if (!notLiveJobs) throw new Error('jobs unreadable')
-      for (const j of notLiveJobs) jobNumberById.set(j.id, j.job_number)
+      for (const j of notLiveJobs) {
+        jobNumberById.set(j.id, j.job_number)
+        const d = String(j.job_number || '').replace(/\D/g, '')
+        if (d) {
+          const list = jobsByDigits.get(d) || []
+          list.push(j)
+          jobsByDigits.set(d, list)
+        }
+      }
       blockedJobIds = new Set(
         notLiveJobs
           .filter((j: any) => DEAD_JOB_STATUSES.has(String(j.status || '').toLowerCase()) ||
@@ -1963,17 +1972,7 @@ async function ingestMaterialsActuals(
       let jobFromRef: { id: string; job_number: string } | null = null
       if (token && refTokens.size === 1) {
         const digits = token.replace(/\D/g, '')
-        const { data: sameDigits, error: jErr } = await sb
-          .from('jobs')
-          .select('id, job_number, status, do_not_schedule:metadata->do_not_schedule')
-          .eq('org_id', DEFAULT_ORG_ID)
-          .like('job_number', `%${digits}`)
-        // Evidence that could not be read is not a refusal: leave the bill as it is.
-        if (jErr || !Array.isArray(sameDigits)) {
-          console.error(`[materials] job lookup failed ${bill.xero_invoice_id}:`, jErr?.message)
-          continue
-        }
-        const rows = sameDigits.filter((j: any) => String(j.job_number).replace(/\D/g, '') === digits)
+        const rows = jobsByDigits.get(digits) || []
         const job = rows.find((j: any) => j.job_number === token)
         const live = job &&
           !DEAD_JOB_STATUSES.has(String(job.status || '').toLowerCase()) &&
@@ -2245,6 +2244,7 @@ async function ingestMaterialsActuals(
   }
 }
 
+export const _ingestMaterialsActualsForTest = ingestMaterialsActuals
 
 // The scheduled bill pre-match (JP-06) on its own: a share of the open bills each run, new bills
 // first, the turn moving every 15 minutes. Logged like the ingest so a stopped run shows.

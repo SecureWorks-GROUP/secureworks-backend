@@ -122,7 +122,8 @@ Deno.test("price drift never reads a staff_only row as a material price", async 
   try {
     await withEnv(BASE_ENV, async () => {
       const res = await handle(
-        new Request("https://example.invalid/daily-digest", {
+        // Only the scheduled build (action=build) builds the digest (P0-14).
+        new Request("https://example.invalid/daily-digest?action=build", {
           method: "POST",
           headers: {
             "content-type": "application/json",

@@ -558,6 +558,18 @@ jobs:
             supabase/functions/_shared/supplier_price_defaults_test.ts \
             supabase/functions/daily-digest/staff_only_price_drift_test.ts
 
+      # The daily digest is built once a day by its timer; a screen or agent
+      # reads the stored one (P0-14). Completion packs (which can email a
+      # client) keep the same jobs and the same triggers: a differential run
+      # against the old per-job loop. Drives the real daily-digest handler, so
+      # the same --no-check reason as above.
+      - name: Test the daily digest builds once and screens read the stored one
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/daily-digest/digest_mode_test.ts \
+            supabase/functions/daily-digest/digest_handler_test.ts \
+            supabase/functions/daily-digest/completion_pack_pick_test.ts
+
       # The Dispatch tab's list read is opt-in on `pipeline`: the plain read must
       # stay exactly as it was, and the list must never drop a job past the
       # 1000-row ceiling or select the whole scope blob. These files type-check,
