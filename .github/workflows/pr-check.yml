@@ -775,6 +775,7 @@ jobs:
             supabase/functions/ops-api/chase_sms_contact_guard_test.ts \
             supabase/functions/ops-api/retired_booking_actions_test.ts \
             supabase/functions/ops-api/invoice_context_test.ts \
+            supabase/functions/ops-api/fact_reader_switch_test.ts \
             supabase/functions/ops-api/job_conversation_chat_logs_retired_test.ts \
             supabase/functions/ops-api/job_conversation_party_roles_test.ts \
             supabase/functions/ops-api/job_commercial_read_test.ts \
