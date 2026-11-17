@@ -5,7 +5,7 @@ SET LOCAL TimeZone='UTC';
 SET LOCAL statement_timeout='120s';
 -- Rule 17: FU26.0's objects and this case's own are re-applied first.
 \ir ../../../migrations/20261118024514_context_story_book_speed.sql
-\ir ../../../migrations/20261118064413_job_story_stored_profit.sql
+\ir ../../../migrations/20261118065939_job_story_stored_profit.sql
 -- Rule 17: an earlier contract in the shard may have rebuilt the stored tables.
 -- These are the store's own job indexes (20261117195801), restored if missing.
 CREATE INDEX IF NOT EXISTS job_cost_events_stored_job_idx ON public.job_cost_events_stored(job_id);
@@ -208,7 +208,7 @@ SELECT pg_temp.sp_assert((SELECT md5(prosrc)='ac51513f6164fa256011d67c1bd82b10' 
 SELECT public.remove_context_story_book_speed();
 SELECT pg_temp.sp_assert((SELECT md5(prosrc)='fc9a1c8f605a1dfd6c7d1ef7667bfa0d' FROM pg_proc WHERE oid='public.context_job_story_book(uuid,timestamptz)'::regprocedure),'FU26.0 remove after this remove failed');
 -- Re-apply while removed keeps the switch as it is and replaces no entry point.
-\ir ../../../migrations/20261118064413_job_story_stored_profit.sql
+\ir ../../../migrations/20261118065939_job_story_stored_profit.sql
 SELECT pg_temp.sp_assert((SELECT md5(prosrc)='fc9a1c8f605a1dfd6c7d1ef7667bfa0d' FROM pg_proc WHERE oid='public.context_job_story_book(uuid,timestamptz)'::regprocedure),'re-apply touched the book');
 
 -- 8. No browser role reaches any new door.
