@@ -1,3 +1,5 @@
+import { buildPayView, type PayView, type PayViewOptions } from "./trade_pay_view.ts";
+
 // Canonical subcontractor invoice money split.
 //
 // Statutory source (checked 2026-08-27): the Australian Taxation Office's
@@ -785,12 +787,14 @@ export function presentTradeInvoiceMoney<
   T extends Record<string, unknown>,
 >(
   invoice: T,
+  payViewOptions?: Pick<PayViewOptions, "taxSetAsidePercent" | "repayment">,
 ):
   & T
   & { trade_payable: number | null }
   & Partial<PresentedTradeInvoiceRecurringDeduction>
   & Partial<PresentedTradeInvoiceXeroAdjustments>
-  & Partial<PresentedTradeInvoiceSuperInclusive> {
+  & Partial<PresentedTradeInvoiceSuperInclusive>
+  & { pay_view?: PayView } {
   const hasPersistedSplit = PERSISTED_SPLIT_FIELDS.some((field) =>
     invoice[field] !== null && invoice[field] !== undefined
   );
@@ -800,7 +804,13 @@ export function presentTradeInvoiceMoney<
 
   const money = validatePersistedTradeInvoiceMoney(invoice);
   const xero = presentTradeInvoiceXeroAdjustments(invoice, money.trade_payable);
-  const inclusive = presentedSuperInclusive(money);
+  // Xero's recorded answer owns the displayed bank amount once read. Keep
+  // the existing office-change rows instead of masking them with pay_view.
+  const view = payViewOptions && !xero.xero_adjustments ? buildPayView(money, {
+    ...payViewOptions,
+    reimbursementsEx: round2(money.gross_earned - (money.super_base_ex ?? money.gross_earned)),
+  }) : null;
+  const inclusive = { ...presentedSuperInclusive(money), ...(view ? { pay_view: view } : {}) };
   if (!money.recurring_deduction) {
     return { ...invoice, trade_payable: money.trade_payable, ...xero, ...inclusive };
   }

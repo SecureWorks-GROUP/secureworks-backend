@@ -63,18 +63,34 @@ function firstRow(data: unknown): Record<string, unknown> | null {
   return row && typeof row === "object" ? row as Record<string, unknown> : null;
 }
 
+// Also used by the invoice presenters, once per request. A tax read fault
+// means unknown, independently of whether the pay rule can still be decided.
+export async function readTradePaySettings(client: any) {
+  try {
+    return await client.from("trade_pay_settings")
+      .select("inclusive_super_from, tax_set_aside_percent").eq("id", 1).limit(1);
+  } catch {
+    return { data: null, error: "settings unreadable" };
+  }
+}
+
+export function tradePayTaxPercent(settings: any): number | null {
+  if (settings?.error) return null;
+  const raw = firstRow(settings?.data)?.tax_set_aside_percent;
+  if (raw === null || raw === undefined) return null;
+  const percent = Number(raw);
+  return Number.isFinite(percent) && percent >= 0 && percent <= 60 ? percent : null;
+}
+
 /** One read of the switch and one of the start date. */
-export async function readTradePayRule(client: any): Promise<TradePayRuleRead> {
+export async function readTradePayRule(client: any, settingsRead?: ReturnType<typeof readTradePaySettings>): Promise<TradePayRuleRead> {
   try {
     const [flag, settings] = await Promise.all([
       client.from("feature_flags")
         .select("enabled")
         .eq("flag_name", TRADE_PAY_INCLUSIVE_FLAG)
         .limit(1),
-      client.from("trade_pay_settings")
-        .select("inclusive_super_from")
-        .eq("id", 1)
-        .limit(1),
+      settingsRead ?? readTradePaySettings(client),
     ]);
     if (flag?.error) return { ok: false, error: "switch unreadable" };
     const on = firstRow(flag?.data)?.enabled === true;
@@ -150,10 +166,11 @@ export async function resolveTradePayBasis(
   client: any,
   prior: TradePayPriorInvoice,
   payDay: unknown,
+  settingsRead?: ReturnType<typeof readTradePaySettings>,
 ): Promise<TradeInvoiceSuperBasis | null> {
   const stored = tradePayStoredBasis(prior);
   if (stored.priced) return stored.basis;
-  const read = await readTradePayRule(client);
+  const read = await readTradePayRule(client, settingsRead);
   if (!read.ok) throw new TradePayRuleUnreadable(read.error);
   return tradePayBasisFor(read, payDay);
 }
@@ -163,9 +180,10 @@ export async function resolveTradePayBasisForPreview(
   client: any,
   prior: TradePayPriorInvoice,
   payDay: unknown,
+  settingsRead?: ReturnType<typeof readTradePaySettings>,
 ): Promise<{ basis: TradeInvoiceSuperBasis | null; unavailable: boolean }> {
   try {
-    return { basis: await resolveTradePayBasis(client, prior, payDay), unavailable: false };
+    return { basis: await resolveTradePayBasis(client, prior, payDay, settingsRead), unavailable: false };
   } catch (error) {
     if (!(error instanceof TradePayRuleUnreadable)) throw error;
     console.error("[ops-api] pay rule unreadable, preview shows no money:", error.message);
