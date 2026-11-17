@@ -3,6 +3,7 @@
 // verification on, which refuses every x-api-key caller at the gateway (401).
 import { isMoneyAction, moneyActionGate, readMoneyActionFlags } from "./money_actions.ts"
 import { agentProposalAction } from "./agent_proposals.ts"
+import { weeklyCheckAction } from "./weekly_check.ts"
 import { setCouncilRequired } from './council_mark.ts'
 import { JobLabourPayReadError, readHourlyCappedJobs, readHourlyLabourLimits } from './job_labour_cap.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
@@ -6475,6 +6476,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     }
 
     switch (action) {
+      case 'weekly_check_list':
+      case 'weekly_check_record': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        const result = await weeklyCheckAction(client, {
+          action, method: req.method, query: url.searchParams, body,
+          authMode, user: authUser, staff: _opsApiStaffOperatorRole(authUser?.role),
+        })
+        return json(result.body, result.status)
+      }
       case 'list_agent_proposals':
       case 'carry_out_agent_proposal':
       case 'decline_agent_proposal': {
