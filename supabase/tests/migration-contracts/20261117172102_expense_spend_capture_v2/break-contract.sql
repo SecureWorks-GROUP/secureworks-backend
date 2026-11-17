@@ -1,0 +1,1 @@
+ALTER TABLE public.expense_receipts DROP CONSTRAINT expense_receipts_job_or_stock_not_both;
