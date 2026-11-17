@@ -198,6 +198,7 @@ function isTravelLine(line: HardRuleLine): boolean {
  * has a non-travel line. A missing `open` is treated as open. A line with
  * no job is not refused. An unreadable job refuses a non-travel line.
  */
+// Superseded by trade_line_hold_v1 (owner, 17 Nov 2026): a line with no work order is held for the office, not refused. Do not turn crew_invoice_requires_job_work_order_v1 on.
 export function hardRuleRefusal(input: {
   flagOn: boolean;
   lines: readonly HardRuleLine[];
@@ -237,6 +238,7 @@ export async function loadCrewInvoiceJobWorkOrderRefusal(
   client: any,
   lines: readonly HardRuleLine[],
 ): Promise<HardRuleRefusal | null> {
+  if (await readFlag(client, "trade_line_hold_v1")) return null;
   const flagOn = await readFlag(
     client,
     CREW_INVOICE_REQUIRES_JOB_WORK_ORDER_FLAG,
