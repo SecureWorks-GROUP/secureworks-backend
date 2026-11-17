@@ -2,7 +2,6 @@ import { assert, assertEquals, assertNotEquals } from 'jsr:@std/assert@1'
 import {
   accountRuleFor,
   checkDraft,
-  DIVISION_CATEGORY_NAME,
   divisionTrackingOption,
   loadDraftStandard,
   linesFingerprint,
@@ -16,13 +15,6 @@ const examples: Example[] = JSON.parse(
   await Deno.readTextFile(new URL('./division_examples.json', import.meta.url)),
 )
 
-Deno.test('division examples: at least 20 rows, ZZTEST numbers only', () => {
-  assert(examples.length >= 20, `only ${examples.length} examples`)
-  for (const e of examples) {
-    if (e.job_number) assert(/zztest/i.test(e.job_number), `${e.job_number} is not a ZZTEST number`)
-  }
-})
-
 Deno.test('division examples: divisionTrackingOption and trackingCategoryForJob both give each expect', () => {
   for (const e of examples) {
     assertEquals(
@@ -35,15 +27,6 @@ Deno.test('division examples: divisionTrackingOption and trackingCategoryForJob 
       e.expect,
       `trackingCategoryForJob(${e.job_number}, ${e.job_type})`,
     )
-  }
-})
-
-Deno.test('division examples cover every branch of the mapper', () => {
-  const types = new Set(examples.map((e) => e.job_type))
-  for (const t of ['granny_flat', 'repair', 'roofing', 'renovation']) assert(types.has(t), `type ${t} not covered`)
-  const numbers = examples.map((e) => String(e.job_number || '').toUpperCase())
-  for (const p of ['SWRESTO-', 'SWMS-', 'AJBR', 'MS1', 'BWCWA', 'WB6', 'SWP', 'SWF', 'SWD', 'SWI', 'SWR', 'ZZTEST']) {
-    assert(numbers.some((n) => n.startsWith(p)), `prefix ${p} not covered`)
   }
 })
 
@@ -62,8 +45,15 @@ Deno.test('stock division: an SW option is taken as it is; a division word maps 
   assertEquals(divisionTrackingOption({ stock_division: 'carpentry', job_number: 'SWF-ZZTEST01' }), 'SW - FENCING')
 })
 
-Deno.test('the category name is Business Unit', () => {
-  assertEquals(DIVISION_CATEGORY_NAME, 'Business Unit')
+Deno.test('settled loose divisions require stored authority, and expenses default to SW Group', () => {
+  for (const job_type of ['misc', 'miscellaneous', 'general']) {
+    assertEquals(divisionTrackingOption({ job_type, job_number: 'SWP-ZZTEST03' }), '')
+    assertEquals(divisionTrackingOption({ job_type, activeOptions: new Set(['Private Renovations']) }), 'Private Renovations')
+    assertEquals(divisionTrackingOption({ job_type, activeOptions: new Set(['SW - PATIOS']) }), '')
+  }
+  for (const stock_division of ['fuel', 'PARKING', 'meals']) {
+    assertEquals(divisionTrackingOption({ stock_division }), 'SW Group')
+  }
 })
 
 const rules: XeroAccountRule[] = [

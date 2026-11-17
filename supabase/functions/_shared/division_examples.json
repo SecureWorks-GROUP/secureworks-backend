@@ -1,27 +1,132 @@
 [
-  { "job_number": "SWP-ZZTEST01", "job_type": "granny_flat", "expect": "" },
-  { "job_number": null, "job_type": "granny_flat", "expect": "" },
-  { "job_number": "SWR-ZZTEST01", "job_type": "repair", "expect": "SW - MAKESAFE" },
-  { "job_number": null, "job_type": "repair", "expect": "SW - MAKESAFE" },
-  { "job_number": "SWR-ZZTEST02", "job_type": "roofing", "expect": "SW - PRIVATE ROOFING" },
-  { "job_number": "SWR-ZZTEST03", "job_type": "renovation", "expect": "SW - PRIVATE ROOFING" },
-  { "job_number": "SWR-ZZTEST04", "job_type": "Roofing", "expect": "SW - PRIVATE ROOFING" },
-  { "job_number": null, "job_type": null, "expect": "" },
-  { "job_number": "", "job_type": "fencing", "expect": "" },
-  { "job_number": "SWRESTO-ZZTEST01", "job_type": null, "expect": "SW - RESTORATION" },
-  { "job_number": "swresto-zztest02", "job_type": "makesafe", "expect": "SW - RESTORATION" },
-  { "job_number": "SWMS-ZZTEST01", "job_type": null, "expect": "SW - MAKESAFE" },
-  { "job_number": "AJBRZZTEST01", "job_type": null, "expect": "SW - MAKESAFE" },
-  { "job_number": "MS1ZZTEST01", "job_type": null, "expect": "SW - MAKESAFE" },
-  { "job_number": "BWCWAZZTEST01", "job_type": null, "expect": "SW - MAKESAFE" },
-  { "job_number": "WB6ZZTEST01", "job_type": null, "expect": "SW - MAKESAFE" },
-  { "job_number": "SWP-ZZTEST02", "job_type": "patio", "expect": "SW - PATIOS" },
-  { "job_number": "SWF-ZZTEST01", "job_type": "fencing", "expect": "SW - FENCING" },
-  { "job_number": "swf-zztest02", "job_type": null, "expect": "SW - FENCING" },
-  { "job_number": "SWD-ZZTEST01", "job_type": null, "expect": "SW - DECKING" },
-  { "job_number": "SWI-ZZTEST01", "job_type": "insurance", "expect": "SW - INSURANCE WORK" },
-  { "job_number": "SWR-ZZTEST05", "job_type": null, "expect": "" },
-  { "job_number": "SWR-ZZTEST06", "job_type": "makesafe", "expect": "" },
-  { "job_number": "ZZTEST-01", "job_type": null, "expect": "" },
-  { "job_number": "SWM-ZZTEST01", "job_type": "miscellaneous", "expect": "" }
+  {
+    "job_number": "SWP-ZZTEST01",
+    "job_type": "granny_flat",
+    "expect": "SecureBuild"
+  },
+  {
+    "job_number": null,
+    "job_type": "granny_flat",
+    "expect": "SecureBuild"
+  },
+  {
+    "job_number": "SWR-ZZTEST01",
+    "job_type": "repair",
+    "expect": "SW - MAKESAFE"
+  },
+  {
+    "job_number": null,
+    "job_type": "repair",
+    "expect": "SW - MAKESAFE"
+  },
+  {
+    "job_number": "SWR-ZZTEST02",
+    "job_type": "roofing",
+    "expect": "SW - PRIVATE ROOFING"
+  },
+  {
+    "job_number": "SWR-ZZTEST03",
+    "job_type": "renovation",
+    "expect": "SW - PRIVATE ROOFING"
+  },
+  {
+    "job_number": "SWR-ZZTEST04",
+    "job_type": "Roofing",
+    "expect": "SW - PRIVATE ROOFING"
+  },
+  {
+    "job_number": null,
+    "job_type": null,
+    "expect": ""
+  },
+  {
+    "job_number": "",
+    "job_type": "fencing",
+    "expect": ""
+  },
+  {
+    "job_number": "SWRESTO-ZZTEST01",
+    "job_type": null,
+    "expect": "SW - RESTORATION"
+  },
+  {
+    "job_number": "swresto-zztest02",
+    "job_type": "makesafe",
+    "expect": "SW - RESTORATION"
+  },
+  {
+    "job_number": "SWMS-ZZTEST01",
+    "job_type": null,
+    "expect": "SW - MAKESAFE"
+  },
+  {
+    "job_number": "AJBRZZTEST01",
+    "job_type": null,
+    "expect": "SW - MAKESAFE"
+  },
+  {
+    "job_number": "MS1ZZTEST01",
+    "job_type": null,
+    "expect": "SW - MAKESAFE"
+  },
+  {
+    "job_number": "BWCWAZZTEST01",
+    "job_type": null,
+    "expect": "SW - MAKESAFE"
+  },
+  {
+    "job_number": "WB6ZZTEST01",
+    "job_type": null,
+    "expect": "SW - MAKESAFE"
+  },
+  {
+    "job_number": "SWP-ZZTEST02",
+    "job_type": "patio",
+    "expect": "SW - PATIOS"
+  },
+  {
+    "job_number": "SWF-ZZTEST01",
+    "job_type": "fencing",
+    "expect": "SW - FENCING"
+  },
+  {
+    "job_number": "swf-zztest02",
+    "job_type": null,
+    "expect": "SW - FENCING"
+  },
+  {
+    "job_number": "SWD-ZZTEST01",
+    "job_type": null,
+    "expect": "SW - DECKING"
+  },
+  {
+    "job_number": "SWI-ZZTEST01",
+    "job_type": "insurance",
+    "expect": "SW - INSURANCE WORK"
+  },
+  {
+    "job_number": "SWR-ZZTEST05",
+    "job_type": null,
+    "expect": ""
+  },
+  {
+    "job_number": "SWR-ZZTEST06",
+    "job_type": "makesafe",
+    "expect": ""
+  },
+  {
+    "job_number": "ZZTEST-01",
+    "job_type": null,
+    "expect": ""
+  },
+  {
+    "job_number": "SWM-ZZTEST01",
+    "job_type": "miscellaneous",
+    "expect": ""
+  },
+  {
+    "job_number": "SWP-ZZTEST03",
+    "job_type": "general",
+    "expect": ""
+  }
 ]
