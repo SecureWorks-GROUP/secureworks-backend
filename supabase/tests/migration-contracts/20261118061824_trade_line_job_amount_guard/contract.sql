@@ -1,7 +1,7 @@
 BEGIN;
 SET LOCAL statement_timeout='120s';
 -- Rule 17: reapply our creating migration inside the rolled-back contract.
-\ir ../../../migrations/20261118041727_trade_line_job_amount_guard.sql
+\ir ../../../migrations/20261118061824_trade_line_job_amount_guard.sql
 CREATE FUNCTION pg_temp.zztest_assert(ok boolean, words text) RETURNS void LANGUAGE plpgsql AS $$ BEGIN
  IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'ZZTEST %',words; END IF;
 END $$;
