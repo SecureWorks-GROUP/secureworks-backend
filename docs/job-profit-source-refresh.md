@@ -73,3 +73,27 @@ figures, failure/retry, office edits, daily pagination and native index plans.
 The director's baseline in `reports/db-load-17nov-night.md` is one-job
 `v_job_profit` averaging 7.4 seconds over 62 calls and page refresh averaging
 5.7 seconds over 297 calls. No production speedup is claimed here.
+
+The explicit diagnostic overload `job_profit_stored_compare(p_job_ids uuid[])`
+compares only the named jobs (at most 500 array entries). Pass an explicit
+`uuid[]` cast in SQL, or the `p_job_ids` RPC parameter. NULL, empty and all-NULL
+arrays compare zero jobs; duplicates are ignored. The integer/no-argument
+company diagnostic is unchanged. The new overload is service-role only and
+has no automatic caller or financial side effect.
+
+The reference is filtered before materialization. Profit columns and both event
+count/sum comparisons use the requested ids, including requested stored-only
+jobs and orphan events. Unrequested drift is excluded. A missing stored row or
+column is reported, NULL stays distinct from zero, and a reference read error
+propagates rather than reporting equality. Repeating after a fault is safe.
+The stored profit primary key and both existing stored-event job_id indexes
+serve the bounded reads. This does not change the reference views' inherited
+internal source scans or claim every source read is index-bound. The contract
+proves scoped materialization with an unrelated-row refusal and native plans
+on the fixture sources and stored tables; production timing remains unmeasured.
+
+Corrected baseline (director, 18 Nov, one quiet-database read per step on the
+slowest recent job): page build 16.5 seconds, written-story stale check 15.8
+seconds, its book 14.7 seconds, and one-job Job Profit 0.3 seconds. The earlier
+averages above do not establish the cause of page-build latency. This diagnostic
+change claims no page-build speedup and does not alter the story/book functions.

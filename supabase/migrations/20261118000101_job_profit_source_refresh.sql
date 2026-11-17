@@ -324,3 +324,70 @@ REVOKE ALL ON FUNCTION public.job_profit_group_work_order_shares_trg() FROM PUBL
 GRANT EXECUTE ON FUNCTION public.job_profit_group_work_order_shares_trg() TO service_role;
 REVOKE ALL ON FUNCTION public.job_profit_group_work_orders_trg() FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.job_profit_group_work_orders_trg() TO service_role;
+
+-- Explicit-id diagnostic overload. The integer/no-argument company diagnostic
+-- remains byte-identical. No existing reader or timer calls this new form.
+CREATE OR REPLACE FUNCTION public.job_profit_stored_compare(p_job_ids uuid[]) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $fn$
+DECLARE v_ids uuid[]; v_missing jsonb; v_cols text; v_differences jsonb;
+ v_missing_jobs jsonb; v_pair text[]; v_events jsonb; v_jobs bigint;
+/* function block */ BEGIN
+ -- NULL and empty mean no jobs, never company-wide. Keep an explicit upper
+ -- bound matching refresh_many; duplicates/null elements cannot widen scope.
+ IF cardinality(p_job_ids)>500 THEN RAISE EXCEPTION 'job_profit_compare_too_many'; END IF;
+ SELECT array_agg(id ORDER BY id) INTO v_ids
+ FROM (SELECT DISTINCT unnest(p_job_ids) id) requested WHERE id IS NOT NULL;
+ SELECT coalesce(jsonb_agg(a.column_name ORDER BY a.ordinal_position),'[]'::jsonb) INTO v_missing
+ FROM information_schema.columns a LEFT JOIN information_schema.columns b ON b.table_schema='public' AND b.table_name='job_profit_stored' AND b.column_name=a.column_name
+ WHERE a.table_schema='public' AND a.table_name='v_job_profit' AND b.column_name IS NULL;
+ IF v_ids IS NULL THEN
+  RETURN jsonb_build_object('jobs',0,'differences','[]'::jsonb,'missing_in_stored','[]'::jsonb,'missing_columns',v_missing);
+ END IF;
+ -- Filter BEFORE materializing the reference, with no ORDER BY/LIMIT over the
+ -- company. The public reference views and financial expressions are unchanged.
+ -- Their inherited source scans are not claimed to become index-bound here.
+ CREATE TEMP TABLE job_profit_compare_ids_view ON COMMIT DROP AS
+ SELECT * FROM public.v_job_profit WHERE job_id=ANY(v_ids);
+ SELECT count(*) INTO v_jobs FROM pg_temp.job_profit_compare_ids_view;
+ SELECT string_agg(quote_ident(a.column_name),',' ORDER BY a.ordinal_position) INTO v_cols
+ FROM information_schema.columns a JOIN information_schema.columns b ON b.table_schema='public' AND b.table_name='job_profit_stored' AND b.column_name=a.column_name
+ WHERE a.table_schema='public' AND a.table_name='v_job_profit';
+ -- job_profit_stored primary key bounds every store read to the requested ids.
+ EXECUTE format($sql$
+  SELECT coalesce(jsonb_agg(jsonb_build_object('job_id',v.job_id,'job_number',to_jsonb(v)->'job_number','column',d.key,'stored',to_jsonb(s)->d.key,'view',d.value) ORDER BY v.job_id,d.key COLLATE "C"),'[]'::jsonb)
+  FROM pg_temp.job_profit_compare_ids_view v
+  JOIN (SELECT %s FROM public.job_profit_stored WHERE job_id=ANY($1)) s USING(job_id)
+  CROSS JOIN LATERAL jsonb_each(to_jsonb(v)) d
+  WHERE d.key IN (SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='job_profit_stored') AND d.value IS DISTINCT FROM to_jsonb(s)->d.key
+ $sql$,v_cols) INTO v_differences USING v_ids;
+ SELECT coalesce(jsonb_agg(v.job_id ORDER BY v.job_id),'[]'::jsonb) INTO v_missing_jobs
+ FROM pg_temp.job_profit_compare_ids_view v
+ LEFT JOIN public.job_profit_stored s ON s.job_id=v.job_id WHERE s.job_id IS NULL;
+ -- A requested stored-only job is drift too. Unrequested stale store rows are
+ -- excluded, even when the request includes a job absent from the reference.
+ SELECT v_differences||coalesce(jsonb_agg(jsonb_build_object('job_id',s.job_id,'job_number',to_jsonb(s)->'job_number','column','job','stored',to_jsonb(s)-'computed_at','view',NULL) ORDER BY s.job_id),'[]'::jsonb) INTO v_differences
+ FROM public.job_profit_stored s LEFT JOIN pg_temp.job_profit_compare_ids_view v USING(job_id)
+ WHERE s.job_id=ANY(v_ids) AND v.job_id IS NULL;
+ FOREACH v_pair SLICE 1 IN ARRAY ARRAY[
+  ['v_job_cost_events','job_cost_events_stored','cost_events'],
+  ['v_job_revenue_events','job_revenue_events_stored','revenue_events']
+ ] LOOP
+  -- Existing job_cost_events_stored_job_idx / job_revenue_events_stored_job_idx.
+  -- Both event sides use REQUESTED ids, including stored-only/orphan events.
+  EXECUTE format($sql$
+   WITH a AS (SELECT job_id,count(*) n,sum(amount_ex) amount_ex FROM public.%I WHERE job_id=ANY($1) GROUP BY job_id),
+   b AS (SELECT job_id,count(*) n,sum(amount_ex) amount_ex FROM public.%I WHERE job_id=ANY($1) GROUP BY job_id)
+   SELECT coalesce(jsonb_agg(jsonb_build_object('job_id',coalesce(a.job_id,b.job_id),'job_number',v.job_number,'column',%L,
+    'stored',jsonb_build_object('count',coalesce(b.n,0),'amount_ex',b.amount_ex),
+    'view',jsonb_build_object('count',coalesce(a.n,0),'amount_ex',a.amount_ex)) ORDER BY coalesce(a.job_id,b.job_id)),'[]'::jsonb)
+   FROM a FULL JOIN b USING(job_id)
+   LEFT JOIN pg_temp.job_profit_compare_ids_view v ON v.job_id=coalesce(a.job_id,b.job_id)
+   WHERE a.n IS DISTINCT FROM b.n OR a.amount_ex IS DISTINCT FROM b.amount_ex
+  $sql$,v_pair[1],v_pair[2],v_pair[3]) INTO v_events USING v_ids;
+  v_differences:=v_differences||v_events;
+ END LOOP;
+ DROP TABLE pg_temp.job_profit_compare_ids_view;
+ RETURN jsonb_build_object('jobs',v_jobs,'differences',v_differences,'missing_in_stored',v_missing_jobs,'missing_columns',v_missing);
+END $fn$;
+REVOKE ALL ON FUNCTION public.job_profit_stored_compare(uuid[]) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.job_profit_stored_compare(uuid[]) TO service_role;

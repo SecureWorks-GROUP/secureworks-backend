@@ -3,6 +3,7 @@ SET LOCAL statement_timeout='120s';
 -- Rule 17: restore our prerequisites before asserting objects, then restore this
 -- whole test database at ROLLBACK. No earlier contract is edited.
 \ir ../../../migrations/20261117195801_job_profit_stored.sql
+CREATE TEMP TABLE compare_legacy_body AS SELECT prosrc FROM pg_proc WHERE oid='public.job_profit_stored_compare(integer)'::regprocedure;
 \ir ../../../migrations/20261118000101_job_profit_source_refresh.sql
 DO $check$ DECLARE t text; BEGIN
  IF EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='job_profit_changed') THEN RAISE EXCEPTION 'merge installed trigger'; END IF;
@@ -212,4 +213,87 @@ END $plans$;
 SELECT public.job_profit_refresh_remove();
 DO $check$ BEGIN IF EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='job_profit_changed') THEN RAISE EXCEPTION 'remove left trigger'; END IF; END $check$;
 SELECT 'PASS: P0-09.4 scope A source isolation, timestamp noise, old/new jobs, credit/group lookup, failure recovery, daily cursor and nine native plans' AS result;
+-- The new diagnostic takes explicit ids and never changes the legacy body.
+DO $check$ BEGIN
+ IF (SELECT prosrc FROM compare_legacy_body) IS DISTINCT FROM
+  (SELECT prosrc FROM pg_proc WHERE oid='public.job_profit_stored_compare(integer)'::regprocedure) THEN RAISE EXCEPTION 'legacy compare changed'; END IF;
+ IF has_function_privilege('anon','public.job_profit_stored_compare(uuid[])','EXECUTE')
+ OR has_function_privilege('authenticated','public.job_profit_stored_compare(uuid[])','EXECUTE')
+ OR NOT has_function_privilege('service_role','public.job_profit_stored_compare(uuid[])','EXECUTE') THEN RAISE EXCEPTION 'id compare access'; END IF;
+END $check$;
+-- Fixtures have unrelated jobs, including drift which MUST stay out of scope.
+TRUNCATE public.job_profit_stored,public.job_cost_events_stored,public.job_revenue_events_stored,public.job_materials_facts;
+CREATE INDEX ON public.job_materials_facts(job_id);
+CREATE INDEX ON public.job_cost_events_stored(job_id);
+CREATE INDEX ON public.job_revenue_events_stored(job_id);
+INSERT INTO public.job_materials_facts(job_id,amount_ex) VALUES
+ ('00000000-0000-0000-0000-000000000001',1.25),
+ ('00000000-0000-0000-0000-000000000002',NULL);
+INSERT INTO public.job_profit_stored SELECT p.*,now() FROM public.v_job_profit p WHERE job_id IN('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002');
+INSERT INTO public.job_cost_events_stored SELECT p.*,now() FROM public.v_job_cost_events p;
+DO $check$ DECLARE ids uuid[]:=ARRAY['00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002']::uuid[]; r jsonb; BEGIN
+ r:=public.job_profit_stored_compare(ids);
+ IF r IS DISTINCT FROM public.job_profit_stored_compare(2) OR r->'jobs'<>'2' OR r->'differences'<>'[]' THEN RAISE EXCEPTION 'id/legacy parity: %',r; END IF;
+ IF public.job_profit_stored_compare(ids||ids||ARRAY[NULL]::uuid[]) IS DISTINCT FROM r THEN RAISE EXCEPTION 'duplicate/null ids'; END IF;
+ UPDATE public.job_profit_stored SET profit_ex=0 WHERE job_id=ids[2];
+ IF NOT public.job_profit_stored_compare(ids)->'differences' @> '[{"column":"profit_ex","stored":0,"view":null}]' THEN RAISE EXCEPTION 'NULL became zero'; END IF;
+ UPDATE public.job_profit_stored SET profit_ex=NULL WHERE job_id=ids[2];
+ IF public.job_profit_stored_compare(ARRAY[NULL]::uuid[])->'jobs'<>'0' THEN RAISE EXCEPTION 'null element widened scope'; END IF;
+ IF public.job_profit_stored_compare(NULL::uuid[])->'jobs'<>'0' OR public.job_profit_stored_compare('{}'::uuid[])->'jobs'<>'0' THEN RAISE EXCEPTION 'empty input widened scope'; END IF;
+ BEGIN
+  PERFORM public.job_profit_stored_compare(array_fill('00000000-0000-0000-0000-000000000001'::uuid,ARRAY[501]));
+  RAISE EXCEPTION 'unbounded ids accepted';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'job_profit_compare_too_many' THEN RAISE; END IF; END;
+END $check$;
+-- Missing store, NULL vs zero, office edit, stored-only profit and orphan events.
+DELETE FROM public.job_profit_stored WHERE job_id='00000000-0000-0000-0000-000000000002';
+UPDATE public.jobs SET job_number='SWF-900003' WHERE id='00000000-0000-0000-0000-000000000001';
+UPDATE public.job_profit_stored SET profit_ex=0 WHERE job_id='00000000-0000-0000-0000-000000000001';
+INSERT INTO public.job_profit_stored(job_id,job_number) VALUES('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee','SWF-900004'),('ffffffff-ffff-ffff-ffff-ffffffffffff','SWF-900005');
+INSERT INTO public.job_cost_events_stored(job_id,amount_ex) VALUES('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee',1.25),('ffffffff-ffff-ffff-ffff-ffffffffffff',1.25);
+INSERT INTO public.job_revenue_events_stored(job_id,amount_ex) VALUES('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee',NULL),('ffffffff-ffff-ffff-ffff-ffffffffffff',1.25);
+DO $check$ DECLARE r jsonb; BEGIN
+ r:=public.job_profit_stored_compare(ARRAY['00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002','eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee','dddddddd-dddd-dddd-dddd-dddddddddddd']::uuid[]);
+ IF r->'jobs'<>'2' OR r->'missing_in_stored'<>'["00000000-0000-0000-0000-000000000002"]' THEN RAISE EXCEPTION 'missing job accounting: %',r; END IF;
+ IF jsonb_array_length(r->'differences')<>5 OR EXISTS(SELECT 1 FROM jsonb_array_elements(r->'differences') d WHERE d->>'job_id'='ffffffff-ffff-ffff-ffff-ffffffffffff') THEN RAISE EXCEPTION 'scoped drift: %',r; END IF;
+ IF NOT r->'differences' @> '[{"column":"job_number"},{"column":"profit_ex"},{"column":"job"},{"column":"cost_events"},{"column":"revenue_events"}]' THEN RAISE EXCEPTION 'drift classes: %',r; END IF;
+END $check$;
+-- Native planner, 10,000 unrelated rows. Existing fixture indexes match the
+-- production job_id indexes. Assert bounded reads, not a pinned index name.
+INSERT INTO public.job_profit_stored(job_id) SELECT md5('compare-profit-'||n)::uuid FROM generate_series(1,10000) n;
+INSERT INTO public.job_cost_events_stored(job_id,amount_ex) SELECT md5('compare-cost-'||n)::uuid,1 FROM generate_series(1,10000) n;
+INSERT INTO public.job_revenue_events_stored(job_id,amount_ex) SELECT md5('compare-revenue-'||n)::uuid,1 FROM generate_series(1,10000) n;
+INSERT INTO public.job_materials_facts(job_id,amount_ex) SELECT md5('compare-source-'||n)::uuid,1 FROM generate_series(1,10000) n;
+ANALYZE public.job_profit_stored; ANALYZE public.job_cost_events_stored; ANALYZE public.job_revenue_events_stored; ANALYZE public.job_materials_facts; ANALYZE public.jobs;
+DO $plans$ DECLARE relation text; plan jsonb; BEGIN
+ FOREACH relation IN ARRAY ARRAY['job_profit_stored','job_cost_events_stored','job_revenue_events_stored','v_job_profit','v_job_cost_events'] LOOP
+  EXECUTE format('EXPLAIN (ANALYZE,FORMAT JSON) SELECT * FROM public.%I WHERE job_id=ANY(ARRAY[''00000000-0000-0000-0000-000000000001'']::uuid[])',relation) INTO plan;
+  IF plan::text LIKE '%Seq Scan%' OR plan::text NOT LIKE '%Index%Scan%' THEN RAISE EXCEPTION 'unbounded id read %: %',relation,plan; END IF;
+  IF (plan->0->'Plan'->>'Actual Rows')::int>1 THEN RAISE EXCEPTION 'id read escaped scope: %',plan; END IF;
+ END LOOP;
+END $plans$;
+-- Poison the reference projection on every unrequested job. This observes the
+-- real overload's materialization scope, not merely a separately written plan.
+CREATE FUNCTION pg_temp.compare_probe(job uuid,value numeric) RETURNS numeric LANGUAGE plpgsql AS $probe$ BEGIN
+ IF job<>'00000000-0000-0000-0000-000000000001'::uuid THEN RAISE EXCEPTION 'unrequested reference built'; END IF;
+ IF current_setting('compare_probe.fail',true)='on' THEN RAISE EXCEPTION 'fixture_read_failed'; END IF;
+ RETURN value;
+END $probe$;
+CREATE OR REPLACE VIEW public.v_job_profit AS SELECT j.id job_id,j.job_number,pg_temp.compare_probe(j.id,sum(f.amount_ex)) profit_ex FROM public.jobs j LEFT JOIN public.job_materials_facts f ON f.job_id=j.id GROUP BY j.id;
+DO $check$ DECLARE r jsonb; BEGIN
+ PERFORM set_config('compare_probe.fail','on',true);
+ BEGIN
+  PERFORM public.job_profit_stored_compare(ARRAY['00000000-0000-0000-0000-000000000001']::uuid[]);
+  RAISE EXCEPTION 'failed read returned equality';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'fixture_read_failed' THEN RAISE; END IF; END;
+ PERFORM set_config('compare_probe.fail','off',true);
+ r:=public.job_profit_stored_compare(ARRAY['00000000-0000-0000-0000-000000000001']::uuid[]);
+ IF r->'jobs'<>'1' OR jsonb_array_length(r->'differences')<>2 THEN RAISE EXCEPTION 'retry or scoped projection: %',r; END IF;
+ IF public.job_profit_stored_compare(ARRAY['00000000-0000-0000-0000-000000000001']::uuid[]) IS DISTINCT FROM r THEN RAISE EXCEPTION 'repeat differs'; END IF;
+END $check$;
+ALTER TABLE public.job_profit_stored DROP COLUMN profit_ex;
+DO $check$ BEGIN
+ IF public.job_profit_stored_compare(ARRAY['00000000-0000-0000-0000-000000000001']::uuid[])->'missing_columns'<>'["profit_ex"]' THEN RAISE EXCEPTION 'missing schema hidden'; END IF;
+END $check$;
+SELECT 'PASS: explicit-id comparison parity, private access, bounded/empty input, five drift classes, five native scoped plans, unrelated-row poison, read fault and retry' AS result;
 ROLLBACK;

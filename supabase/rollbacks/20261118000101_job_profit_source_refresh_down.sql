@@ -1,3 +1,4 @@
+DROP FUNCTION IF EXISTS public.job_profit_stored_compare(uuid[]);
 SELECT public.job_profit_refresh_remove();
 DROP FUNCTION IF EXISTS public.job_profit_group_work_orders_trg();
 DROP FUNCTION IF EXISTS public.job_profit_group_work_order_shares_trg();
