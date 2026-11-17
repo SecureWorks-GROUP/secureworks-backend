@@ -476,6 +476,10 @@ export async function raiseHeldLines(
     if (key(row.line_type) === "commission" || key(row.line_type) === "reimbursement") continue;
     backedOnJob.set(String(row.job_id), (backedOnJob.get(String(row.job_id)) ?? 0) + cents(row.line_total_ex));
   }
+  const ownPaidPart = new Map<string, number>();
+  for (const row of ctx.backed) {
+    if (row.split_group_id) ownPaidPart.set(row.split_group_id, (ownPaidPart.get(row.split_group_id) ?? 0) + cents(row.line_total_ex));
+  }
   const splitWhole = new Map<string, number>();
   for (const row of [...ctx.backed, ...saved.map((s) => s.row)]) {
     if (!row.split_group_id) continue;
@@ -489,7 +493,11 @@ export async function raiseHeldLines(
     const over = row.hold_reason === "over_amount" && job
       ? {
         work_order_amount_ex: money(job.allowed_ex),
-        claimed_so_far_ex: money((cents(job.backed_billed_ex) + (backedOnJob.get(jobId!) ?? 0)) / 100),
+        // Spec example: 4,000.00 / 3,600.00 / 800.00 / 400.00. This send's
+        // other backed lines count; the line's own paid part does not, so the
+        // figures add up (claimed + line - amount = over by).
+        claimed_so_far_ex: money((cents(job.backed_billed_ex) + (backedOnJob.get(jobId!) ?? 0) -
+          (row.split_group_id ? ownPaidPart.get(row.split_group_id) ?? 0 : 0)) / 100),
         line_amount_ex: row.split_group_id
           ? (splitWhole.get(row.split_group_id) ?? cents(amount)) / 100
           : amount,
