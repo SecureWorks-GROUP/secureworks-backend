@@ -1,7 +1,7 @@
 // JWT flag: --no-verify-jwt. Keep this line at the top: the deploy workflow reads
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
-import { moneyActionGate, readMoneyActionFlags } from "./money_actions.ts"
+import { isMoneyAction, moneyActionGate, readMoneyActionFlags } from "./money_actions.ts"
 import { agentProposalAction } from "./agent_proposals.ts"
 import { setCouncilRequired } from './council_mark.ts'
 import { JobLabourPayReadError, readHourlyCappedJobs, readHourlyLabourLimits } from './job_labour_cap.ts'
@@ -6460,13 +6460,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     // the routine cannot reach anything privileged here regardless (deny-list + gates).
     const authModeLegacy: 'api_key' | 'jwt' = authMode === 'jwt' ? 'jwt' : 'api_key'
 
-    const moneyFlags = await readMoneyActionFlags(client)
-    const moneyProposal = await moneyActionGate(client, {
-      action: action || '', method: req.method, body,
-      actor: requestActor.actor || 'actor_missing', authMode,
-      fromPerson: authMode === 'jwt' && !!authUser,
-    }, moneyFlags)
-    if (moneyProposal) return json(moneyProposal.body, moneyProposal.status)
+    const fromPerson = authMode === 'jwt' && !!authUser
+    if (!fromPerson && isMoneyAction(action || '', body)) {
+      const moneyFlags = await readMoneyActionFlags(client)
+      const moneyProposal = await moneyActionGate(client, {
+        action: action || '', method: req.method, body,
+        actor: requestActor.actor || 'actor_missing', authMode, fromPerson,
+      }, moneyFlags)
+      if (moneyProposal) return json(moneyProposal.body, moneyProposal.status)
+    }
 
     switch (action) {
       case 'list_agent_proposals':
