@@ -40,7 +40,7 @@ import {
 } from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { divisionTrackingOption } from '../_shared/xero_draft_standard.ts'
-import { commissionCapCodeFromDbError, commissionCapRefusal, commissionLineState, readJobCommissionRecords, type JobCommissionRecord } from './job_commission.ts'
+import { commissionCapCodeFromDbError, commissionCapRefusal, commissionLineState, readJobCommissionRecords, readJobCommissionRecordsReusing, type JobCommissionRecord } from './job_commission.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
@@ -15155,6 +15155,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let extraSubtotal = 0
             let clientPricedExtraCount = 0
             let commissionRecordsForOffers: Map<string, JobCommissionRecord> | null = null
+            // The jobs that offer read covered; any other job is read before use.
+            let commissionOfferReadJobIds: ReadonlySet<string> = new Set()
             if (hasExtras) {
               // Client lines are trimmed once (type and job references) and
               // every step below reads those values. Weekly work-order lines
@@ -15260,6 +15262,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (!weeklyInvoice && commissionOfferJobIds.length > 0 && await readFlag(client, 'commission_from_job_only_v1')) {
                 try {
                   commissionRecordsForOffers = await readJobCommissionRecords(client, commissionOfferJobIds)
+                  commissionOfferReadJobIds = new Set(commissionOfferJobIds)
                 } catch {
                   throw new ApiError('Could not check the commission on this invoice. Nothing was saved. Please submit again.', 503, { saved: false, code: 'commission_unreadable' })
                 }
@@ -15292,9 +15295,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   },
                   lines: jobLines,
                   jobVertical: _jobVertical,
-                  readCommissionRecords: (jobIds) => commissionRecordsForOffers
-                    ? Promise.resolve(commissionRecordsForOffers)
-                    : readJobCommissionRecords(client, jobIds),
+                  readCommissionRecords: (jobIds) => readJobCommissionRecordsReusing(client, jobIds, commissionRecordsForOffers
+                    ? { records: commissionRecordsForOffers, readJobIds: commissionOfferReadJobIds }
+                    : null),
                 }).catch((error) => {
                   if (error instanceof ExtraJobBillingRefusal) {
                     throw new ApiError(error.message, 403, {
@@ -15620,7 +15623,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (commissionClaims.length > 0) {
                 let records
                 try {
-                  records = commissionRecordsForOffers ?? await readJobCommissionRecords(client, commissionClaims.map((c: any) => c.jobId))
+                  records = await readJobCommissionRecordsReusing(client, commissionClaims.map((c: any) => c.jobId), commissionRecordsForOffers
+                    ? { records: commissionRecordsForOffers, readJobIds: commissionOfferReadJobIds }
+                    : null)
                 } catch {
                   throw new ApiError('Could not check the commission on this invoice. Nothing was saved. Please submit again.', 503, { saved: false, code: 'commission_unreadable' })
                 }

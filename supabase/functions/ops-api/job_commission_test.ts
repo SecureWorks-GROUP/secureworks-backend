@@ -16,6 +16,7 @@ import {
   jobCommissionAction,
   type JobCommissionRecord,
   readJobCommissionRecords,
+  readJobCommissionRecordsReusing,
 } from "./job_commission.ts";
 import { _opsApiRequestHandlerForTest } from "./index.ts";
 
@@ -144,6 +145,70 @@ Deno.test("records: a failed read throws; before the migration there are none (t
   assertEquals(missing.size, 0);
   const got = await readJobCommissionRecords(fake({ v_job_commission: [{ ...rec(), expected_amount_ex_gst: "100.00", claimed_ex_gst: "12.50" }] }), [JOB, JOB]);
   assertEquals([got.get(JOB)?.expected_amount_ex_gst, got.get(JOB)?.claimed_ex_gst], [100, 12.5]);
+});
+
+// The offered-commission read is reused by the cap. It answers only for the
+// jobs it read; a claimed job it never read is read before the cap, so the
+// server refuses what the database cap (20261113230000) would refuse.
+const reusedOffer = () => ({
+  records: new Map([[JOB, rec()]]),
+  readJobIds: new Set([JOB]),
+});
+const claims = [
+  { jobId: JOB, ref: "ZZTEST-1", amountEx: 10 },
+  { jobId: JOB2, ref: "ZZTEST-2", amountEx: 10 },
+];
+
+Deno.test("reused offer read: a job it never read is read before the cap, which then refuses another salesperson's job", async () => {
+  // The gap: the reused map alone skips the unread job.
+  assertEquals(commissionCapRefusal({ tradeId: ME, lines: claims, records: reusedOffer().records }), null);
+  const client = fake({ v_job_commission: [rec({ job_id: JOB2, salesperson_user_id: OTHER })] });
+  const records = await readJobCommissionRecordsReusing(client, claims.map((c) => c.jobId), reusedOffer());
+  assertEquals(client.calls.length, 1);
+  assertEquals(client.calls[0].filters, [["in", "job_id", [JOB2]]]);
+  const refusal = commissionCapRefusal({ tradeId: ME, lines: claims, records });
+  assertEquals([refusal?.code, refusal?.jobs], ["commission_not_salesperson", ["ZZTEST-2"]]);
+});
+
+Deno.test("reused offer read: an unread job over its amount is refused; an unread job with no record keeps today's rules", async () => {
+  const over = await readJobCommissionRecordsReusing(
+    fake({ v_job_commission: [rec({ job_id: JOB2, expected_amount_ex_gst: 15, claimed_ex_gst: 10, remaining_ex_gst: 5 })] }),
+    claims.map((c) => c.jobId),
+    reusedOffer(),
+  );
+  const refusal = commissionCapRefusal({ tradeId: ME, lines: claims, records: over });
+  assertEquals([refusal?.code, refusal?.jobs], ["commission_over_amount", ["ZZTEST-2"]]);
+
+  const none = await readJobCommissionRecordsReusing(fake({ v_job_commission: [] }), claims.map((c) => c.jobId), reusedOffer());
+  assertEquals([...none.keys()], [JOB]);
+  assertEquals(commissionCapRefusal({ tradeId: ME, lines: claims, records: none }), null);
+});
+
+Deno.test("reused offer read: nothing is read again when it covered every job; a failed read of the rest throws", async () => {
+  const quiet = fake({ v_job_commission: [] });
+  const offerRead = { records: new Map(), readJobIds: new Set([JOB, JOB2]) };
+  const covered = await readJobCommissionRecordsReusing(quiet, [JOB, JOB2], offerRead);
+  assertEquals([covered.size, quiet.calls.length], [0, 0]);
+
+  let threw = false;
+  try {
+    await readJobCommissionRecordsReusing(
+      fake({ v_job_commission: { error: { code: "XX000", message: "boom" } } }),
+      [JOB, JOB2],
+      reusedOffer(),
+    );
+  } catch {
+    threw = true;
+  }
+  assert(threw);
+});
+
+Deno.test("no reused read (switch off): one read of every job, as before", async () => {
+  const client = fake({ v_job_commission: [rec(), rec({ job_id: JOB2 })] });
+  const got = await readJobCommissionRecordsReusing(client, [JOB, JOB2], null);
+  assertEquals(client.calls.length, 1);
+  assertEquals(client.calls[0].filters, [["in", "job_id", [JOB, JOB2]]]);
+  assertEquals([...got.keys()].sort(), [JOB, JOB2].sort());
 });
 
 // ── Doors ───────────────────────────────────────────────────────────────────
