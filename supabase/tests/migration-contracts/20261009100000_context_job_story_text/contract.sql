@@ -1,4 +1,3 @@
-\ir ../20261118020617_job_story_stored_profit/unwind-successor.sql
 -- 20261104080000 (expected cost missing) put production's v_job_profit in place (its setup) and added a column
 -- after TP-13's last: when a full stack has it, it is rolled back and the stack's own definition put back
 -- first, and applied again at the end.
@@ -1025,5 +1024,3 @@ ROLLBACK;
 \ir ../../../migrations/20261114040000_job_profit_expected_from_budget.sql
 \endif
 \endif
-
-\ir ../20261118020617_job_story_stored_profit/restore-successor.sql
