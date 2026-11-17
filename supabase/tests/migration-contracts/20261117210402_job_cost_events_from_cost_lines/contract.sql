@@ -31,6 +31,14 @@ DO $off$ DECLARE a bigint; b bigint; x numeric; y numeric; BEGIN
   RAISE EXCEPTION 'P2-01.7: legacy field changed';
  END IF;
 END $off$;
+-- A missing flag is off too, with the same real fixture row.
+DELETE FROM public.feature_flags WHERE flag_name='job_cost_events_from_cost_lines_v1';
+DO $missing$ BEGIN
+ IF (SELECT count(*) FROM public.v_job_cost_events WHERE job_id='00000000-0000-0000-0000-00000000e701')<>1
+ OR (SELECT sum(amount_ex) FROM public.v_job_cost_events WHERE job_id='00000000-0000-0000-0000-00000000e701')<>50 THEN
+  RAISE EXCEPTION 'P2-01.7: missing switch must read legacy'; END IF;
+END $missing$;
+INSERT INTO public.feature_flags(flag_name,enabled) VALUES('job_cost_events_from_cost_lines_v1',false);
 INSERT INTO public.job_cost_lines(id,org_id,kind,document_kind,document_id,line_key,lane,amount_ex,state,source_hash,
  event_source,event_source_id,event_lane_detail,event_match_method,event_confidence,document_date,order_kind,order_id) VALUES
  ('00000000-0000-0000-0000-00000000e720','00000000-0000-0000-0000-000000000001','supplier_bill','xero_bill','ZZTEST-BILL','1','materials',1000,'split','fixture',
@@ -56,6 +64,12 @@ DO $on$ BEGIN
   RAISE EXCEPTION 'P2-01.7: part identity';
  END IF;
 END $on$;
+-- Keep actual query plans in the CI log. Natural planner settings, no
+-- forced index names or planner switches; the director reviews these before
+-- enabling the reader. Synthetic volumes are not a production load proof.
+EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON)
+ SELECT * FROM public.v_job_cost_events WHERE job_id='00000000-0000-0000-0000-00000000e701';
+EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) SELECT id FROM public.jobs;
 -- A non-counted order line reopens the unchanged PO branch.
 SET CONSTRAINTS ALL DEFERRED;
 DELETE FROM public.job_cost_line_parts WHERE line_id='00000000-0000-0000-0000-00000000e720';
@@ -68,7 +82,7 @@ END $po$;
 -- Explicit install only; marks must include departed and receiving jobs.
 SELECT public.install_job_cost_events_from_cost_lines();
 SELECT public.install_job_cost_events_from_cost_lines();
-CREATE OR REPLACE FUNCTION public.job_mark_changed(uuid,text) RETURNS void LANGUAGE sql AS 'SELECT';
+CREATE OR REPLACE FUNCTION public.job_mark_changed(p_job_id uuid,p_source text) RETURNS void LANGUAGE sql AS 'SELECT NULL::void';
 DELETE FROM public.job_profit_dirty;
 SET CONSTRAINTS ALL DEFERRED;
 UPDATE public.job_cost_lines SET state='on_job',not_counted_reason=NULL,amount_ex=1000 WHERE id='00000000-0000-0000-0000-00000000e720';
@@ -88,7 +102,7 @@ DO $switch$ BEGIN
   RAISE EXCEPTION 'P2-01.7: switch invalidation'; END IF;
 END $switch$;
 -- Failed optional page marking cannot fail the cost write.
-CREATE OR REPLACE FUNCTION public.job_mark_changed(uuid,text) RETURNS void LANGUAGE plpgsql AS $fail$ BEGIN RAISE EXCEPTION 'fixture unavailable'; END $fail$;
+CREATE OR REPLACE FUNCTION public.job_mark_changed(p_job_id uuid,p_source text) RETURNS void LANGUAGE plpgsql AS $fail$ BEGIN RAISE EXCEPTION 'fixture unavailable'; END $fail$;
 UPDATE public.job_cost_line_parts SET lane='other' WHERE line_id='00000000-0000-0000-0000-00000000e720';
 SELECT public.remove_job_cost_events_from_cost_lines();
 SELECT public.remove_job_cost_events_from_cost_lines();

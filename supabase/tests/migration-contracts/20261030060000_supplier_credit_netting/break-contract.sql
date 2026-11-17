@@ -1,3 +1,9 @@
+-- P2-01.7 successor: restore this proof's original definition before it
+-- inspects or rewrites that definition. Existing assertions stay unchanged.
+SELECT to_regclass('public.v_job_cost_events_legacy') IS NOT NULL AS p2017_unwind \gset
+\if :p2017_unwind
+\ir ../../../rollbacks/20261117210402_job_cost_events_from_cost_lines_down.sql
+\endif
 -- Break the one-side rule: an allocation the bill's own copy already counts
 -- (bill_side counts_it) is counted from the credit note as well. The
 -- contract must catch the second count.

@@ -20,5 +20,7 @@ DO $rows$ BEGIN
  OR (SELECT sum(amount_ex) FROM public.v_job_cost_events WHERE job_id='00000000-0000-0000-0000-00000000e701')<>50 THEN
   RAISE EXCEPTION 'P2-01.7 rollback: legacy rows missing'; END IF;
 END $rows$;
+-- The legacy typed RPC must survive the dependent-view rebuild as well.
+SELECT count(*) FROM public.job_profit('00000000-0000-0000-0000-00000000e701');
 SELECT 'PASS P2-01.7 rollback: original legacy view and fixture commitment restored';
 ROLLBACK;
