@@ -20,13 +20,10 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $fn$
     (SELECT b.last_marked_at AS marked_at FROM public.job_change_marks_base b
       ORDER BY b.last_marked_at DESC LIMIT 1)
     UNION ALL
-    (SELECT e.marked_at FROM (
-      -- Keep the ordered index stream below the orphan filter. Putting only
-      -- OFFSET 0 on the jobs probe lets PostgreSQL choose a full raw scan/sort.
-      SELECT r.job_id, r.marked_at FROM public.job_change_mark_events r
-      ORDER BY r.marked_at DESC OFFSET 0
-    ) e
+    (SELECT e.marked_at FROM public.job_change_mark_events e
       -- The raw heap deliberately has no FK. Retain the view's orphan exclusion.
+      -- OFFSET 0 preserves an indexed per-mark existence probe, rather than a
+      -- hash join and sort of the full history before LIMIT can stop the read.
       WHERE EXISTS (SELECT 1 FROM public.jobs j WHERE j.id = e.job_id OFFSET 0)
       ORDER BY e.marked_at DESC LIMIT 1)
   ) q

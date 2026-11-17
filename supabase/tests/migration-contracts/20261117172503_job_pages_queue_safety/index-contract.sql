@@ -27,8 +27,17 @@ BEGIN
  EXECUTE $q$EXPLAIN (FORMAT JSON) SELECT mark_version FROM public.job_change_marks
   WHERE job_id='00000000-0000-4000-8000-000000000456'$q$ INTO plan;
  RAISE NOTICE 'version plan: %',plan;
+ -- Any job-leading index serves this lookup, including a later covering index.
+ -- Require a keyed condition on that index as well as no raw-table scan.
  IF jsonb_path_exists(plan,'$.** ? (@."Node Type" == "Seq Scan" && @."Relation Name" == "job_change_mark_events")')
-  OR NOT plan::text LIKE '%job_change_mark_events_job%' THEN
+  OR NOT EXISTS (
+   SELECT 1 FROM jsonb_path_query(plan, '$.** ? (exists(@."Index Name"))') AS p(node)
+   JOIN pg_class c ON c.relname = p.node->>'Index Name'
+   JOIN pg_index i ON i.indexrelid = c.oid
+    AND i.indrelid = 'public.job_change_mark_events'::regclass
+   JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+   WHERE a.attname = 'job_id' AND position('job_id =' IN p.node->>'Index Cond') > 0
+  ) THEN
   RAISE EXCEPTION 'queue safety: one version did not use the job index: %',plan;
  END IF;
  SELECT count(*) INTO v_before FROM public.job_change_mark_events;
