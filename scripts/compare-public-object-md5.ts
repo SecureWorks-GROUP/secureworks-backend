@@ -67,6 +67,60 @@ export function parseCatalog(tsv: string): Map<string, CatalogRow> {
   return rows;
 }
 
+// Closed CI scope. Use the UNION of both catalogs, so a missing, removed or
+// newly introduced object is checked just like a changed body. Object names
+// here are schema identifiers, never business row values.
+export function parityArea(
+  name: string,
+): "job-profit" | "context" | "pay" | null {
+  const object = name.split("(", 1)[0];
+  if (
+    /^(?:job_profit|job_cost|v_job_(?:profit|cost|revenue|expected|double_charge)|job_financials$|v_makesafe_charge_ledger$|bookkeeping_|v_bookkeeping_|v_xero_lines$|cfo_bill_cost)/
+      .test(object)
+  ) {
+    return "job-profit";
+  }
+  if (
+    /(?:^|_)context(?:_|$)|^luna_|^v_evidence_health(?:_|$)|^v_unresolved_evidence$/
+      .test(object) ||
+    ["attribute_business_event", "ensure_booking_draft_job"].includes(object)
+  ) {
+    return "context";
+  }
+  if (
+    /(?:^|_)(?:trade_invoice|job_work_order)/.test(object) ||
+    object === "work_orders_job_kind_guard" ||
+    /^(?:group_|trade_|v_trade_|v_invoice_line_completeness$|v_group_coverage$|v_patio_group_coverage$|patio_pay|crew_pay)/
+      .test(object) ||
+    /group|crew|paid_hours/.test(object) &&
+      /^(?:office_|work_orders_|job_work_order_|job_client_signoffs_)/.test(
+        object,
+      ) ||
+    /^(?:freeze|unfreeze|amend|project|claim|rekey|remove|restore|revoke|void)_group_/
+      .test(object)
+  ) {
+    return "pay";
+  }
+  return null;
+}
+
+export function scopedCatalog(
+  catalog: Map<string, CatalogRow>,
+): Map<string, CatalogRow> {
+  const selected = new Map(
+    [...catalog].filter(([, row]) => parityArea(row.name)),
+  );
+  // An unrelated or truncated snapshot must not pass with zero comparisons.
+  for (const area of ["job-profit", "context", "pay"]) {
+    if (![...selected.values()].some((row) => parityArea(row.name) === area)) {
+      throw new Error(
+        `Catalog has no ${area} objects; refusing incomplete parity input`,
+      );
+    }
+  }
+  return selected;
+}
+
 export function parseTrace(jsonl: string): Change[] {
   return jsonl.split(/\r?\n/).filter((line) => line.trim()).map(
     (line, index) => {
@@ -140,12 +194,31 @@ export function compareCatalogs(
   return differences;
 }
 
+// This closed inventory is opt-in. A changed hash, present fresh object, or
+// another overload cannot inherit an unsourced object's informational status.
+export function classifyUnsourced(
+  differences: Difference[],
+  inventory: Map<string, CatalogRow>,
+): { failures: Difference[]; unsourced: Difference[] } {
+  const failures: Difference[] = [], unsourced: Difference[] = [];
+  for (const row of differences) {
+    const recorded = inventory.get(key(row));
+    if (row.status === "live_only" && recorded?.md5 === row.live) {
+      unsourced.push(row);
+    } else {
+      failures.push(row);
+    }
+  }
+  return { failures, unsourced };
+}
+
 const cell = (value: string | null) =>
   (value ?? "absent").replaceAll("|", "\\|").replaceAll("\n", " ");
 export function renderComparison(
   differences: Difference[],
   liveCount: number,
   freshCount: number,
+  unsourced: Difference[] = [],
 ): string {
   const counts = (status: Difference["status"]) =>
     differences.filter((row) => row.status === status).length;
@@ -169,15 +242,32 @@ export function renderComparison(
       } |`
     ),
     "",
+    ...(unsourced.length
+      ? [
+        "## live-only-unsourced (informational)",
+        "",
+        `${unsourced.length} objects from the closed director inventory have no repository declaration. They do not fail parity while absent from the fresh catalog at their recorded live hash. This list covers the full snapshot, including objects outside the selected domain scope. The director owns source recovery; these objects are not proved equivalent or safe to remove.`,
+        "",
+        "| Kind | Object | Status | Live md5 |",
+        "| --- | --- | --- | --- |",
+        ...unsourced.map((row) =>
+          `| ${row.kind} | ${cell(row.name)} | live-only-unsourced | ${
+            cell(row.live)
+          } |`
+        ),
+        "",
+      ]
+      : []),
   ].join("\n");
 }
 
 const help = `Offline public view/function md5 comparison; no database access.
 Usage:
-  deno run --allow-read --allow-write scripts/compare-public-object-md5.ts --live <snapshot.tsv> --fresh <fresh.tsv> [--trace <changes.jsonl>] --output <report.md>
+  deno run --allow-read --allow-write scripts/compare-public-object-md5.ts --live <snapshot.tsv> --fresh <fresh.tsv> [--trace <changes.jsonl>] [--scope job-profit-context-pay] [--live-only-unsourced <inventory.tsv>] --output <report.md>
   deno run scripts/compare-public-object-md5.ts --sql
-Flags: --live, --fresh, --trace, --output, --sql, --help
-Exit: 0 equal or SQL/help; 1 differences; 2 invalid input. Never prints bodies.
+Flags: --live, --fresh, --trace, --scope, --live-only-unsourced, --output, --sql, --help
+Exit: 0 no failing differences or SQL/help; 1 failing differences; 2 invalid input. Never prints bodies.
+The optional unsourced inventory uses the same TSV format; exact live-only matches are listed separately.
 TSV: kind<TAB>name<TAB>md5; # comments allowed. Trace JSONL: kind,name,before,after,source.
 Capture using psql -X -qAt -F <tab>, with UTC and the same search_path/version.
 Trace starts at an empty public catalog; capture changes after every build file.`;
@@ -193,7 +283,14 @@ async function main(args: string[]): Promise<number> {
       return 0;
     }
     const options = new Map<string, string>();
-    const known = ["--live", "--fresh", "--trace", "--output"];
+    const known = [
+      "--live",
+      "--fresh",
+      "--trace",
+      "--scope",
+      "--live-only-unsourced",
+      "--output",
+    ];
     for (let i = 0; i < args.length; i += 2) {
       if (
         !known.includes(args[i]) || !args[i + 1] ||
@@ -211,6 +308,10 @@ async function main(args: string[]): Promise<number> {
       if (!options.has(required)) {
         throw new Error(`Missing ${required}; run with --help`);
       }
+    }
+    const scope = options.get("--scope");
+    if (scope !== undefined && scope !== "job-profit-context-pay") {
+      throw new Error("Unknown --scope; expected job-profit-context-pay");
     }
     const output = options.get("--output")!;
     // Never overwrite an input export, including through a symbolic link.
@@ -233,14 +334,33 @@ async function main(args: string[]): Promise<number> {
         "Trace is empty; omit --trace for an unattributed comparison",
       );
     }
-    const differences = compareCatalogs(live, fresh, trace);
+    // Validate a complete trace before selecting a domain; filtering trace
+    // rows first could otherwise hide a discontinuity outside that domain.
+    const allDifferences = compareCatalogs(live, fresh, trace);
+    const scopedLive = scope ? scopedCatalog(live) : live;
+    const scopedFresh = scope ? scopedCatalog(fresh) : fresh;
+    const inventoryPath = options.get("--live-only-unsourced");
+    const { failures, unsourced } = inventoryPath
+      ? classifyUnsourced(
+        allDifferences,
+        parseCatalog(await Deno.readTextFile(inventoryPath)),
+      )
+      : { failures: allDifferences, unsourced: [] };
+    const differences = scope
+      ? failures.filter((row) => parityArea(row.name))
+      : failures;
     await Deno.writeTextFile(
       output,
-      renderComparison(differences, live.size, fresh.size),
+      renderComparison(
+        differences,
+        scopedLive.size,
+        scopedFresh.size,
+        unsourced,
+      ),
       { createNew: true },
     );
     console.log(
-      `comparison:\n  live: ${live.size}\n  fresh: ${fresh.size}\n  differences: ${differences.length}\n  report: ${
+      `comparison:\n  live: ${scopedLive.size}\n  fresh: ${scopedFresh.size}\n  differences: ${differences.length}\n  live-only-unsourced: ${unsourced.length}\n  report: ${
         JSON.stringify(output)
       }`,
     );

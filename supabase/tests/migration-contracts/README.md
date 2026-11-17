@@ -83,3 +83,60 @@ contains Supabase-only schemas and extensions, duplicate historical versions,
 and known live-schema baseline drift. The narrow setup files keep this job a
 deterministic constraint test rather than pretending that history is a clean
 database bootstrap.
+
+## Job Profit, context and pay parity (cx-ci-parity)
+
+`supplemental-migrations.txt` inventories the omitted domain migrations. Both
+forward walks try these at their number alongside registered cases. Each try
+uses `psql --single-transaction`: a refusal rolls back that whole file and is
+listed as `supplemental refused` with SQLSTATE, never partly applied. The
+`public-object-parity` artifact includes the applied/refused inventory for
+both walks. Client/connection failures stop the walk. Existing registered
+migration errors still fail the suite. A successful supplemental application
+is schema-build coverage, not a new behaviour contract. Historical migration
+files and their guards are unchanged. These are disposable database writes only.
+
+The runner exports view/function digests with the comparison script's `--sql`
+when `MIGRATION_CONTRACT_CATALOG_OUTPUT` is set, immediately after the first
+walk and before assertions or rollbacks. It never exports business rows or
+function bodies. The existing fixtures still contain stand-ins; equality is
+limited to the actual exported view definitions and function bodies.
+
+Shard 0 on main and manual runs compares that export with
+`live-public-object-md5.tsv`, the director's 18 Nov catalog. The snapshot was
+inspected before copying: object identifiers, argument type signatures and md5
+only, no business names, amounts or row ids. The director refreshes that file
+from `compare-public-object-md5.ts --sql` on live, with UTC, matching
+`search_path` and PostgreSQL deparser version, then commits the new snapshot.
+Workers and CI never query live. The snapshot's date is evidence of that read,
+not proof of current production. No automatic re-snapshot or digest waiver.
+
+`--scope job-profit-context-pay` fails for changed, live-only or fresh-only
+objects in the union of both catalogs, except the closed unsourced inventory below. Job Profit covers `job_profit`,
+`job_cost`, job cost/revenue/expected/profit views and Bookkeeping evidence;
+context covers context-named routines, evidence-health views and the
+attribution/booking entries;
+pay covers trade/group routines, crew guards and their views. Each input must
+contain all three areas. Other domains remain outside this gate. An unreadable,
+empty or malformed input fails. A difference after an intentional code change
+still needs the director's live refresh; it is never silently accepted.
+
+Required job names and all existing contracts/proofs remain unchanged. The
+catalog and comparison report are retained in the `public-object-parity` CI
+artifact for seven days. No live switch, install, Xero payload or customer
+behaviour changes on merge. No new migration, trigger, schedule or stand-in.
+
+The director's 18 Nov instruction classifies the 23 objects without a repository
+declaration in `live-only-unsourced.tsv` (source: `docs/evidence/cx-schema-sort-18nov.md`).
+The parity step passes `--live-only-unsourced` and lists exact live-only matches
+as **live-only-unsourced**, informational rather than failing. The report lists
+all matching objects across the full snapshot, including the six context evidence
+views and objects outside the scoped gate. This is source-recovery work for the
+director, not equality proof or permission to remove live objects.
+
+The inventory is kind/signature/hash pinned. A changed live hash, another overload,
+a changed definition present in both catalogs, a fresh-only object or any unlisted
+live-only object still fails inside the scope. Without the flag the comparator
+keeps its original full-difference behaviour. Malformed or unreadable inventories
+fail like other inputs. The two context first-apply literals and all sourced
+differences remain failures; no body is normalised or replaced by this classification.

@@ -1,0 +1,1090 @@
+# Live read by the director, 18 Nov 2026 about 01:10 Perth, TimeZone UTC. kind, name, md5.
+# view md5 = md5(pg_get_viewdef(oid, true)); function md5 = md5(prosrc). Schema public, extension-owned functions excluded.
+function	_fence_mint_job_json(p_job_id uuid, p_outcome text)	6769875ce6028a1852eb2d453f216621
+function	_fence_mint_progress(p_request_id uuid, p_joined boolean, p_executor boolean)	1db91eccac6a816177660b102c4fde48
+function	_fence_mint_root_owner(p_request_id uuid)	10f9a34a686df5518e539e9b971c839e
+function	_fence_mint_settle_held_opportunity(p_request_id uuid, p_contact_id text, p_opportunity_id text, p_job_id uuid, p_outcome text)	e10cef874a94d21182cf07eb5d7ba73e
+function	_fence_mint_sorted_uuids(p_ids uuid[])	fbf51cfbcbfab001d5c9f89b7502289f
+function	_fence_opportunity_mapping_job_scope_count(p_job_id uuid)	34b77eda7a88725dfa4cf9494f5df0e7
+function	_fence_opportunity_mapping_rank(p_financial_count bigint, p_quote_count bigint, p_operations_count bigint, p_artifact_count bigint, p_lifecycle_count bigint, p_scope_nonempty boolean, p_pricing_nonempty boolean, p_event_type_count bigint)	12dec818e07d8ac5c8cce02680e4a78f
+function	_sw_api_key()	707b018602bbbdd46af3c1eff68b7205
+function	_sw_service_key()	0ace402afc512ada4f9d93141c38a6a8
+function	accept_quote_document_with_options(p_document_id uuid, p_accepted_at timestamp with time zone, p_record jsonb)	f975a1f2226bc6c95d8e63e9fed68101
+function	agent_action_proposal_claim(p_id uuid, p_user uuid)	d4ade0e4442926ead541ea251b3e6ca0
+function	agent_action_proposals_expire()	8e8d54736d5a73506c70225cfcbd1b7b
+function	allocate_bill_split(p_xero_invoice_id text, p_parts jsonb, p_overhead_ex numeric, p_overhead_note text, p_actor text)	f12d8f9fb2e09de7d1a21c8e9fe3f2e3
+function	amend_group_work_order_pay_basis(p_group_id uuid, p_to_basis text, p_owner_user_id uuid, p_reason text)	70e4feb2751bb27c1ad852137af66ab0
+function	apply_active_job_work_orders(p_job_ids uuid[])	4f7ab2e4bc659df74bfa7fedf292b880
+function	apply_makesafe_board_reconciliation(p_run_key text, p_applied_by text, p_selection_hash text, p_rows jsonb)	7e25c56b142eb30e8e41e56955be08e7
+function	apply_makesafe_board_status(p_run_key text, p_applied_by text, p_evidence_ref text, p_rows jsonb)	03b519bc79f7b13c2263b22a784c0840
+function	apply_makesafe_duplicate_survivor_archive(p_run_key text, p_applied_by text, p_evidence_ref text, p_rows jsonb)	7892ddd81de41cdab175f3560e15d6ff
+function	apply_makesafe_work_order_identity_correction(p_job_id uuid, p_external_ref text, p_metadata jsonb, p_document_id uuid, p_prior_instruction_keys text[], p_corrected_instruction_key text, p_reason text)	d7e1f14a7163ce3e746872e9f22f2b9e
+function	apply_quote_options_to_scope_drafts(p_job_id uuid, p_scope_revision_id uuid)	423e2ed7cf752eb0456952bfb4e4748a
+function	apply_scope_payment_event(p_job uuid, p_kind text, p_coordinate jsonb, p_at timestamp with time zone, p_stage_id text)	dc1d6e9ca896fc3f083371a73a79b9fc
+function	approve_job_work_order(p_work_order_id uuid, p_approver uuid, p_via text, p_expected_updated_at timestamp with time zone)	190d2d0131ebdfe76acfc48794463a7c
+function	approve_job_work_order(p_work_order_id uuid, p_approver uuid, p_via text, p_expected_updated_at timestamp with time zone, p_org_id uuid)	76e2f3a487df37890e9e7797d987aa38
+function	approve_job_work_order_by_agent(p_work_order_id uuid, p_actor text, p_approved_by_name text, p_expected_updated_at timestamp with time zone, p_org_id uuid)	a7935664e08b6156eeabb89deede47f0
+function	approve_job_work_order_switch_off(p_work_order_id uuid, p_approver uuid, p_via text, p_expected_updated_at timestamp with time zone, p_org_id uuid)	6900f14d19b68d4e8b0148fb48889834
+function	approve_ses_invoice_void_revision_v1(p_void_revision_id uuid, p_content_hash text, p_decided_by text)	555424b638c3c743a810d4df808f98cb
+function	approve_work_order_customer_variation(p_variation_id uuid, p_approver uuid, p_via text, p_expected_updated_at timestamp with time zone)	f0a5c32555b5ad5d976ae8e6bf1581fd
+function	approved_send_approvals_guard()	858ab2ab81a17c5dd3c628ba8f6ccbcd
+function	approved_send_approvals_insert_guard()	ef2dc9eea140bd1b2ea8d7fb4789370c
+function	approved_send_audit_append_only()	2f771b392f308630146b9dd2531be300
+function	assert_job_commission_cap(p_job_id uuid, p_invoice_id uuid)	c2aea6de53237a5c3ae7d166d153cac5
+function	assert_ses_dockets_signed_off_v1(p_docket_revision_ids uuid[])	c8dab4777c3e132226b3363e4241232d
+function	assert_synthetic_livefire_purge_job(p_marker text, p_job_id uuid)	3f1358b01f3128bdaab0aeea76ff043f
+function	attribute_business_event()	d0036a1bc36f4b2a779f4a8b192cd687
+function	attribute_context_event_with_luna(p_event_id uuid, p_job_id uuid, p_confidence numeric)	62ed28cbcf041d7cdcda298907a756fa
+function	attribute_context_event_with_luna(p_event_id uuid, p_job_id uuid, p_confidence numeric, p_outcome text)	11c9fb6fedce9cdd4a730e461d5a6fda
+function	auth_org_id()	9f055a9cad32057fb52c92886215cb9d
+function	auth_role()	f69048b62ae676670c21908ee67e3298
+function	auto_assign_job_number()	b9e8a7ec3b3974dd2292c83edbe0d813
+function	auto_issue_job_work_order(p_work_order_id uuid, p_expected_updated_at timestamp with time zone)	7de425d88fdc44c88de5a4dbde59aefa
+function	automation_lane_enabled(lane text)	7e783fc7e83da3429028480b666b11d7
+function	automation_switch_cron_lanes()	d0a346b823b56258bf67bc835f41f922
+function	automation_switch_unwrap_cron_jobs()	1660ea90cf03b3995da084fd533c97e8
+function	automation_switch_wrap_cron_jobs()	14bc2445a6cf1cd3111c95fdc4900375
+function	backfill_job_work_order_drafts(p_apply boolean)	cc875c370c90299ef81bb47889c35816
+function	batch_compute_intelligence()	d6f681cfbeeeaa0ec0371ad5fec7a0ac
+function	begin_ses_invoice_execution_v1(p_job_id uuid, p_invoice_obligation_revision_id uuid, p_approval_content_hash text)	ad419b95250e1171dc71ee4a19ff6f3d
+function	begin_ses_invoice_void_execution_v1(p_void_revision_id uuid, p_content_hash text)	cffbcb1cf9e5060f13fd3afeb49c7c35
+function	begin_ses_release_execution_v1(p_release_revision_id uuid, p_release_content_hash text)	dd6262678e2dad3967f3ef27e282a99e
+function	bill_prematch_change_token(p_org_id uuid)	eb8c1b9c0034e51ac224e2b361fe8e5f
+function	bind_adjudicated_ses_existing_job(p_case_id uuid, p_source_post_ids text[], p_target_job_id uuid, p_expected_identity_key text, p_evidence jsonb)	aa5e8af8a942e9a631ddaaffae7c2522
+function	bind_fence_job_mint_identity(p_request_id uuid, p_contact_id text, p_opportunity_id text)	9e57fb908963ca6167d415838e19d6d5
+function	bind_makesafe_roof_initial_cycle_v1(p_job_id uuid, p_open_reason text, p_expected_case_id uuid, p_expected_cycle_count integer, p_expected_existing_cycle_id uuid, p_require_zero_operational_evidence boolean)	276a2669fe08fa52b243783baa0c548d
+function	bookkeeping_evidence_add(p_revision text, p_facts jsonb)	f75c6ed5aa8d57198696e9b7eb4b509a
+function	bookkeeping_evidence_add_parts(p_revision text, p_sha256 text, p_parts jsonb)	368820456c47fef05926f1d0ec4386d5
+function	bookkeeping_evidence_classify(f jsonb, OUT allocation text, OUT job_number text, OUT job_id uuid, OUT evidenced boolean, OUT basis text, OUT outcome text, OUT document_ref text)	37fb45286ebeb64ab59110fceca365eb
+function	bookkeeping_evidence_close(p_revision text)	071df1156def5b11b6ead755560fa407
+function	bookkeeping_evidence_open(p_revision text, p_schema text, p_producer text, p_emitted_at timestamp with time zone, p_sha256 text, p_supersedes text, p_facts_in_file integer, p_facts_sent integer, p_by text)	987c77971fdfbb1137cdc681fae45cb1
+function	business_events_staff_reader()	1ded825c417b8e9d40692901cf4f766b
+function	capture_business_event(p_row jsonb)	4819869e6dcc40d5cd19a7eba295392c
+function	capture_ghl_history_event(p_row jsonb)	1411b79a4389048ba5de109fe6701e94
+function	carry_work_order_variations(p_prior_invoice_id uuid, p_replacement_invoice_id uuid)	8fc324fa06ee943a41256c5eb1ea4353
+function	catalogue_prices_staff_load(p_rows jsonb)	321db63cdc3cd624e8f783d329c4b8b9
+function	cfo_bill_cost_outcomes_scoped(p_job uuid)	7b2d8fee46d98bb132f3523a8b6398b6
+function	change_work_order_amount(p_work_order_id uuid, p_to_ex numeric, p_reason text, p_actor uuid, p_org_id uuid)	6f61f1a995e4a64765e65674d9068199
+function	check_authority(p_org_id uuid, p_role text, p_channel text, p_action text)	7e16a2180df8156c96fddbd4a17d32d1
+function	check_makesafe_pdf_extraction_drain_response()	58a029b9da0e91600c6d8bb965e3ac80
+function	check_response(p_request_id bigint)	eea2a64c5bb95403008d57909749e5d3
+function	claim_context_document_vision(p jsonb)	673a48233da0ac9f40d3d8415076b424
+function	claim_context_extraction_run(p_job_id uuid, p_run_date date, p_phase text)	0e31f4c0017a05a004e420907f8bc73a
+function	claim_context_pass(p_run_date date)	6ef1e37bb1f41092f6f5f5228f820d46
+function	claim_group_work_order_release(p_group_id uuid, p_actor text, p_actor_user_id uuid)	98f1beb1260bdf37299249e1dac8088f
+function	claim_makesafe_pdf_extraction(p_attachment_id uuid, p_fresh_only boolean)	fdac9ba8f75af6fa78b1bd7698e16ffb
+function	claim_payment_link_slot(p_job_id uuid)	4d53d2e0c23ebdae87b090def04eaec1
+function	claim_ses_external_effect_v1(p_effect jsonb, p_lease_owner text, p_lease_seconds integer)	76ddbb491d1aaa59cbef9f8b03945d00
+function	claim_ses_invoice_no_dispatch_retry_v1(p_expectation jsonb, p_lease_owner text, p_actor text, p_lease_seconds integer)	2813eafeb6cee96a575059f9a1ae96e2
+function	claim_ses_report_trigger_run(p_run_id uuid, p_owner text, p_lease_seconds integer)	febf54e113ac3ba7aa605898fcfa78e0
+function	claim_ses_route_redispatch_v1(p_expectation jsonb, p_lease_owner text, p_actor text, p_lease_seconds integer)	ee498a91ab42c150c673a5cce6c2f12f
+function	claim_sms_slot(p_contact_id text, p_message text, p_job_id uuid)	155ac061f58a89d5dcb1b076b0987333
+function	close_stale_context_document_text_runs()	dfe414d8315c801aa52429df95e57fa2
+function	commission_write_once()	52853d771a976724cf476e9082de526e
+function	commit_makesafe_backfill(p_mailbox text, p_floor timestamp with time zone, p_ceiling timestamp with time zone, p_cursor text)	4d448d463d6bc49c4eb0d3a8269366d6
+function	commit_makesafe_docket_revision_v1(p_revision jsonb, p_artifacts jsonb)	c24d625cff5661e2549b31483c81a25b
+function	commit_makesafe_portal_capture_v1(p_capture jsonb)	49fe09dbfecccf9781e8c3c0071ab079
+function	commit_makesafe_readiness(p_job_id uuid, p_expected_generation bigint, p_readiness_revision text, p_attendance_cycle_set_hash text, p_family_matrix_revision text, p_dependency_envelope jsonb, p_ready boolean, p_blockers jsonb, p_actor text)	67e5af7ff7d64a32ab1e3cc71a4c6d6d
+function	commit_ses_invoice_bound_docket_v1(p_binding jsonb, p_pdf_artifact jsonb)	5244b16db49c78a6b04eabda7963f514
+function	commit_ses_invoice_obligation_revision_v1(p_obligation jsonb, p_revision jsonb)	578d58e933c28d2f1ff5c1ac06ebe6da
+function	commit_ses_invoice_void_revision_v1(p_id uuid, p_org_id uuid, p_job_id uuid, p_xero_invoice_id text, p_invoice_obligation_revision_id uuid, p_observed_status text, p_target_status text, p_reason text, p_content_hash text, p_created_by text)	ec5ba5466aa8ab4cee5134f936b8d9ea
+function	commit_ses_release_closeout_v1(p_closeout jsonb)	b43e8e8d03a050a75b702c74774a1e94
+function	commit_ses_release_revision_v1(p_release jsonb, p_members jsonb, p_routes jsonb)	372bc84b05c77c914be61ae0d768d8e8
+function	complete_fence_job_mint(p_request_id uuid)	9e19150df217ffca5df149e5137be29e
+function	complete_makesafe_intake_job_mint(p_mint_id uuid, p_job_id uuid)	47f38faeb69465309171b58004b682a0
+function	complete_makesafe_pdf_extraction(p_attachment_id uuid, p_claim_token uuid, p_outcome text, p_reason text, p_text text, p_char_count integer, p_page_count integer, p_extractor text, p_truncated boolean, p_completed_at timestamp with time zone, p_next_attempt_at timestamp with time zone)	0966e1350136014553576727f8765c0e
+function	confirm_scope_payment_stage(p_job_id uuid, p_scope_revision_id uuid, p_org_id uuid, p_actor uuid, p_stage_id text, p_evidence_kind text, p_note text)	22abb303d573fe07efc8cda0030afea6
+function	confirm_ses_invoice_void_execution_v1(p_void_revision_id uuid, p_content_hash text, p_final_status text, p_provider_digest jsonb, p_actor text)	7c5e4411d5ab0f3d0f87d80d6030763b
+function	confirm_ses_release_route_v1(p_release_revision_id uuid, p_route_kind text, p_proof_hash text, p_actor text)	6405c07ddf609e930b188639f318e3ca
+function	consume_scope_council_payment_event(p_submission uuid, p_step text)	f4cb01392eb9aaf8c883cb7942c3b272
+function	consume_ses_channel_approval_code(p_request_id uuid, p_channel text, p_sender_fingerprint text, p_message_hash text, p_code_hash text, p_now timestamp with time zone, p_lockout_threshold integer, p_lockout_window interval)	5f382a58c5f259201541040649b4ff3b
+function	context_actor_missing_status()	fc618726bcec075660deb525225143c9
+function	context_address_key(p_address text)	6c6ac4e46ba283d48d9f2637a6a4c1bd
+function	context_address_loose_keys(p_address text)	adc79b8fbd88cbdcabff423727279aa0
+function	context_address_mentions(p_text text)	2438767564934b956319284c323e90f5
+function	context_ai_calls_log(p_rows jsonb)	c62c46083cb1b58d2ff02d649e5531f4
+function	context_ai_calls_trim(p_before timestamp with time zone, p_limit integer)	91cb318d839d5d0c2b1513d20f108f9c
+function	context_ai_harness_save(p_rows jsonb)	57e3749f6cd7a0efe8fcf7681c84a917
+function	context_ai_harness_trim(p_before timestamp with time zone, p_limit integer)	36fbfa5693c8e1beeba328fba5ffe23d
+function	context_attribution_candidate_hash(e business_events)	4b606a8d60a731593ae433fe4288895b
+function	context_attribution_due(p_lane text, p_limit integer)	43c007877b061e55518d2922c585312f
+function	context_attribution_due(p_limit integer)	47a19f03f58470e29642ff84eec7c4be
+function	context_attribution_jobs(p_contact_id text)	c705283a9a83ba57c2a328b23a68d6d6
+function	context_attribution_next_perth_day(p_at timestamp with time zone)	cf6272dd8b9999f5dbe55b3bb1f47909
+function	context_attribution_preview(p_event_id uuid, p_rules_on boolean)	4cd4ef761039f754138518a90531ecd2
+function	context_attribution_record_attempt(e business_events, p_outcome text, p_code text)	a5b5009535543486c63e2f7f2c2d5552
+function	context_booking_capture_status()	155104bfb08b8b3c2f98bdec089d4ee4
+function	context_bucket_reason(e business_events)	2e188391939b7a889c427168607dbbc3
+function	context_bucket_reason_detail(e business_events, p_site_index jsonb)	1c3b05a8d875d55ebca37671857010a9
+function	context_bucket_status()	1ac0e031034928239810432d213ed77e
+function	context_bucket_text(e business_events)	398e21232ca6eb425f882a39840c7b4a
+function	context_builder_ref_jobs(p_text text, p_refs jsonb)	e4d864aa2b41862ea7fcf8e6b49260e7
+function	context_business_minutes(p_from timestamp with time zone, p_to timestamp with time zone)	510dbec36291c25aa1887ade89e2ca4e
+function	context_cadence_policy()	2d11b591c1697bdfa0a16562da6daa06
+function	context_cadence_policy_today()	7751d0e315d610f6e57547adf53eb5f4
+function	context_cadence_pool()	5cb50d8d47eb917acb2406ae3f0d9369
+function	context_cadence_status()	ddcd452a67e9e15150ac05d7847e655f
+function	context_call_transcript_eligible(p_event_type text, p_provider_message_id text, p_payload jsonb)	cd3cb55ab8fa9359b744d3626f14ec6c
+function	context_catchup_eligible_rows(p_job_ids uuid[])	f4ee5a7b0161d4e8aae729c35b86d7ed
+function	context_catchup_list_backfill(p_source text, p_since timestamp with time zone, p_dry_run boolean, p_limit integer, p_priority integer)	6554c7272eda3f74b8b5e349a3ff21c5
+function	context_catchup_mark_done()	f52e823ab347b0983bb561bcb951514d
+function	context_catchup_pending_rows(p_job_ids uuid[])	65f9a648e73e417df6ddb2f061160519
+function	context_catchup_record_read()	5420a6486bee3e03501200008aca6053
+function	context_catchup_request(p_dry_run boolean)	b12a7e9637f87d4345c03e4a604a4022
+function	context_catchup_request_backlog(p_tier integer, p_dry_run boolean, p_limit integer)	42a5f8384c70ef8b2bc1232ec128bfb2
+function	context_census_reasons(p_reasons text[], p_ages text[], p_ids uuid[])	dab375ac1874cd0a336df96a0c7dfe76
+function	context_client_story(p_job_id uuid, p_as_of timestamp with time zone)	ccce1009b2487423ce2a3425a190204f
+function	context_contact_for_key(p_email_key text, p_phone_key text, OUT contact_id text, OUT contacts integer)	78eedc7273576c02e8aa119924c6d5fd
+function	context_contact_job_timeline(p_contact_id text, p_at timestamp with time zone)	88d0aa3f8bdbb2800d66954b5655f0dd
+function	context_contact_job_timeline(p_contact_id text, p_at timestamp with time zone, p_phone_key text, p_email_key text)	be5e8d7df251fb3baf2d1a47641d93eb
+function	context_contact_jobs(p_contact_id text)	110233fcc96446fdcf1f50d1fa65c43c
+function	context_contact_jobs_at(p_contact_id text, p_at timestamp with time zone)	911811b617fa760f5ddf847fb1ab853d
+function	context_contact_jobs_at(p_contact_id text, p_at timestamp with time zone, p_phone_key text, p_email_key text)	6527b7d8c8ae001b0443dbcc224c0f2b
+function	context_contact_names_other_site(p_contact text, p_text text, p_refs jsonb, p_at timestamp with time zone, p_job_id uuid)	fd7fda19e34f638eb9ac71ff4744c5d0
+function	context_contact_parties_at(p_contact_id text, p_at timestamp with time zone)	a78d5a40dfc528f9b47cc6e902216168
+function	context_core_status()	bf6a84ad3b2fdcc0f9f1ba2f253b72a2
+function	context_coverage()	dbee3427213fbaea92215aceb6187c00
+function	context_crm_message_times_keep()	e17d87214d0933eb4dcf279e52f4da08
+function	context_document_text_due(p_limit integer)	5db9fb144443a9ce3e83cb6d13b4c2f9
+function	context_document_text_flag()	0bbcd180e0c494ce39cda13bd0bb1570
+function	context_document_text_policy()	e672da9e885bfbaeef5007c0cd756060
+function	context_document_text_requested_due(p_limit integer)	5e74fdf94f066111ac7e3f5771a225bb
+function	context_document_text_sources()	87a37fec51c8968cda757d056b083568
+function	context_document_text_status()	c787cf5a1a55d3710022e8b8bd2acb20
+function	context_document_vision_admission()	6fc6fbe5e932885a6105d462932ee5bb
+function	context_document_vision_backoff(p_attempts integer)	e865ecf406c3bddd12aacac96ef4a746
+function	context_document_vision_daily_cap()	161c5212fa0b4ff40962d6b91b3cce89
+function	context_document_vision_due(p_limit integer)	5f843b615f8c21e155e08da9580358ba
+function	context_document_vision_flag()	46b1dc70311e8319a1bb3ca9b79c9474
+function	context_document_vision_leased(p_reservation_id uuid)	616286959c9d638eee2a1558a625cfd2
+function	context_document_vision_policy()	e2fc43a4e4d7189daac5c894423ac5dc
+function	context_document_vision_requested_due(p_limit integer)	0c22d66b98714327b668bb66aca883be
+function	context_document_vision_status()	5dfc83c4eba046329dee9dda60ff5f7e
+function	context_email_audience_backfill(p_apply boolean)	05ffa0dddf6772d7b989000dad8db97b
+function	context_email_audience_plan()	f08499284f8b3c98739c276aca1325c5
+function	context_email_audience_resolve(p_row jsonb)	4a84f76052722a5e4d3a7529c584115e
+function	context_email_audience_topic(p_subject text)	e660237ce8d719914ae992e2964c3f68
+function	context_email_capture_policy()	a7ebb664be0ffff255d7bc2481976054
+function	context_email_capture_status()	39f700ff23752f161c2215ecc500ece8
+function	context_email_capture_status_at(p_now timestamp with time zone)	18d69176f3a277af49ebb2cd6e4ae12e
+function	context_email_deep_enabled()	ad7bc1c38de66a313bcfccd6778d63b9
+function	context_email_deep_job_refs(p_metadata jsonb)	567a82d3e59a6bf2dc968900d2b6808c
+function	context_email_deep_live_floor(p_source_key text)	5ad234ad3f73a3d25e8fb295405aee13
+function	context_email_deep_policy()	c16387050717181f6ad51011dd7b62b2
+function	context_email_deep_scope()	2a57c7bd0593a634d428306c6d7e6d06
+function	context_email_deep_scope_jobs(p_as_of timestamp with time zone)	a9fc3cffeb07b77c3dc2af10b186d31e
+function	context_email_deep_status()	ee13972fc7cdb277c7bb9a0b9e758007
+function	context_email_history_reach(p_as_of timestamp with time zone)	8946ec7bb2580c10b629be875f0dc6cf
+function	context_email_history_reach_jobs(p_job_ids uuid[], p_as_of timestamp with time zone)	ead55f4947f707a97ad8774267b1689e
+function	context_email_history_scope()	c66bd7a9522f8bb919bbe204a99b546f
+function	context_email_history_status()	528c22d64509a47cf039859d09ae1447
+function	context_email_job_client_emails()	2dbc13010c20f96f6bf10891be6bb1c8
+function	context_email_key(p_email text)	bccbc990823518e71004ed4bd1d4b54b
+function	context_email_legacy_copy(p_from text, p_received_at timestamp with time zone, p_subject text)	dcaa7ee09bc984c80d14e2bd912b66bd
+function	context_email_reader_flags()	70e0d32adc92c857ced321b7f0ea050f
+function	context_email_supplier_domains()	ad7f35a40fff8e85a07284c746805124
+function	context_email_sweep_continuation_enabled()	077eb28f38030a937e3efdc7bf93cd0a
+function	context_email_sweep_misses(p_source text, p_since timestamp with time zone, p_now timestamp with time zone)	3c35533004663b56b2d3616868678eab
+function	context_email_sweep_status()	64b0c585e257b7c65070d3adee96d156
+function	context_email_sweep_tick()	aa9f596d7e667a02327d89ed573afd6a
+function	context_empty_row_job(e business_events)	b057fc7da940afe25833028d511594b5
+function	context_entity_contact_fill()	6e81ae612e8de6a2495287a76f4553f9
+function	context_event_identity(e business_events, OUT email_key text, OUT phone_key text)	ec1f67645b889441791d433d5fe08339
+function	context_event_is_ghl(e business_events)	6bd4046317c4530a67ae38b0d7052cf4
+function	context_event_is_ours(e business_events)	b34febf8d9ea77ef1a31b088e02b0901
+function	context_event_jobs(p_event uuid)	7f375a226ea3b4c0d9a34c4fd54995d2
+function	context_event_sender_kind(e business_events)	8d0c96101aa111dd540371953f4f12ad
+function	context_event_source_admissible(e business_events)	09efe91e52fd78c868a7a387bd10fff5
+function	context_event_status_only(e business_events)	50c3b2e467a6e8a3c598fa4116c27553
+function	context_event_text(e business_events)	bd5870b90e0f912d6a6d5be4faea812e
+function	context_event_writer_job(e business_events)	9d29d9087ebb8765cc994174a960b6d4
+function	context_extraction_candidates(p_limit integer)	fc0f681d15d59c80a8ee41b45d0486cc
+function	context_extraction_event_flags(p_job_id uuid, p_event_ids uuid[])	5aedb3e5a7aa3286145079032e8e22f8
+function	context_extraction_events(p_job_id uuid, p_limit integer)	68f6da2aac47cae91aa62a0420402d74
+function	context_fact_expiry(p_kind text, p_event_at timestamp with time zone, p_due_date date)	99e2b6fe9610af3b14caf380f8b73827
+function	context_fact_stamp_trust()	6f06ec71eac1ff3f645991d88149cebf
+function	context_finished_wake_hours()	6c21fe81e12fc55b441a844edce1a29a
+function	context_ghl_capture_policy()	d803ce75d024366040936b4002d19b30
+function	context_ghl_capture_status()	6c2648a6307b6f6e5a08f52fb45690d2
+function	context_ghl_history_day_limit(p_scheduled boolean)	f924f4c9f9ceabc79297f496c01d93df
+function	context_ghl_history_due(p_max_jobs integer)	8c5d9bbb35b8b74533b2817e2df283fe
+function	context_ghl_history_due_at(p_max_jobs integer, p_limit jsonb)	2c7784f547ced44353b3ae845c3bf029
+function	context_ghl_history_link_candidates(p_after uuid, p_limit integer)	8b250cbde48e1d0067c541fa10d3c506
+function	context_ghl_history_link_due(p_limit integer)	766586ede803cdac667ea0c52e1c6411
+function	context_ghl_history_live_jobs()	036457fdaa73579ab9cc9881d3b82aef
+function	context_ghl_history_policy()	ae330644d6d87cf4be51f7adb2191891
+function	context_ghl_history_progress()	7732f6d4dd0fe3e2350f8cd0b69d71bf
+function	context_ghl_history_request_reads(p_dry_run boolean, p_limit integer)	b6bb1c72d125f2b578fa155dc9458a11
+function	context_ghl_history_schedule_policy()	bd122c72ca855e5b58286476d95bdd07
+function	context_ghl_item_flag()	83e26c517d21f4796061bc0f8cf86a93
+function	context_ghl_message_copies(p_rows jsonb)	6c9b462f3772c4228a9c06c0ad6105f9
+function	context_grade_passed(p_kind text, p_unit text, p_verdicts jsonb)	05716a04662f880a6a00984053a01799
+function	context_grade_samples(p_as_of timestamp with time zone)	7f0398a83880cb6ba48d94cde39173f1
+function	context_grade_verdicts_problem(p_kind text, p_unit text, p_verdicts jsonb)	c46b888865359ba19f30a497e6b8ace8
+function	context_grades_newest(p_as_of timestamp with time zone)	06ff1ec32ddbc20262931f28fc7340ce
+function	context_held_notes_on()	55a9d985793d5725236f04cdf782a631
+function	context_history_crm_jobs(p_job_ids uuid[])	2de646f0c7ac3ec87f58140312c3798e
+function	context_history_crm_rows(p_job_ids uuid[], p_load_scope uuid[])	1d6444dbeee2ccd9fc9f67c0896c562e
+function	context_history_crm_summary()	f60edba0394be36fe2cd288c987c0875
+function	context_history_daily_policy()	009cf2a07b9a8866ef36223b54167314
+function	context_history_monitored_jobs(p_as_of timestamp with time zone, p_job_ids uuid[])	f20dffbcdc5e938d0a8b9efacfd50de1
+function	context_history_xero_daily_status()	4726da475aa9d5f8e9ff8c01e65fbd5e
+function	context_in_business_hours(p_at timestamp with time zone)	70164e9d1d6aa636c4e9d54357396f16
+function	context_internal_about_job(e business_events)	550176dbcdf545efa3c4703e160aec96
+function	context_internal_text_role(e business_events)	e7327d108966e2bcb9d2eb48e3086a55
+function	context_invoice_linked_redecide()	fb28d7a3ffd333d19ea918ea117e2b21
+function	context_item_kinds()	b3f29f81802a542b720afeebf2eeb3e6
+function	context_jev_agreement(p_since timestamp with time zone, p_until timestamp with time zone)	acd1c143ca45f6458044719625b0f3bf
+function	context_jev_calls_today()	66234b3a1f68661bb30b2c4de2ec4c5c
+function	context_jev_truth(d context_jev_decisions)	520d338e6d920c3190614535bdaa5fe8
+function	context_job_bill_outcomes(p_job uuid)	5eec58dd11457f6a19e51e2979a10117
+function	context_job_cadence(p_job_id uuid)	7110b88f2557febce945e9aed2e6441d
+function	context_job_card_decisions(p_job uuid)	6b2ba87035963db51bdefc8f47aef009
+function	context_job_card_events(p_job_ids uuid[])	c62fceb1af8fd29f99e96baabba189c4
+function	context_job_contact_linked_reconsider()	91a2b7c765d350ccb3cf0c8df4491a6c
+function	context_job_created_reconsider()	2e199e27d38730e95bd5f2b0b8a9b165
+function	context_job_dead(p_job_id uuid)	676b56378995aa9619351807bd606dcb
+function	context_job_event_parties(p_job_id uuid)	f494019118a7f3848bac8671c5136d14
+function	context_job_evidence_for_bills(p_bill_ids text[], p_blind boolean)	6c3940be615086d096820ef7c0264d26
+function	context_job_evidence_is_statement(p_text text)	74bd8161aeb1d7eed829e3a439227bd0
+function	context_job_evidence_number_key(p_number text)	b84446c15ffec74cb0124bc284a48977
+function	context_job_evidence_policy()	c8eefc50302a79e17e9df369ef63758c
+function	context_job_evidence_text_numbers(p_text text)	38518e0ec86af3f673fab43cb2b7fc0c
+function	context_job_extractable(j jobs)	495d0eddb20d837634890d2de95a7242
+function	context_job_freshness(p_job_id uuid)	a901eef0f9135bf04676d81742b85595
+function	context_job_live(p_job_id uuid)	b20e2d96c3a08fa53fa409a1de02e640
+function	context_job_mail(p_job uuid, p_limit integer, p_roles text[])	15a5cf3c1e51e1ba903b40fd383ca81d
+function	context_job_owed_lines(p_job_ids uuid[])	fe3c3604a3b4a50ef241d507dc2dea94
+function	context_job_quote_email_sends(p_job_ids uuid[], p_as_of timestamp with time zone)	d83c48f924f80208d40d4e02952e1069
+function	context_job_real(p_job_id uuid)	7e2fdda96e02d11a45ef8188969c9a5a
+function	context_job_record_bill_share(p_job_number text, p_line_items jsonb, p_amount_types text)	6bc4bb1fded8abc8e3a8a490cd624897
+function	context_job_record_contact(p_job_ids uuid[], p_as_of timestamp with time zone)	4b8d2c65d3ce03d71f2d0e24f4401471
+function	context_job_record_crm_time(p_source text, p_contact_id text, p_message_id text, p_job_id uuid)	72569427cdcbf1857db8c312c9ab088e
+function	context_job_record_date(p text)	17af93203610643b28c818df2317c4a5
+function	context_job_record_legacy_mail(p_job_ids uuid[], p_as_of timestamp with time zone)	c02e117100bd324411fed65e47a8163b
+function	context_job_record_loops(p_job_ids uuid[], p_as_of timestamp with time zone)	82b7f10dabdef1a2022398b78c816bf9
+function	context_job_record_messages(p_job_ids uuid[], p_as_of timestamp with time zone)	4ab1e2a3ff35aa69576f80a06d7b42ba
+function	context_job_record_money(p_job_ids uuid[], p_as_of timestamp with time zone)	152c423ec224be8d3ac48790b7d14cd6
+function	context_job_record_payer_role(p_job_id uuid, p_job_type text, p_job_xero_contact text, p_invoice_contact text, p_invoice_party uuid)	0ee68a524a409bde32ef522f312d8695
+function	context_job_record_timeline(p_job_ids uuid[], p_as_of timestamp with time zone)	fca5eda750a40bbf1f2d8f0e7cf33055
+function	context_job_record_value(p_job_ids uuid[], p_as_of timestamp with time zone)	b21ec0726cc49af6c7275adc3bb8f50c
+function	context_job_ref_tokens(p_text text)	c8c7dac3f00d9aa620fb230dfd3a2791
+function	context_job_story(p_job_id uuid, p_as_of timestamp with time zone, p_generation_id uuid, p_since timestamp with time zone, p_record_only boolean)	61a159a770646dba025911b9e2511c75
+function	context_job_story_assemble(p_job jsonb, p_record jsonb, p_ledger jsonb, p_meta jsonb, p_as_of timestamp with time zone, p_since timestamp with time zone)	ddab6cd2bf43ecf5c88fcf03b7ba0374
+function	context_job_story_bill_outcomes(p_job_id uuid)	43e14aad0b0f78849bddbc72408b4b92
+function	context_job_story_book(p_job_id uuid, p_as_of timestamp with time zone)	fc9a1c8f605a1dfd6c7d1ef7667bfa0d
+function	context_job_story_book_policy()	4df9b59fcf2d584d7af6623feefc49a2
+function	context_job_story_budget()	7a54f0abc1b11389181ccc6664dd0e34
+function	context_job_story_card_hash(p_card jsonb)	aa1dda7b926ce9b34643460c5db2bb88
+function	context_job_story_checks_problem(p_checks jsonb)	1fb14d2e8cb2eb7f4c3a28c84dccb980
+function	context_job_story_claim(p_limit integer)	2cde3a2c1e1f24376c703b1475d07486
+function	context_job_story_claim_state(p_job_id uuid)	30ec2722e096d24f11bb057e0c977f68
+function	context_job_story_closed_paid(p_story jsonb)	e0c1355a1824f9b92ef0212d889aac47
+function	context_job_story_credit_sig(p_job_id uuid)	a5d0f9f74c14ab88cc502f2d2ad98f27
+function	context_job_story_day(p_day date, p_today date)	35aecad0ce5d8ed8947d210c8002dee5
+function	context_job_story_digest_at(p jsonb)	9fdd53bc578fe4319d102fafb0060ad7
+function	context_job_story_digest_num(p jsonb)	8407aba58bca4c655cdd84f670ce47d3
+function	context_job_story_enqueue_changed(p_limit integer)	dd2fa73b0f81ebfa586179dcb1adca2d
+function	context_job_story_enqueue_first(p_limit integer)	733ebc6b53dfc08961728392fb7f58e1
+function	context_job_story_facts(p_job_id uuid, p_as_of timestamp with time zone)	d0f9e33ac9a8cb3f91f2ea11ce907c46
+function	context_job_story_first_policy()	2daa53e2ff1dcccdcc0b6c6f87aa1702
+function	context_job_story_full_hash(p_card jsonb)	a444e315f8aedc2af5de37f80c3e95ce
+function	context_job_story_held(p_job_id uuid, p_as_of timestamp with time zone)	ed4eb54cdbc2e903f4c9f33b8bfee840
+function	context_job_story_held_marks(p_story jsonb, p_job_id uuid, p_as_of timestamp with time zone)	d2c25d67b81a3cdc96d08629026f1bc3
+function	context_job_story_ledger(p_job_id uuid, p_generation_id uuid, p_as_of timestamp with time zone)	23aa0fedac41b75d59607548a1a3f7f2
+function	context_job_story_ledger_sig(p_job_id uuid)	4beb600043f868e7ec57d4db847890e8
+function	context_job_story_meta(p_job_id uuid, p_as_of timestamp with time zone)	1fd862135f975c55e153fd44a83b4fad
+function	context_job_story_money_settled(p_story jsonb)	099bad2f999425bf5b9fc05cbf403075
+function	context_job_story_money_sig(p_job_id uuid)	7a7798901a26351b8e910da3f1392509
+function	context_job_story_money_words(p numeric)	af47ebf1c489a194e1ee0b7f71ef775f
+function	context_job_story_note_current_invoice(p_ledger jsonb, p_money jsonb, p_as_of timestamp with time zone)	0c988b81498d5b41655dfccae171a554
+function	context_job_story_payment_terms(p_story jsonb)	a278b4b93d4fe64a4aeccd9d7f678f95
+function	context_job_story_placement_review(p_story jsonb, p_job uuid, p_generation uuid, p_as_of timestamp with time zone, p_record_only boolean)	32d45b6c39433f720ce2ea0c33080f3f
+function	context_job_story_reading(p_job_id uuid)	9dfd89339332e32d6c8811aed36edf58
+function	context_job_story_record_sig(p_job_id uuid)	8f87d7ea989276c20158db9cbaf88caf
+function	context_job_story_request(p_job_id uuid, p_by text, p_reason text)	d3e09e9e36875955de47438509f40a3c
+function	context_job_story_request_finish(p_request_id uuid, p_lease_token uuid, p_outcome text, p_error text, p_retry_at timestamp with time zone)	5ac979250977d293fcc99559e79daaea
+function	context_job_story_rest(p_ledger jsonb, p_story jsonb, p_as_of timestamp with time zone)	0e435de9f2b68d3635e077bf04682c64
+function	context_job_story_rest_policy()	15ccd071487f473723dbc5dd47299a8d
+function	context_job_story_sections_problem(p_sections jsonb)	d7ad5e8259711b9b6ae686243b071d37
+function	context_job_story_text_get(p_job_id uuid, p_card jsonb, p_check boolean)	ac51513f6164fa256011d67c1bd82b10
+function	context_job_story_text_on()	901a4b96667bd49e806d8d9c465f0348
+function	context_job_story_text_policy()	27ac61c4fee7d15d3b71356271295eab
+function	context_job_story_text_save(p_request_id uuid, p_lease_token uuid, p_job_id uuid, p_sections jsonb, p_card_hash text, p_evidence_until timestamp with time zone, p_generation_id uuid, p_model text, p_prompt_sha256 text, p_checks jsonb)	e6340b260c0b7f54bc676ad17e381ce9
+function	context_job_story_writer_input(p_job_id uuid)	88d5ccf04d40e8cd8e6c7cee87e84f0b
+function	context_job_unpaid_at(p_job_id uuid, p_at timestamp with time zone)	9ee3b18c0b2397a3d794c0d86b9eba15
+function	context_job_view(p_job uuid)	44cef989aecc2317e2cfc0603b8ff36e
+function	context_jobs_cadence(p_job_ids uuid[])	9750d24f7d8d79e05018c2b2f9e3781c
+function	context_ladder_p1a(e business_events, p_preview boolean)	ce620833c851196a00eca328d9b7426a
+function	context_lead_monitored(p_job_id uuid, p_as_of timestamp with time zone)	09e649d7ed7de0996b1355fa2416deaf
+function	context_lead_monitored_jobs(p_job_ids uuid[], p_as_of timestamp with time zone)	ad173efa25e0adfd957971fb780eb74c
+function	context_lead_window_hours(p_type text)	f010fb3b217b0f201302b0985f227ab0
+function	context_ledger_backfill_open(p_from smallint, p_to smallint, p_at timestamp with time zone)	667a4cbb6c25cae2f6f2222ad15e18b2
+function	context_ledger_budget()	e1342d1e088674c8e47ae4d2af317c6e
+function	context_ledger_call_customer(e business_events)	cd1cda0bb5bd1c5405001a1d6b670d5f
+function	context_ledger_call_customer(e business_events, p_job uuid)	15a59f00fcc0a942e32b868583042d9f
+function	context_ledger_carry_forward(p_from uuid, p_to uuid)	475b69055a614373aec0bf6508f2bb55
+function	context_ledger_check_item(p_job_id uuid, p_item jsonb, p_writer text, p_person uuid, p_note text)	af976e59b8e6f35612d6383042d6e38e
+function	context_ledger_checks_pass(p_checks jsonb)	5b020dad3ea63d832d67786dc4025438
+function	context_ledger_cite(p_job_id uuid, p_cite jsonb)	158d8e3ed8b26c56a6e71bcd86d7b2a8
+function	context_ledger_claim(p_job_id uuid, p_kind text, p_run_date date)	5450d6ebcf78f29a3d8723d2248f0bdd
+function	context_ledger_close_on_records(p_job_id uuid, p_dry_run boolean)	7859146d6f4ac846650805a502f670aa
+function	context_ledger_current_generation(p_job_id uuid)	4bb724869d456376b698ba7524202c32
+function	context_ledger_due(p_limit integer)	a23941f01dd6bc8f0d5666c0025aeadb
+function	context_ledger_elsewhere_claim(p_what text)	2a9e05cb067dfdcd13561446f180290c
+function	context_ledger_email_closes(p_email_type text, p_closes_on text)	fcd8b82d3de45d4fc71177daaff4b885
+function	context_ledger_event_locations(e business_events)	52e2826a1c5f8ac1fc0ff46189f5f8a1
+function	context_ledger_event_on_job(e business_events, p_job uuid)	17cb0b0566fd1dd873f588286af4cc4c
+function	context_ledger_evidence_rows(p_job_ids uuid[], p_as_of timestamp with time zone)	e42feef799d9c3616a891afc2b31f213
+function	context_ledger_failures(p_job_ids uuid[])	1762b4a030868f0a55c0720697e06166
+function	context_ledger_finish(p_run_id uuid, p_lease_token uuid, p_generation_id uuid, p_outcome text, p_meta jsonb)	7f21d4665463c0e06eb731e3db63bf9a
+function	context_ledger_held_citable(p_job_id uuid, p_id uuid, p_as_of timestamp with time zone)	046e12f16b0376ab09d7ab7be7e3ce2d
+function	context_ledger_held_cite(p_job_id uuid, p_cite jsonb)	8a89cf0c933b7eafe320fa42e52d1ccf
+function	context_ledger_held_placed_copy(p_id uuid)	192bfeddb31a4342a8629b4971e6a308
+function	context_ledger_held_rows(p_job_ids uuid[], p_as_of timestamp with time zone)	a674d5e0854cc6d6cf54c068eed456fe
+function	context_ledger_item_held_now(p_job_id uuid, p_opened_by jsonb, p_as_of timestamp with time zone)	dca48cd6444151303a30ebcf7b3c5d5f
+function	context_ledger_items_held_stamp()	a29250a0fb6e730b9855f905bed219e8
+function	context_ledger_job_event_closes(p_event_type text, p_closes_on text)	299c6fe4b4ea038166078027f2a6e231
+function	context_ledger_judge(p_job_ids uuid[])	fd4b85230fbda0ace55b193bb05c6a5d
+function	context_ledger_mail_copies(p_mail_ids uuid[])	0cd7b932baca3498f1f47df46965b6d8
+function	context_ledger_mail_copy_blocks(e business_events, p_job uuid, p_other_live boolean)	0470e58b4a4b3bc8de28690bf80d494d
+function	context_ledger_mail_rule_since()	0cf9c6bbd42d1ba7f8970ac89ddcb04d
+function	context_ledger_message_kind(e business_events)	fcc07d00658255f268110a431b2d252d
+function	context_ledger_packet(p_job_id uuid, p_since timestamp with time zone, p_as_of timestamp with time zone)	2dd9a6a1fd6c57e68ee775cdcabfae3e
+function	context_ledger_paid_close_at(p_paid_at timestamp with time zone)	70bf30850a20fb2a54983ab2957ef53f
+function	context_ledger_party_keys(p_emails text[], p_phones text[], p_contacts text[])	3992c66a856ae21d4088257196d0f0a1
+function	context_ledger_person_edit(p_job_id uuid, p_user_id uuid, p_action text, p_item_key text, p_note text, p_item jsonb)	5f12c853421c686878f75f84facad089
+function	context_ledger_person_placement_enabled()	5f04694be6744b6e99e310063d4fdbf5
+function	context_ledger_placement_review(p_job uuid, p_generation uuid, p_as_of timestamp with time zone)	5bdd66d2dc3a6a8906c1b936766d2433
+function	context_ledger_placement_state(p_job uuid)	2eb564b4d528139ffb8d6d7148586370
+function	context_ledger_promote(p_generation_id uuid, p_by text)	3085815c30c3b1a236275f0c0c7ae975
+function	context_ledger_promote_shadow(p_by text, p_job_ids uuid[], p_limit integer)	f3a73161410c6da869af7652235d43c5
+function	context_ledger_reader_events(p_jobs uuid[])	7a4e3fb602703b6005f9437c701e05b8
+function	context_ledger_rebuild_packet(p_run_id uuid, p_lease_token uuid)	2df77bc099394a149d740c5f34021df1
+function	context_ledger_rebuild_request_state(p_job_ids uuid[])	e9ea968dc4c263117c5f97c38190fca6
+function	context_ledger_record_candidates(p_job_id uuid, p_closes_on text, p_about_key text, p_opened_at timestamp with time zone, p_from_role text)	c8d8590535b54ff2bf542720089a41ff
+function	context_ledger_record_candidates(p_job_id uuid, p_closes_on text, p_about_key text, p_opened_at timestamp with time zone, p_from_role text, p_to_role text)	6e716f6a5b0805f965dfaa5175b543cb
+function	context_ledger_record_close_install()	991807da3557d75fee8bf9fdb2d808f1
+function	context_ledger_record_close_remove()	0869188503285d6e992b5748bd6e21c9
+function	context_ledger_record_close_undo(p_since timestamp with time zone)	09a82c307f8f58075451987fc3e04b31
+function	context_ledger_record_close_withdraw_trg()	8afbc8e563b4c35d77e8fb470e1be517
+function	context_ledger_record_packet(p_job_id uuid, p_as_of timestamp with time zone)	0aa8c21ebca4b8cbf8d6a16d424c7ca6
+function	context_ledger_record_signature(p_job_id uuid)	e32c6ccd2b2ad7657827257ee3bf31e7
+function	context_ledger_request_rebuild(p_job_id uuid, p_requested_by text, p_reason text)	1d3c98ad214afc77520776434f6bac86
+function	context_ledger_row_admissible(e business_events)	6cda77e4b64ebae8ac44837c34d914bc
+function	context_ledger_row_elsewhere(p_job_id uuid, p_table text, p_id uuid)	d9b1fb5e99a8aa730898a49c9c75ed56
+function	context_ledger_row_unread(p_landed_at timestamp with time zone, p_automated boolean, p_until timestamp with time zone)	a684b7d9c649cfa8424e4cb0a928c2ef
+function	context_ledger_same_loop(a context_ledger_items, b context_ledger_items)	3377737d53d054598260296c0c3229ac
+function	context_ledger_siblings(p_job_id uuid, p_as_of timestamp with time zone)	57a154eb2ba27aa3af8e4aabb30d6974
+function	context_ledger_text_norm(p_text text)	74539dfcb8bda784179b834c749b6473
+function	context_ledger_thin_rebuild_policy()	b43f6dfa7c0405b807bc06c00c6e9185
+function	context_ledger_work_order_key(p_ref text)	57a647fa8076f3ce3127599ae3a85746
+function	context_ledger_write(p_run_id uuid, p_lease_token uuid, p_generation_id uuid, p_items jsonb, p_transitions jsonb, p_reader text)	8aaa66ef0d647debacb1db3ab2a98b39
+function	context_link_ref_jobs(p_text text)	840a52b5a5a4805d5524a57f70c63572
+function	context_linked_status(p_status text)	ab0b67927684168cfe94de9118a87a7c
+function	context_live_site_index(p_loose_keys text[])	8f41a9dad7ed1ec951bf8cd6c56a8f94
+function	context_message_party_roles(e business_events)	17a10cf9b9180a6380e8465d2dce503b
+function	context_money_status()	155104bfb08b8b3c2f98bdec089d4ee4
+function	context_not_job_sender(e business_events)	7e6e0d89fd467ed3044459435e19ac58
+function	context_parties_status()	5f01b621c22b3cb0840bf04eb32a338f
+function	context_party_builder_address(p_address text)	ccd5e9acd5d51228007c3af14054c474
+function	context_party_call_roles(e business_events)	c71771892098899f2195b45605901729
+function	context_party_contact_roles(p_contact text)	8c1f5381cb41d2cdcb0f33b530cc3070
+function	context_party_crm_roles(p_contact text, p_email_key text, p_phone_key text, p_at timestamp with time zone)	b5b0d82f9d9809cc7f6a7db6b1fde458
+function	context_party_domain_roles(p_address text)	93624d7e20f4ab3f292a1b0e2a8777d9
+function	context_party_key_jobs(p_email_key text, p_phone_key text, p_at timestamp with time zone)	151e03e177ecb85fe7c02f68bcccaf90
+function	context_party_key_roles(p_address text, p_phone_key text)	4da54e7c7107e927b350947697f440e7
+function	context_party_names_other_site(p_text text, p_job_id uuid)	df565d783f87d612984d267b57f904a4
+function	context_party_roles_lanes(p_as_of timestamp with time zone, p_days integer)	ff6797dcd0d2788d01ac1ff21143a18a
+function	context_party_supplier_key(p_email_key text, p_phone_key text)	92a1eb902c4a0aa0aab05d1aa7707352
+function	context_party_user_role(p_email_key text, p_phone_key text)	17bdaa22bb55de8635c1dd8563d070d1
+function	context_party_xero_bill(p_subject text)	2aef40c5509b118cee06a35cd951a64f
+function	context_payload_job_is_guess(e business_events)	1c87d88718cf014429170e3f1aaaa2aa
+function	context_payload_job_mismatch_rows()	69d68f016116576e6b6c8c773de8752e
+function	context_payload_job_repair(p_dry_run boolean, p_limit integer)	db0412566058df9e27a070472abb5482
+function	context_phone_key(p_phone text)	ad18564daffd9bb955949dbd4a5282c1
+function	context_pipeline_status()	9183a756c0d4b3881507656751c0d422
+function	context_placement_draw_digest(p_draw jsonb)	c6be81b5ddc93a3a9138d1667f5cabed
+function	context_placement_grade_card(p_event_id uuid, p_placed_job_id uuid)	13019e239ed5c786ff0ccf5a7b4913d3
+function	context_placement_grades_newest(p_as_of timestamp with time zone, p_population text)	164af66bd52e9d9481411b8fca02cec4
+function	context_placement_in_population(p_population text, p_lane text, p_audience text)	e79f3aa5e00c62bc0591855cd266f8ed
+function	context_placement_message_twin(e business_events)	51c07b74975ce624aa1c72dba26b5367
+function	context_placement_misfile_counts(p_as_of timestamp with time zone)	affef73a9d03cc5cf1b3a9ab465bbb46
+function	context_placement_misfile_plan()	5d1dec8bbcd3d5fd9058024ff8987e5b
+function	context_placement_population(p_as_of timestamp with time zone, p_days integer, p_population text)	2c437a3564a490750f99e5c610c3ccbf
+function	context_placement_sample(p_as_of timestamp with time zone, p_size integer, p_seed text, p_days integer, p_population text)	4458022ebb492ef463574b88ef4e581e
+function	context_placement_stratum(p_status text, p_rule text, p_match_method text)	016b1f0bef334ffbc8d39d070a298c59
+function	context_rank_contact_set(p_ids uuid[], p_guard uuid[])	79d83147145172244e0dbf7d2d9d2390
+function	context_ready_jobs_count(p_cap integer)	7dee92c8660ecf3a113b109f0e3128bd
+function	context_recon_append_only()	85e8c6ee820ecb7b83ad1a58f04d2b20
+function	context_recon_contact_owed(p_contacts text[])	5b2161cecdf4e1ea37945cd76c227c21
+function	context_recon_daily_left_out(p_as_of timestamp with time zone)	7849fac416e2cb79eeca7f5c40b5030d
+function	context_recon_daily_list(p_as_of timestamp with time zone, p_limit integer)	8f724c9deafcaf771c31c09a401a8e70
+function	context_recon_daily_rows(p_as_of timestamp with time zone)	b09aeb980a947da9de9d4a64f132e5f3
+function	context_recon_decision_state(p_event uuid)	2a804b7b7c226c1b623a14d8f5c81026
+function	context_recon_dispute(p_event uuid)	1f6ce65a2ec910d5fe72ccdb6b156cf6
+function	context_recon_evidence_hash(p_event uuid)	44ccd308c15f5d3e7f12503965a834eb
+function	context_recon_evidence_hash_of(p_channel text, p_direction text, p_occurred_at timestamp with time zone, p_contact_id text, p_payload jsonb)	bbc3501981e45439d2d6998aa08d8e93
+function	context_recon_evidence_keys()	db97c404ef7e2098425a4a9684979734
+function	context_recon_health(p_since timestamp with time zone)	18e98a4694a8f2713d17a62d9338cbfa
+function	context_recon_hold_decided()	b2cf225251d4e69b81d27be277fbff27
+function	context_recon_invoice_decision_state(p_invoice uuid)	fc0d183a50f0ff3f17cb22de954d64af
+function	context_recon_invoice_evidence_hash(p_invoice uuid)	c0f0fbc167c1a3fb7196f96569a62d4a
+function	context_recon_job_choices(p_jobs uuid[])	b412c37283a137e4e6cf80027f0d1ace
+function	context_recon_job_is_live(p_status text)	08678eb9dda70fb94f891e210a884e5a
+function	context_recon_job_items(p_job uuid)	3fb6517fa8b4cf3a9f56192bedeb47ce
+function	context_recon_live_from()	7d2cc3eb5bd8fc6b5dcf6bd00420068a
+function	context_recon_placement(p_event uuid)	90200beb89ba2f36e578ccb8dad84cf1
+function	context_recon_queue(p_as_of timestamp with time zone)	12d8944b7778e34babc2cfc461248b28
+function	context_recon_queue_statuses()	a5ff3a41463adcf1c65263649dca9f49
+function	context_recon_record_decision(p_event uuid, p_shown_hash text, p_action text, p_job_ids uuid[], p_cause text, p_user_id uuid, p_escalate_to text)	9cc5672723ba368861f1305812bb6f2e
+function	context_recon_record_invoice_decision(p_invoice uuid, p_shown_hash text, p_action text, p_job_ids uuid[], p_cause text, p_user_id uuid, p_escalate_to text)	f63d147b665b865388494710df9f31a6
+function	context_recon_set_dispute(p_event uuid, p_user_id uuid, p_reason text)	ec28f70e20a7674443bee5760e71677e
+function	context_recon_source_at(e business_events)	8b40d559006f9a4241180b90852a5939
+function	context_recon_source_time_hash(e business_events)	61c301d66ba259cb0052456fba0abb39
+function	context_reconsider_contact(p_contact_id text, p_since timestamp with time zone, p_reason text, p_job_id uuid)	53f7d9d592e75d0232226fa466f76464
+function	context_reconsider_eligible(e business_events, p_job_id uuid)	b36321bfcadcb02dc2aef454d12cece7
+function	context_redecide_events(p_ids uuid[], p_reason text, p_detail jsonb)	aac05ea52c2a5a28e3b087393d3ff039
+function	context_redecide_one(p_id uuid, p_reason text, p_detail jsonb)	b90e52161037944135f326ecf38c9745
+function	context_redecide_resting(p_status text, p_before_at timestamp with time zone, p_before_id uuid)	5c11ac90d98fe62b0749e27c4f427f64
+function	context_redecided_metadata(p_md jsonb, p_message_at timestamp with time zone)	a9394af1be0ac53135736764e02b92fd
+function	context_ref_jobs(p_tokens text[])	14931b7986111458def3808cf85bbb57
+function	context_ref_recipient_is_customer(e business_events, p_job uuid)	18904e5439afd9c23e59e97f200d256e
+function	context_request_role()	94c307050a74b605c8a15ff8d0d50264
+function	context_scorecard(p_as_of timestamp with time zone)	13f30d2cd4cafb4b6c30f1243b6f3195
+function	context_scorecard_jobs(p_after uuid, p_limit integer, p_as_of timestamp with time zone)	c0a2b2a18dfa2f6bc78f883911896d87
+function	context_scorecard_lane_of(p_event_type text, p_source text, p_channel text, p_direction text, p_body text, p_metadata jsonb)	2b51a7422882b6b1d77988fdd3860230
+function	context_scorecard_policy()	cf2438ff9b72b8aca9191b0dcf80c7b6
+function	context_scorecard_record_receipt(p_reader text, p_run_id bigint, p_red_rows integer[])	666ffa352f064f0ddddfe21731c7f495
+function	context_scorecard_record_run(p_trigger text)	b1749f7c69126d6deb57fd0ecb21710d
+function	context_scorecard_run_policy()	690a4d01caaece2eb8cb5b979f6336be
+function	context_scorecard_run_status(p_as_of timestamp with time zone)	02221a2bd436b591b75f4341ef9ff72e
+function	context_sender_key(e business_events)	c270c92b04eb3cdaae25079cce2141e6
+function	context_site_address(p_address text, OUT address_key text, OUT house integer, OUT street text)	e39b1844234efb0d0ca8206023761530
+function	context_site_candidates(p_job_id uuid)	57ae7b5804383831ffb7a53ea08fab3c
+function	context_source_freshness()	35b687b9a9daff5c090eadc145ebbe12
+function	context_source_freshness_policy()	080b0163e5f58c6857312865864ec1e9
+function	context_stamp_party_roles()	de974f45ef3174e9391a3d31369df179
+function	context_story_message_text(e business_events)	52d664033c39b59f864ee25a7d72e9ef
+function	context_story_scorecard(p_as_of timestamp with time zone)	db3b020d813e84e39e0f6fa4791dfc18
+function	context_story_scorecard_jobs(p_after uuid, p_limit integer)	3e410b9ea58a28e87789c9d7a72dddd6
+function	context_street_type(p_word text)	21983f01da7b276d3607eb6a3c3d1bdd
+function	context_supplier_order_tokens(p_subject text)	e6935ca30c49c89d5db8de386da6e18c
+function	context_supported_due_date(p_text text, p_event_at timestamp with time zone)	59d6d8fc08b2ba856ecbecfc0625e93d
+function	context_text_names_other_site(p_text text, p_refs jsonb, p_job_id uuid)	1055d89fb1566d6b35306261845b17ed
+function	context_thread_bound_redecide()	fc9134d5a7a325282ce6c59fc677244b
+function	context_transcript_capture_policy()	aa063d0d61ee4e4f4b296d5f1cc61a1b
+function	context_transcript_capture_status()	909bb8d371b00f49eb80fabf715e176c
+function	context_transcript_due_calls(p_limit integer, p_history boolean)	4e67b697860f6206c30d1e107dd62677
+function	context_transcript_fetch_flag()	3cae5d15d6b1c00c4d94739fcf3b8744
+function	context_transcript_history_pending()	87c5b235cfc4ae10d10fed033356e801
+function	context_truth_set_draw_digest(p_draw jsonb)	e1ce832a28054cad0396356ecbeda97a
+function	context_truth_set_ex_ok(p_ex numeric[], p_n integer)	faca1cbd957eedd5a3829ab4e337db5c
+function	context_truth_set_ex_sum(p_ex numeric[])	c8d54a3eeb3f166886e5e5cb5ee2219a
+function	context_truth_set_ids_ok(p_ids uuid[])	3b6fd900ae7649dd2a6de38708326243
+function	context_truth_set_ratio(p_parts jsonb, p_mul_num bigint, p_mul_den bigint)	e34c013379d54a3eaed669718901e1db
+function	context_truth_set_results(p_as_of timestamp with time zone)	c28a5f3a9b4c4aa26afae5db0f52bb2c
+function	context_truth_set_strata_ok(p_kind text, p_strata jsonb, p_drawn integer, p_screened integer)	134daea58f411cc65ee99edc464fe434
+function	context_unlinked_census(p_budget_ms integer, p_phase text, p_cursor_at timestamp with time zone, p_cursor_id uuid)	0aa0307cbabca8c35486e1c42860b314
+function	context_unlinked_rows(p_scope text, p_reason text, p_source text, p_since timestamp with time zone, p_cursor_at timestamp with time zone, p_cursor_id uuid, p_limit integer, p_budget_ms integer)	dabbe191ffcb94e93d1a1b662ccf7a1b
+function	context_unlinked_rules_enabled()	a93c2cf56215d996861e04f15f978875
+function	context_unplaced_for_job(p_job_id uuid)	3527f11806f3b76081137324e4762a08
+function	context_unplaced_lane(e business_events)	c63281fdebf570ea2f822086d92b4da4
+function	context_unplaced_policy()	2bc6b66155417478c7236c5a2160205a
+function	context_unread_events(p_job_id uuid)	3897a4a1954c9bb6cf35419e9d04d285
+function	context_unread_rows(p_job_ids uuid[])	bb5ec9f11d525b8d420739fa3d8c4d54
+function	context_worker_facts_present()	05b9e4b3258cef32f9607d1ae548b720
+function	context_worker_marks_newest()	ca4ba427896f360c551d25f817b6394a
+function	context_worker_notes_due()	118cdaa6aa8143ceaa36cdcf7c328ee0
+function	context_worker_state()	02f8087bdb8e6a36ca35812faf2062fd
+function	context_xero_event_invoice(e business_events)	e10753cc0a55962f00897ab0daa9dda5
+function	context_xero_evidence_backfill(p_dry_run boolean, p_limit integer)	eb9a51fc91bb4341e4a56b4e65552aae
+function	context_xero_evidence_backfill_plan()	805f818bffd9af3b0ead62f5b5fb80ff
+function	context_xero_evidence_place(p_plan jsonb, p_dry_run boolean, p_since timestamp with time zone, p_limit integer)	90950950f0b3b31ea09aa5106ddfb117
+function	context_xero_evidence_request_reads(p_dry_run boolean, p_limit integer)	1ec556309a42774ef87c8023b40c6cdd
+function	context_xero_evidence_undo(p_dry_run boolean)	f0895bd3ed4638df1fdaa44b8ebceccf
+function	context_xero_paid_event_key(e business_events)	689b60123b81312a722b47d4056376d4
+function	convert_nudges_to_actions()	46a352073e290af59a80e2e9f3118e00
+function	count_intentions_today(p_org_id uuid, p_user_id uuid, p_action text)	2a8135509c23d5b23633c0ce0cbf90a1
+function	debt_ws_company_terms_valid(p_terms jsonb)	790395c8c92cb70f9bfac1f21526f8df
+function	debt_ws_payments_between(p_org_id uuid, p_from date, p_to date)	7c15ea4e4ad4b5aa2e6c675c43897fbf
+function	debt_ws_set_company_terms(p_company_key text, p_days integer, p_user_id text)	05f6f121ca85fd125c78f5e92230f417
+function	deliver_proposed_actions()	26b9056f09ede14ef932671609fed5d8
+function	dequeue_next_event(p_worker_id text, p_lock_ttl_seconds integer)	b60275f0fc8d76b0ffc35509031f7e74
+function	discard_makesafe_board_reconciliation(p_run_key text, p_selection_hash text, p_reason text)	969d69a710297b2556178d3e2efb6dfd
+function	dispatch_commit_order(p jsonb)	9739e25ac19463e3181cc8df06836526
+function	dispatch_commit_order_update(p jsonb)	ce4a19205cd720571555fa4d78292f1a
+function	dispatch_job_number_pattern(p_job_number text)	617e321e374086d35c7665d649041afc
+function	dispatch_line_cost_reasons_write_once()	eb211fdbc29c9b2c818aabd073272eaa
+function	dispatch_next_po_number()	78bd189aac4dd3e8bd795d184da69f40
+function	dispatch_release_unknown_send(p jsonb)	c201c49d5ac3c3ec498dd7c687a2639b
+function	dispatch_supplier_name_key(p_name text)	44d5b3aa9ff44feea2401cd78386364a
+function	dispatch_v2_record_outlook_order(p jsonb)	c4bf8db5348ab8480c56558a11a4bfbf
+function	dispatch_v2_record_outlook_order_on_send(p jsonb)	a00031742091f71f57f087077f0fbca9
+function	enforce_makesafe_intake_case_source_insert()	fcd5017e15ced3bcbde921d21277f8c0
+function	enforce_makesafe_intake_case_write()	89ba51017ea762bf3d8ed8990ad1d04f
+function	enforce_ses_synthetic_livefire_run_change()	8d9b0751aa6f32afe4ebe20ec5ec77ef
+function	enforce_trade_invoice_money_split_v1()	ff361e7f0a04b3d136b00a8e6a0d714d
+function	enqueue_makesafe_pdf_extraction()	903bacbdbc020a74bbba7a4c6896de60
+function	enqueue_ses_report_trigger_run()	1f5876b73954bcf123c8b3e6caef41f4
+function	ensure_booking_draft_job(p_ghl_contact_id text, p_type text, p_org_id uuid, p_client jsonb)	f53555f7acf5750ba3a40333f53ada79
+function	ensure_job_work_order_draft(p_job_id uuid, p_origin text)	a14baec28892644e945944b87df7f5dc
+function	ensure_makesafe_job_details_job_type()	4c150444b918a0949cc90915ec40f6b8
+function	exec_sql(query text)	948cec9e1500f3fca121f041abd6e253
+function	expire_stale_confirmations()	57e40e45851db41e7023f18587d6383d
+function	finalize_makesafe_board_reconciliation(p_run_key text, p_applied_by text, p_selection_hash text, p_state_token_hash text)	3fd731a7c79ce5da2d5fdf914db7af3f
+function	find_or_create_entity(p_org_id uuid, p_entity_type text, p_name text)	e9c86f3a7ba3d76764f93e7899b01726
+function	finish_context_extraction_run(p_run_id uuid, p_lease_token uuid, p_status text, p_event_ids uuid[], p_tokens_in integer, p_facts_new integer, p_facts_superseded integer, p_facts_retracted integer, p_error text, p_retry_at timestamp with time zone)	10e315c67afeb142e55a096f44688f85
+function	finish_context_pass(p_run_date date, p_lease_token uuid, p_status text, p_retry_at timestamp with time zone, p_error text)	c1b28ccd6361ed9b74ccd231372e8518
+function	flashing_library_author(p_org uuid, p_id uuid)	e15f64268ca0aec84b6f3159cf81810b
+function	flashing_library_touch()	249f27bed9e317cb8d037a878be5efd8
+function	flush_owner_unapproved()	6dd91511b0ff194be584ea603a4c504e
+function	fn_payment_detected()	4a143d6c4c23d078905198967d771512
+function	fn_process_payment_events()	b4d97a166345ad53b9a985b0d88f8a19
+function	freeze_group_work_order_split(p_group_id uuid)	74c08234e38f002588fd04b8672106b5
+function	gen_random_bytes(integer)	036f2b03225615af5611170f8c716d5a
+function	gen_random_uuid()	93a3ed0437c41efb1b5b33f41d961489
+function	generate_smart_nudges()	9a224881771398f305a172296400ff0e
+function	get_entity_memory(p_entity_id uuid)	da9856063399e189e773a220f778f7dd
+function	get_fence_job_mint_progress(p_request_id uuid)	68f16ef523e47345d6f9f163b3beafeb
+function	get_job_financials(p_job_id uuid)	67922849c196e7426716e674be600690
+function	get_recent_corrections(p_org_id uuid, p_limit integer)	e28602a9157e739382482ed4398c1c90
+function	get_release_packet(p_job_id uuid)	027c480e315c809cbb3368ad9b921348
+function	grant_job_deposit_gate_override(p_job_id uuid, p_user_id uuid, p_reason text, p_unpaid_reasons jsonb)	c4407a4a35c8ed921548b5f2bbd4b4c7
+function	group_claim_active_trade(p_org uuid, p_user uuid)	b2f2c652420617e7631d470d5a0fb187
+function	group_claim_approvals_append_only()	4a7487364f7f23d8cfe5ab08572934f3
+function	group_claim_crew_sources(p_group_id uuid)	748ba9a9171a3e2b7c9e96a7ded4834c
+function	group_claim_on_job(p_job uuid, p_user uuid)	16384c8f926f70935add4709f84af3f6
+function	group_claim_search_trades(p_actor uuid, p_query text)	3b4138fb84cd23d68667517b04ca2777
+function	group_claim_split_hash(p_group_id uuid)	c9fc2e804244de5719a2a8b94a688cd7
+function	group_claim_update_crew(p_group_id uuid, p_actor uuid, p_action text, p_users uuid[])	f41855f36c7be5a525aa9fc939312523
+function	group_client_signoff_counts(p_job uuid)	7a756ebcdbdbefa195177e43761bb45c
+function	group_reopen_requires_client_confirmation()	e5b23e93ff19a390c41d3bcee7add1d5
+function	group_work_order_assignment_covers(p_job uuid, p_user uuid, p_day date)	fd7829f6d9887a13f3e0fffc8c2b91a3
+function	group_work_order_budget_lock()	acc2e22fe08cdb224f1359933e5b2829
+function	group_work_order_caller_is_participant(p_group uuid)	8832f11ceb32770dc143e9b3cfc4ff6e
+function	group_work_order_caller_is_staff()	c3b99315dcfbb6cced3d9bbd959186c0
+function	group_work_order_crew(p_job_ids uuid[])	54c75ba1592d8fa016a45f7729169d17
+function	group_work_order_events_append_only()	7da5333adccada7f89443d3648ff777b
+function	group_work_order_hours_paid(p_job uuid)	3479922890fb0805191772446230663a
+function	group_work_order_hours_paid_budget(p_basis text, p_gross_ex numeric)	ae305a17368f5384daed0b778b00ab26
+function	group_work_order_hours_paid_total(p_job uuid, p_basis text)	88c6927c03ef2485b10d76859c6cf160
+function	group_work_order_hours_unresolved(p_job uuid)	279d0eed8f6fb574d98d2b3230ca3497
+function	group_work_order_invoice_billed(p_status text, p_xero_bill_id text, p_xero_bill_status text)	33b4a51643ff538f0638fd527e095315
+function	group_work_order_job_released(p_job uuid)	e87632c5a4b8ae1c488bd01b55ff97ee
+function	group_work_order_labour_outside_pool(p_scope_items jsonb)	88c84505f70d7905c1e384b5e32c7843
+function	group_work_order_line_is_normal_pay(p_line_type text, p_source_work_order_id uuid)	d0cb1aa9cf94070a25c950eef8980ec8
+function	group_work_order_line_is_office_fee(p_line_type text, p_description text)	601ab6bd581c43b6c75f2bfbb552e961
+function	group_work_order_line_is_paid_hours(p_line_type text, p_source_work_order_id uuid, p_description text)	ede0a8d65154d86ba3f9da6282ddeea5
+function	group_work_order_lock_job(p_job uuid)	0532a1b8d1ee6d4d7a711ce105cdb0e3
+function	group_work_order_paid_by_hours(p_job uuid, p_user uuid)	dd7b3e40f836e8e5f89bc4e537551d37
+function	group_work_order_pay_for_basis(p_basis text, p_budget_ex numeric)	aace628ef06d6309956a4fa08a136212
+function	group_work_order_refuse_late_joiner()	4404f87c6b2fe01d40bbe08e1c260600
+function	group_work_order_release_state(p_group_id uuid)	e3439e346dd94d76fee489af7a9d755c
+function	group_work_order_share_pay(p_group_id uuid, p_budget_ex numeric)	c3b74efe8a0c779d1cdae7097f41c257
+function	group_work_order_shares_frozen_guard()	4bac657bb331c1feea00c1806f528209
+function	group_work_order_signature_ok(p_value text)	9a4b61a25e79ff079d3acf2e3ab94c1e
+function	group_work_order_time_entries_guard()	c5a2dae4a073dbab297e26e853c1d3f8
+function	group_work_order_write_split(p_group_id uuid, p_freeze boolean)	49c6e1a2f1c06a608f650734295da85b
+function	group_work_orders_open_needs_acceptance()	064e68eb3e49a23f01ad1b6e5657a97e
+function	group_work_orders_refuse_existing_pay()	9ecbd9960a836b5abca836805c4a55e6
+function	group_work_orders_release_guard()	b49c5f87a53810f1398b40a5397477c2
+function	group_work_orders_void_permanent()	ea866a17377d3b4a071e2e2995ce47ab
+function	guard_jobs_ses_money_seal_v1()	666e49cc861b874b1a6de9d4f5cbb42a
+function	guard_makesafe_board_attention_mark_insert()	5a3d6ca2b02e0549b894da9c46fe9fe0
+function	guard_makesafe_board_status_application_insert()	60362b002a9a1a40e2ef514949421228
+function	guard_makesafe_invoice_void_content_v1()	3a77f05344398ee697467b63776ef81f
+function	guard_scope_draft_work_order()	237857f59700d5573dc00818401a15f5
+function	increment_observation_count()	6302287ebf98f1a6827975481fc35c65
+function	inspect_stale_ses_route_dispatch_v1(p_expectation jsonb)	acde2b6d8271c87e7d599754ffa14d2d
+function	install_job_cost_events_from_cost_lines()	61a67850157001cc082ab84c71762f7b
+function	install_trade_invoice_reimbursement_guard()	7c3f7deeef8527c38535161dc4d85c06
+function	install_trade_line_hold()	a6d6f316eb0896791a93492972a37495
+function	install_trade_repayment_save_lock()	3f1f2ba26cbad172646048d3b7268707
+function	invalidate_makesafe_authority_dependency()	389fd32ec39c3f93f94514368bd9bd6c
+function	invalidate_makesafe_case_dependency()	32d8766791a272495bab092b42126b66
+function	invalidate_makesafe_fact_dependency()	50634cd26302b3143fe6e75f429a135b
+function	invalidate_makesafe_family_pointer()	42ebf73f41992614e654b162b02d9a11
+function	invalidate_makesafe_readiness(p_job_id uuid, p_dependency_kind text, p_dependency_identity text, p_reason text, p_actor text)	73c3eb1ad4d4c215aaeb5d24228883e9
+function	is_flag_enabled(p_org_id uuid, p_flag_key text)	6f1986906f80c6cc1f2ba73718bdd9eb
+function	is_shadow_mode(p_org_id uuid, p_flag_key text)	b5e464a28397d7776790d78f7372c4f4
+function	issue_owner_approved_job_work_order(p_work_order_id uuid)	6a9a885d26e8f5f73b65a362d972b6e0
+function	issue_ses_channel_approval_request(p_org_id uuid, p_job_id uuid, p_channel text, p_sender_fingerprint text, p_request_id uuid, p_message_hash text, p_code_hash text, p_issued_at timestamp with time zone, p_expires_at timestamp with time zone)	b4bb5e6bbf8aeebbd84323e64bba1116
+function	job_budgets_record_commission()	d5d2b7053129d9fec7818136b113cca4
+function	job_budgets_write_once()	43a4adfc8394a917c328e49f3f063cec
+function	job_change_mark_triggers_install()	599431a4292e6d559913a1f33659c772
+function	job_change_mark_triggers_remove()	f4dd8077b0b2d8835618cf11417b5378
+function	job_change_marks_fold(p_limit integer)	d0f9bf410e9f1e22e1b09707324ee858
+function	job_client_signoffs_append_only()	40c60a14a81eb26cb17e426408fd326b
+function	job_client_signoffs_group_release_guard()	961212f524a5ed341db7602f729533fb
+function	job_closeout_settings_receipt_mode_since()	dbddb3027eb44cd73277ef3d897b1ee8
+function	job_commission_claimed_ex_gst(p_job_id uuid, p_include_invoice uuid)	9645d675143512a2c38720efb409ade8
+function	job_contacts_owner_mirror()	42e95ad1c5ecae48fc4f799ba0babf94
+function	job_cost_bill_line_job_id(p_text text)	a543e41bc709d4a96d1f2b3f7719b572
+function	job_cost_close(p_job_ids uuid[], p_as_of date)	9de6b059eb7c7ac5743a264b6696ef1e
+function	job_cost_close_policy()	7fd61f70963f66c4ec55c2643d81be5b
+function	job_cost_credit_ex(p_credit_inc numeric, p_credit_note_id text, p_xero_invoice_id text)	77e39c0217788a1392b45a0e0e746a5f
+function	job_cost_credit_note_part(p_row_ex numeric, p_allocation numeric, p_bill_total numeric)	6a27d945efb54126e6a1f7e122e6b368
+function	job_cost_credit_note_part_ex(p_row_ex numeric, p_allocation_inc numeric, p_credit_note_id text, p_xero_invoice_id text)	a766a40ec8dc8ed455c41eb8dbe8ceb5
+function	job_cost_credit_share(p_raw jsonb, p_total numeric)	157bf7ace554eb5e6b2af6e13975d721
+function	job_cost_crew_bill_line_job_number(p_description text)	40421e65a5e63ac7e9473fca034cf0da
+function	job_cost_document_business_unit(p_lines jsonb)	d72e74d586be4871363a4d405cfe76f0
+function	job_cost_events_dirty_trg()	045fd8abb375eb601393617736de8125
+function	job_cost_events_mark_job(p_job_id uuid)	78955850d475d5acc75192a921c09cb9
+function	job_cost_events_switch_dirty_trg()	e41e23212e581b968fcf350f832374aa
+function	job_cost_installer_bill(p_line_items jsonb)	e61215731f3635296abe0ae853d495d8
+function	job_cost_line_business_unit(p_line jsonb)	f8102dd9d7921f31f24995fdedba38d2
+function	job_cost_lines_install_trade_triggers()	a74b97953584f7a73a08cff77da511f5
+function	job_cost_lines_parts_check()	8a5db5579b00b45f2206c92aefbbd180
+function	job_cost_lines_refollow(p_document_kind text, p_document_id text)	b372e29cdeef8c2f1f33627330ae1f81
+function	job_cost_lines_remove_trade_triggers()	947fb3bd1ad9039d8869e2d7a58c327b
+function	job_cost_lines_retry_one()	0cd0fa4e8d5441b2c70c98b937458ab8
+function	job_cost_lines_set_state(p_line_id uuid, p_state text, p_parts jsonb, p_decided_by_kind text, p_decision_id bigint, p_needs_reason text)	bdce2616f524c7bb9b259ba2ae159dc7
+function	job_cost_lines_sync_credit_notes(p_credit_note_ids text[])	8b6aa2fbddcfdb0b2caa1dcf4371c8ce
+function	job_cost_lines_sync_trade_invoice(p_trade_invoice_id uuid)	9704fd8812b4715b6667d5713763ef32
+function	job_cost_lines_trade_invoice_row()	cd7a3a3a39a09d9f24771c5e8c28a4f3
+function	job_cost_lines_trade_statement()	e320e56f749e60379b05b33f68d8678b
+function	job_cost_lines_try_trade(p_invoice_id uuid)	96ca2a2f45845ab14105300f3ee2ecc8
+function	job_cost_lines_upsert_documents(p_docs jsonb)	aad74ba4411cc0cda370d43070e3c5cf
+function	job_cost_lines_write_state(p_line_id uuid, p_state text, p_parts jsonb, p_decided_by_kind text, p_decision_id bigint, p_needs_reason text)	43ad746d942986842b42dc2191a1363d
+function	job_cost_super_company_contribution(p_line jsonb)	ddd7c875c6ca07dbdf71a5635245955b
+function	job_cost_super_withheld_line(p_line jsonb)	256ab823c5158bbe00abaa6e29240b77
+function	job_deposit_gate_overrides_guard()	9f501f2f741cddb2fecae8354b704100
+function	job_invoice_work_order_id(p_job_id uuid)	88e2dda4af25c973840615dfe641c6b4
+function	job_labour_budget_on()	00e46d85c1f04d6cee393957f8d09938
+function	job_labour_cap_raises_write_once()	ace2e869476cea38e383c83a937b2d1e
+function	job_labour_cap_state(p_job uuid)	232a760a368c993912f1402772e5573d
+function	job_live_work_order_id(p_job_id uuid)	0ce4c087a01ee557d9017cf2c84d0359
+function	job_mark_changed(p_job_id uuid, p_source text)	5b18f9192d73b9ddc86a71215ee7ebd3
+function	job_mark_changed_trg()	fb50d37b02370c3ee12af5d5be0593f8
+function	job_marks_notes_seen(p_until timestamp with time zone)	37e812ea6644048adedba96ac6a12315
+function	job_material_lines_cost_reason_own()	45982ce12b492901198bd6aafd00a124
+function	job_materials_facts_no_mix()	0b74f3b539b99c884246d876f4509720
+function	job_not_yet_accepted(p_type text, p_status text)	e6ce4777ae32bc3f3a90fb6a93045479
+function	job_page_ack(p_job_id uuid, p_version bigint, p_covers timestamp with time zone, p_events bigint[])	87c4c8e53fb0bf2210d6981a2b54fc40
+function	job_page_get(p_job_id uuid)	4fad727218d2eda48113c658512f86b9
+function	job_page_refresh(p_job_id uuid)	7c10bf73a85170c37f9a88051cb5ce47
+function	job_page_version()	bb34e28de0bddd8894950200837142ea
+function	job_page_yield(p_job_id uuid)	3771230719acd7dc0f48ab01b63a275c
+function	job_pages_install()	b393cfc26b34ebb650bd606ac8ca093e
+function	job_pages_keep_ready_set()	c4b69a0a85eca048b1a9f33bdc868c4a
+function	job_pages_next_due()	d35be2589fd0d6009ae964c277eb8ed1
+function	job_pages_nightly(p_limit integer)	828932bf1fdb968c764f28838fa0aee8
+function	job_pages_refresh_due(p_limit integer)	24c1f2a21e214ff20c5f6b4d81efc584
+function	job_pages_remove()	239bbd45b31b7bc7996ade88d833829f
+function	job_party_email_key(p_email text)	670df0b3697061286a48f63ecc261e70
+function	job_party_flag_on()	65b443062e3189665c7527875510e0a1
+function	job_party_phone_key(p_phone text)	e5af2f3e7a4706de07ae167d43a04463
+function	job_party_receipt(p_job_id uuid, p_job_contact_id uuid, p_change text, p_actor text, p_method text, p_match_basis text, p_run_id uuid, p_before jsonb, p_after jsonb, p_detail jsonb)	49c6aa92c24dd47585d8acdd8f78e12b
+function	job_party_reconsider(p_party job_contacts, p_ghl text)	5dd79285ad333d7221d82839a7c659ac
+function	job_profit(p_job_id uuid)	23f7924c80a4cbf0cd5448bc0edb4424
+function	job_profit_crew_pay_landing(p_since timestamp with time zone)	f3b6bc31b6178b02dcb436f3febceff3
+function	job_profit_expected_cost_missing(p_job_id uuid)	bc133570b9f1876e8bbe8a41e8f608b9
+function	job_profit_line_evidence(p_job_id uuid)	e07cf775a74cda10cca2e40d4bafc540
+function	job_profit_line_evidence_many(p_job_ids uuid[])	70f5e76999eb569da0adcf9e7d98c61a
+function	job_profit_line_evidence_score(p_from date, p_to date)	4f2852ac4ab5f4625184b6f3de4fe2ad
+function	job_profit_mark(p_job_id uuid, p_reason text)	3f3c3d56c36b1721a3c7f808ccfac958
+function	job_profit_num(p jsonb)	c7f6f76f4c1b979aa2d167f8be8cd5e9
+function	job_profit_partial_cost_policy()	23e11003e1b7bd73c92a7dc49f40559f
+function	job_profit_patio_revision_pricing(p_scope_text text, p_pricing_text text)	7e7c7d5a9158a5eaef99adc0864dd33f
+function	job_profit_refresh(p_job_id uuid)	d96f13e4ba1c7bd508ada9412832f54f
+function	job_profit_refresh_all()	1a06107e14830e6902b2c93f04d7410f
+function	job_profit_refresh_all(p_after uuid, p_limit integer)	6488957a919cbdd0e71d5e808010a14f
+function	job_profit_refresh_many(p_job_ids uuid[])	b82dc4d9fc789fdaafb47eb818a571ca
+function	job_profit_refresh_marked(p_limit integer)	f1b07c4a36b63ffbf01e96e3de0e3256
+function	job_profit_safe_jsonb(p_text text)	8aa388ed047b2551ff922161f10ac54c
+function	job_profit_share_on_price(p_price_ex numeric, p_share_pct numeric, p_ex_gst numeric)	81cbca7fbbf44bf1f425e04cfd49ba73
+function	job_profit_stored_compare(p_limit integer)	90cb957924333481f123197dbb9306ac
+function	job_quote_values(p_job_id uuid)	ddd18840b41ec1267033ea938861801c
+function	job_truth_notes_of(p_generation_id uuid)	dec27a2b4f6ea46a2aff70e6d91819ee
+function	job_truth_story_sentences(p_sections jsonb)	47e1371131282c1c1a2fcf38b2386c8b
+function	job_truth_weekly_draw(p_week date, p_limit integer)	dcdb8819c3c2e2b9e8db2490915c87ee
+function	job_truth_weekly_install()	eb4a930bdaea4efaf3745f84f6acbf4b
+function	job_truth_weekly_record(p_week date, p_job_id uuid, p_user uuid, p_marks jsonb, p_missing jsonb)	3338af87c00487a71a0c3e62a0da7ce6
+function	job_truth_weekly_remove()	ffd964acb7692ec5ee7f32df67a1d166
+function	job_truth_weekly_set_candidate(p_week date, p_job_id uuid, p_story_sections jsonb, p_notes_generation uuid)	b6a3a43081bda64a904bf013baf8d58c
+function	job_work_order_billed_invoice_statuses()	b4af43918566da0538e24fd717d73a13
+function	job_work_order_content_hash(w work_orders)	1992957241e86acbe9261cc1d6a7826a
+function	job_work_order_crew_invoice_rollback_guard()	b71077db5788d5da194e796c3205cdbe
+function	job_work_order_gaps(p_org_id uuid)	2ebc9481011b898bca9591791afd8bd4
+function	job_work_order_issue_check(w work_orders)	0ed6b2438513f9040d70ab10ce2159aa
+function	job_work_order_not_ready(w work_orders)	e1a48206cb1732aa5ae1fd12dcd80922
+function	job_work_order_open_statuses()	4a1286402bad34372ef43b888b8cd2e2
+function	job_work_order_owner_gate(w work_orders, p_hash text)	1c0f4ccb1bf3176a03355510265269de
+function	job_work_order_owner_unapproved_append_only()	13ab40283384330789242e417cf9b724
+function	job_work_order_recent_activity(p_job_id uuid)	24de0de4bdd89430e9747fcf538305b0
+function	jobs_expected_costs_write_once()	732cf2d56e100e33e1bc5fa9e95be897
+function	jobs_open_job_work_order()	b30eac8ddd266bd0d4e6573121c4bead
+function	jobs_record_status_move()	bdb3232e5a8e1d51e9023557dbdfd249
+function	keep_human_parked_intake_case()	95f164fb3396255e4cba047cbd3fef91
+function	keep_newest_xero_settlement_evidence()	8bee848349d31a110204413771482289
+function	link_issued_job_work_order(p_work_order_id uuid)	6d71cfadb3ca88ba646e39759c7c69ec
+function	link_job_ghl_contact(p_row jsonb)	713bf6bd8950d2ed1f363ff68f17e624
+function	link_site_jobs(p_job_id uuid, p_site_lead_job_id uuid, p_link_kind text, p_decision text, p_actor text, p_evidence jsonb)	4181b749680808c81ac9bf92e1ce5fae
+function	list_visit_outcomes(p_since timestamp with time zone, p_until timestamp with time zone, p_scoper_user_id uuid, p_contact_id text, p_include_history boolean, p_limit integer, p_offset integer)	1f8ff5f21a866c6a622642ab8c90243e
+function	makesafe_attendance_cycle_set_hash_v1(p_attendance_cycle_ids uuid[])	ca5d778ad1dd3dbb19f6ddc3fdeb5244
+function	makesafe_auto_file_enabled()	9d3f47aea79d8d80b5fc5516697a6d5b
+function	makesafe_canonical_json_v1(p_value jsonb)	0824855643d0b96a6cde4122428fe779
+function	makesafe_cron_enabled()	551e1b064a59bc7eaac25e204b6167ed
+function	makesafe_deterministic_intake_preflight(p_org_id uuid)	7b4c011b172a432be7b878eb85a25a47
+function	makesafe_exact_allowlist_valid(values_to_check text[], max_items integer)	66e38fa6e3c76657d962be985faa0644
+function	makesafe_fact_canonical_json_v1(p_value jsonb)	82af069e9fd4b52f6f6a7c247d4d0f35
+function	makesafe_fact_hash_v1(p_kind text, p_payload jsonb)	b3e2c1a7218b46953523a847a89eb2db
+function	makesafe_intake_case_transition_allowed(p_from_state text, p_to_state text)	b77c8b9ac90059908a75226d38145791
+function	makesafe_intake_email_accounting(p_org_id uuid)	45e26351ef9e024c656c9452d47d5524
+function	makesafe_intake_field_names_valid(p_values text[])	3d0683d9a6e87501b9a90b822cddba22
+function	makesafe_intake_fresh_source_health(p_org_id uuid, p_mailbox text, p_since timestamp with time zone, p_now timestamp with time zone)	a987e90689b882377d978b8ec61387b9
+function	makesafe_intake_mode()	1cf0b23bc13be6bf36c6c1b2c6b9298d
+function	makesafe_intake_provenance_valid(p_value jsonb)	e878dc545c3e4bf795042ec06b449066
+function	makesafe_pdf_extraction_backlog_estimate()	d381bb1bd2cb799023689a190ba83884
+function	makesafe_readiness_revision_v1(p_dependency_envelope jsonb)	8cfcb82df904758c8373195c18085ea6
+function	makesafe_reconciliation_state_token_v1(p_state_facts jsonb)	37ffd47973132af6cbd7f2ece76176bf
+function	makesafe_synthetic_livefire_source_health(p_org_id uuid, p_mailbox text, p_since timestamp with time zone, p_source_post_ids jsonb, p_terminal_override boolean)	6ed99dd5f8fe08eb46ad8248e2c59e04
+function	mark_ghl_calendar_appointment_sending(p_location_id text, p_key text, p_token uuid)	103f3e47f8fe5b41db5680b47c2f5644
+function	mark_overdue_commitments()	58aeb25403eb243a4059014837c5a359
+function	match_observations(query_embedding vector, match_threshold double precision, match_count integer, filter_entity_id uuid)	7826aa8b6d90adfe585f6a4715505313
+function	match_shadow_report(p_days integer)	9f1a386bc898fcf1ec6c6f06d3137519
+function	materials_ai_accuracy_by_supplier()	c2088bd75ad0e67c6bc0a42a4b0f7bba
+function	materials_ai_apply(p_call uuid, p_model text, p_decision jsonb)	87a2272f379b9c41a72e232f872655b2
+function	materials_ai_bill_batch(p_limit integer)	8cc46936782ac304a450ff8b19e6607b
+function	materials_ai_candidate_jobs(p_from date, p_to date)	191fff3225a1ac8c03f6e631cea025d2
+function	materials_ai_finish_call(p_call uuid, p_status text, p_error text)	ba02e08f26f318bb462b6cb423861531
+function	materials_ai_hard_keys(p_bill text, p_job_id uuid)	2ef85da40004fb45adc42ea2488e8947
+function	materials_ai_held_reason(p_reason text)	f2daa075fb7e5fdad016a22bfc5a8b03
+function	materials_ai_known_answers()	37967033a1437554a223bbdfe724c871
+function	materials_ai_placed_without_key_count()	d4bc78e8231189c5b23050ff5e5a9990
+function	materials_ai_record_second_check(p_placement uuid, p_result jsonb)	7e5af5bb3c59ab8dc5c6012af32622d4
+function	materials_ai_reserve_call(p_kind text, p_model text, p_bills integer)	ee7f1484d1403b642f9af7710b77abbc
+function	materials_ai_second_check_due(p_limit integer)	95c17ede87b0e897db0df4735915acf5
+function	materials_ai_status()	5e572ca27767186c91c353f086eb934c
+function	materials_ai_trade_mirror(p_xero_invoice_id text, p_line_items jsonb)	69ca1198709a288991b2ea1739712f71
+function	materials_ai_undo(p_placement uuid, p_actor text, p_note text)	5df9528fca92ba749b53229816cb6cca
+function	materials_ingest_change_parts(p_org_id uuid)	8ade3775c0633d1599642df9b56c6c74
+function	materials_ingest_change_token(p_org_id uuid)	b04090499256f6b6df3a73fa99032704
+function	materials_recon_installer_holds()	6c1aae4d2e8e8c92f8612bed9946ca3b
+function	next_job_number(job_type text)	54e49abe7bd3225fb96e016094504d89
+function	next_quote_number()	1785ef27a5627f4ec3503532a83cce1e
+function	next_ses_report_trigger_run()	0f896481d5ce1163cf4d64cb14209e68
+function	office_approve_group_hours(p_group_id uuid, p_actor_user_id uuid, p_reason text)	7bd8860261907f47ebf6c44f9c4d43a9
+function	office_client_confirmation_group_guard()	e9af9d86c13d35fb241fa83705722984
+function	office_issue_group_share_invoices(p_group_id uuid, p_owner_user_id uuid, p_reason text)	5802e14b7e256db9dab496715120fd2c
+function	owner_approval_authority(p_user uuid)	8d406ee431a0e756a47bc079858b576e
+function	owner_approval_company_ok(p_approver uuid, p_org_id uuid, p_job_org uuid)	cb68dd46272e220e4919e11c3c0b0e19
+function	owner_approval_required()	dd7f34f6779a88754c21448da7659ace
+function	owner_approved_job_work_order_drafts(p_limit integer)	b7c6a3915269dfc8bfb2ceec787f925b
+function	owner_unapproved_queue(p_entry jsonb)	077685b73879f775f9ea9d58f8de1461
+function	persist_luna_context_revision(p_run_id uuid, p_lease_token uuid, p_job_id uuid, p_events jsonb, p_new jsonb, p_supersedes jsonb, p_retracts jsonb, p_extractor_version text, p_tokens_in integer)	5e2f351da5fbf4fcb0c69c3d841f5e3d
+function	persist_luna_context_revision(p_source_table text, p_source_id text, p_expected_source jsonb, p_store text, p_fact jsonb)	f8c4bd29bba0878396ee7626c21ee65d
+function	persist_running_trade_invoice_draft_v1(p_invoice jsonb, p_lines jsonb, p_requested_prior_draft_id uuid, p_builder jsonb, p_origin text, p_agent_label text, p_dismissed text[], p_created_by_agent boolean, p_pay_unconfirmed boolean)	6cbd591a63476d4a59a8c9a4a6e2f06c
+function	persist_trade_work_order_invoice_v1(p_invoice jsonb, p_lines jsonb, p_requested_prior_draft_id uuid)	3c07c3113679ee7cdd99c574f755d99a
+function	persist_weekly_trade_invoice_v1(p_invoice jsonb, p_lines jsonb, p_requested_prior_draft_id uuid)	58182c36e4f35a04ef652da81cea4ec7
+function	persist_weekly_trade_invoice_v2(p_invoice jsonb, p_lines jsonb, p_requested_prior_draft_id uuid)	085f22c1cafb68f7248fcc0269809048
+function	persist_weekly_trade_invoice_v3(p_invoice jsonb, p_lines jsonb, p_requested_prior_draft_id uuid)	76fa542e390519c8f8a5232cf55f6fbf
+function	pipeline_newest_job_mark(p_org_id uuid)	32f08b5508426137d4b4908fc74c7254
+function	prepare_scope_job_drafts(p_job_id uuid, p_scope_revision_id uuid, p_org_id uuid)	de842c927feec6fca4f08978dfea42a8
+function	prevent_makesafe_attendance_cycle_identity_change()	e413721e548cc2fbdea6dd2f2712052f
+function	preview_active_job_work_orders()	c1c46b68f4d342de9e2f79f6be43d376
+function	preview_makesafe_state_authority_v2(p_job_ids uuid[])	3cc105cd6aa243065854f933f9116d77
+function	process_outbound_queue()	1e00b23b27ba7f33f151376f821f5aef
+function	project_group_work_order_split(p_group_id uuid)	90289a765cd0d8d3d20c2f20d1e74e84
+function	purge_makesafe_email_pii(retention_days integer)	1a11457f77e37a50a5b7313d8356d697
+function	purge_makesafe_pdf_extraction_coordinate_text()	b4733e5973a9bd82398236b90a8b5a7a
+function	purge_synthetic_livefire_attendance_cycles(p_marker text)	f515f61db3da147c10287f47ce83b973
+function	purge_synthetic_livefire_jobs(p_marker text)	c52d93bbee56eb7ab3dca4d57f404b52
+function	purge_synthetic_livefire_jobs_without_case_tombstones(p_marker text)	e501488b9b6075eb4f122c4b498d4399
+function	quote_builder_versions_guard()	69660b0783a84e07405ffd4adcb61fcc
+function	quote_option_acceptances_write_once()	378ec66c422a5b1cb13f44480b87ce2d
+function	quote_revisions_controlled_immutable()	bbbe8fc01e95bb4b7047dca341c4a955
+function	quote_revisions_no_delete()	a9ebf331c0611078eba5bee1f0472c21
+function	quote_send_price_unapproved_forward_only()	86b8eb76e27862f94a19cdf7180c2e25
+function	quote_send_sealed_revision_misses_append_only()	5f4e4fc3b75c31fe02b69aa6e3111975
+function	raise_job_labour_cap(p_job uuid, p_budget_id uuid, p_actor uuid, p_actor_email text, p_org_id uuid, p_amount numeric, p_reason text)	c63e24e9ca11b2aed3f85db735d587ef
+function	read_job_owner_approval_state(p_job_id uuid, p_org_id uuid)	cd95ace3d48fec9cc2e45a5993df3df8
+function	read_scope_job_drafts(p_job_id uuid, p_scope_revision_id uuid, p_org_id uuid)	5a62c3bd32fc0dbb79e1e0656c72881d
+function	read_scope_payment_stages(p_job_id uuid, p_scope_revision_id uuid, p_org_id uuid)	bd2d6dcc50eff70d297907742386490e
+function	read_stuck_ses_route_dispatches_v1(p_job_ids uuid[])	5b79c8a71492bbaeaaeb3189bd119dc8
+function	record_attribution_error(p_event_id uuid, p_code text)	e1b568e2242bb956647d0af36d6a0d4b
+function	record_call_transcript_fetch(p jsonb)	5b87c8022ac3caa71c7903590cca76f1
+function	record_capture_run(p_run jsonb)	db03c98a6da49f128595342f5a93f84c
+function	record_context_document_text(p jsonb)	8b3b8652a2d01cbf8cdd17c7971fa70d
+function	record_context_document_vision(p jsonb)	8f13831740b81b7da9ad6240372c0540
+function	record_fence_job_mint_failure(p_request_id uuid, p_code text, p_message text, p_org_id uuid, p_actor_id uuid, p_executing_request_id uuid)	4d45c7d10a73f2fe92e6587e8b78cb44
+function	record_fence_job_mint_opportunity(p_request_id uuid, p_opportunity_id text, p_contact_id text)	0d86a0ded87482184389e60d4f78954a
+function	record_ghl_history_contact(p_row jsonb)	4880dd100bc6161d61b91695231acb52
+function	record_ghl_link_attempt(p_row jsonb)	bfec08e4fc653ab9b4f150fe07317d43
+function	record_ghl_webhook_receipt(p_receipt jsonb)	05293bfa6bf24e1ea182fd01492d882e
+function	record_job_budget(p_job_id uuid, p_scope_revision_id uuid, p_pricing_hash text, p_taken_option_ids text[], p_budget jsonb, p_summary jsonb, p_lines jsonb)	6ebad9e2c83b0a1d741c50508691d6f5
+function	record_job_commission_from_budget(p_budget job_budgets)	2ceb89b7b69e01615c2b44cab4e78344
+function	record_job_work_order_approval(p_work_order_id uuid, p_approver uuid, p_via text, p_expected_updated_at timestamp with time zone, p_scope_revision_id uuid, p_org_id uuid, p_require_revision boolean)	e4676dc3ad67859014c8a73f853cee18
+function	record_makesafe_intake_case_event()	b7f5365d4e8072afb33a4765f7335974
+function	record_on_site_client_signoff(p_capture_request_id uuid, p_capture_payload_hash text, p_org_id uuid, p_job_id uuid, p_signed_name text, p_happy boolean, p_satisfaction_rating smallint, p_signature_png text, p_captured_by uuid, p_captured_by_actor text, p_captured_device text, p_outstanding_items text)	1ae7feed11a9bef840052eee92bfca77
+function	record_ops_api_actor_missing()	9fc40f32c34fc28c59c726ab7c437f24
+function	record_quote_send_price_unapproved(p_send_key text, p_job_id uuid, p_path text, p_document_id uuid, p_state text, p_scope_revision_id uuid)	1b9833e4d78f63e34c131be4d5f31410
+function	record_scope_payment_signal(p_job uuid, p_kind text, p_coordinate jsonb, p_at timestamp with time zone)	95dc2c192f6c62335ca9137313a11f22
+function	record_scope_price_approval(p_job_id uuid, p_scope_revision_id uuid, p_approver uuid, p_via text, p_org_id uuid, p_expected_documents text[])	2edb28d4e361842bd6815c0b4242bf70
+function	record_ses_docket_review_state_v1(p_event jsonb)	0b22b1275434c6526ba71448c1ae3e32
+function	record_ses_review_feedback_v1(p_feedback jsonb)	ddd837bd53d0e6b10401e1100cd51992
+function	record_ses_revision_approval_v1(p_approval jsonb)	43951472076dd4f6eaf74abd0cb72f08
+function	record_visit_outcome(p_record jsonb, p_recorded_by_user_id uuid)	4654e4c2fed4c23e2504bc6adfcecc6b
+function	record_work_order_owner_unapproved(p_job_id uuid, p_work_order_id uuid, p_kind text, p_event text, p_path text, p_scope_revision_id uuid, p_missing text[])	673768046377a8a9508a18767114a899
+function	refresh_makesafe_case_lineage_identity_v1()	8962b1815ed0310f2406ffad125b2ff5
+function	refresh_makesafe_status_shadow(p_rows jsonb)	70ce03ee17c8e625727f910f0df30240
+function	refuse_visit_outcome_mutation()	4f164b2e3a8bd7045d1f057fe631fea9
+function	register_scope_payer_parties(p_job_id uuid, p_scope_revision_id uuid, p_org_id uuid)	36df8b68eb8fb340b34fbf2259594fc4
+function	register_synthetic_livefire_job(p_marker text, p_job_id uuid)	c0242d54e78ed34606d55fa5ddaf29b3
+function	reject_makesafe_board_attention_mark_mutation()	8cf979a3a31f41b831cd52c360cfaa13
+function	reject_makesafe_board_status_application_mutation()	6e7b9113ecaf480d06200a96eea2874e
+function	reject_makesafe_docket_append_only_change()	4087431e08a05ebecb38b5c10c943fa1
+function	reject_makesafe_intake_append_only_mutation()	b9beed5a8c737c59ec55eb681628959e
+function	reject_makesafe_invoice_revision_content_change()	9c1426575b56ddf66e98165429fe2bbc
+function	reject_makesafe_release_revision_content_change()	4c3bfdb7fa0ff352038035477dc6ef09
+function	reject_makesafe_sibling_evidence_mutation()	4087431e08a05ebecb38b5c10c943fa1
+function	reject_makesafe_state_audit_mutation()	c097293b7ab4a4042e56a0f88568179f
+function	reject_makesafe_state_seed_audit_mutation()	0e0e2f15a3783a93d84a9bb26c344195
+function	reject_ses_append_only_change()	4087431e08a05ebecb38b5c10c943fa1
+function	reject_ses_docket_review_event_change()	e47e66080b4af890f0f264728e76a6f9
+function	reject_trade_invoice_v1(p_invoice_id uuid, p_note text)	7f9368d57bed7d02e0a918fd20867680
+function	rekey_group_work_order(p_group_id uuid, p_actor uuid)	e7fe79b792a484470c650f589a28d38e
+function	release_ghl_calendar_appointment_sending(p_location_id text, p_key text, p_reason text, p_released_by text)	83fac6728acbb944a928c8644dfcd2cf
+function	release_makesafe_instruction_key_mint(p_org_id uuid, p_draft_id uuid)	50fa94b575b29a1cadbb5df13e8e7318
+function	release_scope_job_drafts(p_job_id uuid, p_scope_revision_id uuid, p_legacy boolean)	dd6c43b116cbe1b4766c9529e33e732c
+function	remove_group_work_order_participant(p_group_id uuid, p_user uuid, p_actor uuid)	1e3b7e8c9db494731cb2a3c398ba7fda
+function	remove_job_cost_events_from_cost_lines()	a1890885cba09238f5a4605eaf396177
+function	remove_trade_invoice_reimbursement_guard()	a9e2e3886ebe8b6637183abe4d0449c5
+function	remove_trade_line_hold()	abb062cba38b9b425eadfcae503692e4
+function	remove_trade_repayment_save_lock()	8d66b6a60306191517543457b488b8b0
+function	renew_context_extraction_run(p_run_id uuid, p_lease_token uuid)	4a67eafbe87cd378282db0e021e0305c
+function	renew_context_pass(p_run_date date, p_lease_token uuid)	b06ad7baf3a44b69286f9145e23d7884
+function	renew_ses_route_dispatch_lease_v1(p_expectation jsonb, p_lease_seconds integer)	39d8dfb48e414414383d905ca95a847f
+function	replace_trade_invoice_draft_v1(p_prior_draft_id uuid, p_replacement_id uuid, p_user_id uuid, p_assignment_ids uuid[])	f75c37eca62a593aa9ff57b74f2f9efb
+function	rerun_context_attribution(p_limit integer, p_contact_id text)	70326b3836093f400ddf44558a66846e
+function	reschedule_job_assignments_refuse(p_reason text, p_message text, p_context jsonb)	091d5d731bf2259f116d266e8d87a7b4
+function	reschedule_job_assignments_v1(p_job_id uuid, p_updates jsonb, p_deletes jsonb, p_creates jsonb, p_release_ghost_user_ids uuid[], p_released_invoice_statuses text[], p_operator text)	f31aab51823252d733c397880cc1b500
+function	reserve_context_model_call(p_phase text, p_run_id uuid, p_lease_token uuid)	e381963e14d214b6b43c98eb70836919
+function	reserve_fence_job_mint(p_request_id uuid, p_org_id uuid, p_actor_id uuid, p_identity_key text, p_input_fingerprint text, p_intent text, p_contact_id text, p_opportunity_id text, p_expected_existing_job_ids uuid[], p_repeat_reason text, p_first_name text, p_last_name text, p_client_email text, p_client_phone text, p_site_address text, p_site_suburb text, p_type text)	22985fff505bad476acb242bd26ee335
+function	reserve_ghl_calendar_appointment(p_location_id text, p_key text, p_fingerprint text, p_user_id text, p_start timestamp with time zone, p_end timestamp with time zone, p_token uuid)	eb47ae7c38dbad852eb1a8ff444ed77d
+function	reserve_ghl_history_run(p_max_jobs integer, p_actor text)	03b81ce45883b2ed31a8e5e5a5c88aec
+function	reserve_makesafe_instruction_key_mint(p_org_id uuid, p_draft_id uuid, p_instruction_keys text[])	711c1d0e01f1a84d7c384aaa0ee7077a
+function	reserve_makesafe_intake_job_mint(p_org_id uuid, p_draft_id uuid, p_mint_role text, p_case_id uuid, p_source_post_ids text[])	d335d3d203fbb5795e915903ef5933fa
+function	resolve_context_attribution(e business_events)	32365101d23dde1695707a0bddff640b
+function	resolve_context_attribution(e business_events, p_preview boolean, p_rules_on boolean)	f9cd8d311bf00a92f7b708ff2d2dc8a7
+function	restore_group_work_order_participant(p_group_id uuid, p_user uuid, p_actor uuid)	507064eab2f1dd93495fbbd36ddf0c55
+function	retire_ses_docket_revision_v1(p_event jsonb)	2a351e507831ce34a421b6db6a1c2058
+function	reverse_ghl_contact_link(p_link_id uuid, p_actor text)	bc62193d8d08ecdfe0a4c3ad2b0bacfe
+function	revoke_group_client_signoff(p_group_id uuid, p_actor uuid)	43b305c38d8df429c0012c8211ecf07f
+function	revoke_job_deposit_gate_override(p_job_id uuid, p_user_id uuid, p_reason text)	cdcc4acaa80797ea5ff70d26a04f97b0
+function	rls_auto_enable()	99be20677b456ea8d3be47bdd44fb369
+function	sales_booking_executions_settle_once()	4647f9c9e78cc26bdbc47fa8d7c6955b
+function	sales_booking_route_changes_append_only()	0381b403f30dea32d16d9be8cf85c984
+function	sales_booking_route_write(p_op text, p_route_id text, p_route jsonb, p_expected_updated_at timestamp with time zone, p_actor_user_id uuid, p_actor_email text, p_reason text)	09128f788dfc60205b1060f017083b02
+function	sales_performance_note_v1(p_week_start date, p_lane text, p_note text)	d7aef93acbed4fdbc8a7b2954f12af1e
+function	sales_performance_write_v1(p_org_id uuid, p_week_start date, p_lane text, p_metrics jsonb, p_coverage jsonb, p_queues jsonb, p_run_id text, p_definition_version text, p_computed_at timestamp with time zone)	9b02e608a066c80097d5406266e3b0fe
+function	scan_jobs_touch()	6646ea1d7e9b3d829fa7973a7d44e7eb
+function	scope_artifacts_append_only()	006c3a53eb27e248f7143aef61538c75
+function	scope_draft_cents(p_value jsonb)	3103d6206ff36c450d363bd7ece6b52b
+function	scope_job_draft_issue_state(p_job_id uuid)	986e6ccb68ea35e38b7bf7cab7a351f8
+function	scope_owner_approval_json(a scope_owner_approvals)	9d733217701e853bf5f4b6d49875b35e
+function	scope_owner_approvals_append_only()	45ef514bf7f1186a5580729d47560d85
+function	scope_payment_acceptance_event()	f797bca04100b26cdb07706683716f8e
+function	scope_payment_install_event()	be415db0bf514e132ad2add504b04a75
+function	scope_payment_plan(p_job uuid)	95fd9dc4210356a9b405b8333419ee44
+function	scope_price_owner_approval(p_job_id uuid, p_scope_revision_id uuid)	f1a68650be30cf2b02f5b1a3007620c0
+function	scope_revision_quote_documents(p_scope_revision_id uuid)	80f7b4954896b0f922fa1609f7351b87
+function	scope_revisions_controlled_immutable()	b5275b79eb979c9215db5b46315685f7
+function	scope_revisions_insert_lifecycle()	749d881d62dec5e1b5e2824c2d111fd8
+function	scope_revisions_no_delete()	4add3da0834fb11f591b24333c7a2a37
+function	seal_makesafe_case_jobs_v1()	5d059c9b6b3e64b00372ac944b27f6e6
+function	seal_makesafe_child_job_v1()	b592d7406687054c9863cc748c81f64c
+function	seal_makesafe_job_v1(p_job_id uuid, p_source text)	eca34585097a0c0f8c4616a914061887
+function	search_entities(p_org_id uuid, p_query text, p_entity_type text, p_limit integer)	eea77c3367d9824fa6a68512b5697a26
+function	seed_makesafe_state_authority_scoped_v2(p_run_key text, p_applied_by text, p_selection_hash text, p_job_ids uuid[])	f657be6307249b6e86602982576e40dc
+function	seed_makesafe_state_authority_v1(p_run_key text, p_applied_by text, p_selection_hash text, p_job_ids uuid[])	41e7a18b8e735c558ea57c900ba114a5
+function	send_ghl_email(p_contact_id text, p_subject text, p_html_body text, p_job_id uuid)	6474ff88b03fdf2e7d81b58cca12cb33
+function	send_ghl_sms(p_contact_id text, p_message text, p_job_id uuid)	12a717209253df741063ffc8163d2e93
+function	send_outlook_email(p_from_email text, p_to_email text, p_subject text, p_html_body text, p_cc text, p_attachment_urls jsonb)	0314d6c4eadf0bdd23d668e7e4cd7d75
+function	send_outlook_email(p_to text, p_subject text, p_html_body text, p_from text, p_cc text, p_attachment_url text, p_attachment_name text)	023965292de0f6e76398635b5b6074d1
+function	send_outlook_email_b64(p_to text, p_subject text, p_html_body text, p_attachment_b64 text, p_attachment_name text, p_from text, p_cc text)	ff8e21f173e675c0b5230f1cf4421e13
+function	ses_report_cron_scheduler_pulse(p_limit integer)	1b5bbaeacdecf3b60986db75a05914ed
+function	ses_report_drain_cron_job()	222ba46f205877b94a1911a7e08767b9
+function	ses_report_drain_cron_run_count()	6487a50315855fe499fa81ac5d39a379
+function	ses_report_drain_cron_runs(p_limit integer)	020d6c8543343ab6916e17b3ef5a3e2e
+function	ses_report_drain_cron_visibility()	0ea6625f12e6ea69cbbc861c393795b2
+function	ses_report_drain_enabled()	c23a71f21d754512d81157c6fba7be7f
+function	ses_report_drain_http_responses(p_limit integer)	eed2eb2db99f478867e0471020ec05bd
+function	ses_synthetic_livefire_marker_is_terminal(p_marker text)	c5a0c7c6a8bf218008e8bb2324fd4983
+function	set_bookings_updated_at()	5bdc21b8fa8fb1231bdb021e09a5bc8e
+function	set_commission_rate(p_trade text, p_percent numeric, p_reason text, p_actor uuid)	5474d892a69a276aeb6e1b43e2217557
+function	set_job_party_ids(p_job_contact_id uuid, p_ghl_contact_id text, p_xero_contact_id text, p_method text, p_match_basis text, p_actor text)	468ba14f0f8dce6ed92bd592ba48b801
+function	set_monitored_mailbox(p_email text, p_enabled boolean, p_status text, p_reason text, p_actor text)	490a637f9ea0da6aae196e9ce1aeaf5d
+function	set_scoper_preferences_updated_at()	5bdc21b8fa8fb1231bdb021e09a5bc8e
+function	set_trade_pay_setting(p_field text, p_value text, p_actor uuid)	364c9cd7dc55ef61b4e41f38f86f37b6
+function	settle_stale_ses_route_dispatch_v1(p_expectation jsonb, p_outcome jsonb, p_actor text)	25ae80a308e744757af486e21ecf02d2
+function	staff_pings_claim(p_secret text, p_limit integer)	33adebeb861490c770ca417c4de04e5b
+function	staff_pings_mark(p_secret text, p_id uuid, p_status text, p_error text)	c9194d1a54af81f78cc3849836c01b49
+function	staff_pulse_enqueue(p_secret text, p_person text, p_text text)	979dc86ede94ee0e1b760ecf19d42024
+function	staff_pulse_enqueue_manual(p_secret text, p_person text, p_text text, p_approval text)	ea1ab75f0ce7d020f452f01aa767c1ef
+function	staff_pulse_ping_status(p_secret text, p_ids uuid[])	036f8cce3006b44004b5bbbcb2ca3976
+function	stage_makesafe_board_reconciliation(p_run_key text, p_applied_by text, p_selection_hash text, p_state_token_hash text, p_chunk_index integer, p_chunk_count integer, p_rows jsonb)	5105022d619430709eaf92b51d7b698b
+function	stamp_makesafe_fact_identity_v1()	0ee1ab9dfd683868251feae8c1d2967c
+function	stamp_makesafe_intake_case_identity_v1()	642cbd128cbf57a0ca9a19462b7b8648
+function	supplier_name_key(p text)	15a108c740906e4ec46374422053da42
+function	sw_service_key()	ef5735ac3d7771cf1677c8908c28ee8d
+function	sweep_gate_confirm(p_name text, p_token text)	2179dd4df0e37413490b716ed1a87043
+function	sweep_gate_should_post(p_name text, p_token text, p_heartbeat interval)	823d0e57d922b8d83c7786c32be8cdd8
+function	sweep_gate_tables_token(p_tables text[])	45c4110b668a66d7980ae238dc652e22
+function	terminalize_synthetic_livefire_run(p_marker text, p_evidence jsonb, p_terminal_at timestamp with time zone)	e063544f8fa58cdf3cdec895184ab70b
+function	trade_held_line_notes_append_only()	10c787dfa66d08c703d5db029188a2b5
+function	trade_invoice_events_append_only()	2cb29d3ca8aa735859a600bc58bef42e
+function	trade_invoice_first_numeric_candidate_v1(p_values jsonb, p_fallback numeric)	f76997d457c96c76aa63c28fffb4b8e3
+function	trade_invoice_lines_commission_cap()	62acf428ebd0e05ea89aafacd8c64f7f
+function	trade_invoice_lines_group_release_guard()	ff2de9de1690931728ad2e35b1bb335a
+function	trade_invoice_lines_group_review_insert()	0fba2581e0c5dff3b9de9b456468af9e
+function	trade_invoice_lines_group_share_snapshot()	ed7d8968a07b481d2f05721b08985edc
+function	trade_invoice_lines_link_job_work_order()	bd6c0e656b9be90200196c2c7e3a14b4
+function	trade_invoice_lines_no_week_claim_guard()	fc27eb86655e85635236599cf2ca5eda
+function	trade_invoice_lines_reimbursement_once()	f193ef8e3a9ef03bc7ee57822329c336
+function	trade_invoice_no_week_claim_key(p_source_work_order_id uuid, p_line_type text)	03f22b5b2ad05349341e7a18dd943698
+function	trade_invoice_work_order_scope_lines_v1(p_scope_items jsonb)	a829730c56bcd17088708babb9b675ee
+function	trade_invoice_xero_adjustments_tie(p_total numeric, p_lines jsonb)	0f02659f7f89136909134c5a1c0c8169
+function	trade_invoices_commission_cap()	b930838df2d853db0457d67c729339c1
+function	trade_invoices_group_release_guard()	10e70d58f705015a01218f73c440ab8d
+function	trade_invoices_link_job_work_orders()	6c92fd81aa2c9df9bbec73057cf0d748
+function	trade_is_off_job_crew(p_user_id uuid, p_job_id uuid, p_week_start date)	a636e99eca79b79c65610f15e08ee37c
+function	trade_pay_rule_on(p_day date)	1c1e2b3e8e2a9f0283b0c692049d2f4d
+function	trade_pay_run_check(p_as_of date, p_weeks integer, p_org_id uuid)	64ce0918ca3fce8f3edeb44de08b15d6
+function	trade_pay_settings_changes_append_only()	d82087000c6f57b86869a7a01150bf13
+function	trade_repayment_balance(p_id uuid)	67b5cbfce7105c35fe815cfabb1d733a
+function	trade_repayment_save_lock()	fdab3ff0a3d4e51670c8cc146d426c53
+function	trade_send_totals(p_send_id uuid)	4efbd58b17fd6f4fc50c7974efea19ac
+function	transition_ses_external_effect_v1(p_operation_key text, p_from_state text, p_to_state text, p_event_kind text, p_detail jsonb, p_actor text)	12ae064f1a09a2647d0d0b7559ee272a
+function	trigger_batch_intelligence()	d7cc777412535e14c500d7ea8986199f
+function	trigger_context_document_text()	763871e15925f6080c9bd7cdf41c55ed
+function	trigger_context_email_deep_history()	227bb812108d859112fca5577ce593d8
+function	trigger_context_email_history()	e3bf7cccc57fbbd2f740565695321a66
+function	trigger_context_email_poll()	bf67f0c4e5604233590712b9662dceb8
+function	trigger_context_email_sweep()	02e0c1fe63c60212865c955dc3997bb9
+function	trigger_daily_digest()	53af11d62dd1772078c8c4ef66e55489
+function	trigger_daily_digest_action(p_action text)	f892686e66a122ac695f1d9922fcdfa6
+function	trigger_debt_ws_jan_list(p_action text)	a36f5f15bf894226cb7ca1221ccfe330
+function	trigger_debt_ws_report_auto()	c38755b29c2d8f06e565f2230ec4820f
+function	trigger_debt_ws_report_refresh()	04dc7e6c2eae2f3477abd7b70d676060
+function	trigger_dispatch_v2_replies_scan()	ccfe4a0138bf7c19527a6b6396b403fc
+function	trigger_generate_nudges()	559fb48f3688375de5c44b67a366b844
+function	trigger_ghl_call_transcript_fetch()	0ec1769f5f45dff78a5de49f319286a6
+function	trigger_ghl_history_schedule()	87de4d4c12adc14b98fb3c1098aea08f
+function	trigger_ghl_message_reconcile()	e7d460c5681b9806d5add35343b9c156
+function	trigger_job_auto_start()	4331fef44dec3f1c5080ea5ff4c7baa6
+function	trigger_job_closeout_sweep()	7b81e25f4da9caba11366aa8da98f9de
+function	trigger_job_schedule_reminders()	f0739174533963e7b0e4a014a37e0780
+function	trigger_job_work_order_auto_issue()	fb8c84fc7d73e89d6171ae79ba163d87
+function	trigger_makesafe_email_purge()	dd99e6226902a9f4dbcd1be7112abc18
+function	trigger_makesafe_pdf_extraction_drain()	66d05cd3bb001924feb19c86f4513a18
+function	trigger_makesafe_portal_recheck()	54771ab5eda1da1e9f3df2e035eeb20c
+function	trigger_makesafe_reconcile(p_action text)	a5813a4778dc804d829e1446ffe8632a
+function	trigger_makesafe_sent_mirror()	51f0c7f884d556b7669d2fd59ca8e119
+function	trigger_makesafe_status_canary()	b5436ab8befa6da058e021f136059be8
+function	trigger_makesafe_status_shadow_refresh()	a15c7a6af52f2001d748f390cdd1d7fd
+function	trigger_makesafe_story_recompute()	c2edaef60f9b0e5f575a86d1d7716428
+function	trigger_monitor_inbox()	ca25c16633829b201c8c7a08b10bf4e4
+function	trigger_monitor_ses_makesafes()	a57770bba28f498cfbbb00b196b6ccd7
+function	trigger_ses_report_trigger_drain()	3acf50e1f63019606931808952feeec6
+function	trigger_xero_history_daily(p_limit integer)	f847c00e65be62ceb1cc9a870059fa33
+function	trigger_xero_sync_action(p_action text)	5e7759107244be12a3e416b43abcf7c7
+function	trigger_xero_sync_action_gated(p_action text, p_gate text, p_token text, p_heartbeat interval)	71f6e8fc3f81232331426730f96d2e11
+function	try_lock_mailbox_sync(p_mailbox text)	bc3d774cdce75080971dfd45e2b85086
+function	unfreeze_group_work_order_split(p_group_id uuid, p_actor uuid)	aaa77b40f74ae3cbad8c0153a969eb35
+function	unlock_mailbox_sync(p_mailbox text)	f8c90f8225407ba592ef7a0ce4cc2660
+function	update_timestamp()	9b1889f56258bf9d6554213c05019c76
+function	update_updated_at()	9b1889f56258bf9d6554213c05019c76
+function	upsert_job_party(p_job_id uuid, p_source_party_key text, p_fields jsonb, p_actor text, p_run_id uuid)	702a0357b5386e7929637fa92c46cef6
+function	users_guard_self_update()	63f2b44a381d2f09cba30b7175ded481
+function	validate_makesafe_board_reconciliation_state_tokens(p_rows jsonb)	7b14df4c94a3a78aec5f01b7e96f618e
+function	validate_makesafe_intake_target_job()	3680a3e14a9e5d8df718b4b53dddc33c
+function	validate_makesafe_sibling_bundle_binding()	5383a2233fcae747a7e8338688d6f5b9
+function	validate_makesafe_sibling_evidence_claim()	f0eaad601807d8df792771305cbb4384
+function	vault_upsert_sw_api_key(p_secret text)	b8c66070f83a723be5bdf2e8b1d94c89
+function	void_group_work_order(p_group_id uuid, p_actor uuid, p_reason text)	b225f7565d27b7195a02158e17405e1e
+function	work_order_amount_change_profit()	4d1b8b4c5372764a529d869c14ffe478
+function	work_order_amount_change_total(p_work_order_id uuid)	d3c73de97bf9a216c945752c18b04315
+function	work_order_amount_changes_immutable()	accc72d4280c87acb93857423400b202
+function	work_order_customer_variation_invoices_guard()	3a4042d38177ef67cb4519993b37175f
+function	work_order_customer_variations_guard()	cc8bac74ebf057bac254604febf1f478
+function	work_orders_crew_owner_gate()	1c035deb57c90dd2d8d8440e764961c8
+function	work_orders_crew_owner_hold(p_new work_orders)	4765c4224f4fe66c5cf9757c946c4a06
+function	work_orders_fill_revision_guard()	a762724d5373a9abbf7c43addaf4cd3f
+function	work_orders_issue_needs_acceptance()	5045acca0a3327024fae1ab301be9627
+function	work_orders_job_kind_guard()	65b36da461ba14f657aad4be219cda0c
+function	work_orders_owner_unapproved_flush()	fe34a56a408ade13dc8ede6774cea08e
+function	xero_builder_reference_candidates(p_keys text[])	75d9e25b609df7fce74447179c32072f
+function	xero_invoices_stamp_job_linked_at()	cc43e778fe09ecbb5ca9007d637b6b96
+function	xero_spend_revenue_monthly(p_as_of date, p_months integer, p_org_id uuid)	0901a4ebfdd6318388f045c42b18b9e7
+function	xero_supplier_credit_note_copy(p_org_id uuid, p_note jsonb, p_allocations jsonb)	d9fd84a4ef1e9dff30a6c772d664806e
+function	xero_tieout_monthly(p_as_of date, p_months integer, p_org_id uuid)	601ddb93ed24eab76bdd0aeabe480718
+view	aged_receivables	a4c48d3081d0683220ec3decfa4f9c8a
+view	calendar_events	e7429df39db6f938834209418bf39c7d
+view	cfo_bill_cost_outcomes	08396d8ce6699b34817f4201958ac84a
+view	contact_enrichment_queue	29fbe9806c763a9f40b7248ff2a5e5a5
+view	context_ai_calls_daily	063e3cc0949d1d85c92c94cd3c8640af
+view	current_job_context_facts	198b3d8ec217a7ecf2335dc71cbbe7ed
+view	dispatch_approved_supplier_contact_bills	9aad96030886b4440e0b54b55e8315db
+view	google_ads_monthly	6fe7b035a0619bfa9719bb1793dd3790
+view	job_change_marks	5cf355dddf7cd4df267833a91263f6d5
+view	job_financials	cebb5f90de8ca204cfecfb3f02e2bf7b
+view	job_trade_time_entries	ac674abb238558860f2f945cb2121651
+view	job_truth_weekly_scores	a5b2992ee5f2dd98642b5e0db21546fd
+view	jobs_needing_scheduling	271a02a1cc98e35fe6b1362341fedcb5
+view	makesafe_board_attention_current	1d5402fc69cc8d7bd7c0d637dfb90829
+view	makesafe_board_status_current	ad9e62a24f3167e10e586a66d91d74fb
+view	makesafe_cancellation_current_v2	35d11f02f9a81b5f12e5f0fa33fc569f
+view	makesafe_docket_revisions_current	b90c4fa9cb3ade38c7bb78a676adce0a
+view	makesafe_family_rules_current_v2	02e8a6faa28734d6b921dbb987f04998
+view	makesafe_intake_case_divergence	366e7a114b50e14f7121cf643eb7aa00
+view	makesafe_invoice_obligation_revisions_current	ba2807c89bb3735fd7f2a85ad4bd5d97
+view	makesafe_readiness_current_v2	cf155078cc984a95c31bf0b520c68457
+view	makesafe_revision_approvals_current_v2	81771935ba25d1d56677a2d843776ff5
+view	makesafe_state_identity_current_v2	8e27ed5a7dd8b9a719c1a003bbd9fe86
+view	makesafe_status_disagreements	1e5824f8e5ddbb2210220e4d776c2dea
+view	makesafe_terminal_proofs_current_v2	2ffc96692e89e952fc61d16f14bc7970
+view	monthly_costs	4785227143a9ff98ed95196811802fce
+view	monthly_revenue	1b0a3f661a128205babd7400b13f1396
+view	pipeline_metrics	f4ba6aa04327a02d9c2d5893452b9313
+view	pipeline_summary	3e995ef7b6b21bbfd1f2bac52af0a985
+view	run_summary	d269cfc7218946c498f16b23561eb346
+view	ses_docket_review_current	29e7de1d28714d8c62349ecd40f32ea7
+view	ses_release_proof_ledger	caad3be75d47a5837319c7b9c5141c8a
+view	upcoming_schedule	67e0266b36371677428f3e3a0f5e841f
+view	v_bill_allocation_balance	7b489430b21ed49ad2107cf0d97c1ead
+view	v_bookkeeping_line_evidence_current	9f921c9cfa1ca2568989329e907c3752
+view	v_bookkeeping_line_parts_current	8d1e063dbf8e08524c6c3b2d6023b9c3
+view	v_commission_rates	9fe4fb81a11b71c4cc8591fc468c9a2e
+view	v_dispatch_order_bills	8f4d6f8fd3ad096dd39f4822913bb76a
+view	v_dispatch_orders	f8835f8091730995fc97afd5819518cd
+view	v_evidence_health	21d2960d706aad7828834553c2f55713
+view	v_evidence_health_mailbox	b0cd94c18013c05e2f3bca0f7ee368f3
+view	v_evidence_health_proposals	0b4ddb74a7cb6b4b730459cb6d2b150a
+view	v_evidence_health_queue	6eb2cd532694b245d4166acadf2388af
+view	v_evidence_health_stale	70f3dbe7e0767ba04ed6023cdc7faa78
+view	v_group_coverage	9da2955456c939026525c3591cbc543f
+view	v_invoice_line_completeness	c963cb2bf47d3d3a82a3f249be306014
+view	v_job_budget	b3f7b3287a4e7e47f965675dcdd9490e
+view	v_job_commission	466159d5e764e5cae573f4be9e44e05d
+view	v_job_cost_events	c2e9632718dfa057703f1ee36b97322e
+view	v_job_cost_events_legacy	b48997c55913ce3c90e3a3c947533fd3
+view	v_job_cost_events_lines	d8ccd9fe8847bbcb735baa871f08fd70
+view	v_job_double_charge	3eb63864a59784f400e38746d0e92b0a
+view	v_job_expected_cost_facts	5b94fa3034baa4b489869b66f0fccab5
+view	v_job_orders	7a51fee78972a57587fedcc1c0b195f4
+view	v_job_profit	578270db501761330fad0b46412aac95
+view	v_job_profit_patio_scope_binding	2ed0785fc88c772372849ee978029c39
+view	v_job_profit_share_invoices	59d7ebb941e5b95cdb09dd5c6a13c8f3
+view	v_job_revenue_events	cea985aadcb59a2f751b1f403176a39c
+view	v_makesafe_charge_ledger	7b35c51e2f349687efc36c9f2be49c78
+view	v_materials_ai_placed_without_key	8856ab849c957730733972c2661d5f0b
+view	v_patio_group_coverage	5a2bb4317fc550cb935cb51ddc5749c7
+view	v_sales_conversation	c8bb816a7984a5ab9c58711bce3bac58
+view	v_sales_priority	15c84ac2b168ad5108bc89c37d80784b
+view	v_supplier_credit_allocations	9684232cbb1c45e7564ce168971d800e
+view	v_supplier_credit_placement	e9754f7c63e856eb80f4f6c240039323
+view	v_trade_charge_resolved	d12b26e9e288b558a79aee827c196470
+view	v_unresolved_evidence	36d8959a0c8fbfc7b032f08ba2b5efc8
+view	v_xero_lines	925c281ea6d03bd4778b1b996409269b
