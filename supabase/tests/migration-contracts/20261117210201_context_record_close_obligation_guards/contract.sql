@@ -1,6 +1,11 @@
 BEGIN;
 \set record_fixture_seed true
 \ir setup.sql
+-- The older fixture was inserted with replica mode. Attendance updates below
+-- exercise normal constraints, including the real crew foreign key.
+INSERT INTO public.users(id,org_id,name,role)
+VALUES('00000000-0000-4000-8000-000000000499','00000000-0000-0000-0000-000000000001','trade','trade')
+ON CONFLICT(id) DO NOTHING;
 -- All fixtures use roles and synthetic job numbers. No money is moved.
 UPDATE public.context_ledger_items SET closes_on='invoice_issued',about_key='other:final-invoice',
  what='Send the final invoice.',from_role='us',to_role='customer'
