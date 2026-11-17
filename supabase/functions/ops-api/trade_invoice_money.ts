@@ -1091,10 +1091,9 @@ export function buildTradeInvoiceAuditModel(
       );
     }
     return {
-      description: withTradeIdentityOnXeroDescription(
-        line.Description || "Trade invoice line",
-        tradeName,
-      ),
+      description: isTradeInvoiceReimbursementXeroLine(line)
+        ? String(line.Description)
+        : withTradeIdentityOnXeroDescription(line.Description || "Trade invoice line", tradeName),
       quantity,
       unit_amount: unitAmount,
       line_total: round2(quantity * unitAmount),
@@ -1195,26 +1194,15 @@ export function splitTradeInvoiceXeroLines(
     tradeName?: string | null;
   },
 ): TradeInvoiceXeroLine[] {
+  if (money.super_basis === TRADE_INVOICE_INCLUSIVE_SUPER_BASIS) {
+    assertTradeInvoiceSuperBaseMatchesLines(money, 0, grossLines.filter(isTradeInvoiceReimbursementXeroLine).reduce((sum, line) => sum + Number(line.Quantity ?? 1) * Number(line.UnitAmount ?? 0), 0));
+  }
   const model = buildTradeInvoiceAuditModel(
     grossLines,
     money,
     options.tradeName,
   );
   const taxType = money.gst_on ? "INPUT" : "NONE";
-  // Super inclusive GST is 10% of the total less reimbursements, but every
-  // work line goes to Xero as INPUT, so Xero would charge GST on a
-  // reimbursement line too and the bill would not match the invoice. Refuse
-  // that one shape until reimbursement lines carry their own tax type
-  // (P1-03). No reimbursement line can be saved before then.
-  if (
-    money.super_basis === TRADE_INVOICE_INCLUSIVE_SUPER_BASIS && money.gst_on &&
-    money.super_base_ex !== null && money.super_base_ex !== undefined
-  ) {
-    throw new TradeInvoiceMoneyError(
-      "MONEY_SPLIT_INVALID",
-      "A GST registered trade's reimbursement cannot be put on a super inclusive Xero bill yet",
-    );
-  }
   // Labour stays at the submitted amounts. The minus line is the worker
   // withhold only, so the bill total is cash payable to the trade. Super
   // remittance (super_amount, still 12%) is paid to the fund separately and
@@ -1238,7 +1226,7 @@ export function splitTradeInvoiceXeroLines(
       Description: submitted.description,
       Quantity: submitted.quantity,
       UnitAmount: submitted.unit_amount,
-      TaxType: taxType,
+      TaxType: isTradeInvoiceReimbursementXeroLine(line) ? "NONE" : taxType,
     };
   });
 
@@ -1324,6 +1312,10 @@ export function normaliseXeroTaxType(value: unknown): string {
   return t === "BASEXCLUDED" ? "NONE" : t;
 }
 
+export function isTradeInvoiceReimbursementXeroLine(line: TradeInvoiceXeroLine): boolean {
+  return /^reimbursement - /i.test(String(line.Description || ""));
+}
+
 export function assertReturnedTradeInvoiceXeroSplit(
   value: unknown,
   money: TradeInvoiceMoney,
@@ -1340,7 +1332,9 @@ export function assertReturnedTradeInvoiceXeroSplit(
   const deductionLines = lines.filter((line) =>
     isTradeInvoiceRecurringDeductionXeroLine(line)
   );
+  const reimbursementLines = lines.filter(isTradeInvoiceReimbursementXeroLine);
   const labourLines = lines.filter((line) =>
+    !isTradeInvoiceReimbursementXeroLine(line) &&
     !isTradeInvoiceSuperXeroLine(line) &&
     !isTradeInvoiceRecurringDeductionXeroLine(line)
   );
@@ -1382,12 +1376,13 @@ export function assertReturnedTradeInvoiceXeroSplit(
     deductionLines.length !== (money.recurring_deduction ? 1 : 0) ||
     (money.recurring_deduction?.kind === "repayment" && deductionLines.some((line) =>
       line.AccountCode !== money.recurring_deduction?.xero_account_code)) ||
-    Math.abs(labourCents - expectedGrossCents) > 1 ||
+    Math.abs(labourCents + reimbursementLines.reduce((sum, line) => sum + lineGrossCents(line), 0) - expectedGrossCents) > 1 ||
     Math.abs(superCents - expectedWithholdCents) > 1 ||
     Math.abs(deductionCents - expectedDeductionCents) > 1 ||
     Math.abs(totalCents - expectedNetCents) > 1 ||
     superLines.some((line) => taxTypeOf(line) !== "NONE") ||
     deductionLines.some((line) => taxTypeOf(line) !== "NONE") ||
+    reimbursementLines.some((line) => taxTypeOf(line) !== "NONE") ||
     labourLines.some((line) => taxTypeOf(line) !== expectedLabourTaxType)
   ) {
     throw new TradeInvoiceMoneyError(

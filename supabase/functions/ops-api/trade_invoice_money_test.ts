@@ -926,14 +926,14 @@ Deno.test("inclusive super: spec test 9, the Xero draft bill carries the three f
   assertEquals([gst[0].TaxType, gst[1].TaxType], ["INPUT", "NONE"]);
 });
 
-Deno.test("inclusive super: a GST trade's reimbursement is held back from Xero, never sent with GST on it", () => {
+Deno.test("inclusive super: an unidentified reimbursement is refused before Xero", () => {
   const m = inclusiveMoney(1200, { reimbursementEx: 80, gstOn: true });
   const withReimbursement: TradeInvoiceXeroLine[] = [
     ...INCLUSIVE_LINES,
-    { Description: "ZZTEST reimbursement", Quantity: 1, UnitAmount: 80, AccountCode: "310" } as TradeInvoiceXeroLine,
+    { Description: "Reimbursement - ZZTEST receipt", Quantity: 1, UnitAmount: 80, AccountCode: "310" } as TradeInvoiceXeroLine,
   ];
   assertThrows(
-    () => splitTradeInvoiceXeroLines(withReimbursement, m, { superAccountCode: "478" }),
+    () => splitTradeInvoiceXeroLines(withReimbursement.map((line, i) => i === withReimbursement.length - 1 ? { ...line, Description: "ZZTEST unidentified receipt" } : line), m, { superAccountCode: "478" }),
     TradeInvoiceMoneyError,
     "reimbursement",
   );
@@ -964,6 +964,19 @@ Deno.test("inclusive super: job cost reads no company super on top", () => {
     const m = inclusiveMoney(gross, { reimbursementEx: reimbursement });
     assertEquals(Math.round((m.super_amount - (m.gross_earned - m.net_pay)) * 100) / 100, 0);
   }
+});
+
+
+Deno.test("ZZTEST reimbursement retains NONE tax and stays inside the returned totals", () => {
+  const money = calculateTradeInvoiceMoney({ grossEarned: 1200, gstOn: true, earningsDate: "2026-11-16", superBasis: "inclusive_12_112_v1", reimbursementEx: 80 });
+  const lines = splitTradeInvoiceXeroLines([
+    { Description: "ZZTEST hours", Quantity: 1, UnitAmount: 1120, AccountCode: "ZZTEST-labour" },
+    { Description: "Reimbursement - ZZTEST receipt", Quantity: 1, UnitAmount: 80, AccountCode: "ZZTEST-reimbursement", TaxType: "NONE" },
+  ], money, { tradeName: "ZZTEST-trade", superAccountCode: "ZZTEST-super" });
+  assertEquals(lines.map((l) => [l.UnitAmount, l.TaxType]), [[1120, "INPUT"], [80, "NONE"], [-120, "NONE"]]);
+  assertEquals(lines.reduce((s, l) => s + Number(l.Quantity) * Number(l.UnitAmount), 0), 1080);
+  assertReturnedTradeInvoiceXeroSplit(lines, money);
+  assertThrows(() => assertReturnedTradeInvoiceXeroSplit(lines.map((l, i) => i === 1 ? { ...l, TaxType: "INPUT" } : l), money));
 });
 
 Deno.test("inclusive super: money labels group thousands", () => {

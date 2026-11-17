@@ -726,6 +726,11 @@ Deno.test("list: an hourly job's row shows the limit the doors refuse by; a fail
   assertEquals([failed.cap_read, failed.work_orders[0].cap], ["failed", null]);
 });
 
+Deno.test("ZZTEST reimbursement is outside an exhausted job cap", () => {
+  const incomingEx = incomingLabourByJob([{ job_id: JOB, line_type: "reimbursement", line_total_ex: 80 }]);
+  assertEquals(workOrderTotalCapRefusal({ jobs: [{ jobId: JOB, ref: "ZZTEST-01", allowedEx: 1120 }], billedEx: new Map([[JOB, 1120]]), incomingEx }), null);
+});
+
 Deno.test("ZZTEST changed work order: cap follows the change to the cent and read failures refuse", async () => {
   const client = fakeClient({ changes: [{ work_order_id: WO, delta_ex: 224 }],
     lines: [line("ZZTEST-line", "approved", "labour", 1120)] });

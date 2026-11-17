@@ -3520,6 +3520,13 @@ Deno.test("on-site sign-off: two identical captures at the same moment leave one
   assertEquals(db.rows("job_media").filter((m) => m.phase === "signature").length, 2);
 });
 
+Deno.test("ZZTEST reimbursement never takes a group share or hours", async () => {
+  const { isNormalWorkOrderPayLine, isPaidHoursLine } = await import("./group_work_order.ts");
+  const line = { job_id: "ZZTEST-job", line_type: "reimbursement", line_total_ex: 80 };
+  assertEquals(isNormalWorkOrderPayLine(line), false);
+  assertEquals(isPaidHoursLine(line), false);
+});
+
 Deno.test("ZZTEST people history: office removal and restore each append once without changing success", async () => {
   const memory = new Memory();
   seedSplit(memory);

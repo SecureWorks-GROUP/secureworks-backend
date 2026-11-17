@@ -1125,9 +1125,11 @@ for (const flagOn of [false, true]) {
       week_start: WEEK_START,
     }, { flagOn });
     assertEquals(dated.status, 200, JSON.stringify(dated.body));
-    assertEquals(dated.rpcCalls.length, 1);
-    assertEquals(dated.rpcCalls[0].name, "persist_weekly_trade_invoice_v3");
-    assertEquals(shape(dated.rpcCalls[0].args.p_lines), expected);
+    const saves = dated.rpcCalls.filter((call) =>
+      call.name === "persist_weekly_trade_invoice_v3"
+    );
+    assertEquals(saves.length, 1);
+    assertEquals(shape(saves[0].args.p_lines), expected);
     assertEquals(dated.lineRows, []);
   });
 }
