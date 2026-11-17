@@ -46,7 +46,7 @@ DO $$ DECLARE n int; BEGIN
   SELECT count(*) INTO n FROM public.v_job_cost_events
     WHERE source_id = '03000000-0000-4000-8000-000000000006' AND lane = 'other' AND lane_detail = 'other' AND is_actual AND amount_ex = 80;
   IF n <> 1 THEN RAISE EXCEPTION 'ZZTEST reimbursement cost row is wrong'; END IF;
-  IF EXISTS (SELECT 1 FROM public.v_job_profit WHERE job_id = '03000000-0000-4000-8000-000000000001' AND cost_flag = 'unclassified_lines') THEN
+  IF NOT EXISTS (SELECT 1 FROM public.v_job_profit WHERE job_id = '03000000-0000-4000-8000-000000000001' AND cost_flag IS DISTINCT FROM 'unclassified_lines') THEN
     RAISE EXCEPTION 'ZZTEST reimbursement cost is unclassified';
   END IF;
 END $$;
