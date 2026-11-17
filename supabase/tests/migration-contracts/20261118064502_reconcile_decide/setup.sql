@@ -1,6 +1,9 @@
 -- CI: the registered stack already holds the list, the raise, the cost-line
 -- writer and users, so this is a no-op. Isolated local proof: build them from
--- their own case and migration files. No function stand-ins.
+-- their own case and migration files. Stand-ins, isolated only: empty
+-- trade_invoices, trade_invoice_lines and xero_supplier_credit_notes (row types
+-- the writer migrations declare) and a four-column users table. No function
+-- stand-ins; Job Profit and job page marks run only where main has them (CI).
 SELECT to_regprocedure('public.reconcile_item_raise(text,text,text,uuid[],jsonb,jsonb,text)') IS NULL AS isolated_decide_setup \gset
 \if :isolated_decide_setup
 \ir ../20261118064402_reconcile_item_raise/setup.sql

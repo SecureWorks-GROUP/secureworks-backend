@@ -77,6 +77,11 @@ DECLARE
     RAISE EXCEPTION 'reconcile_action_not_for_item'
       USING DETAIL = format('%s on %s %s', p_action, v_item.kind, v_item.subject_table);
   END IF;
+  -- not_duplicate answers a duplicate hold only; on any other item it would close
+  -- the item with its lines still held and stop the same hold being raised.
+  IF p_action = 'not_duplicate' AND v_item.reason IS DISTINCT FROM 'possible_duplicate' THEN
+    RAISE EXCEPTION 'reconcile_not_a_duplicate_hold' USING DETAIL = v_item.reason;
+  END IF;
   IF p_action = 'resolve' AND nullif(btrim(coalesce(p_note, '')), '') IS NULL THEN
     RAISE EXCEPTION 'reconcile_note_required';
   END IF;
@@ -140,8 +145,15 @@ DECLARE
            WHERE l ->> 'id' = v_part ->> 'line_id' AND l ->> 'state' IS NOT NULL) THEN
         RAISE EXCEPTION 'reconcile_parts_invalid' USING DETAIL = 'a part names a line that is not counted on this document';
       END IF;
-      IF jsonb_typeof(v_part -> 'amount_ex') IS DISTINCT FROM 'number' THEN
-        RAISE EXCEPTION 'reconcile_parts_do_not_add_up' USING DETAIL = 'every part needs an amount';
+      -- Cents only, never zero, and the same sign as its line: amounts are
+      -- numeric(12,2), and a part of the other sign could make any total add up.
+      IF jsonb_typeof(v_part -> 'amount_ex') IS DISTINCT FROM 'number'
+         OR (v_part ->> 'amount_ex')::numeric <> round((v_part ->> 'amount_ex')::numeric, 2)
+         OR (v_part ->> 'amount_ex')::numeric = 0
+         OR sign((v_part ->> 'amount_ex')::numeric) <> (SELECT sign((l ->> 'amount_ex')::numeric)
+              FROM jsonb_array_elements(v_lines) l WHERE l ->> 'id' = v_part ->> 'line_id') THEN
+        RAISE EXCEPTION 'reconcile_parts_do_not_add_up'
+          USING DETAIL = 'every part is a non-zero amount in cents, the same sign as its line';
       END IF;
       IF v_part ->> 'target' = 'job' THEN
         IF coalesce(v_part ->> 'job_id', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN

@@ -46,6 +46,11 @@ CREATE FUNCTION pg_temp.item(d text) RETURNS uuid LANGUAGE sql AS $f$
   ARRAY['32030000-0000-4000-8000-0000000000a1']::uuid[], '{"outcome":"job","clue_ids":[11,12]}'::jsonb,
   jsonb_build_object('reason', 'one_clue', 'summary', jsonb_build_object('number', d)), 'matcher:v1')
 $f$;
+CREATE FUNCTION pg_temp.dup_item(d text) RETURNS uuid LANGUAGE sql AS $f$
+ SELECT public.reconcile_item_raise('bill', 'cost_document', 'xero_bill:ZZTEST-3203-' || d,
+  ARRAY['32030000-0000-4000-8000-0000000000a1']::uuid[], NULL,
+  jsonb_build_object('reason', 'possible_duplicate', 'summary', jsonb_build_object('number', d)), 'matcher:v1')
+$f$;
 CREATE FUNCTION pg_temp.h(i uuid) RETURNS text LANGUAGE sql AS $f$
  SELECT evidence_hash FROM public.reconcile_items WHERE id = i $f$;
 CREATE FUNCTION pg_temp.line(d text, k text DEFAULT '1') RETURNS public.job_cost_lines LANGUAGE sql AS $f$
@@ -58,7 +63,12 @@ CREATE FUNCTION pg_temp.decide(i uuid, a text, parts jsonb, note text DEFAULT NU
 -- place: the whole line on the live job, by the person, the item decided.
 DO $place$
 DECLARE i uuid := pg_temp.item('PLACE'); r jsonb; l public.job_cost_lines; d public.reconcile_decisions; marked boolean;
+ page_marks bigint;
 /* block */ BEGIN
+ IF to_regclass('public.job_change_mark_events') IS NOT NULL THEN
+  EXECUTE $q$SELECT count(*) FROM public.job_change_mark_events
+   WHERE job_id = '32030000-0000-4000-8000-0000000000a1' AND source = 'person'$q$ INTO page_marks;
+ END IF;
  r := pg_temp.decide(i, 'place', '[{"job_id":"32030000-0000-4000-8000-0000000000a1"}]');
  l := pg_temp.line('PLACE');
  IF (SELECT amount_ex FROM public.job_cost_line_parts WHERE line_id = l.id AND target = 'job'
@@ -80,6 +90,12 @@ DECLARE i uuid := pg_temp.item('PLACE'); r jsonb; l public.job_cost_lines; d pub
   EXECUTE $q$SELECT EXISTS(SELECT 1 FROM public.job_profit_dirty
    WHERE job_id = '32030000-0000-4000-8000-0000000000a1')$q$ INTO marked;
   IF NOT marked THEN RAISE EXCEPTION 'P2-03.3 a placed job must be marked for Job Profit'; END IF;
+ END IF;
+ -- The job page mark runs only where main's job pages exist (CI, not the isolated run).
+ IF to_regclass('public.job_change_mark_events') IS NOT NULL THEN
+  EXECUTE $q$SELECT count(*) - $1 FROM public.job_change_mark_events
+   WHERE job_id = '32030000-0000-4000-8000-0000000000a1' AND source = 'person'$q$ INTO page_marks USING page_marks;
+  IF page_marks < 1 THEN RAISE EXCEPTION 'P2-03.3 a placed job must be marked for its page'; END IF;
  END IF;
  -- A closed item cannot be decided again.
  PERFORM pg_temp.expect_failure(format($f$SELECT public.reconcile_decide(%L,%L,'overhead',NULL,NULL,false,
@@ -113,6 +129,10 @@ DECLARE i uuid := pg_temp.item('RETRY');
  FROM unnest(ARRAY['undo', 'message', 'shrug']) a;
  PERFORM pg_temp.expect_failure(format($f$SELECT pg_temp.decide(%L,'resolve',NULL,'sorted')$f$, i),
   'reconcile_action_not_for_item');
+ -- not_duplicate only answers a duplicate hold: on an ordinary bill it would
+ -- close the item with its lines still held.
+ PERFORM pg_temp.expect_failure(format($f$SELECT pg_temp.decide(%L,'not_duplicate',NULL)$f$, i),
+  'reconcile_not_a_duplicate_hold');
  PERFORM pg_temp.expect_failure(format($f$SELECT public.reconcile_decide(%L,%L,'overhead',NULL,NULL,false,
   '32030000-0000-4000-8000-00000000057a')$f$, gen_random_uuid(), 'zz'), 'reconcile_item_unknown');
  -- Placing on a cancelled job, or on another organisation's job.
@@ -141,6 +161,17 @@ DECLARE i uuid := pg_temp.item('SPLIT'); l public.job_cost_lines; s jsonb;
  PERFORM pg_temp.expect_failure(format($f$SELECT pg_temp.decide(%L,'split',%L)$f$, i, jsonb_build_array(
   jsonb_build_object('line_id', l.id, 'target', 'division_stock', 'division', 'roofing', 'amount_ex', 1000))),
   'reconcile_division_unknown');
+ -- Thirds of a cent, a part of the other sign, and a zero part all refuse.
+ PERFORM pg_temp.expect_failure(format($f$SELECT pg_temp.decide(%L,'split',%L)$f$, i, jsonb_build_array(
+  jsonb_build_object('line_id', l.id, 'target', 'overhead', 'amount_ex', 333.333),
+  jsonb_build_object('line_id', l.id, 'target', 'overhead', 'amount_ex', 333.333),
+  jsonb_build_object('line_id', l.id, 'target', 'overhead', 'amount_ex', 333.334))), 'reconcile_parts_do_not_add_up');
+ PERFORM pg_temp.expect_failure(format($f$SELECT pg_temp.decide(%L,'split',%L)$f$, i, jsonb_build_array(
+  jsonb_build_object('line_id', l.id, 'target', 'job', 'job_id', '32030000-0000-4000-8000-0000000000a1', 'amount_ex', 1500),
+  jsonb_build_object('line_id', l.id, 'target', 'overhead', 'amount_ex', -500))), 'reconcile_parts_do_not_add_up');
+ PERFORM pg_temp.expect_failure(format($f$SELECT pg_temp.decide(%L,'split',%L)$f$, i, jsonb_build_array(
+  jsonb_build_object('line_id', l.id, 'target', 'overhead', 'amount_ex', 1000),
+  jsonb_build_object('line_id', l.id, 'target', 'overhead', 'amount_ex', 0))), 'reconcile_parts_do_not_add_up');
  s := jsonb_build_array(
   jsonb_build_object('line_id', l.id, 'target', 'job', 'job_id', '32030000-0000-4000-8000-0000000000a1', 'amount_ex', 600),
   jsonb_build_object('line_id', l.id, 'target', 'overhead', 'amount_ex', 300),
@@ -203,7 +234,7 @@ END $leave$;
 -- not_duplicate (ruling): records the decision and closes the item; no lines
 -- change, nothing is requeued, and the same hold is not raised again.
 DO $not_duplicate$
-DECLARE i uuid := pg_temp.item('NOTDUP'); r jsonb; before_line jsonb;
+DECLARE i uuid := pg_temp.dup_item('NOTDUP'); r jsonb; before_line jsonb;
 /* block */ BEGIN
  SELECT to_jsonb(l) INTO before_line FROM public.job_cost_lines l WHERE document_id = 'ZZTEST-3203-NOTDUP';
  r := pg_temp.decide(i, 'not_duplicate', NULL);
@@ -212,7 +243,7 @@ DECLARE i uuid := pg_temp.item('NOTDUP'); r jsonb; before_line jsonb;
   OR NOT EXISTS(SELECT 1 FROM public.reconcile_decisions WHERE id = (r ->> 'decision_id')::bigint
      AND action = 'not_duplicate' AND "by" LIKE 'person:%') THEN
   RAISE EXCEPTION 'P2-03.3 not_duplicate must record and close without changing lines'; END IF;
- IF pg_temp.item('NOTDUP') IS NOT NULL THEN
+ IF pg_temp.dup_item('NOTDUP') IS NOT NULL THEN
   RAISE EXCEPTION 'P2-03.3 the same hold must not be raised again after not_duplicate'; END IF;
  IF (SELECT prosrc FROM pg_proc WHERE oid = 'public.reconcile_decide(uuid,text,text,jsonb,text,boolean,uuid)'::regprocedure)
     ~* 'requeue' THEN
