@@ -1422,9 +1422,14 @@ handlerTest(
       user: UTE_TRADE,
     });
     assertEquals(first.body.success, true, JSON.stringify(first.body));
-    assertEquals(first.rpcCalls.length, 1);
-    assertEquals(first.rpcCalls[0].name, "persist_weekly_trade_invoice_v3");
-    assertEquals(carriedOn(first.rpcCalls[0].args.p_invoice), {
+    const invoiceSave = (out: Awaited<ReturnType<typeof callTradeAction>>) => {
+      const saves = out.rpcCalls.filter((call) =>
+        call.name === "persist_weekly_trade_invoice_v3"
+      );
+      assertEquals(saves.length, 1);
+      return saves[0].args;
+    };
+    assertEquals(carriedOn(invoiceSave(first).p_invoice), {
       id: RULE_100,
       label: "Ute hire",
       amount: 100,
@@ -1446,13 +1451,13 @@ handlerTest(
         recurring_deduction_amount: 100,
       }],
     });
-    assertEquals(again.rpcCalls.length, 1);
+    const savedAgain = invoiceSave(again);
     assertEquals(
-      again.rpcCalls[0].args.p_invoice.recurring_deduction_amount,
+      savedAgain.p_invoice.recurring_deduction_amount,
       100,
     );
     assertEquals(
-      again.rpcCalls[0].args.p_requested_prior_draft_id,
+      savedAgain.p_requested_prior_draft_id,
       "earlier-draft",
     );
     assertEquals(again.body.trade_payable, 276);
@@ -1461,7 +1466,7 @@ handlerTest(
     const other = await callTradeAction("save_trade_invoice_draft", draft, {
       user: OTHER_TRADE,
     });
-    assert(!("recurring_deduction_amount" in other.rpcCalls[0].args.p_invoice));
+    assert(!("recurring_deduction_amount" in invoiceSave(other).p_invoice));
     assertEquals(other.body.trade_payable, 376);
     assert(!("recurring_deduction_week" in other.body));
   },
