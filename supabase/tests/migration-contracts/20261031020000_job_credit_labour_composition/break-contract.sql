@@ -1,3 +1,9 @@
+-- P2-01.7 successor: restore this proof's original definition before it
+-- inspects or rewrites that definition. Existing assertions stay unchanged.
+SELECT to_regclass('public.v_job_cost_events_legacy') IS NOT NULL AS p2017_unwind \gset
+\if :p2017_unwind
+\ir ../../../rollbacks/20261117210402_job_cost_events_from_cost_lines_down.sql
+\endif
 -- 20261104070000 to 20261104072000 (A6 cost rules) sit on 20261104063000 (A4 V8): unwind them first, back to the
 -- A4 V8 definition, then A4 V8 below.
 -- 20261104090000 and 20261104091000 (A3 division) sit on the A6 cost rules: unwind them first.

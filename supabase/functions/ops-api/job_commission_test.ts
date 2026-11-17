@@ -10,6 +10,7 @@ import "./trade_app_visibility_rules_test_env.ts";
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   commissionOfferFor,
+  commissionLineState,
   commissionCapCodeFromDbError,
   commissionCapRefusal,
   jobCommissionAction,
@@ -269,5 +270,31 @@ Deno.test("commission offer: only the named salesperson receives the remaining f
   for (const remaining_ex_gst of [0, -1]) {
     assertEquals(commissionOfferFor(rec({ remaining_ex_gst }), ME), { state: "claimed", offer_ex: 0 });
     assertEquals(commissionOfferFor(rec({ remaining_ex_gst }), OTHER), { state: "not_yours", offer_ex: null });
+  }
+});
+
+Deno.test("commission line state: only the named salesperson with a known remaining figure gets an offer", () => {
+  assertEquals(commissionLineState(null, ME), { state: "no_figure", remaining_ex: null });
+  for (const state of ["no_amount", "no_salesperson", "salesperson_not_found"] as const) {
+    for (const caller of [ME, OTHER]) {
+      assertEquals(commissionLineState(rec({ state }), caller), { state: "no_figure", remaining_ex: null });
+    }
+  }
+  for (const missing of [
+    { expected_amount_ex_gst: null },
+    { remaining_ex_gst: null },
+    { expected_amount_ex_gst: Number.NaN },
+    { remaining_ex_gst: Number.POSITIVE_INFINITY },
+    { salesperson_user_id: null },
+  ]) {
+    for (const caller of [ME, OTHER]) {
+      assertEquals(commissionLineState(rec(missing), caller), { state: "no_figure", remaining_ex: null });
+    }
+  }
+  assertEquals(commissionLineState(rec({ remaining_ex_gst: 37.25 }), ME), { state: "offer", remaining_ex: 37.25 });
+  assertEquals(commissionLineState(rec({ remaining_ex_gst: 37.25 }), OTHER), { state: "not_yours", remaining_ex: null });
+  for (const remaining_ex_gst of [0, -1]) {
+    assertEquals(commissionLineState(rec({ remaining_ex_gst }), ME), { state: "claimed", remaining_ex: null });
+    assertEquals(commissionLineState(rec({ remaining_ex_gst }), OTHER), { state: "not_yours", remaining_ex: null });
   }
 });

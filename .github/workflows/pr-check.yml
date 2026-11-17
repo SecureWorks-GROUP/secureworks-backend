@@ -99,6 +99,52 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Rule 19: compare new files with main NOW, not the event's base SHA.
+      # Keep this blocking inside the existing required deno-check job.
+      - name: Require new migration numbers after current main
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          MAIN_SHA=$(git rev-parse refs/remotes/origin/main)
+          MAIN_FILES=$(git ls-tree -r --name-only "$MAIN_SHA" -- supabase/migrations/)
+          # Compare trees, not merge-base history: only files absent from main
+          # are new. Existing migrations and main's later additions are ignored.
+          ADDED_FILES=$(git diff --name-only --diff-filter=A --no-renames \
+            "$MAIN_SHA" "$PR_HEAD_SHA" -- supabase/migrations/)
+
+          HIGHEST=""
+          while IFS= read -r FILE; do
+            if [[ "$FILE" =~ ^supabase/migrations/([0-9]{14})_[^/]+\.sql$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+              if [[ "$VERSION" > "$HIGHEST" ]]; then HIGHEST="$VERSION"; fi
+            fi
+          done <<< "$MAIN_FILES"
+          if [ -z "$HIGHEST" ]; then
+            echo "::error::Cannot determine main's highest migration number"
+            exit 1
+          fi
+
+          FAILED=0
+          COUNT=0
+          while IFS= read -r FILE; do
+            # Draft subfolders are not applied migrations.
+            if [[ "$FILE" =~ ^supabase/migrations/[^/]+\.sql$ ]]; then
+              COUNT=$((COUNT + 1))
+              if [[ ! "$FILE" =~ ^supabase/migrations/([0-9]{14})_[^/]+\.sql$ ]]; then
+                echo "::error file=$FILE::New migration needs a 14-digit version"
+                FAILED=1
+              elif [[ ! "${BASH_REMATCH[1]}" > "$HIGHEST" ]]; then
+                echo "::error file=$FILE::Rule 19: new migration must be numbered after $HIGHEST on main ($MAIN_SHA). Renumber and rerun the check."
+                FAILED=1
+              fi
+            fi
+          done <<< "$ADDED_FILES"
+          [ "$FAILED" -eq 0 ] || exit 1
+          echo "Rule 19 passed: $COUNT new migration(s), main highest $HIGHEST ($MAIN_SHA)"
+
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x

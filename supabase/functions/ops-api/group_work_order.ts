@@ -39,6 +39,7 @@ import { calculateTradeInvoiceMoney, TRADE_INVOICE_EMPLOYER_SUPER_BASIS, TRADE_I
 import { resolveTradeInvoiceTimeEntry } from "./trade_invoice_time_entry.ts";
 
 export const GROUP_WORK_ORDER_FLAG = "group_work_order_v1";
+export const GROUP_CLAIM_FLOW_FLAG = "group_claim_flow_v1";
 
 export const GROUP_WORK_ORDER_CLIENT_LINK_FLAG =
   "group_work_order_client_link_send_v1";
@@ -707,6 +708,12 @@ const QUERY_FAULTS: {
   status: number;
   keepDetail?: boolean;
 }[] = [
+  { needle: "group_not_on_job", code: "group_not_on_job", message: "You are not on this job's crew. Add yourself to the job first, or ask a crew mate or the office.", status: 409 },
+  { needle: "group_person_not_a_trade", code: "group_person_not_a_trade", message: "Choose an active trade in your company.", status: 409 },
+  { needle: "group_has_hours", code: "group_has_hours", message: "You have hours on this job. Remove them first, or ask the office.", status: 409 },
+  { needle: "group_claim_disabled", code: "group_claim_disabled", message: "Group claims are switched off.", status: 409 },
+  { needle: "group_member_removed_by_office", code: "group_member_removed_by_office", message: REMOVED_BY_OFFICE_MESSAGE, status: 409 },
+
   {
     needle: "group_removal_not_found",
     code: "group_removal_not_found",
@@ -957,6 +964,71 @@ async function callerAssigned(
     "check the crew assignment",
   );
   return rows.some(liveAssignment);
+}
+
+async function claimOnJob(client: any, jobId: string, userId: string): Promise<boolean> {
+  const { data, error } = await client.rpc("group_claim_on_job", { p_job: jobId, p_user: userId });
+  throwQuery(error, "check the claim crew");
+  return data === true;
+}
+
+async function updateClaimCrew(client: any, groupId: string, caller: GroupCaller, action: string, users: string[] = []) {
+  const { data, error } = await client.rpc("group_claim_update_crew", {
+    p_group_id: groupId, p_actor: caller.userId, p_action: action, p_users: users,
+  });
+  throwQuery(error, "update the claim crew");
+  return data;
+}
+
+/** Called only for a group-work-order invoice mode, after the clock or booking succeeds. */
+export async function ensureGroupParticipant(client: any, jobId: string, userId: string) {
+  if (!(await readSwitch(client, GROUP_CLAIM_FLOW_FLAG))) return null;
+  const { data: user, error } = await client.from("users").select("id, org_id, role").eq("id", userId).maybeSingle();
+  throwQuery(error, "read your profile");
+  if (!user?.org_id) throw new GroupWorkOrderError("group_actor_required", "Sign in as yourself.", 403);
+  // Keep the existing create's accepted-job, sealed work-order and pay guards.
+  return await createGroupWorkOrder(client, { userId, orgId: user.org_id, role: user.role, isStaff: false }, { job_id: jobId });
+}
+
+/** Enrollment is additive help after a successful clock, never a clock precondition. */
+export async function enrollClockGroupParticipant(
+  client: any, jobId: string, userId: string, readMode: () => Promise<string | undefined>,
+): Promise<void> {
+  try {
+    if (await readSwitch(client, GROUP_CLAIM_FLOW_FLAG) && await readMode() === "group_work_order") {
+      await ensureGroupParticipant(client, jobId, userId);
+    }
+  } catch (error) { console.error("[clock_event] group claim enrollment failed:", error); }
+}
+
+export async function nameGroupWorkOrderCrew(client: any, caller: GroupCaller, body: Record<string, unknown>) {
+  await assertClaimEnabled(client);
+  const group = await resolveGroup(client, body);
+  const ids = Array.isArray(body.user_ids) ? [...new Set(body.user_ids.map(String))] : [];
+  if (!ids.length || ids.some(id => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
+    throw new GroupWorkOrderError("group_person_not_a_trade", "Choose an active trade in your company.", 409);
+  }
+  return await updateClaimCrew(client, String(group.id), caller, "name", ids);
+}
+
+export async function leaveGroupClaim(client: any, caller: GroupCaller, body: Record<string, unknown>) {
+  await assertClaimEnabled(client);
+  const group = await resolveGroup(client, body);
+  return await updateClaimCrew(client, String(group.id), caller, "leave");
+}
+
+async function assertClaimEnabled(client: any) {
+  if (!(await readSwitch(client, GROUP_CLAIM_FLOW_FLAG))) {
+    throw new GroupWorkOrderError("group_claim_disabled", "Group claims are switched off.", 409);
+  }
+}
+
+export async function searchTradesForClaim(client: any, caller: GroupCaller, query: string) {
+  await assertClaimEnabled(client);
+  if (query.trim().length < 2) return { trades: [] };
+  const { data, error } = await client.rpc("group_claim_search_trades", { p_actor: caller.userId, p_query: query.trim() });
+  throwQuery(error, "search the crew");
+  return { trades: data ?? [] };
 }
 
 async function loadJob(client: any, jobId: string) {
@@ -1219,7 +1291,12 @@ export async function createGroupWorkOrder(
       404,
     );
   }
-  const assigned = await callerAssigned(client, jobId, caller.userId);
+  const claimFlow = await readSwitch(client, GROUP_CLAIM_FLOW_FLAG);
+  if (claimFlow && String(job.org_id) !== caller.orgId) {
+    throw new GroupWorkOrderError("group_job_not_found", "That job was not found.", 404);
+  }
+  const assigned = await callerAssigned(client, jobId, caller.userId) ||
+    (claimFlow && await claimOnJob(client, jobId, caller.userId));
   if (!assigned && !caller.isStaff) {
     throw new GroupWorkOrderError(
       "group_work_order_not_assigned",
@@ -1249,6 +1326,10 @@ export async function createGroupWorkOrder(
         "This job already has a group on a different work order.",
         409,
       );
+    }
+    if (claimFlow) {
+      await updateClaimCrew(client, String(existing.id), caller, "sync");
+      return publicGroupCard(existing);
     }
     const participants = await loadParticipants(client, String(existing.id));
     if (!participants.some((row) => String(row.user_id) === caller.userId)) {
@@ -1283,7 +1364,8 @@ export async function createGroupWorkOrder(
     "id, org_id, job_id, work_order_id, status, share_token, client_signed_at",
   ).single();
   throwQuery(error, "open the group");
-  await insertParticipant(client, String(data.id), caller.userId);
+  if (claimFlow) await updateClaimCrew(client, String(data.id), caller, "sync");
+  else await insertParticipant(client, String(data.id), caller.userId);
   return publicGroupCard(data);
 }
 
@@ -1407,6 +1489,10 @@ export async function joinGroupWorkOrder(
 ) {
   await assertGroupEnabled(client);
   const group = await resolveGroup(client, body);
+  if (await readSwitch(client, GROUP_CLAIM_FLOW_FLAG)) {
+    await updateClaimCrew(client, String(group.id), caller, "join");
+    return publicGroupCard(group);
+  }
   const jobId = String(group.job_id);
   const assigned = await callerAssigned(client, jobId, caller.userId);
   if (!assigned && !caller.isStaff) {
@@ -2353,8 +2439,13 @@ export async function readTradeGroupWorkOrder(
       404,
     );
   }
+  const claimFlow = await readSwitch(client, GROUP_CLAIM_FLOW_FLAG);
+  const claimGroup = claimFlow ? (group || await loadGroupByJob(client, jobId)) : null;
+  const claimMember = claimGroup && (await loadParticipants(client, String(claimGroup.id)))
+    .some(row => String(row.user_id) === caller.userId);
   if (
-    !caller.isStaff && !(await callerAssigned(client, jobId, caller.userId))
+    !caller.isStaff && !claimMember && !(await callerAssigned(client, jobId, caller.userId)) &&
+    !(claimFlow && await claimOnJob(client, jobId, caller.userId))
   ) {
     throw new GroupWorkOrderError(
       "group_work_order_not_assigned",
@@ -2546,11 +2637,20 @@ async function readGroupCrewStatus(client: any, caller: GroupCaller, groupId: st
     const full = String(users.find((u) => String(u.id) === id)?.name || "").trim();
     return full ? full.split(/\s+/)[0] : "A crew member";
   };
+  let sources: Record<string, unknown>[] = [];
+  if (await readSwitch(client, GROUP_CLAIM_FLOW_FLAG)) {
+    try {
+      const sourceRead = await client.rpc("group_claim_crew_sources", { p_group_id: groupId });
+      if (!sourceRead.error && Array.isArray(sourceRead.data)) sources = sourceRead.data;
+      else console.error("[group claim] crew source unavailable");
+    } catch { console.error("[group claim] crew source unavailable"); }
+  }
   const released = state.released === true;
   return {
     crew_status: state.people.filter((p: any) => p.state !== "no_share").map((p: any) => ({
       name: nameOf(String(p.user_id)),
       me: String(p.user_id) === caller.userId,
+      ...(sources.length ? { how: sources.find(row => row.user_id === p.user_id)?.how ?? null } : {}),
       state: released ? "released" : String(p.state),
     })),
     release: {

@@ -3,6 +3,7 @@
 // verification on, which refuses every x-api-key caller at the gateway (401).
 import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
 import { listExpenseReceipts } from './expense_list.ts'
+import { factReadOn } from './fact_reader_switch.ts'
 import { rejectTradeInvoiceStorage } from './trade_invoice_rejection.ts'
 import { syncConversationCache } from './conversation_cache_write.ts'
 import { isMoneyAction, moneyActionGate, readMoneyActionFlags } from "./money_actions.ts"
@@ -951,6 +952,7 @@ import {
   readInvoicePayableRoutes,
   type InvoicePayableRoute,
   type GroupCaller,
+  enrollClockGroupParticipant, nameGroupWorkOrderCrew, leaveGroupClaim, searchTradesForClaim,
 } from './group_work_order.ts'
 import { requestWorkOrderAmount, sendOutlookWorkOrderRequest } from './work_order_request.ts'
 import { signatureImageTag } from '../_shared/signature_image.ts'
@@ -2389,8 +2391,9 @@ async function reimbursementXeroAccount(client: any, lines: any[]): Promise<stri
 
 // Which super rule prices an invoice being saved: the one decision in
 // trade_pay_rule.ts. `prior` is the stored invoice this save replaces (null
-// for a new invoice): a priced prior keeps its stored basis, otherwise the
-// rule for the pay day. Unreadable: 503 pay_rule_unreadable, nothing saved.
+// for a new invoice): a dated priced prior keeps its stored basis; an
+// undated draft takes the rule for the incoming pay day.
+// Unreadable: 503 pay_rule_unreadable, nothing saved.
 async function tradePayBasisForSave(
   client: any,
   prior: TradePayPriorInvoice,
@@ -5317,6 +5320,9 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   // their own share only. Feedback and the office split are not on this list.
   'create_group_work_order',
   'join_group_work_order',
+  'name_group_work_order_crew',
+  'leave_group_claim',
+  'search_trades_for_claim',
   'sign_group_work_order',
   'submit_group_work_order_hours',
   'delete_group_work_order_hours',
@@ -11626,7 +11632,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (tradeInvoiceHasExternalXeroIdentity(rejInv) || rejInv.status === 'pushed_to_xero' || rejInv.status === 'paid') {
           throw new ApiError('Cannot reject an invoice already in Xero/paid', 400)
         }
-        const { data: rejected, error: rejErr } = await rejectTradeInvoiceStorage(client, rejInvId, officeSentBackNote(rejNote))
+        const { data: rejected, error: rejErr } = await rejectTradeInvoiceStorage(client, rejInvId, officeSentBackNote(rejNote), reviewActorLabel(authUser))
         if (rejErr) throw new Error('Failed to reject: ' + rejErr.message)
         if (rejected?.id !== rejInvId) {
           throw new ApiError('Cannot reject an invoice while its Xero identity is being recorded', 409)
@@ -13215,6 +13221,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'trade_invoice_job_modes':
       case 'create_group_work_order':
       case 'join_group_work_order':
+      case 'name_group_work_order_crew':
+      case 'leave_group_claim':
+      case 'search_trades_for_claim':
       case 'sign_group_work_order':
       case 'submit_group_work_order_hours':
       case 'delete_group_work_order_hours':
@@ -13416,6 +13425,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }
           case 'create_group_work_order':
           case 'join_group_work_order':
+          case 'name_group_work_order_crew':
+          case 'leave_group_claim':
+          case 'search_trades_for_claim':
           case 'sign_group_work_order':
           case 'submit_group_work_order_hours':
           case 'delete_group_work_order_hours':
@@ -13433,6 +13445,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const groupPayload = groupBody(body)
             if (action === 'create_group_work_order') {
               return await groupWorkOrderJson(createGroupWorkOrder(client, groupCaller, groupPayload))
+            }
+            if (action === 'search_trades_for_claim') {
+              if (req.method !== 'GET') return json({ error: 'GET required' }, 405)
+              return await groupWorkOrderJson(searchTradesForClaim(client, groupCaller, url.searchParams.get('q') || ''))
+            }
+            if (action === 'name_group_work_order_crew' || action === 'leave_group_claim') {
+              if (req.method !== 'POST') return json({ error: 'POST required' }, 405)
+              return await groupWorkOrderJson(action === 'name_group_work_order_crew'
+                ? nameGroupWorkOrderCrew(client, groupCaller, groupPayload)
+                : leaveGroupClaim(client, groupCaller, groupPayload))
             }
             if (action === 'join_group_work_order') {
               return await groupWorkOrderJson(joinGroupWorkOrder(client, groupCaller, groupPayload))
@@ -14153,7 +14175,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               ? new Date(new Date(draftWeekStart + 'T00:00:00Z').getTime() + 6 * 86400000).toISOString().slice(0, 10)
               : new Date().toISOString().slice(0, 10)
             // The draft this save replaces, read before pricing so a priced
-            // draft keeps its stored basis (trade_pay_rule.ts).
+            // dated draft keeps its stored basis; an undated draft takes the
+            // incoming pay date's rule (trade_pay_rule.ts).
             let existingDraft: ({ id: string } & NonNullable<TradePayPriorInvoice>) | null = weeklyShape && draftWeekStart
               ? await loadReplaceableWeeklyDraft(client, tradeUser.id, draftWeekStart)
               : null
@@ -14709,11 +14732,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               }
               priorDraft = weeklyDraft
             } else if (draft_id) {
-              const { data: draftToSubmit } = await client.from('trade_invoices')
-                .select(`id, status, week_start, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)
+              const { data: draftToSubmit, error: draftToSubmitErr } = await client.from('trade_invoices')
+                .select(`id, status, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)
                 .eq('id', draft_id)
                 .eq('user_id', tradeUser.id)
                 .maybeSingle()
+              if (draftToSubmitErr) throw new Error('Failed to load selected draft: ' + draftToSubmitErr.message)
               if (draftToSubmit?.status === 'draft') {
                 priorDraft = draftToSubmit
               }
@@ -15541,7 +15565,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // includes super and reimbursement lines carry none. A group
             // share keeps its group's basis.
             // The draft this submit replaces, read before pricing so a priced
-            // draft keeps its stored basis (trade_pay_rule.ts).
+            // dated draft keeps its stored basis; an undated draft takes the
+            // incoming pay date's rule (trade_pay_rule.ts).
             // Recurring deduction (for example Ute hire): taken off the amount
             // payable of a weekly invoice, after super and GST. The lines,
             // subtotal, super and GST below are untouched by it. An invoice
@@ -16720,6 +16745,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               event,
             )
             if (duplicate) {
+              if (event === 'clock_on') await enrollClockGroupParticipant(client, assignment.job_id, tradeUser.id, async () => {
+                const modes = await loadTradeInvoiceJobModes(client, {
+                  tradeId: tradeUser.id, orgId: tradeUser.orgId, jobIds: [assignment.job_id],
+                  jobVertical: _jobVertical, normaliseManagedVerticals: _normalizeManagedVerticals,
+                })
+                return modes.jobs[0]?.invoice_mode
+              })
+
               return json({ success: true, assignment, duplicate: true })
             }
 
@@ -16858,6 +16891,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 detail_json: eventDetail,
               })
             } catch (e) { console.log('[clock_event] event log error:', e) }
+
+            if (event === 'clock_on') await enrollClockGroupParticipant(client, assignment.job_id, tradeUser.id, async () => {
+              const modes = await loadTradeInvoiceJobModes(client, {
+                tradeId: tradeUser.id, orgId: tradeUser.orgId, jobIds: [assignment.job_id],
+                jobVertical: _jobVertical, normaliseManagedVerticals: _normalizeManagedVerticals,
+              })
+              return modes.jobs[0]?.invoice_mode
+            })
 
             // Auto-advance make-safe job status when trade clocks on
             if (event === 'clock_on' || event === 'start_travel') {
@@ -21022,6 +21063,7 @@ async function resolveJobs(client: any, body: any) {
 }
 
 async function getJobContextFacts(client: any, body: any) {
+  if (!(await factReadOn(client))) return { rows: [], facts_retired: true }
   const jobUuids: string[] = Array.isArray(body?.job_uuids) ? body.job_uuids : []
   if (jobUuids.length === 0) return { rows: [] }
   const limit = typeof body?.limit === 'number' && body.limit > 0
@@ -21503,6 +21545,7 @@ async function assembleJobDossier(client: any, body: any) {
   // read-only SQL functions, instead of the heavy reads below.
   if (mode === 'story') return await buildStoryDossier(client, jobRow, body)
 
+  const factsRetired = !(await factReadOn(client))
   const jobId: string = jobRow.id
   const jobNumber: string = jobRow.job_number
   const ghlContactId: string | null = jobRow.ghl_contact_id || null
@@ -21631,7 +21674,7 @@ async function assembleJobDossier(client: any, body: any) {
   const conversationAsc = [...conversationRead.data].reverse()
 
   // SQL view filters retired/expired facts BEFORE this bounded order/limit.
-  const factsRead = await safeRead('current_job_context_facts', async () => {
+  const factsRead = factsRetired ? { data: [], status: { ok: true, count: 0 } } : await safeRead('current_job_context_facts', async () => {
     const { data, error } = await client.from('current_job_context_facts')
       .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at, expires_at, _context_store')
       .eq('job_id', jobId)
@@ -21676,7 +21719,7 @@ async function assembleJobDossier(client: any, body: any) {
     readScopeSignOff(client, jobId),
     readScopeRevisionAlignment(client, jobId, jobRow.scope_json, jobRow.type),
     readJobFreshness(client, jobId),
-    safeRead('job_brief', async () => {
+    factsRetired ? { data: [], status: { ok: true, count: 0 } } : safeRead('job_brief', async () => {
       const { data, error } = await client.from('current_job_context_facts')
         .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at, expires_at, _context_store')
         .eq('job_id', jobId)
@@ -21720,8 +21763,9 @@ async function assembleJobDossier(client: any, body: any) {
 
   // ── Diagnostics ──
   const warnings: string[] = []
+  if (factsRetired) warnings.push('The old AI facts list is retired. Read the job story for what was said and what is owed.')
   if (excludedFacts) warnings.push(`facts: ${excludedFacts} superseded, retracted, untrusted or expired rows withheld from this bounded read`)
-  if (factsRead.status.ok && currentFacts.length === 0) {
+  if (!factsRetired && factsRead.status.ok && currentFacts.length === 0) {
     warnings.push('facts: no current rows returned; historical or out-of-window evidence may still exist')
   }
   warnings.push('reasoning/outcomes: Layer 7 schema not yet job-linked')
@@ -21803,6 +21847,7 @@ async function assembleJobDossier(client: any, body: any) {
     events: eventsRead.data,
     conversation: conversationAsc,
     facts: readableFacts,
+    ...(factsRetired ? { facts_retired: true } : {}),
     temporaryFacts,
     // How current `facts` are (context K4, cadence design section 4).
     freshness: freshnessRead.freshness,

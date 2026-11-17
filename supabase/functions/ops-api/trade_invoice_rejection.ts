@@ -5,6 +5,7 @@ export async function rejectTradeInvoiceStorage(
   client: any,
   invoiceId: string,
   note: string,
+  actor: string,
 ): Promise<{ data: { id: string } | null; error?: { message: string } | null }> {
   // feature_flags_pkey. Missing/unreadable keeps the original update verbatim.
   const { data: flag, error: flagError } = await client.from("feature_flags")
@@ -13,6 +14,7 @@ export async function rejectTradeInvoiceStorage(
     const { data, error } = await client.rpc("reject_trade_invoice_v1", {
       p_invoice_id: invoiceId,
       p_note: note,
+      p_actor: actor,
     });
     return { data: typeof data === "string" ? { id: data } : null, error };
   }
