@@ -33,6 +33,8 @@ function tableClient(tables: Record<string, Row[]>) {
     };
     const api: any = {
       select: () => api,
+      // P1-05.8: readers skip holding invoices; no fixture row is one.
+      neq: () => api,
       order(column: string, opts: { ascending?: boolean } = {}) {
         orderBy = { column, ascending: opts.ascending !== false };
         return api;

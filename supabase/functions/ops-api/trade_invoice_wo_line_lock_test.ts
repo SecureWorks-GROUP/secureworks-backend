@@ -313,21 +313,22 @@ Deno.test("the billed window comes from the job's own job-level lines' line_date
 });
 
 Deno.test("index.ts reads WO job cards for the submitting trade only, before persisting", () => {
-  const readAt = INDEX.indexOf("const woLock = workOrderLockJobs(extraLineItems)");
+  const readAt = INDEX.indexOf("const woLock = workOrderLockJobs(");
   assert(readAt > 0, "submit path must derive WO lock jobs from the extra lines");
-  const block = INDEX.slice(readAt, readAt + 3200);
+  // P1-05.8 adds the held-line card split beside the lock read.
+  const block = INDEX.slice(readAt, readAt + 4800);
   assertStringIncludes(block, ".eq('user_id', tradeUser.id)");
   assertStringIncludes(block, ".in('job_id', woLock.jobIds)");
   assertStringIncludes(block, ".gte('scheduled_date', week_start).lte('scheduled_date', weekEnd)");
   assertStringIncludes(block, "selectWorkOrderLineAssignmentIds({");
-  const includedAt = INDEX.indexOf("const includedAssignmentIds = [...new Set([");
+  const includedAt = INDEX.indexOf("const lineHoldIncludedIds = () => [...new Set([");
   const persistAt = INDEX.indexOf("? _persistWeeklyTradeInvoice(", includedAt);
   assert(includedAt > readAt, "included ids must be built after the WO card read");
   assert(persistAt > includedAt, "the stamp set must exist before the invoice is persisted");
 });
 
 Deno.test("index.ts folds WO line cards into the same Layer B stamp and prior-draft transfer", () => {
-  const includedAt = INDEX.indexOf("const includedAssignmentIds = [...new Set([");
+  const includedAt = INDEX.indexOf("const lineHoldIncludedIds = () => [...new Set([");
   const included = INDEX.slice(includedAt, includedAt + 300);
   assertStringIncludes(included, "...woLineAssignmentIds,");
   // The prior-draft RPC and the Layer B CAS both still consume the one list.
@@ -414,7 +415,7 @@ Deno.test("index.ts notes already-held WO cards on the invoice instead of failin
   // The stamp set is what gets stamped, and held cards are not in it.
   const stampAt = INDEX.indexOf("const expectedAssignmentIds = [...new Set(includedAssignmentIds)]");
   assert(stampAt > 0 && stampAt < noteAt, "the note is recorded after the Layer B stamp");
-  const includedAt = INDEX.indexOf("const includedAssignmentIds = [...new Set([");
+  const includedAt = INDEX.indexOf("const lineHoldIncludedIds = () => [...new Set([");
   const included = INDEX.slice(includedAt, includedAt + 300);
   assert(!included.includes("woLineHeldCardIds"), "held cards must never enter the stamp set");
 });

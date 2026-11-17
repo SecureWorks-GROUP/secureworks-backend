@@ -82,6 +82,7 @@ function fakeClient(fx: Fixtures): { client: any; writes: Write[] } {
       };
       const builder: any = {
         select: () => builder,
+        neq: () => builder,
         eq(column: string, value: unknown) {
           filters[column] = value;
           return builder;

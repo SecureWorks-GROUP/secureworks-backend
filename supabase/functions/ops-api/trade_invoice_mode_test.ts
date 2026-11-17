@@ -139,6 +139,7 @@ function fakeClient(world: World = {}) {
       };
       const builder: any = {
         select: () => builder,
+        neq: () => builder,
         eq(col: string, val: unknown) {
           filters.push(["eq", col, val]);
           return builder;
@@ -385,6 +386,7 @@ function hoursClient(world: { failJobs?: boolean } = {}) {
       };
       const builder: any = {
         select: () => builder,
+        neq: () => builder,
         eq(col: string, val: unknown) {
           if (table !== "job_assignments") filters.push(["eq", col, val]);
           return builder;

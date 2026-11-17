@@ -250,7 +250,7 @@ Deno.test("wiring: every door that saves or changes a trade line checks the cap 
   // submit_work_order_invoice: before the claim that saves the invoice.
   const door = src.indexOf("case 'submit_work_order_invoice': {");
   const doorCap = src.indexOf(CALL + "workOrderLines)", door);
-  const claim = src.indexOf("await _claimWorkOrderInvoiceBeforeXero(", door);
+  const claim = src.indexOf("_claimWorkOrderInvoiceBeforeXero(", door);
   assert(
     door > 0 && doorCap > door && doorCap < claim,
     "the crew work order door checks before it saves",

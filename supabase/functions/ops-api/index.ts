@@ -11611,8 +11611,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const { invoice_id: aprInvId } = body
         if (!aprInvId) throw new ApiError('invoice_id required', 400)
         const { data: aprInv } = await client.from('trade_invoices')
-          .select('id, status').eq('id', aprInvId).maybeSingle()
+          .select('id, status, invoice_kind').eq('id', aprInvId).maybeSingle()
         if (!aprInv) throw new ApiError('Invoice not found', 404)
+        // P1-05.8: a holding invoice is never approved for pay; its lines are
+        // moved to a payable invoice by the office instead.
+        if (aprInv.invoice_kind === 'held') throw holdingInvoiceNotPushedError()
         if (aprInv.status !== 'pending_ops_review' && aprInv.status !== 'queried') {
           throw new ApiError('Only invoices pending ops review can be approved (status: ' + aprInv.status + ')', 400)
         }
@@ -13783,7 +13786,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             if (requestedNegativeChargeIds.length > 0) {
               const { data: selectedChargeRows, error: selectedChargeErr } = await client
                 .from('trade_invoice_lines')
-                .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+                .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, invoice_kind, users:user_id(name))')
                 .in('id', requestedNegativeChargeIds)
                 .eq('trade_invoices.org_id', tradeUser.orgId)
               if (selectedChargeErr) throw selectedChargeErr
@@ -16235,8 +16238,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // P1-05.8: hold_lines tells the persist which lines the holding
             // invoice carries, so each line is checked as the trade sent it.
             // Sent to the weekly work-order persist only, never without held lines.
+            // A weekly line is checked in the weekly persist's own row shape
+            // (weeklyInvoiceLineRows), so its held part is sent the same way.
             const lineHoldHeldLineRows = (holdingId: string) => (lineHoldSorted?.held || []).map((row: any) => ({
-              ...toTradeInvoiceLineRow(holdingId, row, row._holdLabour ? { line_type: 'labour' } : {}),
+              ...(lineHoldWeeklySource && !isReimbursementItem(row)
+                ? { ...lineHoldWeeklySource.lines[Number(row.line_position)], total_hours: null, hourly_rate: null }
+                : lineHoldWeeklySource
+                ? reimbursementDbLine(row)
+                : toTradeInvoiceLineRow(holdingId, row, row._holdLabour ? { line_type: 'labour' } : {})),
               hold_reason: row.hold_reason,
               hold_detail: row.hold_detail,
               office_review_status: 'awaiting',
@@ -16406,10 +16415,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 held: lineHoldSorted!.held,
               })
               try {
+                // A split line's booking stays with its paid part (Layer B
+                // stamps it for this week's invoice); only bookings no paid
+                // line carries go to the holding invoice.
+                const paidBookings = new Set(includedAssignmentIds)
                 await stampHeldBookings(client, tradeUser.id, lineHoldSaved.id, [
                   ...lineHoldSorted!.held.flatMap((row: any) => Array.isArray(row.assignment_ids) ? row.assignment_ids : []),
                   ...lineHoldWoCardIds,
-                ], RELEASED_INVOICE_STATUS_SET)
+                ].filter((id: any) => !paidBookings.has(String(id))), RELEASED_INVOICE_STATUS_SET)
               } catch (error) {
                 await lineHoldUndoHolding()
                 throw error
@@ -18627,6 +18640,9 @@ export function _selectWorkOrderNegativeCharges(
     if (String(parent.user_id || '') === String(args.viewerId)) continue
     if (String(row.acknowledgment_status || '') !== 'acknowledged') continue
     if (RELEASED_INVOICE_STATUS_SET.has(String(parent.status || ''))) continue
+    // P1-05.8: a line waiting for the office is not paid, so it is never
+    // taken off anyone's pay.
+    if (parent.invoice_kind === 'held') continue
 
     const overrideApplied = row.override_amount !== null && row.override_amount !== undefined
     const sourceAmount = Number(overrideApplied ? row.override_amount : row.line_total_ex)
@@ -19119,7 +19135,7 @@ export async function _resolveWeeklyWorkOrderInvoice(
   if (chargeIds.length > 0) {
     reads.push(
       client.from('trade_invoice_lines')
-        .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+        .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, invoice_kind, users:user_id(name))')
         .in('id', chargeIds)
         .eq('trade_invoices.org_id', tradeUser.orgId),
       client.from('trade_invoice_lines')
@@ -19299,7 +19315,7 @@ async function readWorkOrderChargeRows(
     const ids = jobIds.slice(i, i + WORK_ORDER_ID_CHUNK)
     const { data, error } = await client
       .from('trade_invoice_lines')
-      .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+      .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, invoice_kind, users:user_id(name))')
       .in('job_id', ids)
       .eq('trade_invoices.org_id', orgId)
       .neq('trade_invoices.user_id', viewerId)
