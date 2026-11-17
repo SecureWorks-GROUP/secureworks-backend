@@ -1,0 +1,1 @@
+DO $$ BEGIN IF to_regprocedure('public.work_order_amount_change_profit()') IS NOT NULL OR pg_get_functiondef('public.group_work_order_write_split(uuid,boolean)'::regprocedure) LIKE '%public.work_order_amount_change_total(wo.id)%' THEN RAISE EXCEPTION 'pot rollback incomplete'; END IF; END $$;
