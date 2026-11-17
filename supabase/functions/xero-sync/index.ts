@@ -1435,6 +1435,7 @@ export async function matchUnlinkedInvoicesOnChange(client: any, totalSynced: nu
     }
   }
   const result = await matchUnlinkedInvoices(client)
+  if (result.success === false || result.degraded || result.error || result.builder_reference?.error) return result
   const { error } = await client.from('xero_sync_state').upsert({
     key: 'unlinked_match_last_run_at', cursor_at: now.toISOString(),
   }, { onConflict: 'key' })
