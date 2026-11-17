@@ -2,6 +2,7 @@
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
 import { REIMBURSEMENT_FLAG, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
+import { rejectTradeInvoiceStorage } from './trade_invoice_rejection.ts'
 import { syncConversationCache } from './conversation_cache_write.ts'
 import { isMoneyAction, moneyActionGate, readMoneyActionFlags } from "./money_actions.ts"
 import { agentProposalAction } from "./agent_proposals.ts"
@@ -11621,13 +11622,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (tradeInvoiceHasExternalXeroIdentity(rejInv) || rejInv.status === 'pushed_to_xero' || rejInv.status === 'paid') {
           throw new ApiError('Cannot reject an invoice already in Xero/paid', 400)
         }
-        const { data: rejected, error: rejErr } = await client.from('trade_invoices')
-          .update({ status: 'ops-reject', query_note: officeSentBackNote(rejNote) })
-          .eq('id', rejInvId)
-          .is('xero_bill_id', null)
-          .is('xero_pushed_at', null)
-          .select('id')
-          .maybeSingle()
+        const { data: rejected, error: rejErr } = await rejectTradeInvoiceStorage(client, rejInvId, officeSentBackNote(rejNote))
         if (rejErr) throw new Error('Failed to reject: ' + rejErr.message)
         if (rejected?.id !== rejInvId) {
           throw new ApiError('Cannot reject an invoice while its Xero identity is being recorded', 409)
