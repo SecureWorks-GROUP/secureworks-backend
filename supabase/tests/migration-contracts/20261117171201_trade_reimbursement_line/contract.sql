@@ -58,7 +58,16 @@ DO $$ DECLARE n int; BEGIN
   END IF;
 END $$;
 UPDATE public.trade_invoices SET status = 'ops-reject' WHERE id = '03000000-0000-4000-8000-000000000004';
-INSERT INTO public.trade_invoice_lines(trade_invoice_id,line_type,line_total_ex,expense_receipt_id) VALUES ('03000000-0000-4000-8000-000000000005','reimbursement',80,'03000000-0000-4000-8000-000000000003');
+-- Main keeps one line per receipt even after office rejection. Preserve that rule.
+DO $$ DECLARE rejected_constraint text; BEGIN
+  BEGIN
+    INSERT INTO public.trade_invoice_lines(trade_invoice_id,line_type,line_total_ex,expense_receipt_id) VALUES ('03000000-0000-4000-8000-000000000005','reimbursement',80,'03000000-0000-4000-8000-000000000003');
+    RAISE EXCEPTION 'ZZTEST rejected receipt bypassed permanent receipt uniqueness';
+  EXCEPTION WHEN unique_violation THEN
+    GET STACKED DIAGNOSTICS rejected_constraint = CONSTRAINT_NAME;
+    IF rejected_constraint IS DISTINCT FROM 'trade_invoice_lines_one_receipt' THEN RAISE; END IF;
+  END;
+END $$;
 SELECT public.remove_trade_invoice_reimbursement_guard();
 SELECT public.remove_trade_invoice_reimbursement_guard();
 DO $$ BEGIN
@@ -66,4 +75,5 @@ DO $$ BEGIN
     RAISE EXCEPTION 'ZZTEST director removal left the receipt guard installed';
   END IF;
 END $$;
+SELECT 'PASS: P1-03.1 receipt constraints, live claim guard, rejected receipt refusal and other cost lane' AS result;
 ROLLBACK;
