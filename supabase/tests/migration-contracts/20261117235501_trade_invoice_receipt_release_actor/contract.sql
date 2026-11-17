@@ -57,6 +57,15 @@ DO $plan$ DECLARE p jsonb; BEGIN
    RAISE EXCEPTION 'cx-reimb-rest exact delete did not use an index: %',p;
  END IF;
  RAISE NOTICE 'cx-reimb-rest exact delete plan: %',p;
+ -- The shared picker/save query is bounded by the receipt uniqueness index.
+ EXECUTE $query$EXPLAIN (ANALYZE,FORMAT JSON) SELECT expense_receipt_id,trade_invoice_id
+   FROM public.trade_invoice_lines WHERE expense_receipt_id IN
+     ('22000000-0000-4000-8000-000000000003','22000000-0000-4000-8000-000000000004')$query$ INTO p;
+ IF p::text LIKE '%Seq Scan%' OR p::text NOT LIKE '%Index Scan%'
+    OR (p->0->'Plan'->>'Actual Rows')::integer > 2 THEN
+   RAISE EXCEPTION 'cx-reimb-rest shared claims read was not index-bound: %',p;
+ END IF;
+ RAISE NOTICE 'cx-reimb-rest shared claims plan: %',p;
 END $plan$;
 
 -- A real event failure must restore the header, receipts and audit together.
