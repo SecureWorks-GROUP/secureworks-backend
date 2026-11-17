@@ -45,6 +45,9 @@ import {
   isBilledHoursInvoice,
   isPaidHoursLine,
   joinGroupWorkOrder,
+  ensureGroupParticipant,
+  enrollClockGroupParticipant,
+  nameGroupWorkOrderCrew,
   moneyToCents,
   PARTICIPANT_SHARE_KEYS,
   participantShareResponse,
@@ -3578,4 +3581,42 @@ Deno.test("ZZTEST changed work order pot reaches participant and office with swi
   db.rows("group_work_orders")[0].approved_budget_ex = null;
   flag.enabled = false;
   await read(482.15);
+});
+
+Deno.test("claim crew: off or unreadable switch leaves clock enrollment alone", async () => {
+  for (const failed of [false, true]) {
+    const db = new Memory();
+    const client = db.client();
+    if (failed) client.from = () => { throw new Error("read failed"); };
+    assertEquals(await ensureGroupParticipant(client, JOB, USER_A), null);
+    let modesRead = 0;
+    await enrollClockGroupParticipant(client, JOB, USER_A, async () => { modesRead++; return "group_work_order"; });
+    assertEquals(modesRead, 0);
+    assertEquals(db.rows("group_work_order_participants"), []);
+    assertEquals(db.rows("group_work_orders"), []);
+  }
+});
+
+Deno.test("claim crew: enrollment failure leaves a successful clock successful", async () => {
+  const db = new Memory();
+  db.rows("feature_flags").push({ flag_name: "group_claim_flow_v1", enabled: true });
+  let reads = 0;
+  await enrollClockGroupParticipant(db.client(), JOB, USER_A, () => {
+    reads++;
+    throw new Error("mode unavailable");
+  });
+  assertEquals(reads, 1);
+  assertEquals(db.rows("group_work_orders"), []);
+});
+
+Deno.test("claim crew: an invalid person is refused before any crew write", async () => {
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("feature_flags").push({ flag_name: "group_claim_flow_v1", enabled: true });
+  const error = await assertRejects(() => nameGroupWorkOrderCrew(db.client(), trade(USER_A), {
+    job_id: JOB, user_ids: ["not-a-user"],
+  }), GroupWorkOrderError);
+  assertEquals(error.code, "group_person_not_a_trade");
+  assertEquals(error.status, 409);
+  assertEquals(db.rows("group_work_order_participants").length, 2);
 });

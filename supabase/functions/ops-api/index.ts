@@ -949,6 +949,7 @@ import {
   readInvoicePayableRoutes,
   type InvoicePayableRoute,
   type GroupCaller,
+  enrollClockGroupParticipant, nameGroupWorkOrderCrew, leaveGroupClaim, searchTradesForClaim,
 } from './group_work_order.ts'
 import { requestWorkOrderAmount, sendOutlookWorkOrderRequest } from './work_order_request.ts'
 import { signatureImageTag } from '../_shared/signature_image.ts'
@@ -5312,6 +5313,9 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   // their own share only. Feedback and the office split are not on this list.
   'create_group_work_order',
   'join_group_work_order',
+  'name_group_work_order_crew',
+  'leave_group_claim',
+  'search_trades_for_claim',
   'sign_group_work_order',
   'submit_group_work_order_hours',
   'delete_group_work_order_hours',
@@ -13216,6 +13220,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'trade_invoice_job_modes':
       case 'create_group_work_order':
       case 'join_group_work_order':
+      case 'name_group_work_order_crew':
+      case 'leave_group_claim':
+      case 'search_trades_for_claim':
       case 'sign_group_work_order':
       case 'submit_group_work_order_hours':
       case 'delete_group_work_order_hours':
@@ -13417,6 +13424,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }
           case 'create_group_work_order':
           case 'join_group_work_order':
+          case 'name_group_work_order_crew':
+          case 'leave_group_claim':
+          case 'search_trades_for_claim':
           case 'sign_group_work_order':
           case 'submit_group_work_order_hours':
           case 'delete_group_work_order_hours':
@@ -13434,6 +13444,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const groupPayload = groupBody(body)
             if (action === 'create_group_work_order') {
               return await groupWorkOrderJson(createGroupWorkOrder(client, groupCaller, groupPayload))
+            }
+            if (action === 'search_trades_for_claim') {
+              if (req.method !== 'GET') return json({ error: 'GET required' }, 405)
+              return await groupWorkOrderJson(searchTradesForClaim(client, groupCaller, url.searchParams.get('q') || ''))
+            }
+            if (action === 'name_group_work_order_crew' || action === 'leave_group_claim') {
+              if (req.method !== 'POST') return json({ error: 'POST required' }, 405)
+              return await groupWorkOrderJson(action === 'name_group_work_order_crew'
+                ? nameGroupWorkOrderCrew(client, groupCaller, groupPayload)
+                : leaveGroupClaim(client, groupCaller, groupPayload))
             }
             if (action === 'join_group_work_order') {
               return await groupWorkOrderJson(joinGroupWorkOrder(client, groupCaller, groupPayload))
@@ -16709,6 +16729,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               event,
             )
             if (duplicate) {
+              if (event === 'clock_on') await enrollClockGroupParticipant(client, assignment.job_id, tradeUser.id, async () => {
+                const modes = await loadTradeInvoiceJobModes(client, {
+                  tradeId: tradeUser.id, orgId: tradeUser.orgId, jobIds: [assignment.job_id],
+                  jobVertical: _jobVertical, normaliseManagedVerticals: _normalizeManagedVerticals,
+                })
+                return modes.jobs[0]?.invoice_mode
+              })
+
               return json({ success: true, assignment, duplicate: true })
             }
 
@@ -16847,6 +16875,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 detail_json: eventDetail,
               })
             } catch (e) { console.log('[clock_event] event log error:', e) }
+
+            if (event === 'clock_on') await enrollClockGroupParticipant(client, assignment.job_id, tradeUser.id, async () => {
+              const modes = await loadTradeInvoiceJobModes(client, {
+                tradeId: tradeUser.id, orgId: tradeUser.orgId, jobIds: [assignment.job_id],
+                jobVertical: _jobVertical, normaliseManagedVerticals: _normalizeManagedVerticals,
+              })
+              return modes.jobs[0]?.invoice_mode
+            })
 
             // Auto-advance make-safe job status when trade clocks on
             if (event === 'clock_on' || event === 'start_travel') {
