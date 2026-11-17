@@ -55,6 +55,7 @@ import {
   DISPATCH_V2_STALE_SENDING_MS,
   DISPATCH_V2_TEST_TO,
   dispatchV2BodyHtml,
+  DISPATCH_ORDER_QUOTE_REF_FLAG,
   dispatchV2BuildEmail,
   type DispatchV2DateMode,
   dispatchV2DateModeParam,
@@ -2657,6 +2658,22 @@ function noApprovedEmail(): never {
   );
 }
 
+// P2-10.4: is dispatch_order_quote_ref_line_v1 on? Read where the email is
+// made. Only an explicit true is on: a missing row, a failed read or a throw
+// is off, so the email is then exactly what it was before the line existed.
+// (Unlike the budget switch, an unreadable read here never refuses: leaving
+// the line out is the safe answer.)
+export async function readDispatchOrderQuoteRefSwitch(client: any): Promise<boolean> {
+  try {
+    const { data, error } = await client.from("feature_flags").select("enabled")
+      .eq("flag_name", DISPATCH_ORDER_QUOTE_REF_FLAG).limit(1);
+    if (error || !Array.isArray(data)) return false;
+    return data[0]?.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
 // Make the held email for one supplier box, in the template, with To and CC
 // from the approved list plus the team mailbox. An open email for the box is
 // returned as it is (rebuild: true rebuilds it from the lines, losing edits).
@@ -2764,6 +2781,7 @@ export async function makeDispatchV2Email(
     fulfilment: asked ?? (open ? dispatchV2FulfilmentOf(open.body_text) : null),
     dateMode,
     photoCount: photoIds.length,
+    quoteRefLine: await readDispatchOrderQuoteRefSwitch(client),
   });
   const to = (info.approved.to_emails || []).map((e: string) =>
     String(e).toLowerCase()

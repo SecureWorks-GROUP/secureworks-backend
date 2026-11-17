@@ -271,6 +271,21 @@ export function dispatchV2Subject(jobNumber: unknown): string {
   return number ? `Material Order Ref ${number}` : "Material Order Ref";
 }
 
+// P2-10.4: the order email can ask the supplier to put our job number on their
+// invoice, so their bill can be matched to the job. Behind the switch
+// dispatch_order_quote_ref_line_v1, seeded off: a supplier reads these words,
+// so the owner approves them before it is turned on.
+export const DISPATCH_ORDER_QUOTE_REF_FLAG = "dispatch_order_quote_ref_line_v1";
+
+/** "Please quote this reference on your invoice: <job number>", or "" when
+ * the job has no number (the line is then left out). */
+export function dispatchV2QuoteRefLine(jobNumber: unknown): string {
+  const number = cleanLine(jobNumber);
+  return number
+    ? dispatchV2NoLongDashes(`Please quote this reference on your invoice: ${number}`)
+    : "";
+}
+
 // ── Delivery or pickup ──────────────────────────────────────────────────────
 
 export type DispatchV2Fulfilment = "delivery" | "pickup";
@@ -373,6 +388,12 @@ export function dispatchV2BuildEmail(input: {
   // line, the order is photo-only; with both, the lines say
   // "Please also see attached." under them.
   photoCount?: number | null;
+  // P2-10.4: true adds "Please quote this reference on your invoice: <job
+  // number>" as the body's last line (Shaun's signature, the sign-off, is
+  // added after the body by send-outlook-email). The caller passes true only
+  // while dispatch_order_quote_ref_line_v1 is on. False or left out: the body
+  // is exactly what it was before.
+  quoteRefLine?: boolean | null;
 }): DispatchV2Built {
   const pickup = input.fulfilment === "pickup";
   const dateText = input.dateMode === "asap"
@@ -411,7 +432,7 @@ export function dispatchV2BuildEmail(input: {
     : photos > 0
     ? [numbered.join("\n\n"), "", DISPATCH_V2_ALSO_ATTACHED_TEXT]
     : [numbered.join("\n\n")];
-  const body = [
+  const body: string[] = [
     `Hi Team, could we please order the following for ${
       pickup ? "pickup" : "delivery"
     }:`,
@@ -428,14 +449,19 @@ export function dispatchV2BuildEmail(input: {
     "",
     "",
     "Please confirm when you can, thank you.",
-  ].join("\n");
+  ];
+  const quoteRef = input.quoteRefLine === true
+    ? dispatchV2QuoteRefLine(input.job?.job_number)
+    : "";
+  if (quoteRef) body.push("", quoteRef);
+  const bodyText = body.join("\n");
   const missing: DispatchV2Built["missing"] = [];
   if (!dateText) missing.push("date");
   if (!pickup && !address) missing.push("address");
   if (!pickup && !contact) missing.push("contact");
   return {
     subject: dispatchV2Subject(input.job?.job_number),
-    body_text: body,
+    body_text: bodyText,
     lines: built,
     standing_lines_included: standing,
     photo_only: photoOnly,
