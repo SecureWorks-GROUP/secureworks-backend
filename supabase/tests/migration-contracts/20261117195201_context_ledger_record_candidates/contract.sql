@@ -9,12 +9,12 @@ BEGIN
   OR c.key IS DISTINCT FROM 'quote:q-9001' THEN RAISE EXCEPTION 'record candidates: T1 quote'; END IF;
  SELECT count(*) INTO n FROM public.context_ledger_record_candidates('00000000-0000-4000-8000-000000000401','quote_sent',NULL,'2026-11-05T00:00:00+08');
  IF n<>0 THEN RAISE EXCEPTION 'record candidates: T5 older quote'; END IF;
- SELECT * INTO c FROM public.context_ledger_record_candidates('00000000-0000-4000-8000-000000000402','payment',NULL,'2026-11-03T09:00:00+08','customer');
+ SELECT * INTO c FROM public.context_ledger_record_candidates('00000000-0000-4000-8000-000000000402','payment','invoice:inv-9002','2026-11-03T09:00:00+08','customer');
  -- Ticket step 5 gives the store priority over the example's next midnight.
  IF c.closes_at IS DISTINCT FROM '2026-11-05T23:59:59+08'::timestamptz THEN RAISE EXCEPTION 'record candidates: T2 paid day'; END IF;
- SELECT count(*) INTO n FROM public.context_ledger_record_candidates('00000000-0000-4000-8000-000000000403','payment',NULL,'2026-11-03T09:00:00+08','us');
+ SELECT count(*) INTO n FROM public.context_ledger_record_candidates('00000000-0000-4000-8000-000000000403','payment',NULL,'2026-11-03T09:00:00+08','us','supplier');
  IF n<>1 THEN RAISE EXCEPTION 'record candidates: T3 supplier'; END IF;
- IF EXISTS(SELECT 1 FROM public.context_ledger_record_candidates('00000000-0000-4000-8000-000000000403','payment',NULL,'2026-11-03T09:00:00+08','customer'))
+ IF EXISTS(SELECT 1 FROM public.context_ledger_record_candidates('00000000-0000-4000-8000-000000000403','payment','invoice:inv-9002','2026-11-03T09:00:00+08','customer'))
  OR EXISTS(SELECT 1 FROM public.context_ledger_record_candidates('00000000-0000-4000-8000-000000000407','booking_made',NULL,'2026-11-03T09:00:00+08'))
  OR EXISTS(SELECT 1 FROM public.context_ledger_record_candidates('00000000-0000-4000-8000-000000000401','reply',NULL,'2026-11-03T09:00:00+08')) THEN RAISE EXCEPTION 'record candidates: refusal cases'; END IF;
 END $c$;
