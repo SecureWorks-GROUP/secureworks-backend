@@ -31,27 +31,25 @@ export async function tradeRepaymentsAction(
     );
   }
   if (!caller.orgId) return result(403, "staff_only", "A company is required.");
-  if (action !== "list_trade_repayments") {
-    if (!caller.userId) {
-      return result(
-        403,
-        "repayment_not_approver",
-        "Only the bookkeeper and the owner can set a repayment.",
-      );
-    }
-    const setting = await client.from("trade_pay_settings").select(
-      "pay_run_approver_user_ids",
-    ).eq("id", 1).maybeSingle();
-    if (
-      setting.error ||
-      !setting.data?.pay_run_approver_user_ids?.includes(caller.userId)
-    ) {
-      return result(
-        403,
-        "repayment_not_approver",
-        "Only the bookkeeper and the owner can set a repayment.",
-      );
-    }
+  // Repayments are named pay figures: list, set and stop all need a pay run
+  // approver, checked before any repayment or person row is read.
+  const notApprover = () =>
+    result(
+      403,
+      "repayment_not_approver",
+      action === "list_trade_repayments"
+        ? "Only the bookkeeper and the owner can see repayments."
+        : "Only the bookkeeper and the owner can set a repayment.",
+    );
+  const setting = await client.from("trade_pay_settings").select(
+    "pay_run_approver_user_ids",
+  ).eq("id", 1).maybeSingle();
+  if (
+    setting.error ||
+    !Array.isArray(setting.data?.pay_run_approver_user_ids) ||
+    !setting.data.pay_run_approver_user_ids.includes(caller.userId)
+  ) {
+    return notApprover();
   }
   if (action === "list_trade_repayments") {
     const users = await client.from("users").select("id, name").eq(
