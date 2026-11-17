@@ -1,0 +1,1 @@
+DO $$ DECLARE d text; BEGIN d := pg_get_functiondef('public.persist_weekly_trade_invoice_v1(jsonb,jsonb,uuid)'::regprocedure); d := replace(d, 'NULLIF(line->>''expense_receipt_id'', '''')::uuid', 'NULL::uuid'); EXECUTE d; END $$;

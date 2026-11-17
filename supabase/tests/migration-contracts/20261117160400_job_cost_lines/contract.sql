@@ -222,6 +222,62 @@ SELECT 1 / CASE WHEN :'rollback_code' = 'P0001'
                      AND :'rollback_message' = 'job_cost_lines_rollback_has_data' THEN 1 ELSE 0 END;
 \echo 'P2-01.1 PASS: rollback preserves recorded lines'
 
+SELECT set_config('contract.parent', :'on_job_id', false);
+-- Follow-up 6: a writer cannot commit a placed line before its parts.
+BEGIN;
+SELECT pg_temp.cost_line_fixture('line-without-parts', 'on_job', 1000.00);
+\set ON_ERROR_STOP off
+COMMIT;
+\set ON_ERROR_STOP on
+SELECT pg_temp.cost_line_commit_refused(:'SQLSTATE', :'LAST_ERROR_MESSAGE', 'line without parts');
+\echo 'P2-01.1 PASS: line and parts require one transaction'
+
+-- Every target obeys conservation and supplies its required coordinate.
+BEGIN;
+SELECT pg_temp.cost_line_fixture('short-overhead', 'overhead', 1000.00) AS short_target_id \gset
+INSERT INTO public.job_cost_line_parts (line_id, part_no, target, division, lane, amount_ex)
+VALUES (:'short_target_id', 1, 'overhead', NULL, 'materials', 999.99);
+\set ON_ERROR_STOP off
+COMMIT;
+\set ON_ERROR_STOP on
+SELECT pg_temp.cost_line_commit_refused(:'SQLSTATE', :'LAST_ERROR_MESSAGE', 'short overhead');
+\echo 'P2-01.1 PASS: short overhead refuses at commit'
+
+BEGIN;
+SELECT pg_temp.cost_line_fixture('short-division_stock', 'division_stock', 1000.00) AS short_target_id \gset
+INSERT INTO public.job_cost_line_parts (line_id, part_no, target, division, lane, amount_ex)
+VALUES (:'short_target_id', 1, 'division_stock', 'insurance', 'materials', 999.99);
+\set ON_ERROR_STOP off
+COMMIT;
+\set ON_ERROR_STOP on
+SELECT pg_temp.cost_line_commit_refused(:'SQLSTATE', :'LAST_ERROR_MESSAGE', 'short division_stock');
+\echo 'P2-01.1 PASS: short division_stock refuses at commit'
+
+BEGIN;
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.job_cost_line_parts (line_id, part_no, target, lane, amount_ex)
+    VALUES (current_setting('contract.parent')::uuid, 2, NULL, 'materials', 0);
+    RAISE EXCEPTION 'cost lines contract: missing target accepted';
+  EXCEPTION WHEN not_null_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO public.job_cost_line_parts (line_id, part_no, target, lane, amount_ex)
+    VALUES (current_setting('contract.parent')::uuid, 2, 'job', 'materials', 0);
+    RAISE EXCEPTION 'cost lines contract: job without job_id accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO public.job_cost_line_parts (line_id, part_no, target, lane, amount_ex)
+    VALUES (current_setting('contract.parent')::uuid, 2, 'division_stock', 'materials', 0);
+    RAISE EXCEPTION 'cost lines contract: stock without division accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+ROLLBACK;
+\echo 'P2-01.1 PASS: missing target, job and division refuse'
+
 BEGIN;
 -- Parent cascade deletes must not raise for a line that no longer exists.
 DELETE FROM public.job_cost_lines WHERE document_id = 'ZZTEST-COST-LINES';

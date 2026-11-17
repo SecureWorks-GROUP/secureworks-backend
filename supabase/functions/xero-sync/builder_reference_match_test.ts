@@ -475,11 +475,18 @@ Deno.test("Matcher: a failed candidate read links nothing by the rule and the co
   const orig = console.error;
   console.error = () => {};
   try {
-    const { client, calls } = fakeClient({ sales: [SALE_1775], candidates: { data: null, error: { message: "boom" } }, jobsByContact: [] });
+    const { client, calls, inserts } = fakeClient({
+      sales: [{ ...SALE_1775, contact_name: "customer_role" }],
+      candidates: { data: null, error: { message: "boom" } },
+      jobsByContact: [{ id: "fallback-job", job_number: "SWF-260001", client_name: "customer_role",
+        org_id: "00000000-0000-0000-0000-000000000001", legacy: false, status: "accepted", type: "fencing" }],
+    });
     const r: any = await matchUnlinkedInvoices(client);
-    assertEquals([r.matched, r.builder_reference.ready, r.builder_reference.error], [0, false, "boom"]);
-    assert(!calls.some((c) => c.table === "xero_invoices" && c.update));
-    assert(calls.some((c) => c.table === "jobs" && c.select?.includes("client_name")), "contact-name candidates were read");
+    assertEquals([r.matched, r.builder_reference.ready, r.builder_reference.error], [1, false, "boom"]);
+    const write = calls.find((c) => c.table === "xero_invoices" && c.update)!;
+    assertEquals(write.update!.job_id, "fallback-job");
+    assert(write.filters.some((f) => f.op === "is" && f.args[0] === "job_id" && f.args[1] === null));
+    assertEquals(inserts.find((i) => i.table === "business_events")!.row.payload.method, "client_name_exact");
   } finally {
     console.error = orig;
   }

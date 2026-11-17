@@ -1,0 +1,1 @@
+-- Source tables and matcher storage are owned by earlier registered cases.
