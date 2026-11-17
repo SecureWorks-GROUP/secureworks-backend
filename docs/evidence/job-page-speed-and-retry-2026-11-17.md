@@ -139,17 +139,19 @@ office closure and isolated close-read failure. Existing queue fairness checks
 still prove both yields. A planted unexpected refresh body must refuse the
 migration, and rollback verifies the exact record-close predecessor md5. No
 proof test was deleted; the renamed folder retains every original assertion.
-The index proof now checks the actual job-leading key and keyed condition,
-including main's newer covering index, rather than insisting on one equivalent
-index name. It still refuses an unbounded raw-table scan.
-Historical page, schedule and record-close tests restore the installed successor
+Rule 16: the sparse and dense plans must show indexed access on each updated
+table and no Seq Scan, independent of index name. Dense access additionally
+requires a job-leading key with a job-id condition. EXPLAIN ANALYZE bounds
+actual rows read (including filter rejects) to 32 per table on the synthetic
+1,000-job/10,000-mark fixture. No index is added.
+Historical mark-trigger, page, schedule and record-close tests restore the installed successor
 after exercising their own body, so subsequent cases cannot silently test an
 obsolete refresh definition.
 
-Fresh fix gate after merging current main: 22 positive cases, 7 rollback cases,
-22 planted breaks rejected for their expected reasons, and one unexpected
+Fresh fix gate after merging current main: 23 positive cases, 8 rollback cases,
+23 planted breaks rejected for their expected reasons, and one unexpected
 pre-image refused; zero unexpected failures. The stock `run.sh` was invoked
-with the 22 case names found by searching for both replaced functions. It
+with the 23 case names found by searching for both replaced functions. It
 builds all registered schema prerequisites but runs only those selected
 behavior/proof cases. The successful log ends
 `PostgreSQL migration contracts passed`. The function body pin also proves
@@ -162,3 +164,14 @@ Migration transaction-statement grep and diff whitespace check both pass.
 Director, on live after review and merge: measure deployed build times and
 observe that pending changed/busy jobs no longer monopolize successive turns.
 No trigger or timer installation is required.
+
+The hosted shard exposed one additional historical replay path: the mark-trigger
+case also restores the old queue refresh outside its rolled-back fixtures, and
+its shard omits the page/schedule cases. It now retains raw-table indexes and
+restores the installed successor itself. A focused mark-trigger plus speed-case
+run exercises that exact ordering without depending on either page case.
+
+The separate two-case ordering run passed both positive cases, both rollback
+cases, both expected planted failures and the expected pre-image refusal. This
+run includes the actual-row bounds above. Both logs end
+`PostgreSQL migration contracts passed`.
