@@ -325,10 +325,17 @@ handlerTest("pay rule: an agreed work order on the new rule bills its total, sup
     ["inclusive_12_112_v1", 1850.5, 198.27, 1652.23, 1850.5],
   );
   assert(Math.round(inv.net_pay * 100) + Math.round(inv.super_amount * 100) <= 185050);
-  for (const allocated of [1850.51, 2000]) {
+  // One cent over is caught by the work order cap; any other amount by the
+  // agreed-amount check. Either way nothing is saved.
+  for (
+    const [allocated, code] of [
+      [1850.51, "work_order_total_over_agreed"],
+      [2000, "work_order_amount_not_agreed"],
+    ] as const
+  ) {
     const refused = await submit([woRow(AGREED_JOB, "ZZF-2001", allocated)], ON_FROM);
     assertEquals(refused.status, 409, JSON.stringify(refused.body));
-    assertEquals(refused.body.code, "work_order_amount_not_agreed");
+    assertEquals(refused.body.code, code);
     assertEquals(refused.invoiceRows, []);
   }
 });
