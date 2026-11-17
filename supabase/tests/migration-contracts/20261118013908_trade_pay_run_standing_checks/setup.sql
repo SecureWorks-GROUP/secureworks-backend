@@ -1,0 +1,53 @@
+-- Minimal pre-existing columns support an isolated disposable case. Existing
+-- registered-stack tables/views are preserved; no live setup is supported.
+CREATE TABLE IF NOT EXISTS public.feature_flags(flag_name text PRIMARY KEY, enabled boolean NOT NULL, description text);
+CREATE TABLE IF NOT EXISTS public.users(id uuid PRIMARY KEY, org_id uuid, name text, role text);
+CREATE TABLE IF NOT EXISTS public.jobs(id uuid PRIMARY KEY, org_id uuid, job_number text, status text, type text);
+CREATE TABLE IF NOT EXISTS public.trade_invoices(
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id uuid, user_id uuid, invoice_number text,
+ week_start date, status text, submitted_at timestamptz, created_at timestamptz DEFAULT now(),
+ subtotal_ex numeric, gross_earned numeric, net_pay numeric, super_amount numeric,
+ super_basis text, super_base_ex numeric, gst numeric, total_inc numeric, gst_on boolean,
+ super_rate numeric, job_grand_total_ex numeric, final_deductions_total_ex numeric,
+ to_be_paid_ex numeric, recurring_deduction_amount numeric, xero_bill_id text, xero_pushed_at timestamptz);
+CREATE TABLE IF NOT EXISTS public.trade_invoice_lines(
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(), trade_invoice_id uuid, job_id uuid,
+ line_type text, line_total_ex numeric, job_work_order_id uuid, office_review_status text,
+ group_share_id uuid, description text, job_number text);
+CREATE TABLE IF NOT EXISTS public.work_orders(
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id uuid, job_id uuid, kind text,
+ status text, agreed_labour_ex numeric);
+CREATE TABLE IF NOT EXISTS public.work_order_customer_variations(
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(), work_order_id uuid, status text, trade_allocation_ex numeric);
+CREATE TABLE IF NOT EXISTS public.group_work_orders(
+ id uuid PRIMARY KEY, org_id uuid, job_id uuid, work_order_id uuid, pay_basis text, split_frozen_at timestamptz);
+CREATE TABLE IF NOT EXISTS public.job_assignments(
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(), job_id uuid, user_id uuid,
+ scheduled_date date, status text, is_lead boolean DEFAULT false);
+-- These mirror existing indexes, not new product indexes.
+CREATE INDEX IF NOT EXISTS idx_inv_lines_invoice ON public.trade_invoice_lines(trade_invoice_id);
+CREATE INDEX IF NOT EXISTS idx_inv_lines_job ON public.trade_invoice_lines(job_id);
+CREATE INDEX IF NOT EXISTS idx_wo_job ON public.work_orders(job_id) WHERE job_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_work_order_customer_variations_wo ON public.work_order_customer_variations(work_order_id) WHERE work_order_id IS NOT NULL;
+SELECT to_regprocedure('public.trade_send_totals(uuid)') IS NULL AS need_hold \gset
+\if :need_hold
+\ir ../../../migrations/20261117173901_trade_line_hold.sql
+\endif
+SELECT to_regprocedure('public.trade_is_off_job_crew(uuid,uuid,date)') IS NULL AS need_crew \gset
+\if :need_crew
+\ir ../../../migrations/20261117173401_job_assignment_self_added.sql
+\endif
+SELECT to_regprocedure('public.work_order_amount_change_total(uuid)') IS NULL AS need_changes \gset
+\if :need_changes
+\ir ../../../migrations/20261117171802_work_order_amount_changes.sql
+\endif
+-- A standalone run has no Job Profit stack. This fixture models its documented
+-- trade_line projection. GitHub uses the actual registered v_job_cost_events.
+SELECT to_regclass('public.v_job_cost_events') IS NULL AS need_costs \gset
+\if :need_costs
+CREATE VIEW public.v_job_cost_events AS
+ SELECT l.job_id,l.line_total_ex amount_ex,'trade_line'::text source,
+ l.id::text source_id,i.id::text document_id,true is_actual
+ FROM public.trade_invoices i JOIN public.trade_invoice_lines l ON l.trade_invoice_id=i.id
+ WHERE l.job_id IS NOT NULL;
+\endif
