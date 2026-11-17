@@ -152,7 +152,7 @@ INSERT INTO cron.job (jobname, schedule, command, active) VALUES
   ('daily-digest', '0 22 * * *',
    'SELECT net.http_post(url:=''https://example.invalid/functions/v1/daily-digest'', headers:=''{"Authorization": "Bearer stand-in-old-pasted-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}''::jsonb)',
    false),
-  ('daily-digest-canary', '0 5 * * 1', 'SELECT 1');
+  ('daily-digest-canary', '0 5 * * 1', 'SELECT 1', true);
 CREATE TEMP TABLE old_ids ON COMMIT DROP AS SELECT jobname, jobid FROM cron.job;
 \ir ../../../migrations/20261117150000_daily_digest_build_cron.sql
 DO $$
