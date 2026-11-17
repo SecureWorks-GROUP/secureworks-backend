@@ -1,6 +1,13 @@
 BEGIN;
 -- Inspect this slice before its later fact-read switch overlay.
 \ir ../../../rollbacks/20261117205201_context_fact_read_state_down.sql
+-- This contract proves the earlier facts-only delta against its own predecessor.
+-- Stand that state body back up inside this rolled-back transaction when FU20
+-- part 2 is present; the successor's own case proves the new mark reads.
+SELECT to_regprocedure('public.context_worker_notes_due()') IS NOT NULL AS worker_marks_successor \gset
+\if :worker_marks_successor
+\ir ../../../rollbacks/20261117210101_context_worker_mark_reads_down.sql
+\endif
 SET LOCAL session_replication_role = replica;
 -- Every fixture stays in this rolled-back transaction. No switch is changed live.
 DELETE FROM public.automation_switches;
