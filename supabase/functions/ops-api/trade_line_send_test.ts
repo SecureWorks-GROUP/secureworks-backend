@@ -140,7 +140,7 @@ Deno.test("stampHeldBookings: nothing to stamp writes nothing; an unreadable boo
   await stampHeldBookings(empty.client, "zz-user", "hold-1", [], new Set());
   assertEquals(empty.updates, []);
   const bad = bookingsClient([], [], { readError: true });
-  await assertRejects(() => stampHeldBookings(bad.client, "zz-user", "hold-1", ["a1"], new Set()), Error, "held bookings unreadable");
+  await assertRejects(() => stampHeldBookings(bad.client, "zz-user", "hold-1", ["a1"], new Set()), Error, "held_bookings_unreadable");
 });
 
 const wl = (over: Partial<WeeklyInvoiceLine>): WeeklyInvoiceLine => ({

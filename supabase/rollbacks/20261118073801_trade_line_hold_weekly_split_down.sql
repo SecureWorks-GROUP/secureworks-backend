@@ -2,6 +2,9 @@
 -- (md5(prosrc) 58182c36e4f35a04ef652da81cea4ec7) only from this migration's
 -- body; returns when already at main's body; refuses any other body. Then
 -- drops the split helper, which nothing else reads.
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
+
 DO $drop$ BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_proc

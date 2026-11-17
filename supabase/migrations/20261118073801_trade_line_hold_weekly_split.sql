@@ -24,6 +24,19 @@
 --   * the line put back together does not make its total the same way, so a
 --     split that loses or adds a cent is refused.
 -- Lines with no split id pass through unchanged. Reads and writes no table.
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
+
+-- A function of this name on live must be this migration's own body (a re-run);
+-- anything else is someone else's and is never replaced.
+DO $guard$ DECLARE body_md5 text; BEGIN
+  SELECT md5(prosrc) INTO body_md5 FROM pg_proc
+  WHERE oid = to_regprocedure('public.trade_line_hold_merge_v1(jsonb,jsonb)');
+  IF body_md5 IS NOT NULL AND body_md5 <> '1cf279136f44bccd245bd7845d086d11' THEN
+    RAISE EXCEPTION 'P1-05.8 trade_line_hold_merge_v1 exists with another body: %', body_md5;
+  END IF;
+END $guard$;
+
 CREATE OR REPLACE FUNCTION public.trade_line_hold_merge_v1(p_backed jsonb, p_held jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql

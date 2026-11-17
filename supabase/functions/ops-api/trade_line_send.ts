@@ -19,6 +19,19 @@ import {
 } from "./trade_pay_rule.ts";
 import { WEEKLY_INVOICE_DEDUCTION_LINE_TYPES } from "./trade_invoice_weekly.ts";
 
+/** Director rule 21: logs and error text carry codes and ids only, never a
+ * database message (it can quote row values). */
+export class LineSendFault extends Error {}
+export function lineSendLogCode(error: unknown): string {
+  if (error instanceof LineSendFault) return error.message;
+  if (typeof error === "string" && /^[a-z_]{1,40}$/.test(error)) return error;
+  const code = (error as any)?.code;
+  return typeof code === "string" && /^[A-Za-z0-9_.-]{1,40}$/.test(code) ? code : "error";
+}
+const fault = (what: string, error?: unknown) =>
+  new LineSendFault(error === undefined ? what : `${what}:${lineSendLogCode(error)}`);
+
+
 export const TRADE_LINE_HOLD_FLAG = "trade_line_hold_v1";
 export const HOLDING_INVOICE_DESCRIPTION_SUFFIX = " (part over the job's amount)";
 
@@ -289,16 +302,16 @@ export async function stampStandardSend(
 ): Promise<void> {
   const { error } = await client.from("trade_invoices")
     .update({ send_id: sendId }).eq("id", invoiceId);
-  if (error) throw new Error("send stamp failed: " + String(error.message || error));
+  if (error) throw fault("send_stamp_failed", error);
   const { data: lines, error: readError } = await client.from("trade_invoice_lines")
     .select("id, line_total_ex").eq("trade_invoice_id", invoiceId);
   if (readError || !Array.isArray(lines)) {
-    throw new Error("send stamp failed: lines unreadable");
+    throw fault("send_stamp_lines_unreadable");
   }
   for (const line of lines) {
     const { error: lineError } = await client.from("trade_invoice_lines")
       .update({ sent_amount_ex: money(line.line_total_ex) }).eq("id", line.id);
-    if (lineError) throw new Error("send stamp failed: " + String(lineError.message || lineError));
+    if (lineError) throw fault("send_stamp_failed", lineError);
   }
 }
 
@@ -315,7 +328,7 @@ export async function stampSplitGroups(
       .update({ split_group_id: row.split_group_id })
       .eq("trade_invoice_id", invoiceId)
       .eq("line_position", row.line_position ?? position);
-    if (error) throw new Error("split stamp failed: " + String(error.message || error));
+    if (error) throw fault("split_stamp_failed", error);
   }
 }
 
@@ -383,7 +396,7 @@ export async function saveHoldingInvoice(
       break;
     }
     if (attempt < 2 && input.isNumberTaken(error)) continue;
-    throw new Error("holding invoice not saved: " + String(error?.message || "no id"));
+    throw fault("holding_invoice_not_saved", error ?? "no_id");
   }
   try {
     const rows = input.held.map((row, position) => {
@@ -402,11 +415,11 @@ export async function saveHoldingInvoice(
     const { data: saved, error: lineError } = await client.from("trade_invoice_lines")
       .insert(rows).select("id, line_position");
     if (lineError || !Array.isArray(saved) || saved.length !== rows.length) {
-      throw new Error("holding lines not saved: " + String(lineError?.message || "row count"));
+      throw fault("holding_lines_not_saved", lineError ?? "row_count");
     }
     const { error: liveError } = await client.from("trade_invoices")
       .update({ status: "pending_ops_review" }).eq("id", invoiceId).eq("status", "draft");
-    if (liveError) throw new Error("holding invoice not opened: " + String(liveError.message));
+    if (liveError) throw fault("holding_invoice_not_opened", liveError);
     const byPosition = new Map(saved.map((s: any) => [Number(s.line_position), String(s.id)]));
     return {
       id: invoiceId,
@@ -425,7 +438,7 @@ export async function deleteHoldingInvoice(client: any, invoiceId: string): Prom
     await client.from("trade_invoice_lines").delete().eq("trade_invoice_id", invoiceId);
     await client.from("trade_invoices").delete().eq("id", invoiceId).eq("invoice_kind", "held");
   } catch (error) {
-    console.error("[ops-api] holding invoice clean-up failed:", error instanceof Error ? error.message : String(error));
+    console.error("[ops-api] holding invoice clean-up failed:", lineSendLogCode(error), invoiceId);
   }
 }
 
@@ -440,7 +453,7 @@ export async function releaseStandardInvoice(
     status: "draft",
     query_note: note.slice(0, 500),
   }).eq("id", invoiceId).is("xero_bill_id", null);
-  if (error) console.error("[ops-api] standard invoice release failed:", error.message);
+  if (error) console.error("[ops-api] standard invoice release failed:", lineSendLogCode(error), invoiceId);
 }
 
 export type RaiseContext = {
@@ -467,7 +480,7 @@ export async function raiseHeldLines(
       raised++;
     } catch (error) {
       failed++;
-      console.error("[ops-api] pay line raise failed (send unchanged):", (error as any)?.message ?? String(error));
+      console.error("[ops-api] pay line raise failed (send unchanged):", lineSendLogCode(error));
     }
   };
   const backedOnJob = new Map<string, number>();
@@ -623,13 +636,13 @@ export async function stampHeldBookings(
   if (wanted.length === 0) return;
   const { data, error } = await client.from("job_assignments")
     .select("id, invoiced_in").eq("user_id", userId).in("id", wanted);
-  if (error || !Array.isArray(data)) throw new Error("held bookings unreadable");
+  if (error || !Array.isArray(data)) throw fault("held_bookings_unreadable");
   const refs = [...new Set(data.map((a: any) => a.invoiced_in).filter(Boolean).map(String))];
   const released = new Set<string>();
   if (refs.length > 0) {
     const { data: invoices, error: refError } = await client.from("trade_invoices")
       .select("id, status").in("id", refs);
-    if (refError || !Array.isArray(invoices)) throw new Error("held booking invoices unreadable");
+    if (refError || !Array.isArray(invoices)) throw fault("held_booking_invoices_unreadable");
     for (const inv of invoices) {
       if (releasedStatuses.has(String(inv.status || ""))) released.add(String(inv.id));
     }
@@ -646,7 +659,7 @@ export async function stampHeldBookings(
     .or(claimable.length > 0
       ? "invoiced_in.is.null,invoiced_in.in.(" + claimable.join(",") + ")"
       : "invoiced_in.is.null");
-  if (stampError) throw new Error("held bookings not stamped: " + String(stampError.message || stampError));
+  if (stampError) throw fault("held_bookings_not_stamped", stampError);
 }
 
 /** Jobs to hold whole after a second guard refusal that named no job: every

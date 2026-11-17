@@ -1,6 +1,9 @@
 -- Rollback of P1-05.8 work-order persist split check. Puts back main's body
 -- (md5(prosrc) 3c07c3113679ee7cdd99c574f755d99a) only from this migration's
 -- body; returns when already at main's body; refuses any other body.
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
+
 DO $patch$ DECLARE
   d text;
   body_md5 text;

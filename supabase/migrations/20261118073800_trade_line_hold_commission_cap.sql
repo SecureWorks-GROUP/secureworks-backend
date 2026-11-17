@@ -12,6 +12,9 @@
 -- migration's body returns; any other body refuses.
 -- No table write, no schedule, no switch change.
 -- Rollback: supabase/rollbacks/20261118073800_trade_line_hold_commission_cap_down.sql.
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
+
 DO $patch$ DECLARE d text; old_text text; new_text text; body_md5 text; BEGIN
   d := pg_get_functiondef('public.assert_job_commission_cap(uuid,uuid)'::regprocedure);
   SELECT md5(prosrc) INTO body_md5 FROM pg_proc

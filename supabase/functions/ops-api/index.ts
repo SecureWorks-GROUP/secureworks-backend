@@ -1,7 +1,7 @@
 // JWT flag: --no-verify-jwt. Keep this line at the top: the deploy workflow reads
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
-import { deleteHoldingInvoice, guardedJobs, holdLineFromRow, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, type SendRow, type SortedSend } from './trade_line_send.ts'
+import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdLineFromRow, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, type SendRow, type SortedSend } from './trade_line_send.ts'
 import { readLineHoldFacts, type LineHoldFacts } from './trade_line_hold.ts'
 import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
 import { listExpenseReceipts } from './expense_list.ts'
@@ -13921,7 +13921,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 woFacts = read.facts
                 return read.sorted
               } catch (error) {
-                console.error('[ops-api] submit_work_order_invoice: line hold facts unreadable:', error instanceof Error ? error.message : String(error))
+                console.error('[ops-api] submit_work_order_invoice: line hold facts unreadable:', lineSendLogCode(error))
                 const message = 'Your invoice could not be checked, so nothing was sent. Try again in a minute.'
                 throw new ApiError(message, 503, { ok: false, success: false, saved: false, code: 'line_hold_unreadable', error: message, userMessage: message })
               }
@@ -14023,7 +14023,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               try {
                 await woSaveHolding(null)
               } catch (error) {
-                console.error('[ops-api] submit_work_order_invoice: holding invoice not saved:', error instanceof Error ? error.message : String(error))
+                console.error('[ops-api] submit_work_order_invoice: holding invoice not saved:', lineSendLogCode(error))
                 woHoldFailed('holding_invoice_not_saved')
               }
               await woTellOffice([])
@@ -14087,7 +14087,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   try {
                     await woSaveHolding(null)
                   } catch (holdError) {
-                    console.error('[ops-api] submit_work_order_invoice: holding invoice not saved:', holdError instanceof Error ? holdError.message : String(holdError))
+                    console.error('[ops-api] submit_work_order_invoice: holding invoice not saved:', lineSendLogCode(holdError))
                     woHoldFailed('holding_invoice_not_saved')
                   }
                   await woTellOffice([])
@@ -14103,7 +14103,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 await stampStandardSend(client, tradeInvoiceId, woSendId!)
                 await woSaveHolding(tradeInvoiceId)
               } catch (error) {
-                console.error('[ops-api] submit_work_order_invoice: held-line send not finished:', error instanceof Error ? error.message : String(error))
+                console.error('[ops-api] submit_work_order_invoice: held-line send not finished:', lineSendLogCode(error))
                 await releaseStandardInvoice(client, tradeInvoiceId, 'Held-line send not finished; the next send replaces this draft.')
                 woHoldFailed('holding_invoice_not_saved')
               }
@@ -15790,7 +15790,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 lineHoldFacts = read.facts
                 return read.sorted
               } catch (error) {
-                console.error('[ops-api] generate_trade_invoice: line hold facts unreadable:', error instanceof Error ? error.message : String(error))
+                console.error('[ops-api] generate_trade_invoice: line hold facts unreadable:', lineSendLogCode(error))
                 const message = 'Your lines could not be checked, so nothing was sent. Try again in a minute.'
                 throw new ApiError(message, 503, { ok: false, success: false, saved: false, code: 'line_hold_unreadable', error: message, userMessage: message })
               }
@@ -16451,7 +16451,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               const holdingId = lineHoldSaved.id
               lineHoldSaved = null
               const { error } = await client.from('job_assignments').update({ invoiced_in: null }).eq('invoiced_in', holdingId)
-              if (error) console.error('[ops-api] holding invoice booking release failed:', error.message)
+              if (error) console.error('[ops-api] holding invoice booking release failed:', lineSendLogCode(error), holdingId)
               await deleteHoldingInvoice(client, holdingId)
             }
             const lineHoldSaveHolding = async (followsInvoiceId: string | null) => {
@@ -16521,7 +16521,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               try {
                 await lineHoldSaveHolding(null)
               } catch (error) {
-                console.error('[ops-api] generate_trade_invoice: holding invoice not saved:', error instanceof Error ? error.message : String(error))
+                console.error('[ops-api] generate_trade_invoice: holding invoice not saved:', lineSendLogCode(error))
                 lineHoldFailed('holding_invoice_not_saved')
               }
               await lineHoldTellOffice()
@@ -16545,7 +16545,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 await stampSplitGroups(client, invoiceId, [...lineItems, ...extraLineItems])
                 await lineHoldSaveHolding(invoiceId)
               } catch (error) {
-                console.error('[ops-api] generate_trade_invoice: held-line send not finished:', error instanceof Error ? error.message : String(error))
+                console.error('[ops-api] generate_trade_invoice: held-line send not finished:', lineSendLogCode(error))
                 await releaseStandardInvoice(client, invoiceId, 'Held-line send not finished; the next send replaces this draft.')
                 lineHoldFailed('holding_invoice_not_saved')
               }
@@ -58743,7 +58743,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
           invoiceModeJobIds.map((jobId, index) => holdLineFromRow({ job_id: jobId, line_total_ex: 0 }, weekStart || null, index)),
         )
       } catch (leftErr) {
-        console.error('[ops-api] my_hours: job amounts unreadable:', (leftErr as Error)?.message)
+        console.error('[ops-api] my_hours: job amounts unreadable:', lineSendLogCode(leftErr))
         jobLeftUnavailable = true
       }
     }

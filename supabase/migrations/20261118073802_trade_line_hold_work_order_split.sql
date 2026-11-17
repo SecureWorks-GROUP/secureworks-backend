@@ -14,6 +14,9 @@
 -- Rule 15: patched only from main's body (md5(prosrc)
 -- 3c07c3113679ee7cdd99c574f755d99a); a re-run at this migration's body
 -- returns; any other body refuses.
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
+
 DO $patch$ DECLARE
   d text;
   body_md5 text;
