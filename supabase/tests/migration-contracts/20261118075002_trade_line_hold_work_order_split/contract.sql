@@ -2,6 +2,10 @@
 -- only when backed plus held rebuild each line exactly, may save deductions
 -- alone when all its work is held, and behaves as main without hold_lines.
 -- Fixtures are rolled back.
+-- Merge-safety rule 17: re-apply first (a no-op at this body), so an
+-- earlier contract in the shard cannot leave a different body behind.
+\ir ../../../migrations/20261118075001_trade_line_hold_weekly_split.sql
+\ir ../../../migrations/20261118075002_trade_line_hold_work_order_split.sql
 BEGIN;
 DO $$ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.persist_trade_work_order_invoice_v1(jsonb,jsonb,uuid)'::regprocedure)
