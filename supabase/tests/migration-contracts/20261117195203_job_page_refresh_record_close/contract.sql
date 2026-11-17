@@ -1,6 +1,9 @@
 -- Earlier contracts restore their own historical refresh body. Stand up this
 -- successor before checking it, without replacing any story/ledger function.
+\if :{?page_speed_record_close_test}
+\else
 \ir ../../../migrations/20261117195203_job_page_refresh_record_close.sql
+\endif
 BEGIN;
 \set record_fixture_seed true
 \ir setup.sql
@@ -69,3 +72,12 @@ BEGIN
 END $c$;
 SELECT 'PASS: P4-02.3 off parity, close before page and marks, one ambiguity, withdrawal and isolated fault' AS result;
 ROLLBACK;
+
+-- Leave the installed successor in place for subsequent behavior cases.
+SELECT to_regprocedure('public.job_page_yield(uuid)') IS NOT NULL AS page_retry_successor_live \gset
+\if :page_retry_successor_live
+\if :{?page_speed_record_close_test}
+\else
+\ir ../../../migrations/20261117215801_job_page_speed_and_retry.sql
+\endif
+\endif
