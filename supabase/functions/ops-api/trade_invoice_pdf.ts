@@ -5,7 +5,7 @@
 
 import {
   buildTradeInvoiceAuditModel,
-  TRADE_INVOICE_SUPER_INCLUSIVE_BASIS,
+  TRADE_INVOICE_INCLUSIVE_SUPER_BASIS,
   type TradeInvoiceAuditModel,
   type TradeInvoiceMoney,
   type TradeInvoiceXeroLine,
@@ -22,13 +22,18 @@ function buildSuperInclusiveAuditText(
   invoiceNumber: string,
 ): string[] {
   const base = model.super_base_ex;
+  // P1-01.4: the totals block reads Total (includes super), Paid to your
+  // super fund, Paid to you, then GST when on.
   const lines: string[] = [
     "TAX INVOICE - every amount includes super; the super fund gets 12/112 of the total",
     `${tradeName}  ${invoiceNumber}`,
-    `Total ${moneyLabel(model.header.submitted_total)}`,
-    `Paid to you ${moneyLabel(model.header.amount_payable)}`,
+    `Total (includes super) ${moneyLabel(model.header.submitted_total)}`,
     `Paid to your super fund ${moneyLabel(model.header.super_amount)}`,
+    `Paid to you ${moneyLabel(model.header.amount_payable)}`,
   ];
+  if (model.gst_amount > 0) {
+    lines.push(`GST ${moneyLabel(model.gst_amount)}`);
+  }
   if (base !== null && base !== undefined) {
     lines.push(
       `Reimbursements ${
@@ -50,12 +55,12 @@ function buildSuperInclusiveAuditText(
       moneyLabel(model.super_line.line_total)
     }`,
   );
-  lines.push(`TOTAL paid to you ${moneyLabel(model.header.amount_payable)}`);
+  lines.push(`Paid to you ${moneyLabel(model.header.amount_payable)}`);
   const cashBeforeDeduction = model.header.amount_payable + model.gst_amount;
   if (model.gst_amount > 0) {
     lines.push(
-      `GST ${moneyLabel(model.gst_amount)} on the total. Paid to you including GST ${
-        moneyLabel(cashBeforeDeduction)
+      `GST ${moneyLabel(model.gst_amount)}. Paid to you including GST ${
+        moneyLabel(Math.round(cashBeforeDeduction * 100) / 100)
       }`,
     );
   }
@@ -79,7 +84,7 @@ export function buildTradeInvoiceAuditText(
   const tradeName = String(options.tradeName || "").trim() || "Trade";
   const invoiceNumber = String(options.invoiceNumber || "").trim() ||
     "trade-invoice";
-  if (model.super_basis === TRADE_INVOICE_SUPER_INCLUSIVE_BASIS) {
+  if (model.super_basis === TRADE_INVOICE_INCLUSIVE_SUPER_BASIS) {
     return buildSuperInclusiveAuditText(model, tradeName, invoiceNumber);
   }
   const lines: string[] = [

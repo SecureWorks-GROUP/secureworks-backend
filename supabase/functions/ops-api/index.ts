@@ -707,6 +707,7 @@ import {
   resolveTradeInvoiceGstOn,
   splitTradeInvoiceXeroLines,
   TRADE_INVOICE_EMPLOYER_SUPER_BASIS,
+  TRADE_INVOICE_INCLUSIVE_SUPER_BASIS,
   TradeInvoiceMoneyError,
   type TradeInvoiceSuperBasis,
   type TradeInvoiceMoney,
@@ -718,12 +719,11 @@ import {
   withTradeInvoiceRecurringDeduction,
 } from './trade_invoice_money.ts'
 import {
-  linesCarryGroupShare,
-  resolveTradeInvoiceSuperBasisForPreview,
-  resolveTradeInvoiceSuperBasisForSubmit,
-  type TradeInvoiceSuperBasisInput,
-  TradeSuperInclusiveUnreadable,
-} from './trade_super_inclusive.ts'
+  resolveTradePayBasisForPreview,
+  resolveTradePayBasisForSubmit,
+  TRADE_PAY_RULE_UNREADABLE_WORDS,
+  TradePayRuleUnreadable,
+} from './trade_pay_rule.ts'
 import {
   getRunningInvoiceDraft,
   RunningDraftError,
@@ -2344,24 +2344,23 @@ function tradeInvoiceMoney(
   }
 }
 
-// Which super rule prices an invoice being saved (trade_super_inclusive.ts).
-// Unreadable: 503, nothing saved.
-async function tradeInvoiceSuperBasisForSubmit(
+// Which super rule prices an invoice being saved (trade_pay_rule.ts), by its
+// pay day. Unreadable: 503 pay_rule_unreadable, nothing saved.
+async function tradePayBasisForSubmit(
   client: any,
-  input: TradeInvoiceSuperBasisInput,
+  payDay: unknown,
 ): Promise<TradeInvoiceSuperBasis | null> {
   try {
-    return await resolveTradeInvoiceSuperBasisForSubmit(client, input)
+    return await resolveTradePayBasisForSubmit(client, payDay)
   } catch (error) {
-    if (error instanceof TradeSuperInclusiveUnreadable) {
-      const message = 'Could not check which super rule applies to this invoice. Nothing was saved. Please try again.'
-      throw new ApiError(message, 503, {
+    if (error instanceof TradePayRuleUnreadable) {
+      throw new ApiError(TRADE_PAY_RULE_UNREADABLE_WORDS, 503, {
         ok: false,
         success: false,
         saved: false,
         code: error.code,
-        error: message,
-        userMessage: message,
+        error: TRADE_PAY_RULE_UNREADABLE_WORDS,
+        userMessage: TRADE_PAY_RULE_UNREADABLE_WORDS,
       })
     }
     throw error
@@ -13650,11 +13649,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             )
             const sourceWorkOrderDate = weeklyWorkOrderBusinessDate(wo)
             const woInvoiceDate = new Date().toISOString().slice(0, 10)
-            // One super rule (P1-01): a work order claim includes super.
-            // No week on this invoice: the rule follows the day it is priced.
-            const woSuperBasis = await tradeInvoiceSuperBasisForSubmit(client, {
-              pricedOn: woInvoiceDate,
-            })
+            // One super rule (P1-01.3): a work order claim includes super.
+            // No week on this invoice: its pay day is the day it is made.
+            const woSuperBasis = await tradePayBasisForSubmit(client, woInvoiceDate)
             const woMoney = tradeInvoiceMoney(
               invoiceTotals.subtotal_ex,
               woGstOn,
@@ -14086,13 +14083,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 line_type: (extra.type || 'other').toLowerCase(),
                 line_total_ex: roundMoney(roundMoney(Number(extra.quantity || 1)) * roundMoney(Number(extra.rate || 0))),
               }))
-            // A draft is a working copy: an unreadable rule shows today's
-            // and the submit prices it again.
-            const draftSuperBasis = await resolveTradeInvoiceSuperBasisForPreview(client, {
-              carriesGroupShare: resolvedShares.length > 0,
-              weekStart: draftWeekStart || null,
-              pricedOn: draftWeekEnd,
-            })
+            // The draft is saved with a split, so an unreadable rule refuses
+            // it (503, nothing saved) rather than store a guess. A draft that
+            // carries a group share keeps today's draft pricing; its submit
+            // prices it on the group's basis.
+            const draftSuperBasis = resolvedShares.length > 0
+              ? null
+              : await tradePayBasisForSubmit(client, draftWeekStart || draftWeekEnd)
             // Recurring deduction: a dated draft shows what the submitted
             // invoice will carry, so the trade sees it before submitting.
             const { money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(
@@ -15335,16 +15332,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour' })),
               ...extraLineItems,
             ])
-            // One super rule (P1-01): from the start date every amount
+            // One super rule (P1-01.3): from the start date every amount
             // includes super and reimbursement lines carry none. A group
-            // share keeps its group's rule.
+            // share keeps its group's basis.
             const invoiceReimbursementEx = reimbursementLinesTotalEx(extraLineItems)
-            const invoiceSuperBasis = await tradeInvoiceSuperBasisForSubmit(client, {
-              groupBasis: groupInvoiceBasis.superBasis,
-              carriesGroupShare: linesCarryGroupShare(extraLineItems),
-              weekStart: week_start || null,
-              pricedOn: invoiceEarningsDate,
-            })
+            const invoiceSuperBasis = groupInvoiceBasis.superBasis ??
+              await tradePayBasisForSubmit(client, week_start || invoiceEarningsDate)
             // Recurring deduction (for example Ute hire): taken off the amount
             // payable of a weekly invoice, after super and GST. The lines,
             // subtotal, super and GST below are untouched by it. An invoice
@@ -15352,7 +15345,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // trade has a deduction that week.
             const { money, decision: recurringDeduction } = await applyTradeRecurringDeduction(
               client,
-              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, invoiceSuperBasis, invoiceCommissionEx, invoiceReimbursementEx),
+              tradeInvoiceMoney(
+                subtotal,
+                gstOn,
+                invoiceEarningsDate,
+                invoiceSuperBasis,
+                invoiceSuperBasis === TRADE_INVOICE_INCLUSIVE_SUPER_BASIS ? 0 : invoiceCommissionEx,
+                invoiceReimbursementEx,
+              ),
               {
                 userId: tradeUser.id,
                 weekStart: week_start || null,
@@ -57879,13 +57879,11 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   // submitting. It is taken off this preview only when the preview covers it.
   // A failed rule read is logged and shows no deduction; it never fails the
   // hours view. The submit path does not share that leniency.
-  // One super rule (P1-01): the preview shows the rule this week will be
-  // priced under; an unreadable rule shows today's.
-  const previewSuperBasis = await resolveTradeInvoiceSuperBasisForPreview(client, {
-    weekStart,
-    pricedOn: weekEnding,
-  })
-  let previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding, previewSuperBasis)
+  // One super rule (P1-01.3): the preview shows the rule this week will be
+  // priced under. An unreadable rule shows no money figures
+  // (money_unavailable); the hours still show.
+  const previewRule = await resolveTradePayBasisForPreview(client, weekStart || weekEnding)
+  let previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding, previewRule.basis)
   let previewRecurringDeduction: TradeRecurringDeductionDecision | null = null
   try {
     const previewed = await applyTradeRecurringDeduction(client, previewMoney, { userId, weekStart })
@@ -57952,11 +57950,19 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     week_ending: weekEnding,
     week_start: weekStart,
     total_hours: Math.round(totalHours * 100) / 100,
-    ...tradeInvoiceMoneyResponse(previewMoney),
-    ...(previewRecurringDeduction ? tradeRecurringDeductionResponse(previewRecurringDeduction) : {}),
+    ...(previewRule.unavailable
+      ? { money: null, money_unavailable: true }
+      : {
+        ...tradeInvoiceMoneyResponse(previewMoney),
+        ...(previewRecurringDeduction ? tradeRecurringDeductionResponse(previewRecurringDeduction) : {}),
+        gst,
+        total: previewMoney.total_inc,
+        // The split as one object, with the rule it was worked out on
+        // (super_basis null: the old rule). trade.html reads super_basis.
+        money: { ...tradeInvoiceMoneyResponse(previewMoney), super_basis: previewMoney.super_basis ?? null },
+        money_unavailable: false,
+      }),
     subtotal,
-    gst,
-    total: previewMoney.total_inc,
     already_submitted: !!existingInvoice,
     running_invoice_draft: runningInvoiceDraftEnabled(userRow?.trade_details),
     // True when how each job is invoiced could not be read; every card's

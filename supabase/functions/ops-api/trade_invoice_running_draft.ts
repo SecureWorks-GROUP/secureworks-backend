@@ -26,9 +26,10 @@ import {
   type TradeInvoiceSuperBasis,
 } from "./trade_invoice_money.ts";
 import {
-  linesCarryGroupShare,
-  resolveTradeInvoiceSuperBasisForPreview,
-} from "./trade_super_inclusive.ts";
+  resolveTradePayBasisForSubmit,
+  TRADE_PAY_RULE_UNREADABLE_WORDS,
+  TradePayRuleUnreadable,
+} from "./trade_pay_rule.ts";
 import { draftTradeInvoiceTimeEntry } from "./trade_invoice_time_entry.ts";
 import {
   weeklyWorkOrderBusinessDate,
@@ -940,12 +941,25 @@ export async function saveRunningInvoiceDraft(
   const agentLabel = mode === "agent"
     ? String(body?.agent_label || prior?.agent_label || "agent").slice(0, 80)
     : (prior?.agent_label || null);
-  // A draft is a working copy: an unreadable rule shows today's.
-  const superBasis = await resolveTradeInvoiceSuperBasisForPreview(client, {
-    carriesGroupShare: linesCarryGroupShare(lines),
-    weekStart,
-    pricedOn: weekEnd,
-  });
+  // One super rule (P1-01.3). The draft is saved with a split, so an
+  // unreadable rule refuses it (503, nothing saved). A draft carrying a
+  // group share keeps today's draft pricing; its submit prices it on the
+  // group's basis.
+  const carriesGroupShare = lines.some((line: Record<string, unknown>) =>
+    Boolean(line?.group_share_id) ||
+    String(line?.line_type ?? "").trim().toLowerCase() === "group share"
+  );
+  let superBasis: TradeInvoiceSuperBasis | null = null;
+  if (!carriesGroupShare) {
+    try {
+      superBasis = await resolveTradePayBasisForSubmit(client, weekStart || weekEnd);
+    } catch (error) {
+      if (error instanceof TradePayRuleUnreadable) {
+        throw new RunningDraftError(TRADE_PAY_RULE_UNREADABLE_WORDS, 503, error.code);
+      }
+      throw error;
+    }
+  }
   const payload = {
     p_invoice: headerFor(user, weekStart, weekEnd, notes, gstOn, lines, superBasis),
     p_lines: lines,

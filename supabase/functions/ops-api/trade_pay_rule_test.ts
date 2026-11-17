@@ -18,9 +18,9 @@ import {
   presentTradeInvoiceMoney,
   reimbursementLinesTotalEx,
   splitTradeInvoiceXeroLines,
-  superInclusiveSuperAmount,
+  tradeInvoiceInclusiveSuper,
   TRADE_INVOICE_EMPLOYER_SUPER_BASIS,
-  TRADE_INVOICE_SUPER_INCLUSIVE_BASIS,
+  TRADE_INVOICE_INCLUSIVE_SUPER_BASIS,
   type TradeInvoiceXeroLine,
   validatePersistedTradeInvoiceMoney,
 } from "./trade_invoice_money.ts";
@@ -34,7 +34,7 @@ import {
   TradeSuperInclusiveUnreadable,
 } from "./trade_super_inclusive.ts";
 
-const INCLUSIVE = TRADE_INVOICE_SUPER_INCLUSIVE_BASIS;
+const INCLUSIVE = TRADE_INVOICE_INCLUSIVE_SUPER_BASIS;
 
 /** Exact 12/112 of a cents amount, rounded half up, in cents (BigInt). */
 function exactSuperCents(baseCents: number): number {
@@ -71,18 +71,18 @@ Deno.test("super = total x 12/112 to the cent: every cent from 0 to 3000.00 and 
   for (let cents = 0; cents <= 300000; cents++) {
     const base = cents / 100;
     const want = exactSuperCents(cents) / 100;
-    if (superInclusiveSuperAmount(base) !== want) {
-      throw new Error(`base ${base}: got ${superInclusiveSuperAmount(base)}, want ${want}`);
+    if (tradeInvoiceInclusiveSuper(base) !== want) {
+      throw new Error(`base ${base}: got ${tradeInvoiceInclusiveSuper(base)}, want ${want}`);
     }
   }
   // 1000.02 * 12 / 112 = 107.145 exactly: half a cent rounds up, as the
   // database's round(numeric, 2) does.
-  assertEquals(superInclusiveSuperAmount(1000.02), 107.15);
+  assertEquals(tradeInvoiceInclusiveSuper(1000.02), 107.15);
   const m = inclusive(1000.02);
   assertEquals(m.super_amount, 107.15);
   assertEquals(m.net_pay, 892.87);
   // Large totals stay exact.
-  assertEquals(superInclusiveSuperAmount(123456.78), exactSuperCents(12345678) / 100);
+  assertEquals(tradeInvoiceInclusiveSuper(123456.78), exactSuperCents(12345678) / 100);
 });
 
 Deno.test("GST stays 10% of the whole total; super is on the ex GST total", () => {
