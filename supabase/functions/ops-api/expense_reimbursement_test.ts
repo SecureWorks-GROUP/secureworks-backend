@@ -16,7 +16,7 @@ const pushBody = source.slice(
   source.indexOf("\n) {", pushStart) + 5,
   source.indexOf("\nasync function listExpenses", pushStart),
 ).trim().replace(/}$/, "");
-function fake(invoiceStatus: string | null) {
+function fake(invoiceStatus: string | null, enabled = false) {
   return {
     from(table: string) {
       return {
@@ -29,6 +29,7 @@ function fake(invoiceStatus: string | null) {
         update() {
           return this;
         },
+        maybeSingle() { return Promise.resolve({ data: { enabled } }); },
         single() {
           return Promise.resolve({
             data: { id: "ZZTEST-receipt", status: "approved" },
@@ -45,8 +46,8 @@ function fake(invoiceStatus: string | null) {
     },
   };
 }
-Deno.test("ZZTEST expense on submitted invoice stops before Xero, draft-only expense can push", async () => {
-  for (const status of ["submitted", "draft", "ops-reject"]) {
+Deno.test("ZZTEST expense push is unchanged switch-off and any claim stops Xero switch-on", async () => {
+  for (const enabled of [false, true]) for (const status of ["submitted", "draft", "ops-reject"]) {
     let calls = 0;
     const push = new AsyncFunction(
       "client",
@@ -54,6 +55,7 @@ Deno.test("ZZTEST expense on submitted invoice stops before Xero, draft-only exp
       "authCtx",
       "ApiError",
       "receiptHasLiveTradeInvoice",
+      "REIMBURSEMENT_FLAG",
       "preflightExpense",
       "getToken",
       "buildXeroExpenseBillBody",
@@ -63,11 +65,12 @@ Deno.test("ZZTEST expense on submitted invoice stops before Xero, draft-only exp
     );
     const run = () =>
       push(
-        fake(status),
+        fake(status, enabled),
         { expense_id: "ZZTEST-receipt" },
         { mode: "api_key" },
         ApiError,
         receiptHasLiveTradeInvoice,
+        REIMBURSEMENT_FLAG,
         () => ({ ok: true }),
         async () => {
           calls++;
@@ -80,7 +83,7 @@ Deno.test("ZZTEST expense on submitted invoice stops before Xero, draft-only exp
         },
         () => {},
       );
-    if (status === "submitted") {
+    if (enabled || status === "submitted") {
       const error = await assertRejects(run, ApiError);
       assertEquals(error.status, 409);
       assertEquals(error.detail.code, "expense_on_trade_invoice");

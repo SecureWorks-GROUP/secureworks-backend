@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   resolveReimbursementExtras,
   retryReimbursementClaims,
@@ -127,13 +127,19 @@ Deno.test("ZZTEST receipt sets the amount and its office backing, with no job he
     assertEquals(result.lines[0].job_id, row.job_id);
   }
 });
-Deno.test("ZZTEST one receipt produces one line; draft and rejected claims do not spend it", async () => {
-  const result = await resolve(receipt(), {
-    items: [{ expense_receipt_id: "ZZTEST-receipt" }, {
-      expense_receipt_id: "ZZTEST-receipt",
-    }],
-  }, [{ invoice: { status: "draft" } }, { invoice: { status: "ops-reject" } }]);
-  assertEquals(result.lines.length, 1);
+Deno.test("ZZTEST any stored receipt line is claimed, including draft and ops-reject", async () => {
+  for (const status of ["draft", "ops-reject", "submitted", null]) {
+    const result = await resolve(receipt(), {}, [{ trade_invoice_id: "ZZTEST-existing", invoice: { status } }]);
+    assertEquals(result.lines, []);
+    assertEquals(result.skipped_items.map((s) => s.code), ["reimbursement_already_claimed"]);
+  }
+});
+Deno.test("ZZTEST only the selected replacement draft can reuse its receipt", async () => {
+  const claims = [{ trade_invoice_id: "ZZTEST-draft" }];
+  const own = await resolve(receipt(), { replacingDraftId: "ZZTEST-draft" }, claims);
+  assertEquals(own.lines.length, 1);
+  const other = await resolve(receipt(), { replacingDraftId: "ZZTEST-other" }, claims);
+  assertEquals(other.lines, []);
 });
 Deno.test("ZZTEST weekly receipt stays out of the super base and hours", async () => {
   const result = await resolve(receipt());
@@ -174,4 +180,65 @@ Deno.test("ZZTEST database claim race skips only the losing receipt and saves th
   assertEquals(result.skipped_items.map((s) => s.code), [
     "reimbursement_already_claimed",
   ]);
+});
+
+Deno.test("ZZTEST unique receipt index race retries and preserves the remaining week", async () => {
+  const result = await resolve(receipt());
+  let attempts = 0, repriced = 0;
+  const saved = await retryReimbursementClaims(client(null, [{ trade_invoice_id: "ZZTEST-rejected" }]), result,
+    async () => {
+      if (attempts++ === 0) throw new Error('duplicate key value violates unique constraint "trade_invoice_lines_one_receipt"');
+      return "ZZTEST-week";
+    }, async (removed) => { repriced += removed.length; });
+  assertEquals(saved, "ZZTEST-week");
+  assertEquals(attempts, 2);
+  assertEquals(repriced, 1);
+  assertEquals(result.lines, []);
+  assertEquals(result.skipped_items.map((s) => s.code), ["reimbursement_already_claimed"]);
+});
+Deno.test("ZZTEST unrelated unique errors are not receipt retries", async () => {
+  const result = await resolve(receipt());
+  let repriced = 0;
+  await assertRejects(() => retryReimbursementClaims(client(null, [{ trade_invoice_id: "ZZTEST-other" }]), result,
+    async () => { throw new Error('duplicate key value violates unique constraint "other_index"'); },
+    async () => { repriced++; }), Error, "other_index");
+  assertEquals(repriced, 0);
+  assertEquals(result.lines.length, 1);
+});
+
+Deno.test("ZZTEST standalone SQL fixture uses the exact existing persist functions", async () => {
+  const baseline = await Deno.readTextFile(new URL("../../migrations/20260831021701_trade_invoice_weekly_deductions.sql", import.meta.url));
+  const fixture = await Deno.readTextFile(new URL("../../tests/migration-contracts/20261117194401_trade_reimbursement_receipt_replacement/baseline_functions.sql", import.meta.url));
+  assertEquals(fixture, (baseline.slice(baseline.indexOf("CREATE OR REPLACE FUNCTION public.trade_invoice_first_numeric_candidate_v1("), baseline.indexOf("CREATE OR REPLACE FUNCTION public.persist_trade_work_order_invoice_v1(")) + baseline.slice(baseline.indexOf("CREATE OR REPLACE FUNCTION public.persist_weekly_trade_invoice_v1("), baseline.indexOf("-- Preserve existing source values"))).trimEnd() + "\n");
+});
+
+Deno.test("ZZTEST receipt-bearing dated hourly submission uses atomic save; switch-off stays legacy", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const start = source.indexOf("            const invoiceId = await retryReimbursementClaims(client, reimbursements,");
+  const end = source.indexOf("            const invoice = { id: invoiceId }", start);
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const submit = new AsyncFunction("ctx", "with (ctx) {" + source.slice(start, end).replace(/: (any|number)\b/g, "") + "return invoiceId; }");
+  for (const enabled of [false, true]) {
+    const result = await resolve(receipt(), { flagOn: enabled });
+    let atomic = 0, legacy = 0;
+    const saved = await submit({
+      client: {}, reimbursements: result, priorDraftId: "ZZTEST-draft", week_start: "2026-11-16",
+      weeklyInvoice: null, invoicePayload: { status: "pending_acknowledgment" }, tradeUser: { orgId: "ZZTEST-org" },
+      lineItems: [{ line_total_ex: 560 }], extraLineItems: result.lines,
+      retryReimbursementClaims: (_client: unknown, _result: unknown, persist: () => Promise<string>) => persist(),
+      persistWithFreeNumber: async (persist: () => Promise<string>) => await persist(),
+      toTradeInvoiceLineRow: (_id: string, row: unknown) => row,
+      _persistTradeInvoiceWeekDraft: (_client: unknown, header: unknown, lines: unknown[], prior: string) => {
+        atomic++;
+        assertEquals(header, { status: "pending_acknowledgment", org_id: "ZZTEST-org" });
+        assertEquals(prior, "ZZTEST-draft");
+        assertEquals(lines.length, 2);
+        return "ZZTEST-atomic";
+      },
+      replaceTradeInvoiceDraftKeepingPrior: () => { legacy++; return "ZZTEST-legacy"; },
+    });
+    assertEquals(atomic, enabled ? 1 : 0);
+    assertEquals(legacy, enabled ? 0 : 1);
+    assertEquals(saved, enabled ? "ZZTEST-atomic" : "ZZTEST-legacy");
+  }
 });

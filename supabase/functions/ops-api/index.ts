@@ -2360,11 +2360,11 @@ function tradeInvoiceMoney(
   }
 }
 
-async function invoiceReimbursements(client: any, userId: string, items: any[], basis: unknown = null) {
+async function invoiceReimbursements(client: any, userId: string, items: any[], basis: unknown = null, replacingDraftId: string | null = null) {
   const requested = (items || []).filter(isReimbursementItem)
   if (!requested.length) return { lines: [], skipped_items: [], basis }
   const { data: flag } = await client.from('feature_flags').select('enabled').eq('flag_name', REIMBURSEMENT_FLAG).maybeSingle()
-  return { ...await resolveReimbursementExtras(client, { userId, items: requested, flagOn: flag?.enabled === true, basis }), basis }
+  return { ...await resolveReimbursementExtras(client, { userId, items: requested, flagOn: flag?.enabled === true, basis, replacingDraftId }), basis }
 }
 
 async function markTradeInvoiceJobsChanged(client: any, lines: any[]) {
@@ -14236,7 +14236,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const draftSuperBasis = resolvedShares.length > 0
               ? null
               : await tradePayBasisForSave(client, existingDraft, draftWeekStart || draftWeekEnd)
-            const draftReimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(draftExtras) ? draftExtras : [], draftSuperBasis)
+            const draftReimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(draftExtras) ? draftExtras : [], draftSuperBasis, draftWeekStart ? existingDraftId : null)
             let labourTotal = 0
             for (const l of plainLabour) labourTotal += roundMoney(Number(l.line_total_ex || 0))
             let extraTotal = 0
@@ -14442,7 +14442,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 draftSubtotal = (weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)) + draftReimbursementEx
                 ;({ money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(client, tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd, draftSuperBasis, 0, draftReimbursementEx), { userId: tradeUser.id, weekStart: draftWeekStart || null }))
                 Object.assign(hourlyDraftPayload, tradeInvoiceMoneyFields(draftMoney), { subtotal_ex: draftMoney.gross_earned, gst: draftMoney.gst_amount, total_inc: draftMoney.total_inc }, tradeRecurringDeductionInvoiceFields(draftRecurringDeduction))
-              })
+              }, draftWeekStart ? existingDraftId : null)
             await markTradeInvoiceJobsChanged(client, hourlyDraftLineRows)
             return json({
               success: true,
@@ -14728,7 +14728,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const priorDraftId: string | null = priorDraft?.id || null
             const invoiceSuperBasis = groupInvoiceBasis.superBasis ??
               await tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead)
-            const reimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(extra_items) ? extra_items : [], invoiceSuperBasis)
+            const reimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(extra_items) ? extra_items : [], invoiceSuperBasis, week_start ? priorDraftId : null)
             const invoiceExtraItems = weeklyInvoice
               ? weeklyInvoiceLineRows(weeklyInvoice).map((line: any) => ({
                 ...line,
@@ -15927,6 +15927,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 weeklyInvoiceWithReimbursements(weeklyInvoice, reimbursements.lines),
                 priorDraftId,
               )
+              : week_start && reimbursements.lines.length > 0
+              ? _persistTradeInvoiceWeekDraft(client, { ...invoicePayload, org_id: tradeUser.orgId }, [
+                  ...lineItems.map((line: any) => toTradeInvoiceLineRow('', line, { line_type: 'labour' })),
+                  ...extraLineItems.map((extra: any) => toTradeInvoiceLineRow('', extra)),
+                ], priorDraftId)
               : replaceTradeInvoiceDraftKeepingPrior({
               createInvoice: async () => {
                 const { data: newInvoice, error: invErr } = await client.from('trade_invoices')
@@ -15982,7 +15987,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 totalInc = money.total_inc
                 Object.assign(invoicePayload, tradeInvoiceMoneyFields(money), { subtotal_ex: money.gross_earned, gst, total_inc: totalInc }, tradeRecurringDeductionInvoiceFields(recurringDeduction))
                 if (weeklyInvoice) Object.assign(invoicePayload, { job_grand_total_ex: weeklyInvoice.grand_total + reimbursementEx, to_be_paid_ex: weeklyInvoice.to_be_paid + reimbursementEx })
-              })
+              }, week_start ? priorDraftId : null)
             const invoice = { id: invoiceId }
             await markTradeInvoiceJobsChanged(client, [...lineItems, ...extraLineItems])
 
@@ -64272,7 +64277,9 @@ async function pushExpenseToXero(
   if (!expense) throw new ApiError('Expense not found', 404)
   if (expense.status !== 'approved') throw new ApiError('Expense must be approved before pushing to Xero', 409)
 
-  if (await receiptHasLiveTradeInvoice(client, expense_id)) {
+  const { data: reimbursementFlag } = await client.from('feature_flags')
+    .select('enabled').eq('flag_name', REIMBURSEMENT_FLAG).maybeSingle()
+  if (await receiptHasLiveTradeInvoice(client, expense_id, null, reimbursementFlag?.enabled === true)) {
     throw new ApiError("This receipt is being paid back on a trade invoice, so it is not sent to Xero on its own.", 409, { code: "expense_on_trade_invoice" })
   }
 

@@ -32,17 +32,22 @@ export function reimbursementSkip(
 export async function receiptHasLiveTradeInvoice(
   client: any,
   receiptId: string,
+  replacingDraftId: string | null = null,
+  draftsAreClaims = true,
 ): Promise<boolean> {
+  // trade_invoice_lines_one_receipt bounds this read to one claim, in any status.
   const { data, error } = await client.from("trade_invoice_lines")
-    .select("trade_invoice_id, invoice:trade_invoices!inner(status)")
+    .select(draftsAreClaims ? "trade_invoice_id" : "trade_invoice_id, invoice:trade_invoices!inner(status)")
     .eq("expense_receipt_id", receiptId);
   if (error) throw new Error("Could not read the receipt's invoice claims");
+  // Only a server-selected prior draft may be ignored for an atomic replacement.
+  // The persist RPC rechecks its tenant, owner, week, status and Xero identity.
   return (data || []).some((line: any) => {
-    const invoice = Array.isArray(line.invoice)
-      ? line.invoice[0]
-      : line.invoice;
-    return !invoice ||
-      !["draft", "ops-reject"].includes(String(invoice.status));
+    if (replacingDraftId && line.trade_invoice_id === replacingDraftId) return false;
+    if (draftsAreClaims) return true;
+    // Compatibility for the expense-to-Xero route while the switch is off.
+    const invoice = Array.isArray(line.invoice) ? line.invoice[0] : line.invoice;
+    return !invoice || !["draft", "ops-reject"].includes(String(invoice.status));
   });
 }
 export async function resolveReimbursementExtras(client: any, input: {
@@ -50,6 +55,7 @@ export async function resolveReimbursementExtras(client: any, input: {
   items: any[];
   flagOn: boolean;
   basis: unknown;
+  replacingDraftId?: string | null;
 }): Promise<{ lines: any[]; skipped_items: ReimbursementSkip[] }> {
   const lines: any[] = [], skipped_items: ReimbursementSkip[] = [];
   const seen = new Set<string>();
@@ -80,7 +86,7 @@ export async function resolveReimbursementExtras(client: any, input: {
       ) code = "reimbursement_receipt_required";
       else if (receipt.status === "rejected") code = "reimbursement_rejected";
       else if (
-        receipt.xero_bill_id || await receiptHasLiveTradeInvoice(client, id)
+        receipt.xero_bill_id || await receiptHasLiveTradeInvoice(client, id, input.replacingDraftId)
       ) code = "reimbursement_already_claimed";
     }
     if (code) {
@@ -130,20 +136,19 @@ export async function retryReimbursementClaims<T>(
   result: { lines: any[]; skipped_items: ReimbursementSkip[] },
   persist: () => Promise<T>,
   reprice: (removed: any[]) => Promise<void>,
+  replacingDraftId: string | null = null,
 ): Promise<T> {
   const attempts = result.lines.length + 1;
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       return await persist();
     } catch (error) {
-      if (
-        !String((error as Error)?.message || error).includes(
-          "reimbursement_already_claimed",
-        )
-      ) throw error;
+      const message = String((error as Error)?.message || error);
+      if (!message.includes("reimbursement_already_claimed") &&
+          !message.includes('"trade_invoice_lines_one_receipt"')) throw error;
       const removed = [];
       for (const line of result.lines) {
-        if (await receiptHasLiveTradeInvoice(client, line.expense_receipt_id)) {
+        if (await receiptHasLiveTradeInvoice(client, line.expense_receipt_id, replacingDraftId)) {
           removed.push(line);
         }
       }
