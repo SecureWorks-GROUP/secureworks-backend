@@ -31,6 +31,8 @@ export async function tradeRepaymentsAction(
     );
   }
   if (!caller.orgId) return result(403, "staff_only", "A company is required.");
+  // P1-06.6: the bookkeeper's repayment account, used when the body names none.
+  let defaultAccount = "";
   if (action !== "list_trade_repayments") {
     if (!caller.userId) {
       return result(
@@ -40,7 +42,7 @@ export async function tradeRepaymentsAction(
       );
     }
     const setting = await client.from("trade_pay_settings").select(
-      "pay_run_approver_user_ids",
+      "pay_run_approver_user_ids, repayment_account_code",
     ).eq("id", 1).maybeSingle();
     if (
       setting.error ||
@@ -52,6 +54,9 @@ export async function tradeRepaymentsAction(
         "Only the bookkeeper and the owner can set a repayment.",
       );
     }
+    defaultAccount = typeof setting.data.repayment_account_code === "string"
+      ? setting.data.repayment_account_code.trim()
+      : "";
   }
   if (action === "list_trade_repayments") {
     const users = await client.from("users").select("id, name").eq(
@@ -104,9 +109,10 @@ export async function tradeRepaymentsAction(
       day.toISOString().slice(0, 10) !== week || day.getUTCDay() !== 1 ||
       day < today
     ) return invalid("first_week_start");
-    const account = typeof body.xero_account_code === "string"
+    const typed = typeof body.xero_account_code === "string"
       ? body.xero_account_code.trim()
       : "";
+    const account = typed || defaultAccount;
     if (!account) return invalid("xero_account_code");
     const person = await client.from("users").select("id").eq(
       "id",
