@@ -1,0 +1,1 @@
+ALTER TABLE public.trade_invoice_lines DROP CONSTRAINT IF EXISTS trade_invoice_lines_hold_reason_check;
