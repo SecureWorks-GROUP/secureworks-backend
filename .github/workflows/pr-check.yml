@@ -975,7 +975,8 @@ jobs:
           HAS_CHANGES=true
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "Not a pull request; running the full migration contract suite"
-          elif ! CHANGED=$(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA" -- \
+          elif [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ] || \
+            ! CHANGED=$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" -- \
             'supabase/migrations/' \
             'supabase/rollbacks/' \
             'supabase/tests/migration-contracts/' \
