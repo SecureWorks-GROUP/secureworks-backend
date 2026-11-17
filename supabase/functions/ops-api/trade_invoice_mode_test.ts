@@ -308,7 +308,7 @@ Deno.test("loader: a job with a commission record opens commission to its named 
 });
 
 Deno.test("loader: a failed read throws, never reads as no group or hourly", async () => {
-  for (const fail of ["users", "jobs", "group_work_orders", "work_orders", "v_job_commission"] as const) {
+  for (const fail of ["users", "jobs", "group_work_orders", "work_orders"] as const) {
     await assertRejects(() => load(fakeClient({ fail }), [FENCE]), TradeInvoiceModeReadError);
   }
   // The caller's company must be the trade's own.
@@ -556,6 +556,7 @@ handlerTest("trade_invoice_job_modes: a plain trade gets each job's mode; anothe
         job_id: FENCE,
         invoice_mode: "work_order",
         invoice_mode_reason: "fencing_job",
+        commission: { state: "not_known", offer_ex: null },
         can_claim_commission: false,
         work_order_agreed_ex: 1850.5,
         job_work_order_id: WO_FENCE,
@@ -564,6 +565,7 @@ handlerTest("trade_invoice_job_modes: a plain trade gets each job's mode; anothe
         job_id: PATIO,
         invoice_mode: "group_work_order",
         invoice_mode_reason: "patio_job",
+        commission: { state: "not_known", offer_ex: null },
         can_claim_commission: false,
         work_order_agreed_ex: null,
         job_work_order_id: null,
@@ -572,6 +574,7 @@ handlerTest("trade_invoice_job_modes: a plain trade gets each job's mode; anothe
         job_id: CREATED_MAKESAFE,
         invoice_mode: "hourly",
         invoice_mode_reason: "other_job",
+        commission: { state: "not_known", offer_ex: null },
         can_claim_commission: true,
         work_order_agreed_ex: null,
         job_work_order_id: null,
@@ -707,4 +710,19 @@ Deno.test("mode rule: a restoration job with an agreed work order is billed as t
   // A draft work order agrees nothing: the job stays hourly.
   const hourly = jobs.find((j) => j.job_id === RESTO_HOURLY)!;
   assertEquals([hourly.invoice_mode, hourly.work_order_agreed_ex], ["hourly", null]);
+});
+
+Deno.test("commission offers: job modes carry only the caller's offer and keep an unreadable figure unknown", async () => {
+  const client = fakeClient({ commissions: [
+    { job_id: FENCE, state: "named", salesperson_user_id: TRADE, remaining_ex_gst: 448 },
+    { job_id: MAKESAFE, state: "named", salesperson_user_id: OTHER, remaining_ex_gst: 448 },
+  ] });
+  const out = await load(client, [FENCE, MAKESAFE]);
+  assertEquals(out.jobs.map((row) => row.commission), [
+    { state: "offer", offer_ex: 448 },
+    { state: "not_yours", offer_ex: null },
+  ]);
+  const failed = await load(fakeClient({ fail: "v_job_commission" }), [FENCE]);
+  assertEquals(failed.jobs[0].commission, { state: "not_known", offer_ex: null });
+  assertEquals(failed.jobs[0].can_claim_commission, null);
 });
