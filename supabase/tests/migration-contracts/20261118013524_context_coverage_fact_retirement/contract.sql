@@ -36,8 +36,8 @@ CREATE TEMP TABLE coverage_main AS SELECT public.context_coverage() AS answer;
 \if :{?test_legacy_coverage}
 -- Local negative control: the same behavior assertions must fail on main.
 \else
-\ir ../../../migrations/20261118013038_context_coverage_fact_retirement.sql
-\ir ../../../migrations/20261118013038_context_coverage_fact_retirement.sql
+\ir ../../../migrations/20261118013524_context_coverage_fact_retirement.sql
+\ir ../../../migrations/20261118013524_context_coverage_fact_retirement.sql
 \endif
 DO $contract$
 DECLARE on_answer jsonb; off_answer jsonb; main_answer jsonb;
@@ -100,7 +100,7 @@ DECLARE on_answer jsonb; off_answer jsonb; main_answer jsonb;
     RAISE EXCEPTION 'retirement switch helper grants';
   END IF;
 END $contract$;
-\ir ../../../rollbacks/20261118013038_context_coverage_fact_retirement_down.sql
+\ir ../../../rollbacks/20261118013524_context_coverage_fact_retirement_down.sql
 DO $rollback$
 DECLARE restored text; BEGIN
  SELECT md5(prosrc) INTO restored FROM pg_proc WHERE oid = 'public.context_coverage()'::regprocedure;
