@@ -1,7 +1,6 @@
 // deno-lint-ignore-file no-explicit-any no-import-prefix
 // The Jobs board's change stamp (pipeline_stamp.ts, P0-15.1): three small reads joined
-// with '|'; a missing pipeline_newest_job_mark counts as empty; a failed jobs or job_events
-// read means "not known" (null), so the screen loads the board.
+// with '|'; any failed read means "not known" (null), so the screen loads the board.
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { readPipelineStamp } from "./pipeline_stamp.ts";
 import { _authorizeOpsApiAction } from "./index.ts";
@@ -64,16 +63,26 @@ Deno.test("pipeline stamp: three values joined with '|'", async () => {
   });
 });
 
-Deno.test("pipeline stamp: a missing pipeline_newest_job_mark function counts as empty", async () => {
+Deno.test("pipeline stamp: a missing pipeline_newest_job_mark function is not known (null)", async () => {
   const client = fakeClient({ jobs: JOBS, job_events: EVENTS });
   const out = await readPipelineStamp(client, "org-1");
-  assertEquals(out, { stamp: "2026-11-17T01:00:00+00:00|2026-11-17T02:00:00+00:00|" });
+  assertEquals(out, { stamp: null });
 });
 
-Deno.test("pipeline stamp: a pipeline_newest_job_mark read that throws counts as empty", async () => {
+Deno.test("pipeline stamp: a pipeline_newest_job_mark read that throws is not known (null)", async () => {
   const client = fakeClient({ jobs: JOBS, job_events: EVENTS, pipeline_newest_job_mark: { throws: true } });
   const out = await readPipelineStamp(client, "org-1");
-  assertEquals(out, { stamp: "2026-11-17T01:00:00+00:00|2026-11-17T02:00:00+00:00|" });
+  assertEquals(out, { stamp: null });
+});
+
+Deno.test("pipeline stamp: a failed marks read reloads, then a retry sees the change", async () => {
+  const client = fakeClient({ jobs: JOBS, job_events: EVENTS,
+    pipeline_newest_job_mark: { error: { code: "57014", message: "read timed out" } } });
+  assertEquals(await readPipelineStamp(client, "org-1"), { stamp: null });
+  const retry = fakeClient({ jobs: JOBS, job_events: EVENTS, pipeline_newest_job_mark: MARKS });
+  assertEquals(await readPipelineStamp(retry, "org-1"), {
+    stamp: `${JOBS.row.updated_at}|${EVENTS.row.created_at}|${MARKS.row.last_marked_at}`,
+  });
 });
 
 Deno.test("pipeline stamp: a failed jobs read is not known (null)", async () => {

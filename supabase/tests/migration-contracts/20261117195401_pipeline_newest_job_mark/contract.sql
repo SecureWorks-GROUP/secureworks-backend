@@ -1,12 +1,22 @@
+-- Earlier job-page contracts roll their successor back and recreate the marks
+-- heap without our indexes. Restore our own migration before measuring its plan.
+\ir ../../../migrations/20261117195401_pipeline_newest_job_mark.sql
 BEGIN;
 -- Isolate from registered-stack marks and wall-clock fixture dates; rollback restores all.
 DELETE FROM public.job_change_mark_events;
+DELETE FROM public.job_change_marks_base;
 -- Older marks from our org, a newer foreign-org mark, and a newest orphan.
 INSERT INTO public.jobs(id,org_id,type,status,job_number)
 SELECT md5('ZZTEST-FU13-'||g)::uuid,
  CASE WHEN g%2=0 THEN '00000000-0000-0000-0000-000000000001'::uuid
  ELSE '00000000-0000-0000-0000-000000000002'::uuid END,
  'fencing','accepted','ZZTEST-FU13-'||g FROM generate_series(1,1000) g;
+INSERT INTO public.job_change_marks_base(job_id,last_marked_at)
+SELECT md5('ZZTEST-FU13-'||g)::uuid,'2026-11-16T01:00:00Z'::timestamptz
+ +g*interval '1 second' FROM generate_series(1,1000) g;
+-- A foreign org's newer folded mark must not win over our event.
+UPDATE public.job_change_marks_base SET last_marked_at='2026-11-18T02:30:00Z'
+ WHERE job_id=md5('ZZTEST-FU13-1')::uuid;
 INSERT INTO public.job_change_mark_events(job_id,marked_at,source,page_pending)
 SELECT md5('ZZTEST-FU13-'||((g-1)%1000+1))::uuid,
  '2026-11-17T01:00:00Z'::timestamptz+g*interval '1 second','message',false
@@ -17,6 +27,7 @@ INSERT INTO public.job_change_mark_events(job_id,marked_at,source,page_pending) 
  (md5('ZZTEST-FU13-orphan')::uuid,'2026-11-18T03:00:00Z','message',true);
 ANALYZE public.jobs;
 ANALYZE public.job_change_mark_events;
+ANALYZE public.job_change_marks_base;
 DO $check$
 DECLARE plan jsonb;
 BEGIN
@@ -24,7 +35,7 @@ BEGIN
   IS DISTINCT FROM '2026-11-18T01:00:00Z'::timestamptz THEN
   RAISE EXCEPTION 'FU13: newest handled mark lost, foreign org or orphan leaked'; END IF;
  IF (SELECT last_marked_at FROM public.pipeline_newest_job_mark('00000000-0000-0000-0000-000000000002'))
-  IS DISTINCT FROM '2026-11-18T02:00:00Z'::timestamptz THEN
+  IS DISTINCT FROM '2026-11-18T02:30:00Z'::timestamptz THEN
   RAISE EXCEPTION 'FU13: second org newest mark incorrect'; END IF;
  IF EXISTS(SELECT FROM public.pipeline_newest_job_mark('00000000-0000-0000-0000-000000000003'))
   OR EXISTS(SELECT FROM public.pipeline_newest_job_mark(NULL)) THEN
@@ -38,8 +49,9 @@ BEGIN
   SELECT * FROM public.pipeline_newest_job_mark('00000000-0000-0000-0000-000000000001')$q$ INTO plan;
  RAISE NOTICE 'FU13 newest mark plan: %',plan;
  IF plan::text NOT LIKE '%job_change_mark_events_newest%'
+  OR plan::text NOT LIKE '%job_change_marks_base_newest%'
   OR plan::text NOT LIKE '%jobs_pkey%'
-  OR jsonb_path_exists(plan,'$.** ? (@."Node Type" == "Seq Scan" && (@."Relation Name" == "job_change_mark_events" || @."Relation Name" == "jobs"))') THEN
+  OR jsonb_path_exists(plan,'$.** ? (@."Node Type" == "Seq Scan" && (@."Relation Name" == "job_change_mark_events" || @."Relation Name" == "job_change_marks_base" || @."Relation Name" == "jobs"))') THEN
   RAISE EXCEPTION 'FU13: newest org mark must use timestamp index and jobs primary key'; END IF;
 END $check$;
 -- A booking-only event must advance the same org's reader too.
@@ -50,5 +62,22 @@ DO $check$ BEGIN
   IS DISTINCT FROM '2026-11-18T04:00:00Z'::timestamptz THEN
   RAISE EXCEPTION 'FU13: booking-only mark did not advance stamp'; END IF;
 END $check$;
+-- Reproduce the fold's handoff: save the newest event time on the base row,
+-- then remove handled events. The stamp must remain identical, not regress.
+UPDATE public.job_change_marks_base SET last_marked_at='2026-11-18T04:00:00Z'
+ WHERE job_id=md5('ZZTEST-FU13-2')::uuid;
+DELETE FROM public.job_change_mark_events WHERE job_id=md5('ZZTEST-FU13-2')::uuid;
+DO $check$ BEGIN
+ IF (SELECT last_marked_at FROM public.pipeline_newest_job_mark('00000000-0000-0000-0000-000000000001'))
+  IS DISTINCT FROM '2026-11-18T04:00:00Z'::timestamptz THEN
+  RAISE EXCEPTION 'FU13: folded newest event disappeared from the stamp'; END IF;
+END $check$;
+-- Base-only marks still count after the event heap is completely folded away.
+DELETE FROM public.job_change_mark_events;
+DO $check$ BEGIN
+ IF (SELECT last_marked_at FROM public.pipeline_newest_job_mark('00000000-0000-0000-0000-000000000001'))
+  IS DISTINCT FROM '2026-11-18T04:00:00Z'::timestamptz THEN
+  RAISE EXCEPTION 'FU13: base-only mark disappeared from the stamp'; END IF;
+END $check$;
 ROLLBACK;
-\echo FU13 newest-mark contract passed (org isolation, handled marks, empty org, grants, indexed plan)
+\echo FU13 newest-mark contract passed (org isolation, handled and folded marks, empty org, grants, indexed plan)

@@ -12,3 +12,6 @@ CREATE TABLE IF NOT EXISTS public.job_change_mark_events (
  job_id uuid NOT NULL, marked_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  source text NOT NULL, page_pending boolean NOT NULL DEFAULT true
 );
+CREATE TABLE IF NOT EXISTS public.job_change_marks_base (
+ job_id uuid PRIMARY KEY, last_marked_at timestamptz NOT NULL
+);
