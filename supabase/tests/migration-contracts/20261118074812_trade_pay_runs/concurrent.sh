@@ -16,7 +16,7 @@ case "$CONTRACT_DATABASE_URL" in
  *) echo 'local disposable database only' >&2; exit 2 ;;
 esac
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-down="$here/../../../rollbacks/20261118064649_trade_pay_runs_down.sql"
+down="$here/../../../rollbacks/20261118074812_trade_pay_runs_down.sql"
 if [ "${GITHUB_ACTIONS:-}" = true ]; then
  proof_root="${RUNNER_TEMP:?GitHub runner scratch required}/cl-1578-81"
 else

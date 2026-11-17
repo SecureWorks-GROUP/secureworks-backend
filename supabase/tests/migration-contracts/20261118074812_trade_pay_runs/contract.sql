@@ -11,8 +11,8 @@ CREATE TABLE public.reconcile_item_kinds (kind text PRIMARY KEY,
   words text NOT NULL,
   card text NOT NULL CHECK (card IN ('cost','message','pay_claim','pay_line','weekly','generic')));
 \endif
-\ir ../../../migrations/20261118064649_trade_pay_runs.sql
-\ir ../../../migrations/20261118064649_trade_pay_runs.sql
+\ir ../../../migrations/20261118074812_trade_pay_runs.sql
+\ir ../../../migrations/20261118074812_trade_pay_runs.sql
 
 CREATE FUNCTION pg_temp.zz_assert(ok boolean, words text) RETURNS void
 LANGUAGE plpgsql AS $$ BEGIN
@@ -58,12 +58,12 @@ SELECT pg_temp.zz_assert((SELECT count(*) FROM pg_attribute WHERE attrelid = 'pu
 \set ON_ERROR_ROLLBACK on
 SAVEPOINT zz_owner;
 COMMENT ON COLUMN public.trade_invoices.reviewed_at IS 'ZZTEST another change owns this';
-\ir ../../../migrations/20261118064649_trade_pay_runs.sql
+\ir ../../../migrations/20261118074812_trade_pay_runs.sql
 ROLLBACK TO SAVEPOINT zz_owner;
 SELECT :'LAST_ERROR_MESSAGE' AS apply_error \gset
 SAVEPOINT zz_owner;
 COMMENT ON COLUMN public.trade_invoices.reviewed_by IS NULL;
-\ir ../../../rollbacks/20261118064649_trade_pay_runs_down.sql
+\ir ../../../rollbacks/20261118074812_trade_pay_runs_down.sql
 ROLLBACK TO SAVEPOINT zz_owner;
 SELECT :'LAST_ERROR_MESSAGE' AS down_error \gset
 \set ON_ERROR_ROLLBACK off
@@ -84,13 +84,13 @@ SELECT pg_temp.zz_assert((SELECT count(*) FROM pg_attribute WHERE attrelid = 'pu
 SAVEPOINT zz_collide;
 CREATE OR REPLACE FUNCTION public.approve_trade_pay_run(p_org_id uuid, p_week_start date, p_actor uuid, p_snapshot jsonb)
 RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
-\ir ../../../migrations/20261118064649_trade_pay_runs.sql
+\ir ../../../migrations/20261118074812_trade_pay_runs.sql
 ROLLBACK TO SAVEPOINT zz_collide;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_apply_error \gset
 SAVEPOINT zz_collide;
 CREATE OR REPLACE FUNCTION public.approve_trade_pay_run(p_org_id uuid, p_week_start date, p_actor uuid, p_snapshot jsonb)
 RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
-\ir ../../../rollbacks/20261118064649_trade_pay_runs_down.sql
+\ir ../../../rollbacks/20261118074812_trade_pay_runs_down.sql
 SELECT to_regclass('public.trade_pay_runs') IS NOT NULL
   AND to_regprocedure('public.approve_trade_pay_run(uuid,date,uuid,jsonb)') IS NOT NULL AS collide_kept \gset
 ROLLBACK TO SAVEPOINT zz_collide;
