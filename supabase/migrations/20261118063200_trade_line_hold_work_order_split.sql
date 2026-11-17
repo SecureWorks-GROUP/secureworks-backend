@@ -8,9 +8,8 @@
 -- Director ruling 3 (18 Nov 2026): both doors. With a hold on a send,
 -- p_invoice carries hold_lines. The storage-precision, source-scope and
 -- same-job checks then read trade_line_hold_merge_v1(p_lines, hold_lines).
--- Ruling 2: a deduction is never dropped, so a send whose work is all with the
--- office may save its deductions alone; only then may the saved total be zero
--- or below (the server holds such an invoice for the office, never Xero).
+-- The saved total must still be above zero, as main: a send whose work is all
+-- with the office saves no invoice here (its deductions stay on their source).
 -- Without hold_lines the body reads p_lines exactly as before.
 -- Rule 15: patched only from main's body (md5(prosrc)
 -- 3c07c3113679ee7cdd99c574f755d99a); a re-run at this migration's body
@@ -42,15 +41,6 @@ BEGIN$n$],
       WHERE NULLIF(line->>'source_trade_invoice_line_id', '') IS NULL$o$,
       $n$      FROM jsonb_array_elements(v_source_lines) AS input(line)
       WHERE NULLIF(line->>'source_trade_invoice_line_id', '') IS NULL$n$],
-    ARRAY[$o$  IF v_line_sum <= 0
-$o$, $n$  IF (v_line_sum <= 0 AND NOT (
-       p_invoice ? 'hold_lines'
-       AND NOT EXISTS (
-         SELECT 1 FROM jsonb_array_elements(p_lines) AS input(line)
-         WHERE COALESCE(line->>'line_type', '') <> 'crew_work_order_deduction'
-       )
-     ))
-$n$],
     ARRAY[$o$    FROM jsonb_array_elements(p_lines) AS input(line)
     WHERE NULLIF(input.line->>'job_id', '')::uuid IS DISTINCT FROM v_job_id$o$,
       $n$    FROM jsonb_array_elements(v_source_lines) AS input(line)
@@ -60,7 +50,7 @@ BEGIN
   d := pg_get_functiondef('public.persist_trade_work_order_invoice_v1(jsonb,jsonb,uuid)'::regprocedure);
   SELECT md5(prosrc) INTO body_md5 FROM pg_proc
     WHERE oid = 'public.persist_trade_work_order_invoice_v1(jsonb,jsonb,uuid)'::regprocedure;
-  IF body_md5 = '87f0d8ce6b3e090105b011e8962017ea' THEN RETURN; END IF;
+  IF body_md5 = '7405ac7533156a6e08de5ae94c37c16f' THEN RETURN; END IF;
   IF body_md5 IS DISTINCT FROM '3c07c3113679ee7cdd99c574f755d99a' THEN
     RAISE EXCEPTION 'P1-05.8 work-order persist md5 preimage changed: %', body_md5;
   END IF;

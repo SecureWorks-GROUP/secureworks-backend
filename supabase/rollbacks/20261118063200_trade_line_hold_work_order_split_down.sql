@@ -29,16 +29,6 @@ BEGIN$n$],
       WHERE NULLIF(line->>'source_trade_invoice_line_id', '') IS NULL$o$,
       $n$      FROM jsonb_array_elements(p_lines) AS input(line)
       WHERE NULLIF(line->>'source_trade_invoice_line_id', '') IS NULL$n$],
-    ARRAY[$o$  IF (v_line_sum <= 0 AND NOT (
-       p_invoice ? 'hold_lines'
-       AND NOT EXISTS (
-         SELECT 1 FROM jsonb_array_elements(p_lines) AS input(line)
-         WHERE COALESCE(line->>'line_type', '') <> 'crew_work_order_deduction'
-       )
-     ))
-$o$,
-      $n$  IF v_line_sum <= 0
-$n$],
     ARRAY[$o$    FROM jsonb_array_elements(v_source_lines) AS input(line)
     WHERE NULLIF(input.line->>'job_id', '')::uuid IS DISTINCT FROM v_job_id$o$,
       $n$    FROM jsonb_array_elements(p_lines) AS input(line)
@@ -49,7 +39,7 @@ BEGIN
   SELECT md5(prosrc) INTO body_md5 FROM pg_proc
     WHERE oid = 'public.persist_trade_work_order_invoice_v1(jsonb,jsonb,uuid)'::regprocedure;
   IF body_md5 = '3c07c3113679ee7cdd99c574f755d99a' THEN RETURN; END IF;
-  IF body_md5 IS DISTINCT FROM '87f0d8ce6b3e090105b011e8962017ea' THEN
+  IF body_md5 IS DISTINCT FROM '7405ac7533156a6e08de5ae94c37c16f' THEN
     RAISE EXCEPTION 'P1-05.8 work-order persist rollback md5 postimage changed: %', body_md5;
   END IF;
   FOREACH pair SLICE 1 IN ARRAY pairs LOOP

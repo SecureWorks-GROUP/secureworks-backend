@@ -5,7 +5,7 @@
 BEGIN;
 DO $$ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.persist_trade_work_order_invoice_v1(jsonb,jsonb,uuid)'::regprocedure)
-    IS DISTINCT FROM '87f0d8ce6b3e090105b011e8962017ea' THEN
+    IS DISTINCT FROM '7405ac7533156a6e08de5ae94c37c16f' THEN
   RAISE EXCEPTION 'P1-05.8 work-order persist is not at this migration''s body';
  END IF;
 END $$;
@@ -82,32 +82,17 @@ BEGIN
    jsonb_set(backed, '{0,line_total_ex}', '180.01'), NULL);
   RAISE EXCEPTION 'P1-05.8 expected an added cent refusal';
  EXCEPTION WHEN check_violation THEN NULL; END;
- -- 4. All the work held, a crew charge kept: the deduction saves alone.
+ -- 4. All the work held, a crew charge kept: never a deduction-only invoice.
+ -- The server saves no invoice then; the database refuses one as main does.
  ded := '[{"job_id":"c5900000-0000-4000-8000-000000000002","line_type":"crew_work_order_deduction","description":"Less: crew charge","quantity":1,"unit":"ea","unit_rate":-25,"line_total_ex":-25,"line_date":"2026-11-17","source_trade_invoice_line_id":"c5900000-0000-4000-8000-000000000006"}]';
- BEGIN
-  PERFORM public.persist_trade_work_order_invoice_v1(
-   h || '{"subtotal_ex":-25,"gross_earned":-25,"total_inc":-25,"net_pay":-25}', ded, NULL);
-  RAISE EXCEPTION 'P1-05.8 expected main refusal of a deduction-only invoice';
- EXCEPTION WHEN foreign_key_violation THEN
-  IF SQLERRM <> 'work-order invoice source scope changed before persistence' THEN RAISE; END IF;
- END;
- v := public.persist_trade_work_order_invoice_v1(
-  h || '{"subtotal_ex":-25,"gross_earned":-25,"total_inc":-25,"net_pay":-25}'::jsonb
-    || jsonb_build_object('hold_lines', jsonb_build_array(line || '{"hold_reason":"no_work_order"}')),
-  ded, NULL);
- IF (SELECT sum(line_total_ex) FROM public.trade_invoice_lines WHERE trade_invoice_id=v) <> -25 THEN
-  RAISE EXCEPTION 'P1-05.8 deduction-only save lost its deduction';
- END IF;
- DELETE FROM public.trade_invoices WHERE id=v;
- -- A backed line below its deductions is not a deduction-only save: refused as main.
  BEGIN
   PERFORM public.persist_trade_work_order_invoice_v1(
    h || '{"subtotal_ex":-25,"gross_earned":-25,"total_inc":-25,"net_pay":-25}'::jsonb
      || jsonb_build_object('hold_lines', jsonb_build_array(line || '{"hold_reason":"no_work_order"}')),
-   ded || jsonb_build_array(line || '{"quantity":0,"line_total_ex":0}'), NULL);
-  RAISE EXCEPTION 'P1-05.8 expected a mixed non-positive refusal';
+   ded, NULL);
+  RAISE EXCEPTION 'P1-05.8 expected a deduction-only refusal';
  EXCEPTION WHEN OTHERS THEN
-  IF SQLSTATE NOT IN ('23514','23503') THEN RAISE; END IF;
+  IF SQLSTATE <> '23514' OR SQLERRM <> 'work-order invoice header does not equal its server-resolved lines' THEN RAISE; END IF;
  END;
 END $$;
 ROLLBACK;
