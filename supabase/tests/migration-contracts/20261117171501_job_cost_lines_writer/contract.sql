@@ -1,7 +1,7 @@
 BEGIN;
 DO $$
 DECLARE d jsonb; r jsonb; a uuid; b uuid; credit uuid; parts jsonb;
-  org uuid := '10000000-0000-4000-8000-000000000001';
+  org uuid := '00000000-0000-0000-0000-000000000001';
 BEGIN
   d := jsonb_build_object('org_id',org,'document_kind','xero_bill','document_id','ZZTEST-writer',
     'document_status','AUTHORISED','live',true,'lines',jsonb_build_array(

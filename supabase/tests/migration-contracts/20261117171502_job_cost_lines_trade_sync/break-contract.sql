@@ -1,0 +1,1 @@
+ALTER TABLE public.trade_invoice_lines DISABLE TRIGGER job_cost_lines_trade_update;
