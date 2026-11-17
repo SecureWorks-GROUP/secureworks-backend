@@ -5,6 +5,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   receiptHasLiveTradeInvoice,
+  resolveReimbursementExtras,
   REIMBURSEMENT_FLAG,
 } from "./trade_invoice_reimbursement.ts";
 const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
@@ -30,6 +31,7 @@ function fake(invoiceStatus: string | null, enabled = false) {
         eq() {
           return this;
         },
+        in() { return this; },
         update() {
           return this;
         },
@@ -44,7 +46,7 @@ function fake(invoiceStatus: string | null, enabled = false) {
         then(resolve: any) {
           return Promise.resolve({
             data: table === "trade_invoice_lines" && invoiceStatus
-              ? [{ invoice: { status: invoiceStatus } }]
+              ? [{ expense_receipt_id: "ZZTEST-receipt", invoice: { status: invoiceStatus } }]
               : [],
           }).then(resolve);
         },
@@ -495,4 +497,69 @@ Deno.test("ZZTEST one claim query covers the full crew page without receipt rere
     "feature_flags",
     "trade_invoice_lines",
   ]);
+});
+
+Deno.test("cx-reimb-rest unread amount refuses only its row in both list and save, then office correction works", async () => {
+  for (const amount of [null, "", "unread", 0, -1, Infinity]) {
+    const rows = [receipt("ZZTEST-unread", trade.id, { total_amount: amount }), receipt("ZZTEST-valid")];
+    const fake = listFake(rows, true);
+    const list = await listExpenseReceipts(fake.client, new URLSearchParams(), trade, basis);
+    assertEquals(list.expenses.map((row: any) => row.reimbursement), [
+      { claimable: false, reason: "reimbursement_amount_unreadable" },
+      { claimable: true, reason: null },
+    ]);
+    // Save uses the same current receipt and retains the other reimbursement.
+    const saveClient = { from(table: string) {
+      const q = fake.client.from(table);
+      if (table === "expense_receipts") q.maybeSingle = () => {
+        const original = q.then.bind(q);
+        return { then: (fn: any) => original((r: any) => fn({ ...r, data: r.data?.[0] ?? null })) } as any;
+      };
+      return q;
+    } };
+    const save = () => resolveReimbursementExtras(saveClient, {
+      userId: trade.id, flagOn: true, basis: "inclusive_12_112_v1",
+      items: rows.map((row) => ({ type: "reimbursement", expense_receipt_id: row.id })),
+    });
+    const result = await save();
+    assertEquals(result.lines.map((line) => line.expense_receipt_id), ["ZZTEST-valid"]);
+    assertEquals(result.skipped_items.map((item) => item.code), ["reimbursement_amount_unreadable"]);
+    Object.assign(rows[0], { total_amount: 1 });
+    assertEquals((await save()).lines.length, 2);
+    assertEquals((await listExpenseReceipts(fake.client, new URLSearchParams(), trade, basis))
+      .expenses.every((row: any) => row.reimbursement.claimable), true);
+  }
+});
+
+Deno.test("cx-reimb-rest list and save agree on retained draft/rejected claims and released receipts", async () => {
+  for (const status of ["draft", "ops-reject", "submitted", null]) {
+    for (const retained of [true, false]) {
+      for (const total_amount of [1, null]) {
+        const claims = retained ? [{ expense_receipt_id: "ZZTEST-own", trade_invoice_id: "ZZTEST-invoice", invoice: { status } }] : [];
+        const fake = listFake([receipt("ZZTEST-own", trade.id, { total_amount })], true, claims);
+        const listed = await listExpenseReceipts(fake.client, new URLSearchParams(), trade, basis);
+        const saveClient = { from(table: string) {
+          const q = fake.client.from(table);
+          if (table === "expense_receipts") q.maybeSingle = () => {
+            const original = q.then.bind(q);
+            return { then: (fn: any) => original((r: any) => fn({ ...r, data: r.data?.[0] ?? null })) } as any;
+          };
+          return q;
+        } };
+        const saved = await resolveReimbursementExtras(saveClient, {
+          userId: trade.id, flagOn: true, basis: "inclusive_12_112_v1",
+          items: [{ type: "reimbursement", expense_receipt_id: "ZZTEST-own" }],
+        });
+        const reason = retained ? "reimbursement_already_claimed" : total_amount === null ? "reimbursement_amount_unreadable" : null;
+        assertEquals(listed.expenses[0].reimbursement, { claimable: reason === null, reason });
+        assertEquals(saved.skipped_items.map((item) => item.code), reason ? [reason] : []);
+        assertEquals(saved.lines.length, reason ? 0 : 1);
+        assertEquals(await receiptHasLiveTradeInvoice(fake.client, "ZZTEST-own"), retained);
+        // Server-selected atomic draft replacement is the only exception at save.
+        if (status === "draft") {
+          assertEquals(await receiptHasLiveTradeInvoice(fake.client, "ZZTEST-own", "ZZTEST-invoice"), false);
+        }
+      }
+    }
+  }
 });

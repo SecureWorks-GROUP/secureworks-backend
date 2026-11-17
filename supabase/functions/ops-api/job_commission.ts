@@ -39,6 +39,25 @@ export type JobCommissionRecord = {
   remaining_ex_gst: number | null;
 };
 
+export type CommissionLineState =
+  | { state: "offer"; remaining_ex: number }
+  | { state: "no_figure" | "not_yours" | "claimed"; remaining_ex: null };
+
+/** The sorter uses the job's figure, never an amount sent by the claimant. */
+export function commissionLineState(
+  record: JobCommissionRecord | null,
+  tradeId: string,
+): CommissionLineState {
+  if (
+    !record || record.state !== "named" || !record.salesperson_user_id ||
+    record.expected_amount_ex_gst === null || !Number.isFinite(record.expected_amount_ex_gst) ||
+    record.remaining_ex_gst === null || !Number.isFinite(record.remaining_ex_gst)
+  ) return { state: "no_figure", remaining_ex: null };
+  if (record.salesperson_user_id !== tradeId) return { state: "not_yours", remaining_ex: null };
+  if (record.remaining_ex_gst <= 0) return { state: "claimed", remaining_ex: null };
+  return { state: "offer", remaining_ex: record.remaining_ex_gst };
+}
+
 export type CommissionOffer = {
   state: "not_known" | "not_yours" | "offer" | "claimed";
   offer_ex: number | null;
