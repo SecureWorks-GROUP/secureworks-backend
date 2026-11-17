@@ -2,6 +2,9 @@ import { billCostDocument } from "./cost_lines.ts";
 
 const PAGE_SIZE = 200;
 const MAX_PAGES = 10;
+// Per request, not per page. Return the last committed invoice for the next ask.
+export const MAX_TRADE_RPCS = 20;
+const MIRROR_READ_LIMIT = 1000;
 const BILL_COLUMNS =
   "xero_invoice_id,invoice_type,status,invoice_number,invoice_date,xero_contact_id,contact_name,fully_paid_on,line_items,sub_total,cost_line_amount_types:raw_json->LineAmountTypes";
 type Kind = "bills" | "credits" | "trade";
@@ -53,7 +56,11 @@ export async function backfillCostLines(sb: any, orgId: string, input: Input) {
       let query = sb.from(table).select(
         input.kind === "bills" ? BILL_COLUMNS : key,
       )
-        .eq("org_id", orgId).order(key).limit(PAGE_SIZE);
+        .eq("org_id", orgId).order(key).limit(
+          input.kind === "trade"
+            ? Math.min(PAGE_SIZE, MAX_TRADE_RPCS - done)
+            : PAGE_SIZE,
+        );
       if (input.kind === "bills") query = query.eq("invoice_type", "ACCPAY");
       if (after !== null) query = query.gt(key, after);
       const { data: rows, error } = await query;
@@ -75,29 +82,22 @@ export async function backfillCostLines(sb: any, orgId: string, input: Input) {
             p_credit_note_ids: rows.map((r: any) => r[key]),
           });
         } else {
-          const ids = new Set<string>(rows.map((r: any) => r.xero_invoice_id));
-          const mirrors = new Set<string>();
-          let mirrorAfter: string | null = null;
-          // Same mirror authority as live sync. Scan using trade_invoices PK,
-          // retaining only this page's <=200 matches, never the entire population.
-          for (;;) {
-            let mirrorQuery = sb.from("trade_invoices").select(
-              "id,xero_bill_id",
-            )
-              .eq("org_id", orgId).order("id").limit(PAGE_SIZE);
-            if (mirrorAfter !== null) {
-              mirrorQuery = mirrorQuery.gt("id", mirrorAfter);
-            }
-            const { data, error } = await mirrorQuery;
-            if (error || !Array.isArray(data)) {
-              throw error ?? new Error("Mirror page unavailable");
-            }
-            for (const row of data) {
-              if (ids.has(row.xero_bill_id)) mirrors.add(row.xero_bill_id);
-            }
-            if (data.length < PAGE_SIZE) break;
-            mirrorAfter = data[data.length - 1].id;
+          // trade_invoices_org_xero_bill_idx bounds one mirror read to this
+          // org and this page's <=200 bill ids. Never scan the trade population.
+          const { data, error } = await sb.from("trade_invoices")
+            .select("xero_bill_id")
+            .eq("org_id", orgId)
+            .in("xero_bill_id", rows.map((r: any) => r.xero_invoice_id))
+            .limit(MIRROR_READ_LIMIT);
+          if (error || !Array.isArray(data)) {
+            throw error ?? new Error("Mirror page unavailable");
           }
+          // Several trade rows may share a bill. A capped result is not proof
+          // of absence, so refuse before writes or cursor movement.
+          if (data.length >= MIRROR_READ_LIMIT) {
+            throw new Error("Mirror page limit reached");
+          }
+          const mirrors = new Set<string>(data.map((r: any) => r.xero_bill_id));
           const documents = rows.map((row: any) =>
             billCostDocument({
               ...row,
@@ -115,6 +115,7 @@ export async function backfillCostLines(sb: any, orgId: string, input: Input) {
       }
       // A non-empty page always returns its last source id, even when every
       // row was a mirror. An empty follow-up is the explicit completion proof.
+      if (input.kind === "trade" && done >= MAX_TRADE_RPCS) break;
       if (rows.length < PAGE_SIZE) break;
     }
     return { kind: input.kind, done, next_after: after };
