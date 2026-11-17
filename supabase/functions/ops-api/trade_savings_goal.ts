@@ -97,6 +97,10 @@ function centsToAmount(cents: bigint): number {
   return Number(cents) / 100;
 }
 
+// A high surrogate not followed by a low one, or a low one not preceded by a
+// high one. A valid pair (an emoji) never matches.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 /** Reads a set/clear body. Takes only the goal fields; anything else is ignored. */
 export function parseSavingsGoalInput(body: unknown): ParsedGoalInput {
   const b = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
@@ -106,7 +110,9 @@ export function parseSavingsGoalInput(body: unknown): ParsedGoalInput {
     return invalid("label", "Say what you are saving for, in 60 characters or fewer.");
   }
   // PostgreSQL text cannot hold a NUL character: refuse it here, not as a 503.
-  if (b.label.includes("\u0000")) {
+  // Nor a lone UTF-16 surrogate (JSON "\uD800" parses to one): refuse it
+  // here too, or the write fails and reads as 503 goal_unsaved.
+  if (b.label.includes("\u0000") || LONE_SURROGATE.test(b.label)) {
     return invalid("label", "Say what you are saving for, in 60 characters or fewer.");
   }
   const label = b.label.trim();

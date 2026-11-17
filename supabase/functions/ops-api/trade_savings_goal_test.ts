@@ -134,6 +134,11 @@ Deno.test("invalid inputs refuse 400 goal_invalid naming the field, and write no
     // PostgreSQL text refuses NUL: a 400 naming the label, never a 503.
     [{ ...GOAL, label: "Ute\u0000fund" }, "label"],
     [{ ...GOAL, label: "\u0000" }, "label"],
+    // A lone UTF-16 surrogate cannot be stored either: 400, never 503.
+    [{ ...GOAL, label: JSON.parse('"\\uD800"') }, "label"],
+    [{ ...GOAL, label: "Ute\uDC00fund" }, "label"],
+    [{ ...GOAL, label: "Ute fund\uD83D" }, "label"],
+    [{ ...GOAL, label: "\uDE97\uD83D" }, "label"],
     [{ ...GOAL, target_amount: 0 }, "target_amount"],
     [{ ...GOAL, target_amount: 0.004 }, "target_amount"],
     [{ ...GOAL, target_amount: -5 }, "target_amount"],
@@ -177,6 +182,8 @@ Deno.test("boundaries the table accepts are accepted", () => {
   assert(ok({ ...GOAL, label: "x".repeat(60) }));
   // 60 code points that are 120 UTF-16 units still fit.
   assert(ok({ ...GOAL, label: "\u{1F697}".repeat(60) }));
+  // A valid surrogate pair (an emoji) beside text is still accepted.
+  assert(ok({ ...GOAL, label: "Ute \u{1F697} fund" }));
   assertEquals(parseSavingsGoalInput({ ...GOAL, label: "\u{1F697}".repeat(61) }).kind, "invalid");
   assert(ok({ ...GOAL, target_amount: 0.01 }));
   assert(ok({ ...GOAL, target_amount: 9999999999.99 }));
