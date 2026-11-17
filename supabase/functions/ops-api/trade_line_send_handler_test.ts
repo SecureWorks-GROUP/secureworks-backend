@@ -40,8 +40,10 @@ const JOBS = [
   job(NO_WO_JOB, "ZZF-5002"),
   job(COMM_JOB, "ZZF-5003", { created_by: TRADE_ID }),
   job("6c2f0a52-0000-4000-8000-0000000fb004", "ZZM-5004", { type: "miscellaneous" }),
+  job("6c2f0a52-0000-4000-8000-0000000fb005", "ZZM-5005", { type: "miscellaneous" }),
 ];
 const MISC_JOB = JOBS[3].id;
+const MISC_JOB_2 = JOBS[4].id;
 
 type World = {
   lineHold?: boolean;
@@ -55,6 +57,10 @@ type World = {
   crewWo?: Record<string, unknown>;
   // The job whose job work order is approved at `agreed` (default the backed job).
   agreedJob?: string;
+  // trade_week_autofill_v1 (main's P1-16.3), on together with the hold switch.
+  autofill?: boolean;
+  // A weekly work-order send (work_order_blocks) of these crew work orders.
+  weeklyWo?: Record<string, unknown> | Array<Record<string, unknown>>;
 };
 
 type Captured = {
@@ -139,7 +145,7 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
         return Promise.resolve(Response.json("6c2f0a52-0000-4000-8000-0000000fd999"));
       }
       if (name === "trade_is_off_job_crew") return Promise.resolve(Response.json(false));
-      if (name === "persist_trade_work_order_invoice_v1") {
+      if (name === "persist_trade_work_order_invoice_v1" || name.startsWith("persist_weekly_trade_invoice_v")) {
         const args = typeof init?.body === "string" ? JSON.parse(init.body) : {};
         const id = `6c2f0a52-0000-4000-8000-0000000fe${String(++nextInvoice).padStart(3, "0")}`;
         invoices.push({ id, row: args.p_invoice });
@@ -181,6 +187,11 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
     if (table === "work_orders" && world.crewWo && filterValues(url, "id")?.includes(String(world.crewWo.id))) {
       return reply([world.crewWo]);
     }
+    const weeklyWos = world.weeklyWo ? [world.weeklyWo].flat() : [];
+    if (table === "work_orders" && weeklyWos.length > 0 && filterValues(url, "id")?.some((id) => weeklyWos.some((wo) => wo.id === id))) {
+      const ids = filterValues(url, "id")!;
+      return reply(weeklyWos.filter((wo) => ids.includes(String(wo.id))));
+    }
     if (table === "work_orders") {
       const jobs = filterValues(url, "job_id");
       const rows = world.agreed === undefined ? [] : [{
@@ -199,7 +210,8 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
       const names = filterValues(url, "flag_name") || [];
       return reply(names.map((name) => ({
         flag_name: name,
-        enabled: name === "trade_pay_inclusive_super_v1" || (name === "trade_line_hold_v1" && world.lineHold === true),
+        enabled: name === "trade_pay_inclusive_super_v1" || (name === "trade_line_hold_v1" && world.lineHold === true) ||
+          (name === "trade_week_autofill_v1" && world.autofill === true),
       })));
     }
     if (table === "trade_pay_settings") return reply([{ inclusive_super_from: WEEK_START }]);
@@ -254,6 +266,8 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
       headers: { authorization: "Bearer trade-jwt", "content-type": "application/json" },
       body: JSON.stringify(world.crewWo
         ? { work_order_id: world.crewWo.id, gst_on: false, extra_items }
+        : world.weeklyWo
+        ? { week_start: WEEK_START, gst_on: false, work_order_blocks: [world.weeklyWo].flat().map((wo) => ({ work_order_id: wo.id })) }
         : { week_start: WEEK_START, gst_on: false, extra_items }),
     }));
     const text = await res.text();
@@ -536,3 +550,50 @@ handlerTest("line hold: an extra line with no job number is still refused at ent
   assertEquals(out.invoices, []);
   assertEquals(out.raises, []);
 });
+
+// Both switches on: main's autofill save (trade_week_autofill_v1) with the hold.
+handlerTest("hold and autofill both on: a plain week still splits into pay and the office", async () => {
+  const out = await send([
+    line(BACKED_JOB, "ZZF-5001", "Materials", 4, 50),
+    line(NO_WO_JOB, "ZZF-5002", "Materials", 6, 50),
+  ], { lineHold: true, autofill: true, agreed: 4000 });
+  assertEquals(out.status, 200, JSON.stringify(out.body));
+  const standard = out.invoices.filter((i) => (i.row.invoice_kind ?? "standard") === "standard");
+  const held = out.invoices.filter((i) => i.row.invoice_kind === "held");
+  assertEquals([standard.length, held.length], [1, 1]);
+  assertEquals(out.lines.filter((l) => l.invoiceId === standard[0].id).map((l) => Number(l.row.line_total_ex)), [200]);
+  assertEquals(out.lines.filter((l) => l.row.hold_reason).map((l) => [l.row.hold_reason, Number(l.row.line_total_ex)]), [["no_work_order", 300]]);
+  assertEquals([out.body.send.in_pay_ex, out.body.send.held_ex], [200, 300]);
+});
+
+for (const autofill of [false, true]) {
+  handlerTest(`weekly work-order send, autofill ${autofill ? "on" : "off"}: a backed block is saved through the weekly persist`, async () => {
+    const out = await send([], { lineHold: true, autofill, weeklyWo: CREW_WO(), agreed: 4000, agreedJob: MISC_JOB });
+    assertEquals(out.status, 200, JSON.stringify(out.body));
+    assertEquals(out.invoices.map((i) => i.row.invoice_kind ?? "standard"), ["standard"]);
+    assertEquals(out.lines.filter((l) => l.row.hold_reason).length, 0);
+  });
+  handlerTest(`weekly work-order send, autofill ${autofill ? "on" : "off"}: a block over the amount goes to the office and the send answers Sent`, async () => {
+    const out = await send([], { lineHold: true, autofill, weeklyWo: CREW_WO(), agreed: 100, agreedJob: MISC_JOB });
+    assertEquals(out.status, 200, JSON.stringify(out.body));
+    assertEquals(out.lines.filter((l) => l.row.hold_reason).map((l) => l.row.hold_reason).length > 0, true);
+    assertEquals(out.body.send.sent_ex, roundSent(out.body.send.in_pay_ex + out.body.send.held_ex));
+  });
+}
+const roundSent = (n: number) => Math.round(n * 100) / 100;
+
+for (const autofill of [false, true]) {
+  handlerTest(`weekly work-order send, autofill ${autofill ? "on" : "off"}: one block paid, one held, the persist checks both as sent`, async () => {
+    const second = CREW_WO({ id: "6c2f0a52-0000-4000-8000-0000000fc778", wo_number: "ZZWO-2", job_id: MISC_JOB_2, jobs: JOBS[4] });
+    const out = await send([], { lineHold: true, autofill, weeklyWo: [CREW_WO(), second], agreed: 4000, agreedJob: MISC_JOB });
+    assertEquals(out.status, 200, JSON.stringify(out.body));
+    const standard = out.invoices.filter((i) => (i.row.invoice_kind ?? "standard") === "standard");
+    const held = out.invoices.filter((i) => i.row.invoice_kind === "held");
+    assertEquals([standard.length, held.length], [1, 1]);
+    // The standard save carries the held line so its source checks see the week as sent.
+    assertEquals(standard[0].row.hold_lines.map((l: any) => [l.hold_reason, l.job_id, Number(l.line_total_ex)]), [["hourly_no_maximum", MISC_JOB_2, 300]]);
+    assertEquals(out.lines.filter((l) => l.invoiceId === standard[0].id).map((l) => [l.row.job_id, l.row.line_position]), [[MISC_JOB, 0]]);
+    assertEquals(out.lines.filter((l) => l.row.hold_reason).map((l) => [l.row.hold_reason, l.row.job_id]), [["hourly_no_maximum", MISC_JOB_2]]);
+    assertEquals([out.body.send.in_pay_ex, out.body.send.held_ex, out.body.send.sent_ex], [300, 300, 600]);
+  });
+}
