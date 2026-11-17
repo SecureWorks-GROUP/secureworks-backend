@@ -3531,13 +3531,13 @@ Deno.test("ZZTEST people history: office removal and restore each append once wi
   const restored = await restoreGroupWorkOrderParticipant(memory.client(), caller, { group_id: GROUP, user_id: USER_C });
   assertEquals(restored.restored, true);
   const rows = memory.rows("work_order_amount_changes");
-  assertEquals(rows.map((row) => row.detail.action), ["remove", "restore"]);
+  assertEquals(rows.map((row) => {
+    assert(row.detail && typeof row.detail === "object" && "action" in row.detail);
+    return row.detail.action;
+  }), ["remove", "restore"]);
   assertEquals(rows.map((row) => [row.kind, row.delta_ex]), [["people", 0], ["people", 0]]);
-  const client = memory.client();
-  const from = client.from.bind(client);
-  client.from = (table: string) => table === "work_order_amount_changes"
-    ? { insert: () => ({ error: { message: "ZZTEST failure" } }) } : from(table);
-  const stillRemoved = await removeGroupWorkOrderParticipant(client, caller, {
+  memory.insertFault.set("work_order_amount_changes", "ZZTEST failure");
+  const stillRemoved = await removeGroupWorkOrderParticipant(memory.client(), caller, {
     group_id: GROUP, user_id: USER_C, reason: "ZZTEST retry" });
   assertEquals(stillRemoved.removed, true);
 });
