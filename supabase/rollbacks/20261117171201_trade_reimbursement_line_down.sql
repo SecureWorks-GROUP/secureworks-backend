@@ -10,7 +10,9 @@ BEGIN
   END IF;
   EXECUTE 'CREATE OR REPLACE VIEW public.v_trade_charge_resolved AS ' || replace(d, new, old);
 END $$;
-DROP TRIGGER IF EXISTS trade_invoice_lines_reimbursement_once ON public.trade_invoice_lines;
+SELECT public.remove_trade_invoice_reimbursement_guard();
+DROP FUNCTION IF EXISTS public.install_trade_invoice_reimbursement_guard();
+DROP FUNCTION IF EXISTS public.remove_trade_invoice_reimbursement_guard();
 DROP FUNCTION IF EXISTS public.trade_invoice_lines_reimbursement_once();
 ALTER TABLE public.trade_invoice_lines DROP CONSTRAINT IF EXISTS trade_invoice_lines_receipt_only_on_reimbursement;
 ALTER TABLE public.trade_invoice_lines DROP CONSTRAINT IF EXISTS trade_invoice_lines_reimbursement_check;
