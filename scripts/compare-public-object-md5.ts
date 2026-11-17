@@ -67,6 +67,60 @@ export function parseCatalog(tsv: string): Map<string, CatalogRow> {
   return rows;
 }
 
+// Closed CI scope. Use the UNION of both catalogs, so a missing, removed or
+// newly introduced object is checked just like a changed body. Object names
+// here are schema identifiers, never business row values.
+export function parityArea(
+  name: string,
+): "job-profit" | "context" | "pay" | null {
+  const object = name.split("(", 1)[0];
+  if (
+    /^(?:job_profit|job_cost|v_job_(?:profit|cost|revenue|expected|double_charge)|job_financials$|v_makesafe_charge_ledger$|bookkeeping_|v_bookkeeping_|v_xero_lines$|cfo_bill_cost)/
+      .test(object)
+  ) {
+    return "job-profit";
+  }
+  if (
+    /(?:^|_)context(?:_|$)|^luna_|^v_evidence_health(?:_|$)|^v_unresolved_evidence$/
+      .test(object) ||
+    ["attribute_business_event", "ensure_booking_draft_job"].includes(object)
+  ) {
+    return "context";
+  }
+  if (
+    /(?:^|_)(?:trade_invoice|job_work_order)/.test(object) ||
+    object === "work_orders_job_kind_guard" ||
+    /^(?:group_|trade_|v_trade_|v_invoice_line_completeness$|v_group_coverage$|v_patio_group_coverage$|patio_pay|crew_pay)/
+      .test(object) ||
+    /group|crew|paid_hours/.test(object) &&
+      /^(?:office_|work_orders_|job_work_order_|job_client_signoffs_)/.test(
+        object,
+      ) ||
+    /^(?:freeze|unfreeze|amend|project|claim|rekey|remove|restore|revoke|void)_group_/
+      .test(object)
+  ) {
+    return "pay";
+  }
+  return null;
+}
+
+export function scopedCatalog(
+  catalog: Map<string, CatalogRow>,
+): Map<string, CatalogRow> {
+  const selected = new Map(
+    [...catalog].filter(([, row]) => parityArea(row.name)),
+  );
+  // An unrelated or truncated snapshot must not pass with zero comparisons.
+  for (const area of ["job-profit", "context", "pay"]) {
+    if (![...selected.values()].some((row) => parityArea(row.name) === area)) {
+      throw new Error(
+        `Catalog has no ${area} objects; refusing incomplete parity input`,
+      );
+    }
+  }
+  return selected;
+}
+
 export function parseTrace(jsonl: string): Change[] {
   return jsonl.split(/\r?\n/).filter((line) => line.trim()).map(
     (line, index) => {
@@ -174,9 +228,9 @@ export function renderComparison(
 
 const help = `Offline public view/function md5 comparison; no database access.
 Usage:
-  deno run --allow-read --allow-write scripts/compare-public-object-md5.ts --live <snapshot.tsv> --fresh <fresh.tsv> [--trace <changes.jsonl>] --output <report.md>
+  deno run --allow-read --allow-write scripts/compare-public-object-md5.ts --live <snapshot.tsv> --fresh <fresh.tsv> [--trace <changes.jsonl>] [--scope job-profit-context-pay] --output <report.md>
   deno run scripts/compare-public-object-md5.ts --sql
-Flags: --live, --fresh, --trace, --output, --sql, --help
+Flags: --live, --fresh, --trace, --scope, --output, --sql, --help
 Exit: 0 equal or SQL/help; 1 differences; 2 invalid input. Never prints bodies.
 TSV: kind<TAB>name<TAB>md5; # comments allowed. Trace JSONL: kind,name,before,after,source.
 Capture using psql -X -qAt -F <tab>, with UTC and the same search_path/version.
@@ -193,7 +247,7 @@ async function main(args: string[]): Promise<number> {
       return 0;
     }
     const options = new Map<string, string>();
-    const known = ["--live", "--fresh", "--trace", "--output"];
+    const known = ["--live", "--fresh", "--trace", "--scope", "--output"];
     for (let i = 0; i < args.length; i += 2) {
       if (
         !known.includes(args[i]) || !args[i + 1] ||
@@ -211,6 +265,10 @@ async function main(args: string[]): Promise<number> {
       if (!options.has(required)) {
         throw new Error(`Missing ${required}; run with --help`);
       }
+    }
+    const scope = options.get("--scope");
+    if (scope !== undefined && scope !== "job-profit-context-pay") {
+      throw new Error("Unknown --scope; expected job-profit-context-pay");
     }
     const output = options.get("--output")!;
     // Never overwrite an input export, including through a symbolic link.
@@ -233,14 +291,21 @@ async function main(args: string[]): Promise<number> {
         "Trace is empty; omit --trace for an unattributed comparison",
       );
     }
-    const differences = compareCatalogs(live, fresh, trace);
+    // Validate a complete trace before selecting a domain; filtering trace
+    // rows first could otherwise hide a discontinuity outside that domain.
+    const allDifferences = compareCatalogs(live, fresh, trace);
+    const scopedLive = scope ? scopedCatalog(live) : live;
+    const scopedFresh = scope ? scopedCatalog(fresh) : fresh;
+    const differences = scope
+      ? allDifferences.filter((row) => parityArea(row.name))
+      : allDifferences;
     await Deno.writeTextFile(
       output,
-      renderComparison(differences, live.size, fresh.size),
+      renderComparison(differences, scopedLive.size, scopedFresh.size),
       { createNew: true },
     );
     console.log(
-      `comparison:\n  live: ${live.size}\n  fresh: ${fresh.size}\n  differences: ${differences.length}\n  report: ${
+      `comparison:\n  live: ${scopedLive.size}\n  fresh: ${scopedFresh.size}\n  differences: ${differences.length}\n  report: ${
         JSON.stringify(output)
       }`,
     );
