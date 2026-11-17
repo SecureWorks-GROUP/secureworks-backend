@@ -32,7 +32,7 @@ not expanded.
 `supabase/tests/migration-contracts/20261117233201_followup23_record_proof_weekly_pages/contract.sql`
 contains three behavior cases plus the execution-plan and reapply/rollback
 checks. All fixtures and rollback checks run in one rolled-back transaction.
-The two earlier supplier positive controls now name their exact bill; no test
+The three earlier supplier positive controls now name their exact bill; no test
 or proof was removed.
 
 Local proof uses that single contract and its focused setup on disposable
