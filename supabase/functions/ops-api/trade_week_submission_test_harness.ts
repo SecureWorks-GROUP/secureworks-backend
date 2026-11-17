@@ -29,7 +29,7 @@ type World = {
   cards?: any[];
   rates?: any[];
   gstRegistered?: boolean;
-  fail?: "history" | "rates" | "profile" | "mark";
+  fail?: "history" | "rates" | "profile" | "mark" | "wo_cards";
   body?: any;
   action?: string;
   xero?: boolean;
@@ -41,7 +41,7 @@ export async function send(world: World = {}) {
     reads: URL[] = [];
   const xero: any[] = [];
   const config = new Map<string, any>();
-  const cards = world.cards ?? [card()];
+  const cards = (world.cards ?? [card()]).map((row) => ({ ...row }));
   const previous = globalThis.fetch;
   globalThis.fetch = ((input: Request | URL | string, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
@@ -76,13 +76,17 @@ export async function send(world: World = {}) {
         }),
       );
     }
-    const matches = (row: any, key: string) => {
-      const value = url.searchParams.get(key);
-      return !value || !/^(eq\.|in\.)/.test(value) ||
-        (value.startsWith("eq.")
-          ? String(row[key]) === value.slice(3)
-          : value.slice(4, -1).split(",").includes(String(row[key])));
-    };
+    const matches = (row: any, key: string) =>
+      url.searchParams.getAll(key).every((value) => {
+        if (value.startsWith("eq.")) return String(row[key]) === value.slice(3);
+        if (value.startsWith("in.(")) {
+          return value.slice(4, -1).split(",").includes(String(row[key]));
+        }
+        if (value.startsWith("gte.")) return String(row[key]) >= value.slice(4);
+        if (value.startsWith("lte.")) return String(row[key]) <= value.slice(4);
+        if (value === "is.null") return row[key] == null;
+        return true;
+      });
     if (url.pathname === "/auth/v1/user") {
       return Promise.resolve(
         Response.json({ id: TRADE, aud: "authenticated" }),
@@ -188,9 +192,20 @@ export async function send(world: World = {}) {
       if (world.fail === "history" && url.searchParams.get("limit") === "10") {
         return fail();
       }
-      return reply(
-        cards.filter((c) => matches(c, "id") && matches(c, "job_id")),
+      if (
+        world.fail === "wo_cards" &&
+        url.searchParams.get("job_id")?.startsWith("in.") &&
+        url.searchParams.get("select") ===
+          "id,job_id,scheduled_date,invoiced_in"
+      ) return fail();
+      const selected = cards.filter((row) =>
+        ["id", "job_id", "user_id", "scheduled_date", "status", "is_ghost"]
+          .every((key) => matches(row, key))
       );
+      if (method === "PATCH") {
+        selected.forEach((row) => Object.assign(row, raw));
+      }
+      return reply(selected);
     }
     if (table === "jobs") {
       return reply([{
@@ -246,6 +261,7 @@ export async function send(world: World = {}) {
       invoices,
       lines,
       marks,
+      cards,
       reads,
       xero,
     };
