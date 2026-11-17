@@ -70,8 +70,10 @@ DO $$ DECLARE j uuid:='f1050900-0000-4000-8000-000000000001';
  PERFORM pg_temp.zztest_assert(public.job_backed_room(j)=170,'variation status or amount wrong');
  DELETE FROM public.work_order_customer_variations WHERE job_id=j;
  -- Excluded types and invoice kinds/states do not spend the room.
- INSERT INTO public.trade_invoice_lines(trade_invoice_id,job_id,line_type,line_total_ex)
- VALUES(i,j,'commission',999),(i,j,'reimbursement',999);
+ -- A reimbursement line must name a receipt (main's reimbursement check); the made-up id is not
+ -- foreign-key checked while this contract runs as replica.
+ INSERT INTO public.trade_invoice_lines(trade_invoice_id,job_id,line_type,line_total_ex,expense_receipt_id)
+ VALUES(i,j,'commission',999,NULL),(i,j,'reimbursement',999,'f1050900-0000-4000-8000-000000000007');
  UPDATE public.trade_invoices SET status='draft' WHERE id=other_i;
  INSERT INTO public.trade_invoice_lines(trade_invoice_id,job_id,line_type,line_total_ex) VALUES(other_i,j,'labour',999);
  PERFORM pg_temp.zztest_assert(public.job_backed_room(j)=150,'excluded lines spent room');
