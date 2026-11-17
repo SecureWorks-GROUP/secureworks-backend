@@ -827,6 +827,7 @@ import {
   redactJobDetailWorkOrderForTrade,
   reportWorkOrderVariation,
   resendWorkOrderVariationEmails,
+  resolveWorkOrderAgentCaller,
   resolveWorkOrderApprover,
   sendOutlookVariationEmail,
   readFlag,
@@ -10410,16 +10411,23 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // (owner_approval_authority), checked here and again by the database.
       // The approver is the signed-in user. An approver named only by
       // x-sw-actor `user:<id>` on a server-secret call is refused until
-      // feature flag work_order_terminal_approval_v1 is on. Records the work
-      // order decision; the order is issued only when the owner approval
-      // policy allows (20261109040000).
+      // feature flag work_order_terminal_approval_v1 is on. A server-secret
+      // caller whose actor is `agent:<account>` approves as that agent
+      // (20261117010000): the row records the actor, any approved_by name,
+      // and approved_at. That path does not open any other approval door.
+      // Records the work order decision; the order is issued only when the
+      // owner approval policy allows (20261109040000).
       case 'approve_work_order':
         return json(await runJobWorkOrder(() => approveJobWorkOrder(client, body, resolveWorkOrderApprover({
           authMode,
           authUserId: authUser?.id ?? null,
           serverSecretPresented,
           actor: requestActor,
-        }), authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID)))
+        }), authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID, resolveWorkOrderAgentCaller({
+          authMode,
+          serverSecretPresented,
+          actor: requestActor,
+        }))))
       // Dry run unless apply:true AND feature flag job_work_order_backfill_v1.
       case 'backfill_job_work_orders': {
         if (authMode !== 'api_key' || !serverSecretPresented) {

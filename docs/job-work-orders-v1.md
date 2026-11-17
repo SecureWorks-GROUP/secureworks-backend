@@ -70,6 +70,19 @@ secret, so it does not prove the caller is Shaun. Whether that is enough for
 While the flag is off, a terminal approval is refused 403
 `terminal_approval_switched_off` and Shaun approves from his signed-in session.
 
+An agent caller is a different door (`20261117010000`). A server secret whose
+`x-sw-actor` is `agent:<account>` (the SecureSuite MCP sends `agent:jarvis-mcp`,
+or the deployment's `SW_ACTOR`) may approve a job work order as that account.
+It is not written down as Shaun. The row stores `approved_via = 'agent'`,
+`approved_by` null, `approved_by_actor` (the account), `approved_by_name` (any
+name the caller passed as `approved_by_name`, or as text `approved_by`), and
+`approved_at`. The office read (`job_work_order` / `list_work_orders` kind=job)
+returns those columns. A browser key, a routine key, a seat name and a
+`user:<id>` header are not this door. Customer variations, scope price
+approval and invoice approval do not read it. While
+`owner_approval_saved_revision_required_v1` is on, the agent call is refused
+`owner_approval_required`: it does not record an owner decision.
+
 ### Not before the customer accepts (RQ-19.a)
 
 A fencing or patio job is not accepted yet while its status is `draft`,
@@ -657,7 +670,10 @@ Mapping: `sw_list_work_orders` -> `list_work_orders?kind=job`,
 `sw_create_work_order` -> `create_work_order {kind:"job"}`,
 `sw_update_work_order` -> `update_work_order`, a view tool -> `job_work_order`,
 and a new approve tool -> `approve_work_order`. Drafting and editing work from
-the terminal on merge. Approving from the terminal needs two things: the owner's
-ruling that turns on `work_order_terminal_approval_v1` (see "Who approves"), and
-the MCP server sending `x-sw-actor: user:<his users.id>` with its server secret.
-Until both, Shaun approves from his signed-in session.
+the terminal on merge. Approving as Shaun from the terminal needs two things:
+the owner's ruling that turns on `work_order_terminal_approval_v1` (see "Who
+approves"), and the MCP server sending `x-sw-actor: user:<his users.id>` with
+its server secret. Until both, that impersonation stays refused. An agent
+account approves as itself when the same server secret sends
+`x-sw-actor: agent:<account>` (see "Who approves"); the MCP does not yet
+expose a separate approve tool, so the call is `ops-api?action=approve_work_order`.
