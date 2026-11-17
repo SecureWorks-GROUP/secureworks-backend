@@ -1201,7 +1201,7 @@ async function syncInvoices(sb: any) {
   const contactAddressSweep = await sweepContactAddresses(sb, accessToken, tenantId)
 
   // ── Match unlinked invoices after sync ──
-  const matchResult = await matchUnlinkedInvoices(sb)
+  const matchResult = await matchUnlinkedInvoicesOnChange(sb, totalSynced)
 
   // ── Invoice evidence onto its job (B-4) ──
   // Rows about an invoice that now has a job go to that job in this pass, so a payment
@@ -1371,6 +1371,31 @@ async function invoiceMirrorCheck(sb: any, force: boolean) {
 // ════════════════════════════════════════════════════════════
 
 /** Exported for regression tests (M1 Strategy 2 / silent-400 guard). */
+export async function matchUnlinkedInvoicesOnChange(client: any, totalSynced: number, now = new Date()) {
+  let onChange = false
+  try {
+    const { data, error } = await client.from('feature_flags').select('enabled')
+      .eq('flag_name', 'xero_unlinked_match_on_change_v1').maybeSingle()
+    onChange = !error && data?.enabled === true
+  } catch {
+    // An unreadable switch preserves the existing every-run behaviour.
+  }
+  if (onChange && totalSynced === 0) {
+    const { data, error } = await client.from('xero_sync_state').select('cursor_at')
+      .eq('key', 'unlinked_match_last_run_at').maybeSingle()
+    const lastRun = error ? NaN : Date.parse(data?.cursor_at ?? '')
+    if (Number.isFinite(lastRun) && now.getTime() - lastRun <= 60 * 60 * 1000) {
+      return { matched: 0, flagged: 0, skipped: 'no_change' }
+    }
+  }
+  const result = await matchUnlinkedInvoices(client)
+  const { error } = await client.from('xero_sync_state').upsert({
+    key: 'unlinked_match_last_run_at', cursor_at: now.toISOString(),
+  }, { onConflict: 'key' })
+  if (error) console.error('[xero-sync] Unlinked match timestamp write failed:', error.message)
+  return result
+}
+
 export async function matchUnlinkedInvoices(client: any) {
   let matched = 0
   let flagged = 0
@@ -1399,6 +1424,39 @@ export async function matchUnlinkedInvoices(client: any) {
 
     if (unlinked.length === 0) return { matched: 0, flagged: 0 }
 
+    const jobs = await readAll<any>(() => client.from('jobs')
+      .select('id, job_number, client_name, type, status, legacy, org_id, created_at').order('id'))
+    if (!jobs) {
+      console.error('[xero-sync] Unlinked match jobs unreadable')
+      return { matched: 0, flagged: 0, error: 'jobs unreadable' }
+    }
+    const jobsByNumber = new Map<string, any[]>()
+    const liveByName = new Map<string, any[]>()
+    for (const job of jobs) {
+      const numbered = jobsByNumber.get(job.job_number) || []
+      numbered.push(job)
+      jobsByNumber.set(job.job_number, numbered)
+      if (job.org_id !== DEFAULT_ORG_ID || job.legacy !== false ||
+          ['cancelled', 'lost', 'draft'].includes(job.status)) continue
+      const name = String(job.client_name || '').toLowerCase()
+      const named = liveByName.get(name) || []
+      named.push(job)
+      liveByName.set(name, named)
+    }
+    for (const named of liveByName.values()) {
+      named.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+    }
+    // Both annotation producers use this prefix. Read once before any link so
+    // a failed annotation read cannot turn into missing review evidence.
+    const annotations = await readAll<any>(() => client.from('ai_annotations')
+      .select('source_ref, status').like('source_ref', 'sync:unlinked:%').order('source_ref'))
+    if (!annotations) {
+      console.error('[xero-sync] Unlinked match annotations unreadable')
+      return { matched: 0, flagged: 0, error: 'annotations unreadable' }
+    }
+    const anyRef = new Set(annotations.map((row) => row.source_ref))
+    const activeRef = new Set(annotations.filter((row) => row.status === 'active').map((row) => row.source_ref))
+
     // One candidate read for every customer invoice in this pass. A failed read
     // links nothing by the builder rule; every other strategy runs as before.
     const builderRef = await loadBuilderReferenceCandidates(client, unlinkedSales || [])
@@ -1416,10 +1474,8 @@ export async function matchUnlinkedInvoices(client: any) {
       // this one. extractJobNumber() catches SW(MS|<letter>)-#### uniformly.
       const jobNum = extractJobNumber(ref)
       if (jobNum) {
-        const { data: job } = await client.from('jobs')
-          .select('id, job_number, type')
-          .eq('job_number', jobNum)
-          .maybeSingle()
+        const list = jobsByNumber.get(jobNum) || []
+        const job = list.length === 1 ? list[0] : null
 
         if (job) {
           const refusal = await sealedSesXeroLinkRefusal(
@@ -1537,10 +1593,12 @@ export async function matchUnlinkedInvoices(client: any) {
           // One item per invoice, ever: once a person has resolved or dismissed it,
           // the 15-minute sync does not raise it again.
           const annotation = builderReferenceAnnotation(inv, decision, DEFAULT_ORG_ID)
-          const { data: existingAnn } = await client.from('ai_annotations')
-            .select('id').eq('source_ref', annotation.source_ref).limit(1)
-          if (!existingAnn || existingAnn.length === 0) {
-            await client.from('ai_annotations').insert(annotation).then(() => undefined, () => undefined)
+          if (!anyRef.has(annotation.source_ref)) {
+            const { error } = await client.from('ai_annotations').insert(annotation)
+            if (!error) {
+              anyRef.add(annotation.source_ref)
+              activeRef.add(annotation.source_ref)
+            }
           }
           flagged++
           builderRefResult.flagged++
@@ -1550,23 +1608,7 @@ export async function matchUnlinkedInvoices(client: any) {
 
       // Strategy 2: Contact name matches a job client_name exactly
       if (contactName) {
-        const { data: jobs, error: jobsErr } = await client.from('jobs')
-          .select('id, job_number, client_name, pricing_json, type')
-          .eq('org_id', '00000000-0000-0000-0000-000000000001')
-          .eq('legacy', false)
-          .ilike('client_name', contactName)
-          // A draft is a sales lead with no work: never a name-match home
-          // for money, and never a rival that blocks the real job's link.
-          .not('status', 'in', '("cancelled","lost","draft")')
-          .order('created_at', { ascending: false })
-          .limit(5)
-
-        // A failed lookup must not read as "no candidate jobs" — that is
-        // indistinguishable from a genuine miss and silently skips the link.
-        if (jobsErr) {
-          console.error(`[xero-sync] Strategy 2 job lookup failed for invoice ${inv.invoice_number} (contact "${contactName}"):`, jobsErr.message)
-          continue
-        }
+        const jobs = (liveByName.get(contactName.toLowerCase()) || []).slice(0, 5)
 
         if (jobs && jobs.length === 1) {
           // Exact single match — high confidence, auto-link
@@ -1614,10 +1656,8 @@ export async function matchUnlinkedInvoices(client: any) {
         if (jobs && jobs.length > 1) {
           // Write annotation instead of alert — shows in Inbox with resolution buttons
           const _srcRef = `sync:unlinked:${inv.xero_invoice_id}`
-          const { data: _existingAnn } = await client.from('ai_annotations')
-            .select('id').eq('source_ref', _srcRef).eq('status', 'active').limit(1)
-          if (!_existingAnn || _existingAnn.length === 0) {
-            await client.from('ai_annotations').insert({
+          if (!activeRef.has(_srcRef)) {
+            const { error } = await client.from('ai_annotations').insert({
               org_id: '00000000-0000-0000-0000-000000000001',
               entity_type: 'invoice',
               entity_id: null,
@@ -1640,7 +1680,11 @@ export async function matchUnlinkedInvoices(client: any) {
               source: 'xero-sync',
               source_ref: _srcRef,
               confidence: 0.5,
-            }).then(() => undefined, () => undefined)
+            })
+            if (!error) {
+              anyRef.add(_srcRef)
+              activeRef.add(_srcRef)
+            }
           }
 
           flagged++
