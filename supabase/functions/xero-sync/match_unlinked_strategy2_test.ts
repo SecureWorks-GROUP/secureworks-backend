@@ -208,3 +208,15 @@ Deno.test("on-change gate skips unchanged recent runs, and runs for changes, mis
     else assertEquals(f.calls.find((c) => c.table === "xero_sync_state" && c.mode === "upsert")?.row?.cursor_at, NOW.toISOString());
   }
 });
+
+Deno.test("a failed on-change matcher run remains due on the next unchanged sync", async () => {
+  for (const failure of ["jobsError", "annotationsError"] as const) {
+    const f = makeClient({ enabled: true, unlinked: [invoice()], [failure]: true });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await sync.matchUnlinkedInvoicesOnChange(f.client, 0, NOW);
+      assert(result.error);
+    }
+    assertEquals(f.calls.filter((c) => c.table === "xero_invoices" && c.mode === "select").length, 4);
+    assertEquals(f.calls.filter((c) => c.table === "xero_sync_state" && c.mode === "upsert").length, 0);
+  }
+});
