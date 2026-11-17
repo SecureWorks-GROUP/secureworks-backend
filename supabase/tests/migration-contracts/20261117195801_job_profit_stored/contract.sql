@@ -1,5 +1,19 @@
 BEGIN;
 SET LOCAL TimeZone='UTC';
+-- Refresh calls now require a deadline set before their statement starts.
+SET LOCAL statement_timeout='120s';
+-- Rule 17: an earlier contract may have removed prerequisite objects. Restore
+-- only absent objects, so the deliberate computed_at corruption still fails.
+SELECT to_regclass('public.job_profit_stored') IS NULL
+ OR to_regclass('public.job_cost_events_stored') IS NULL
+ OR to_regclass('public.job_revenue_events_stored') IS NULL
+ OR to_regclass('public.job_profit_dirty') IS NULL
+ OR to_regprocedure('public.job_profit_refresh(uuid)') IS NULL
+ OR to_regprocedure('public.job_profit_refresh_all()') IS NULL
+ OR to_regprocedure('public.job_profit_refresh_many(uuid[])') IS NULL AS restore_stored_prerequisite \gset
+\if :restore_stored_prerequisite
+\ir ../../../migrations/20261117195801_job_profit_stored.sql
+\endif
 DO $schema$ DECLARE rel text; v text; BEGIN
  FOREACH rel IN ARRAY ARRAY['job_profit_stored','job_cost_events_stored','job_revenue_events_stored','job_profit_dirty'] LOOP
   IF to_regclass('public.'||rel) IS NULL THEN RAISE EXCEPTION 'stored profit table missing: %',rel; END IF;

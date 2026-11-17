@@ -30,6 +30,12 @@
 \set ON_ERROR_STOP on
 
 BEGIN;
+-- P2-01.7 successor: restore this proof's original definition before it
+-- inspects or rewrites that definition. Existing assertions stay unchanged.
+SELECT to_regclass('public.v_job_cost_events_legacy') IS NOT NULL AS p2017_unwind \gset
+\if :p2017_unwind
+\ir ../../../rollbacks/20261117210402_job_cost_events_from_cost_lines_down.sql
+\endif
 
 INSERT INTO public.organisations (id, name) VALUES ('00000000-0000-0000-0000-000000000001', 'Synthetic org')
 ON CONFLICT (id) DO NOTHING;
