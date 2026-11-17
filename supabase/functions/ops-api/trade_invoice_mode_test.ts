@@ -416,6 +416,7 @@ Deno.test("my_hours: every card and group job says how it is invoiced and whethe
   const out: any = await myHours(hoursClient(), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
   assertEquals(out.invoice_mode_unavailable, false);
   const cards = Object.fromEntries(out.assignments.map((a: any) => [a.id, a]));
+  assertEquals(cards["card-fence"].commission, { state: "not_known", offer_ex: null });
   assertEquals(
     [cards["card-fence"].invoice_mode, cards["card-fence"].invoice_mode_reason, cards["card-fence"].can_claim_commission],
     ["work_order", "fencing_job", false],
@@ -445,6 +446,7 @@ Deno.test("my_hours: a failed mode read never fails the hours view and never gue
   assert(out.assignments.length > 0);
   for (const a of out.assignments) {
     assertEquals([a.invoice_mode, a.invoice_mode_reason, a.can_claim_commission], [null, null, null]);
+    assertEquals(a.commission, { state: "not_known", offer_ex: null });
     assertEquals([a.work_order_agreed_ex, a.job_work_order_id], [null, null]);
   }
   assertEquals(out.total_hours, 8);

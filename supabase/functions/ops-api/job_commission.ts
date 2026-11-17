@@ -39,6 +39,24 @@ export type JobCommissionRecord = {
   remaining_ex_gst: number | null;
 };
 
+export type CommissionOffer = {
+  state: "not_known" | "not_yours" | "offer" | "claimed";
+  offer_ex: number | null;
+};
+
+/** The caller's claimable commission only, never the job's budget or rate. */
+export function commissionOfferFor(
+  record: JobCommissionRecord | null,
+  callerUserId: string,
+): CommissionOffer {
+  if (!record || record.state !== "named") return { state: "not_known", offer_ex: null };
+  if (record.salesperson_user_id !== callerUserId) return { state: "not_yours", offer_ex: null };
+  if (record.remaining_ex_gst !== null && record.remaining_ex_gst > 0) {
+    return { state: "offer", offer_ex: record.remaining_ex_gst };
+  }
+  return { state: "claimed", offer_ex: 0 };
+}
+
 export class JobCommissionReadError extends Error {
   constructor(what: string) {
     super(`Could not read ${what}`);
@@ -88,7 +106,10 @@ export async function readJobCommissionRecords(
       .in("job_id", ids.slice(i, i + CHUNK));
     if (error) {
       // Before the migration is applied there are no records: today's rules.
-      if (isMissingRelation(error)) return new Map();
+      if (isMissingRelation(error)) {
+        console.error("[ops-api] job commission records unavailable", error.code);
+        return new Map();
+      }
       throw new JobCommissionReadError("the job commission records");
     }
     for (const row of data || []) {
