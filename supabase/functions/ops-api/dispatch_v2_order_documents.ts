@@ -56,7 +56,12 @@
 // section 3e.4.
 
 import { dispatchPdfText } from "./dispatch_order_pdf.ts";
-import { DISPATCH_V2_PHOTO_BUCKET } from "./dispatch_v2_emails.ts";
+import {
+  DISPATCH_V2_FILE_KINDS,
+  DISPATCH_V2_PHOTO_BUCKET,
+  dispatchV2BytesAreKind,
+  dispatchV2IsPhotoType,
+} from "./dispatch_v2_emails.ts";
 
 export const DISPATCH_DOCS_BUCKET = "job-documents";
 export const DISPATCH_DOC_TYPE = "material_order";
@@ -72,7 +77,13 @@ export type DispatchSupplierDocKind =
 
 // supplier_reply: a PDF from a matched reply. order_sheet: our one-page
 // Material order sheet. order_photo: a photo that went on our order email.
-export type DispatchDocSource = "supplier_reply" | "order_sheet" | "order_photo";
+// order_file: a PDF, Excel, CSV or Word file that went on our order email
+// (16 Nov 2026), saved office only.
+export type DispatchDocSource =
+  | "supplier_reply"
+  | "order_sheet"
+  | "order_photo"
+  | "order_file";
 
 // ── Rules (pure) ────────────────────────────────────────────────────────────
 
@@ -224,6 +235,15 @@ export function dispatchOrderPhotoName(supplier: unknown, number: number): strin
   return `${name} order photo ${number}`;
 }
 
+/** The name for the order's own files (16 Nov 2026): "Solarspan order file
+ * 1", "Solarspan order file 2". Numbered apart from the photos. */
+export function dispatchOrderFileName(supplier: unknown, number: number): string {
+  const name = typeof supplier === "string" && supplier.trim()
+    ? supplier.trim()
+    : "Supplier";
+  return `${name} order file ${number}`;
+}
+
 /** Is this order just photos (Tweak 5)? No material line on the order and at
  * least one photo. Such an order gets its photos on the job instead of our
  * order sheet. order: a dispatch_supplier_order_emails row (order_lines,
@@ -238,21 +258,31 @@ export function dispatchOrderIsPhotoOnly(order: {
 }
 
 // The file kinds a saved document may be. A PDF is the default; the order's
-// photos are JPEG, PNG or WebP (the only kinds Dispatch takes).
+// photos are JPEG, PNG or WebP, and its files (16 Nov 2026) a PDF, Excel,
+// CSV or Word file (the kinds a Dispatch supplier box takes).
 const FILE_KINDS: Record<string, { extension: string }> = {
-  "application/pdf": { extension: "pdf" },
   "image/jpeg": { extension: "jpg" },
   "image/png": { extension: "png" },
   "image/webp": { extension: "webp" },
+  ...Object.fromEntries(
+    Object.entries(DISPATCH_V2_FILE_KINDS).map(([type, kind]) => [
+      type,
+      { extension: kind.extension },
+    ]),
+  ),
 };
 
 /** Do the bytes really hold the kind of file we are about to save? A PDF
- * starts with "%PDF-"; a JPEG, PNG or WebP has its own first bytes. */
+ * starts with "%PDF-"; a JPEG, PNG or WebP has its own first bytes; an
+ * Excel, CSV or Word file is checked the way Dispatch checked it on upload. */
 export function dispatchDocBytesAre(
   bytes: Uint8Array,
   contentType: string,
 ): boolean {
   if (contentType === "application/pdf") return hasPdfMagic(bytes);
+  if (DISPATCH_V2_FILE_KINDS[contentType]) {
+    return dispatchV2BytesAreKind(bytes, contentType);
+  }
   if (contentType === "image/jpeg") {
     return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
   }
@@ -419,7 +449,10 @@ export type DispatchSaveDocInput = {
   orderId: string;
   supplierId: string | null;
   source: DispatchDocSource;
-  kind: DispatchSupplierDocKind | "order_sheet" | "order_photo";
+  kind: DispatchSupplierDocKind | "order_sheet" | "order_photo" | "order_file";
+  // Can the crew see it in the trade app? Left out, yes. Our order files
+  // (PDF, Excel, CSV, Word) are office only (Shaun, 16 Nov 2026).
+  visibleToTrades?: boolean;
   displayName: string;
   sha256: string;
   replyEmailId?: string | null;
@@ -591,7 +624,7 @@ export async function saveDispatchOrderDocument(
       file_name: fileName,
       pdf_url: url,
       storage_url: url,
-      visible_to_trades: true,
+      visible_to_trades: input.visibleToTrades !== false,
       uploaded_by: input.operatorUserId ?? null,
       metadata: {
         source: "dispatch_v2_order_confirmed",
@@ -907,6 +940,9 @@ export async function saveDispatchOrderPhotos(
     const rows = read.data || [];
     const supplier = String(input.order.supplier_name ?? "").trim() ||
       "Supplier";
+    // Photos and files are numbered apart: "order photo 1, 2", "order file 1".
+    let photoNumber = 0;
+    let fileNumber = 0;
     for (let i = 0; i < ids.length; i++) {
       const photo = rows.find((r: any) => String(r.id) === ids[i]);
       const sha = String(photo?.sha256 ?? "").toLowerCase();
@@ -917,14 +953,21 @@ export async function saveDispatchOrderPhotos(
         continue;
       }
       result.found++;
+      // A photo stays crew-visible (Tweak 5). A PDF, Excel, CSV or Word file
+      // is office only (Shaun, 16 Nov 2026); the office can switch one on in
+      // the job's Documents list.
+      const isPhoto = dispatchV2IsPhotoType(photo.content_type);
       const saved = await saveDispatchOrderDocument(client, {
         orgId: input.orgId,
         jobId,
         orderId: String(input.order.id),
         supplierId: input.order.supplier_id ?? null,
-        source: "order_photo",
-        kind: "order_photo",
-        displayName: dispatchOrderPhotoName(supplier, i + 1),
+        source: isPhoto ? "order_photo" : "order_file",
+        kind: isPhoto ? "order_photo" : "order_file",
+        visibleToTrades: isPhoto,
+        displayName: isPhoto
+          ? dispatchOrderPhotoName(supplier, ++photoNumber)
+          : dispatchOrderFileName(supplier, ++fileNumber),
         sha256: sha,
         sourceFileName: typeof photo.file_name === "string"
           ? photo.file_name

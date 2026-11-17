@@ -1381,6 +1381,31 @@ Migration: `20261105190000_dispatch_v2_order_photo_documents.sql` adds
 `supabase/rollbacks/`). Until it runs, a photo's claim is refused by the old
 check: logged, nothing saved, the order and crew line unaffected.
 
+#### Files on the order (Shaun, 16 Nov 2026)
+
+A supplier box also takes a PDF, Excel (.xlsx, .xls), CSV or Word (.docx,
+.doc) file (emails contract, `dispatch_v2_upload_photo`). It sits in the same
+`photo_ids` list on the order email, so every rule above holds for it, with
+three differences:
+
+1. **Office only.** Saved with `visible_to_trades false`: the ops dashboard
+   lists it under Material Documents; the trade app does not show it. The
+   office can switch one on with the usual document switch
+   (`toggle_document_visibility`).
+2. **Named apart.** `<Supplier> order file 1`, `<Supplier> order file 2`
+   (`Solarspan order file 1.pdf`), numbered separately from the photos, with
+   the file's own extension and content type.
+3. **Claimed as** `source 'order_file'`, kind `order_file`. The bytes are
+   checked against the stored kind again before the copy, as for photos.
+
+A file-only order (no material line) counts as photo-only for rule 6: its
+files are saved instead of the sheet. Because files are office only, the
+crew then sees no order document for it.
+
+Migration: `20261116150000_dispatch_v2_order_files.sql` adds `order_file` to
+the same two checks (rollback in `supabase/rollbacks/`). Until it runs, a
+file's claim is refused by the old check: logged, nothing saved.
+
 ## 3f. Supplier emails Dispatch did not send (Tweak 2, approved by Shaun 5 Nov 2026)
 
 Shaun often orders straight from Outlook (admin@secureworkswa.com.au), and

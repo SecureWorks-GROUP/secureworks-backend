@@ -2559,15 +2559,21 @@ Deno.test("photos: a small JPEG goes in a box privately; 3 MB or more and HEIC a
       data_base64: "A".repeat(4_000_004),
     }),
     413,
-    "photo_too_large",
+    "file_too_large",
   );
   assert(big.message.includes("MB"));
+  // HEIC is not one of the kinds; the refusal names the file.
   const heic = btoa("\x00\x00\x00\x18ftypheic\x00\x00\x00\x00");
-  await refused(
-    call(db, "dispatch_v2_upload_photo", { job_id: JOB.fence, data_base64: heic }),
+  const heicRefused = await refused(
+    call(db, "dispatch_v2_upload_photo", {
+      job_id: JOB.fence,
+      file_name: "IMG_0001.HEIC",
+      data_base64: heic,
+    }),
     400,
-    "photo_type_not_allowed",
+    "file_type_not_allowed",
   );
+  assert(heicRefused.message.includes("IMG_0001.HEIC"));
   // Moved to the draft list, then removed with its file.
   const moved = await call(db, "dispatch_v2_move_photo", {
     job_id: JOB.fence,
@@ -2744,6 +2750,101 @@ Deno.test("make email: a box with only a photo makes a photo-only email and send
   const next = await makeEmail(db, JOB.patio, SUP.metroll);
   assertEquals(next.email.photo_ids, [second.id]);
   assertOnlyV2Writes(db);
+});
+
+Deno.test("files (16 Nov 2026): a PDF alone makes a file-only order; it goes as an attachment; 20 MB on one email is refused", async () => {
+  const db = makeDb();
+  await addBox(db, JOB.patio, SUP.metroll);
+  const pdfBase64 = btoa("%PDF-1.4 Solarspan order form");
+  const file = (await call(db, "dispatch_v2_upload_photo", {
+    job_id: JOB.patio,
+    supplier_id: SUP.metroll,
+    file_name: "Solarspan order form.pdf",
+    data_base64: pdfBase64,
+  })).photo;
+  assertEquals(
+    [file.content_type, file.kind, file.file_label, file.file_name],
+    ["application/pdf", "file", "PDF", "Solarspan-order-form.pdf"],
+  );
+  // A file with no line is an order, worded as a photo-only one.
+  const made = await makeEmail(db, JOB.patio, SUP.metroll);
+  assertEquals(made.photo_only, true);
+  assertEquals(made.email.photo_ids, [file.id]);
+  assert(made.email.body_text.includes("Please see attached for materials needed."));
+  const { sent, sender } = fakeSender();
+  const real = await call(db, "dispatch_v2_send_email", {
+    email_id: made.email.id,
+    expected_updated_at: made.email.updated_at,
+  }, ctx(sender));
+  assertEquals(real.email.status, "sent");
+  assertEquals(
+    sent[0].attachments.map((a: any) => [a.name, a.contentType, a.contentBytes]),
+    [["Solarspan-order-form.pdf", "application/pdf", pdfBase64]],
+  );
+  // An Excel file and a photo in the box; the held email names both.
+  const xlsx = (await call(db, "dispatch_v2_upload_photo", {
+    job_id: JOB.patio,
+    supplier_id: SUP.metroll,
+    file_name: "lines.xlsx",
+    data_base64: btoa("PK\x03\x04\x00\x00xl/workbook.xml"),
+  })).photo;
+  assertEquals([xlsx.kind, xlsx.file_label], ["file", "Excel"]);
+  const photo = await uploadPhoto(db, JOB.patio, SUP.metroll);
+  assertEquals([photo.kind, photo.file_label], ["photo", "Photo"]);
+  const held = (await makeEmail(db, JOB.patio, SUP.metroll)).email;
+  assertEquals(held.photo_ids, [xlsx.id, photo.id]);
+  // A file of the wrong kind is refused by name.
+  const zip = await refused(
+    call(db, "dispatch_v2_upload_photo", {
+      job_id: JOB.patio,
+      supplier_id: SUP.metroll,
+      file_name: "all.zip",
+      data_base64: btoa("PK\x03\x04\x00\x00photos/a.jpg"),
+    }),
+    400,
+    "file_type_not_allowed",
+  );
+  assert(zip.message.startsWith("all.zip cannot be attached."));
+  // Over 20 MB on one email is refused when the photos and files are chosen.
+  for (const row of db.tables.dispatch_material_photos) {
+    if (row.id === xlsx.id || row.id === photo.id) row.size_bytes = 2_900_000;
+  }
+  const extra = Array.from({ length: 6 }, (_, i) => {
+    const id = `d1160000-0000-4000-8000-00000000000${i}`;
+    db.tables.dispatch_material_photos.push({
+      id,
+      org_id: ORG,
+      job_id: JOB.patio,
+      supplier_id: SUP.metroll,
+      file_name: `big-${i}.pdf`,
+      content_type: "application/pdf",
+      size_bytes: 2_900_000,
+      storage_path: `${JOB.patio}/big-${i}.pdf`,
+      sha256: "0".repeat(64),
+      created_at: "2026-11-16T00:00:00Z",
+    });
+    return id;
+  });
+  const tooMuch = await refused(
+    call(db, "dispatch_v2_save_email", {
+      email_id: held.id,
+      expected_updated_at: held.updated_at,
+      photo_ids: [xlsx.id, photo.id, ...extra],
+    }),
+    413,
+    "attachments_too_large",
+  );
+  assert(tooMuch.message.includes("23.2 MB"));
+  // Eleven are too many for one email.
+  await refused(
+    call(db, "dispatch_v2_save_email", {
+      email_id: held.id,
+      expected_updated_at: held.updated_at,
+      photo_ids: Array.from({ length: 11 }, () => crypto.randomUUID()),
+    }),
+    400,
+    "invalid_request",
+  );
 });
 
 Deno.test("make email: a fencing main supplier with only a photo gets no standing lines", async () => {

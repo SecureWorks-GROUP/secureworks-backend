@@ -4,7 +4,7 @@ Backend for Dispatch v2 slices 5 and 6. The ops screen's Dispatch tab uses it to
 
 - keep a **draft list** of materials on a job, typed in or suggested from the scope,
 - **split** those lines into **supplier boxes** (move a line in, out, or between boxes),
-- add **photos**, for example a handwritten list, under 3 MB each,
+- add **photos**, for example a handwritten list, and (from 16 Nov 2026) **files**: a PDF, Excel, CSV or Word file, under 3 MB each,
 - **make** a held, editable supplier order email in the template,
 - **send** it from `admin@secureworkswa.com.au` through Outlook. A test copy to admin@ is optional.
 
@@ -86,7 +86,13 @@ Only `dispatch_v2_send_email` sends anything, once per press.
 **Photo**
 
 ```json
-{ "id": "uuid", "supplier_id": "uuid or null", "file_name": "Nithin-list.jpg", "content_type": "image/jpeg", "size_bytes": 812345, "added_at": "...", "added_by_email": "shaun@..." }
+{ "id": "uuid", "supplier_id": "uuid or null", "file_name": "Nithin-list.jpg", "content_type": "image/jpeg", "kind": "photo", "file_label": "Photo", "size_bytes": 812345, "added_at": "...", "added_by_email": "shaun@..." }
+```
+
+From 16 Nov 2026 a Photo row can hold a file instead: `kind` is `"photo"` (JPEG, PNG, WebP: show a thumbnail) or `"file"` (show `file_name` and `file_label`: `PDF`, `Excel`, `CSV` or `Word`). The actions keep their photo names.
+
+```json
+{ "id": "uuid", "supplier_id": "uuid", "file_name": "Solarspan-order-form.pdf", "content_type": "application/pdf", "kind": "file", "file_label": "PDF", "size_bytes": 182345, "added_at": "...", "added_by_email": "shaun@..." }
 ```
 
 **Email**
@@ -384,11 +390,12 @@ The fencing standing lines (`4 x bags of quickset`, then `Fixings, Post Caps and
 
 Body: `{ "job_id", "supplier_id": "uuid or null", "file_name", "data_base64" }`. A `data:` prefix is allowed.
 
-The screen should shrink the photo first. The server checks the real bytes:
+The screen should shrink a photo first. The server checks the real bytes:
 
-- JPEG, PNG or WebP only;
+- a photo: JPEG, PNG or WebP;
+- or a file (16 Nov 2026): PDF (`%PDF-`), Excel `.xlsx` or Word `.docx` (a ZIP, told apart by its `xl/` or `word/` folder), the old Excel `.xls` or Word `.doc` (one OLE2 container, told apart by the name's extension), or CSV (a `.csv` name, UTF-8 text, no NUL byte);
 - under 3,000,000 bytes (Outlook's attachment limit);
-- 20 photos per job at most.
+- 40 photos and files per job at most (20 before 16 Nov 2026).
 
 Returns `{ "success": true, "photo": Photo }`. The file goes to the private bucket `dispatch-material-photos`.
 
@@ -396,9 +403,9 @@ Refusals:
 
 | Status | Code | Meaning |
 |---|---|---|
-| 413 | `photo_too_large` | Carries `size_bytes`. The message gives the size in MB and says to take a smaller photo. |
-| 400 | `photo_type_not_allowed` | HEIC, PDF and any other kind. |
-| 409 | `too_many_photos` | Over 20 on the job. |
+| 413 | `file_too_large` | Carries `size_bytes`. The message names the file, gives its size in MB and says to shrink it or send it from Outlook. (`photo_too_large` before 16 Nov 2026.) |
+| 400 | `file_type_not_allowed` | HEIC, ZIP and any other kind. The message names the file and lists what can go. (`photo_type_not_allowed` before 16 Nov 2026.) |
+| 409 | `too_many_photos` | Over 40 on the job. |
 | 409 | `supplier_not_on_job` | The box is not on the job. |
 
 ### dispatch_v2_move_photo / dispatch_v2_delete_photo (POST)
@@ -423,7 +430,7 @@ Makes the held email for one box:
 | Body | The wiki template, below. |
 | To | The approved entry's To. |
 | CC | The approved entry's CC plus the team mailbox, without repeats. |
-| Photos | The box's photos that have not already gone out, oldest first, three at most (`dispatchV2UnsentPhotoIds`). A photo named on a sent, sending or send_unknown email is left off, so a new email never re-sends a photo the supplier already has. The photos can still be changed on the held email. |
+| Photos | The box's photos that have not already gone out, oldest first, ten at most and 20 MB at most together (`dispatchV2UnsentPhotoIds`; three before 16 Nov 2026). A photo or file that would take the email over 20 MB is left for the next email. A photo named on a sent, sending or send_unknown email is left off, so a new email never re-sends a photo the supplier already has. The photos can still be changed on the held email. |
 
 A box needs a line or a photo to make an email (Tweak 5, Shaun 5 Nov 2026). A box with photos and no line makes a **photo-only** email: see "An order that is just a photo" below.
 
@@ -554,7 +561,7 @@ Body: `{ "email_id", "expected_updated_at", "to"?, "cc"?, "subject"?, "body_text
 | `cc` | 0 to 12 addresses |
 | `subject` | up to 250 characters |
 | `body_text` | up to 20,000 characters |
-| `photo_ids` | up to 3, all on the job |
+| `photo_ids` | up to 10 photos and files, all on the job, 20 MB at most together (413 `attachments_too_large`, carries `size_bytes`) |
 
 Addresses are lower-cased and duplicates removed. A bad address is refused, never dropped.
 
@@ -671,7 +678,7 @@ The other columns:
 | `status` | `draft`, `sending`, `sent`, `send_unknown` or `discarded`. |
 | `team_cc_email`, `to_emails`, `cc_emails`, `subject`, `body_text`, `built_body_text` | The email itself; `built_body_text` is the template's version, before edits. |
 | `delivery_date`, `order_lines` | The date, and the lines the email was built from: `[{ line_id, updated_at, text, standing }]`. |
-| `photo_ids` | Up to 3. |
+| `photo_ids` | Up to 10 (photos and files; check `dispatch_supplier_order_emails_photo_count`, 3 before 16 Nov 2026). |
 | `send_claimed_at`, `last_error` | Send bookkeeping. |
 | `created_*`, `updated_at`, `updated_by_email` | Audit. |
 
@@ -702,12 +709,12 @@ The migration also changes two existing tables:
 |---|---|
 | `id`, `org_id`, `job_id` | Row, org and job. |
 | `supplier_id` | Null = the draft list. A composite key `(job_id, supplier_id)` points to `job_material_suppliers`. |
-| `file_name`, `content_type`, `size_bytes` | jpeg, png or webp; 1 to 3,000,000 bytes. |
+| `file_name`, `content_type`, `size_bytes` | jpeg, png or webp, or (16 Nov 2026) pdf, xlsx, xls, csv, docx or doc; 1 to 3,000,000 bytes. |
 | `storage_path` | Unique. |
 | `sha256` | Checked before a photo is attached. |
 | `created_*` | Audit. |
 
-The private bucket `dispatch-material-photos` (3,000,000-byte limit, images only) is created by the migration. The migration fails if the bucket exists and is public.
+The private bucket `dispatch-material-photos` (3,000,000-byte limit; images only until `20261116150000_dispatch_v2_order_files` added the six file types) is created by the migration. The migration fails if the bucket exists and is public.
 
 For all four new tables, row security is on with no policy, the browser roles are revoked, and only service_role is granted. Only ops-api reaches them.
 
