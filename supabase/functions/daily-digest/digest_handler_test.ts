@@ -368,6 +368,63 @@ Deno.test("an unsigned call is refused", async () => {
   });
 });
 
+// The timer signs in with the stored key, a service-role token that need not
+// equal this function's own key (see the pg_cron bearer note in AGENTS.md).
+function fakeJwt(payload: Record<string, unknown>): string {
+  const b64 = (v: unknown) =>
+    btoa(JSON.stringify(v)).replace(/=+$/, "").replace(/\+/g, "-").replace(
+      /\//g,
+      "_",
+    );
+  return `${b64({ alg: "HS256", typ: "JWT" })}.${b64(payload)}.c2ln`;
+}
+
+for (
+  const [verdict, wantBuild] of [["accepted", true], [
+    "rejected",
+    false,
+  ]] as const
+) {
+  Deno.test(`the timer's stored key (service-role token, not this function's key), platform ${verdict}: ${wantBuild ? "builds" : "builds nothing"}`, async () => {
+    const m = await mod();
+    const cred = await import("../_shared/service_credential.ts");
+    cred._setDefaultLegacyKeyProbeForTest(() => Promise.resolve(verdict));
+    try {
+      await at(PERTH_TUESDAY, () =>
+        withEnv(async () => {
+          const auth = {
+            authorization: `Bearer ${fakeJwt({ role: "service_role" })}`,
+          };
+          const { calls } = await withSpy(
+            digestRows({ packJobs: false }),
+            async () => {
+              const res = await m._dailyDigestRequestHandlerForTest(
+                request({ method: "POST", action: "build", auth }),
+              );
+              if (wantBuild) {
+                assertEquals(res.status, 200);
+                assertEquals(res.headers.get("x-sw-digest-mode"), "build");
+              } else {
+                assert(
+                  res.status === 401 || res.status === 403,
+                  `status ${res.status}`,
+                );
+              }
+              await res.body?.cancel();
+            },
+          );
+          assertEquals(
+            writes(calls, "daily_digests").filter((c) => c.method === "POST")
+              .length,
+            wantBuild ? 1 : 0,
+          );
+        }));
+    } finally {
+      cred._setDefaultLegacyKeyProbeForTest(null);
+    }
+  });
+}
+
 // ── Completion packs: same jobs, same triggers ────────────────
 
 Deno.test("the build sends the completion pack for the paid, unsent job only, and posts the webhook", async () => {
