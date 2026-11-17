@@ -1,5 +1,5 @@
 BEGIN;
-\ir ../../../migrations/20261118024255_trade_pay_run_standing_checks.sql
+\ir ../../../migrations/20261118030659_trade_pay_run_standing_checks.sql
 CREATE FUNCTION pg_temp.zztest_assert(ok boolean, words text) RETURNS void
 LANGUAGE plpgsql AS $$ BEGIN
  IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'ZZTEST %',words; END IF;
@@ -311,7 +311,7 @@ EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON)
    AND org_id='00000000-0000-0000-0000-000000000001')
  SELECT sum(c.amount_ex) FROM public.v_job_cost_events c JOIN inv i ON c.document_id=i.id::text
  WHERE c.is_actual AND c.source IN ('trade_line','trade_employer_super');
-\ir ../../../rollbacks/20261118024255_trade_pay_run_standing_checks_down.sql
+\ir ../../../rollbacks/20261118030659_trade_pay_run_standing_checks_down.sql
 SELECT pg_temp.zztest_assert(to_regprocedure('public.trade_pay_run_standing_checks(uuid,uuid[],text)') IS NULL,'rollback left the function');
 
 ROLLBACK;
