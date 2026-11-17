@@ -45,7 +45,7 @@ DO $$ BEGIN
 END $$;
 -- An unreadable shadow switch must not reject the business write.
 SAVEPOINT unreadable_switch;
-DROP TABLE public.feature_flags;
+ALTER TABLE public.feature_flags RENAME TO cost_line_contract_flags;
 UPDATE public.trade_invoice_lines SET description='Work without shadow switch'
   WHERE id='30000000-0000-4000-8000-000000000004';
 UPDATE public.trade_invoices SET super_amount=80

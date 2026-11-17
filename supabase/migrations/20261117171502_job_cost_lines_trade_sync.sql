@@ -152,6 +152,9 @@ BEGIN
       PERFORM public.job_cost_lines_sync_trade_invoice(invoice_id); END LOOP;
   END IF;
   RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'cost line shadow sync skipped: SQLSTATE %', SQLSTATE;
+  RETURN NULL;
 END;
 $$;
 CREATE OR REPLACE FUNCTION public.job_cost_lines_trade_invoice_row()
@@ -159,19 +162,42 @@ RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 BEGIN
   PERFORM public.job_cost_lines_sync_trade_invoice(NEW.id);
   RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'cost line shadow sync skipped: SQLSTATE %', SQLSTATE;
+  RETURN NULL;
 END;
 $$;
 REVOKE ALL ON FUNCTION public.job_cost_lines_trade_statement(),public.job_cost_lines_trade_invoice_row() FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.job_cost_lines_trade_statement(),public.job_cost_lines_trade_invoice_row() TO service_role;
-DROP TRIGGER IF EXISTS job_cost_lines_trade_insert ON public.trade_invoice_lines;
-CREATE TRIGGER job_cost_lines_trade_insert AFTER INSERT ON public.trade_invoice_lines
-  REFERENCING NEW TABLE AS new_lines FOR EACH STATEMENT EXECUTE FUNCTION public.job_cost_lines_trade_statement();
-DROP TRIGGER IF EXISTS job_cost_lines_trade_update ON public.trade_invoice_lines;
-CREATE TRIGGER job_cost_lines_trade_update AFTER UPDATE ON public.trade_invoice_lines
-  REFERENCING OLD TABLE AS old_lines NEW TABLE AS new_lines FOR EACH STATEMENT EXECUTE FUNCTION public.job_cost_lines_trade_statement();
-DROP TRIGGER IF EXISTS job_cost_lines_trade_delete ON public.trade_invoice_lines;
-CREATE TRIGGER job_cost_lines_trade_delete AFTER DELETE ON public.trade_invoice_lines
-  REFERENCING OLD TABLE AS old_lines FOR EACH STATEMENT EXECUTE FUNCTION public.job_cost_lines_trade_statement();
-DROP TRIGGER IF EXISTS job_cost_lines_trade_invoice_update ON public.trade_invoices;
-CREATE TRIGGER job_cost_lines_trade_invoice_update AFTER UPDATE OF status,xero_bill_status,xero_bill_id,super_amount,net_pay,subtotal_ex
-  ON public.trade_invoices FOR EACH ROW EXECUTE FUNCTION public.job_cost_lines_trade_invoice_row();
+
+-- Installed only by the director after the shadow proof. A merge installs no business trigger.
+CREATE OR REPLACE FUNCTION public.job_cost_lines_install_trade_triggers()
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+BEGIN
+  DROP TRIGGER IF EXISTS job_cost_lines_trade_insert ON public.trade_invoice_lines;
+  CREATE TRIGGER job_cost_lines_trade_insert AFTER INSERT ON public.trade_invoice_lines
+    REFERENCING NEW TABLE AS new_lines FOR EACH STATEMENT EXECUTE FUNCTION public.job_cost_lines_trade_statement();
+  DROP TRIGGER IF EXISTS job_cost_lines_trade_update ON public.trade_invoice_lines;
+  CREATE TRIGGER job_cost_lines_trade_update AFTER UPDATE ON public.trade_invoice_lines
+    REFERENCING OLD TABLE AS old_lines NEW TABLE AS new_lines FOR EACH STATEMENT EXECUTE FUNCTION public.job_cost_lines_trade_statement();
+  DROP TRIGGER IF EXISTS job_cost_lines_trade_delete ON public.trade_invoice_lines;
+  CREATE TRIGGER job_cost_lines_trade_delete AFTER DELETE ON public.trade_invoice_lines
+    REFERENCING OLD TABLE AS old_lines FOR EACH STATEMENT EXECUTE FUNCTION public.job_cost_lines_trade_statement();
+  DROP TRIGGER IF EXISTS job_cost_lines_trade_invoice_update ON public.trade_invoices;
+  CREATE TRIGGER job_cost_lines_trade_invoice_update AFTER UPDATE OF status,xero_bill_status,xero_bill_id,super_amount,net_pay,subtotal_ex
+    ON public.trade_invoices FOR EACH ROW EXECUTE FUNCTION public.job_cost_lines_trade_invoice_row();
+END;
+$$;
+CREATE OR REPLACE FUNCTION public.job_cost_lines_remove_trade_triggers()
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+BEGIN
+  DROP TRIGGER IF EXISTS job_cost_lines_trade_insert ON public.trade_invoice_lines;
+  DROP TRIGGER IF EXISTS job_cost_lines_trade_update ON public.trade_invoice_lines;
+  DROP TRIGGER IF EXISTS job_cost_lines_trade_delete ON public.trade_invoice_lines;
+  DROP TRIGGER IF EXISTS job_cost_lines_trade_invoice_update ON public.trade_invoices;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.job_cost_lines_install_trade_triggers(),public.job_cost_lines_remove_trade_triggers()
+  FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.job_cost_lines_install_trade_triggers(),public.job_cost_lines_remove_trade_triggers()
+  TO service_role;
