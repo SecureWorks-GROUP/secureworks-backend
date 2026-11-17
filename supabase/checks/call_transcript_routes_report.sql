@@ -85,6 +85,12 @@ paid_rows AS MATERIALIZED (
       nullif(regexp_replace(e.provider_message_id, '^ghl:', ''), '')], NULL) AS keys
   FROM public.business_events e CROSS JOIN bounds b
   WHERE e.event_type IN ('call.transcribed', 'call.transcript_completed')
+    -- The phone-system writer shares this event type with paid transcription.
+    AND e.source IS DISTINCT FROM 'ghl-call-transcript'
+    AND NOT EXISTS (
+      SELECT 1 FROM public.call_transcript_fetches f
+      WHERE f.transcript_event_id = e.id
+    )
     AND e.occurred_at >= b.until_at - interval '7 days' - interval '15 minutes'
     AND e.occurred_at <= now()
 ),
