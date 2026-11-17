@@ -6,7 +6,7 @@ DO $guard$ /* guard block */ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.job_pages_refresh_due(integer)'::regprocedure)<>'244c167fadca40eae9b784c09a855706' THEN RAISE EXCEPTION 'fu33_down_preimage_mismatch: job_pages_refresh_due(integer)'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.job_profit_refresh_many(uuid[])'::regprocedure)<>'5bf1ad820296062f851290ae4d750426' THEN RAISE EXCEPTION 'fu33_down_preimage_mismatch: job_profit_refresh_many(uuid[])'; END IF;
 END $guard$;
-DROP INDEX IF EXISTS public.job_change_mark_events_priority_due;
+DROP INDEX IF EXISTS public.job_change_mark_events_due_priority;
 DROP INDEX IF EXISTS public.job_change_marks_base_priority_due;
 CREATE OR REPLACE FUNCTION public.job_profit_source_changed(p_table text,p_old jsonb,p_new jsonb,p_reason text)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp SET lock_timeout='25ms' AS $fn$

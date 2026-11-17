@@ -24,7 +24,7 @@ END $guard$;
 -- priority without reading/sorting the queue. These expression indexes provide
 -- two ordered LIMIT 1 probes; jobs_pkey validates the event's job.
 -- Future bulk writers use source 'bulk'; unknown sources remain real changes.
-CREATE INDEX IF NOT EXISTS job_change_mark_events_priority_due
+CREATE INDEX IF NOT EXISTS job_change_mark_events_due_priority
  ON public.job_change_mark_events((source IN ('profit','bulk')),marked_at,job_id) WHERE page_pending;
 CREATE INDEX IF NOT EXISTS job_change_marks_base_priority_due
  ON public.job_change_marks_base((cardinality(sources)>0 AND sources <@ ARRAY['profit','bulk']::text[]),first_marked_at,job_id) WHERE page_pending;
