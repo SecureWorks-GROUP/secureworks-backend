@@ -527,6 +527,16 @@ jobs:
             supabase/functions/ops-api/trade_invoice_pdf_test.ts \
             supabase/functions/ops-api/trade_money_test.ts
 
+      # One super rule (P1-01): every amount includes super, chosen by pay week
+      # behind trade_pay_inclusive_super_v1. Drives the real
+      # generate_trade_invoice handler with every database call answered by a
+      # fetch stub; no switch is turned on anywhere.
+      - name: Test trade pay rule
+        run: |
+          deno test --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/trade_pay_rule_test.ts \
+            supabase/functions/ops-api/trade_pay_rule_handler_test.ts
+
       # Automated money messages are off (captain, 30 Sep 2026). Drives the
       # real ops-api and daily-digest request handlers with every database,
       # Xero and GHL call answered by a fetch spy. Same --no-check reason as

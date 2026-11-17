@@ -26,8 +26,15 @@ import {
 } from "./job_work_orders.ts";
 import {
   calculateTradeInvoiceMoney,
+  reimbursementLinesTotalEx,
   TradeInvoiceMoneyError,
+  type TradeInvoiceSuperBasis,
 } from "./trade_invoice_money.ts";
+import {
+  resolveTradePayBasis,
+  TRADE_PAY_RULE_UNREADABLE_WORDS,
+  TradePayRuleUnreadable,
+} from "./trade_pay_rule.ts";
 import { draftTradeInvoiceTimeEntry } from "./trade_invoice_time_entry.ts";
 import {
   weeklyWorkOrderBusinessDate,
@@ -256,7 +263,7 @@ async function loadWeekDrafts(
 ) {
   const { data, error } = await client.from("trade_invoices")
     .select(
-      "id, created_by_agent, draft_builder, draft_origin, agent_label, dismissed_source_keys, notes, gst_on, gst, gross_earned, super_rate, super_amount, net_pay, total_inc, invoice_source, created_at",
+      "id, created_by_agent, draft_builder, draft_origin, agent_label, dismissed_source_keys, notes, gst_on, gst, gross_earned, super_rate, super_amount, super_basis, super_base_ex, net_pay, total_inc, invoice_source, created_at",
     )
     .eq("user_id", userId)
     .eq("org_id", orgId)
@@ -578,6 +585,9 @@ function headerFor(
   notes: unknown,
   gstOn: boolean,
   lines: Array<Record<string, unknown>>,
+  // One super rule (P1-01): the rule this week is priced under. null is
+  // today's rule, and the header is exactly what it was.
+  superBasis: TradeInvoiceSuperBasis | null = null,
 ) {
   const sum = roundMoney(
     lines.reduce((total, line) => total + Number(line.line_total_ex || 0), 0),
@@ -595,6 +605,8 @@ function headerFor(
       grossEarned: sum,
       gstOn,
       earningsDate: weekEnd,
+      superBasis,
+      reimbursementEx: reimbursementLinesTotalEx(lines),
     });
   } catch (error) {
     if (error instanceof TradeInvoiceMoneyError) {
@@ -617,6 +629,10 @@ function headerFor(
     gst_on: money.gst_on,
     super_rate: money.super_rate,
     super_amount: money.super_amount,
+    ...(money.super_basis ? { super_basis: money.super_basis } : {}),
+    ...(money.super_base_ex !== null && money.super_base_ex !== undefined
+      ? { super_base_ex: money.super_base_ex }
+      : {}),
     total_hours: hours,
     total_breaks_minutes: breaks,
     notes: notes ? String(notes) : null,
@@ -1133,8 +1149,28 @@ export async function saveRunningInvoiceDraft(
   const origin = mode === "agent"
     ? "agent"
     : (prior?.draft_origin || (mode === "auto" ? "auto" : "staff"));
+  // One super rule (P1-01.3). A draft carrying a group share keeps today's
+  // draft pricing; its submit prices it on the group's basis. Otherwise the
+  // one decision (trade_pay_rule.ts): a draft already priced keeps its stored
+  // basis, and only a new or unpriced draft reads the switch. An unreadable
+  // rule refuses the save (503, nothing saved).
+  const carriesGroupShare = lines.some((line: Record<string, unknown>) =>
+    Boolean(line?.group_share_id) ||
+    String(line?.line_type ?? "").trim().toLowerCase() === "group share"
+  );
+  let superBasis: TradeInvoiceSuperBasis | null = null;
+  if (!carriesGroupShare) {
+    try {
+      superBasis = await resolveTradePayBasis(client, prior, weekStart || weekEnd);
+    } catch (error) {
+      if (error instanceof TradePayRuleUnreadable) {
+        throw new RunningDraftError(TRADE_PAY_RULE_UNREADABLE_WORDS, 503, error.code);
+      }
+      throw error;
+    }
+  }
   const payload = {
-    p_invoice: headerFor(user, weekStart, weekEnd, notes, gstOn, lines),
+    p_invoice: headerFor(user, weekStart, weekEnd, notes, gstOn, lines, superBasis),
     p_lines: lines,
     p_requested_prior_draft_id: prior?.id || null,
     p_builder: builder,
