@@ -792,47 +792,59 @@ Deno.test("an agent save stays a draft and cannot submit, authorise, pay, or cre
   );
 });
 
-Deno.test("a draft priced super inclusive keeps its basis and split when saved again with the switch off", async () => {
-  // P1-01.3 money review: the save path keeps the stored basis of an
-  // already-priced draft and reads the switch only for a new or unpriced one.
-  const db = baseDb();
-  db.tables.feature_flags.push({
-    flag_name: "trade_pay_inclusive_super_v1",
-    enabled: true,
-  });
-  db.tables.trade_pay_settings.push({ id: 1, inclusive_super_from: WEEK });
-  const first = await saveRunningInvoiceDraft(db, USER, saveBody(), "staff");
-  const firstInvoice = lastRpc(db).args.p_invoice as Row;
-  // 2 h x $50 = $100; the fund gets 100 x 12/112 = 10.71, the person 89.29.
-  assertEquals(firstInvoice.super_basis, "inclusive_12_112_v1");
-  assertEquals(firstInvoice.gross_earned, 100);
-  assertEquals(firstInvoice.super_amount, 10.71);
-  assertEquals(firstInvoice.net_pay, 89.29);
+// P1-01.3 money review: a draft already priced keeps the rule it was priced
+// under when saved again, whichever way the switch moved; only a new or
+// unpriced draft reads the switch (resolveTradePayBasis). The same rows run
+// over the ordinary draft save and the weekly submit in
+// trade_pay_rule_handler_test.ts.
+// 2 h x $50 = $100. Inclusive: the fund gets 100 x 12/112 = 10.71, the
+// person 89.29. Old rule: super 12.00, the person 94.00 (6% withheld).
+const RUNNING_RE_SAVE_CASES = [
+  {
+    name: "stored inclusive draft, switch off",
+    first: true,
+    second: false,
+    expected: ["inclusive_12_112_v1", 100, 10.71, 89.29],
+  },
+  {
+    name: "stored old-rule draft, switch on from its week",
+    first: false,
+    second: true,
+    expected: [null, 100, 12, 94],
+  },
+];
 
-  db.tables.feature_flags[0].enabled = false;
-  const second = await saveRunningInvoiceDraft(
-    db,
-    USER,
-    saveBody({ draft_id: first.draft_id, notes: "Saved again" }),
-    "staff",
-  );
-  assertEquals(second.draft_id, first.draft_id);
-  const secondInvoice = lastRpc(db).args.p_invoice as Row;
-  assertEquals(secondInvoice.super_basis, "inclusive_12_112_v1");
-  assertEquals(secondInvoice.gross_earned, 100);
-  assertEquals(secondInvoice.super_amount, 10.71);
-  assertEquals(secondInvoice.net_pay, 89.29);
-  assertEquals(secondInvoice.total_inc, 100);
-  const stored = db.tables.trade_invoices.find((row) => row.id === first.draft_id)!;
-  assertEquals(stored.super_basis, "inclusive_12_112_v1");
-  assertEquals(stored.super_amount, 10.71);
-  assertEquals(stored.net_pay, 89.29);
-  // The fake does not project by the select, so pin the columns read.
-  assert(/super_basis, super_base_ex/.test(MODULE_SRC.slice(
-    MODULE_SRC.indexOf("async function loadWeekDrafts("),
-    MODULE_SRC.indexOf("async function loadWeekDrafts(") + 900,
-  )));
-});
+for (const row of RUNNING_RE_SAVE_CASES) {
+  Deno.test(`running draft saved again over a ${row.name}: basis and split unchanged`, async () => {
+    const db = baseDb();
+    db.tables.feature_flags.push({
+      flag_name: "trade_pay_inclusive_super_v1",
+      enabled: row.first,
+    });
+    db.tables.trade_pay_settings.push({ id: 1, inclusive_super_from: WEEK });
+    const first = await saveRunningInvoiceDraft(db, USER, saveBody(), "staff");
+    const header = (invoice: Row) =>
+      [invoice.super_basis ?? null, invoice.gross_earned, invoice.super_amount, invoice.net_pay];
+    assertEquals(header(lastRpc(db).args.p_invoice as Row), row.expected);
+
+    db.tables.feature_flags[0].enabled = row.second;
+    const second = await saveRunningInvoiceDraft(
+      db,
+      USER,
+      saveBody({ draft_id: first.draft_id, notes: "Saved again" }),
+      "staff",
+    );
+    assertEquals(second.draft_id, first.draft_id);
+    assertEquals(header(lastRpc(db).args.p_invoice as Row), row.expected);
+    const stored = db.tables.trade_invoices.find((r) => r.id === first.draft_id)!;
+    assertEquals(header(stored), row.expected);
+    // The fake does not project by the select, so pin the columns read.
+    assert(/super_basis, super_base_ex/.test(MODULE_SRC.slice(
+      MODULE_SRC.indexOf("async function loadWeekDrafts("),
+      MODULE_SRC.indexOf("async function loadWeekDrafts(") + 900,
+    )));
+  });
+}
 
 Deno.test("a staff re-save keeps an agent draft marked as agent-created", async () => {
   const db = baseDb();
