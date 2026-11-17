@@ -61,3 +61,61 @@ END $c$;
 EXPLAIN ANALYZE SELECT public.context_worker_state();
 SELECT 'PASS: P0-03.1 state shape, placement lanes, backoff and permissions' AS result;
 ROLLBACK;
+
+-- Explain the selector's own RETURN QUERY, since EXPLAIN of the PL/pgSQL RPC
+-- alone shows only a Function Scan. No copied lane predicate or planner forcing.
+BEGIN;
+SET LOCAL session_replication_role = replica;
+UPDATE public.business_events SET attribution_status = 'unplaced'
+  WHERE attribution_status = 'pending_luna';
+INSERT INTO public.business_events (id, event_type, attribution_status, occurred_at, metadata)
+SELECT gen_random_uuid(), 'worker_state.fixture', 'unplaced',
+  timestamptz '2000-01-01 00:00Z' + g * interval '1 minute', '{}'
+FROM generate_series(1, 20000) g;
+ANALYZE public.business_events;
+CREATE TEMP TABLE worker_due_plans (label text, lane text, plan text) ON COMMIT DROP;
+CREATE FUNCTION pg_temp.worker_due_plan(p_label text) RETURNS void LANGUAGE plpgsql AS $f$
+DECLARE query text; lane text; line text; plan text;
+BEGIN
+  SELECT substring(p.prosrc FROM 'RETURN QUERY[[:space:]]+(.*);[[:space:]]*END')
+    INTO query FROM pg_proc p
+    WHERE p.oid = 'public.context_attribution_due(text,integer)'::regprocedure;
+  IF query IS NULL THEN RAISE EXCEPTION 'worker state: selector query unavailable'; END IF;
+  query := regexp_replace(query, '\mp_lane\M', '$1', 'g');
+  query := regexp_replace(query, '\mp_limit\M', '$2', 'g');
+  FOREACH lane IN ARRAY ARRAY['live', 'history'] LOOP
+    plan := '';
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) ' || query
+      USING lane, 50 LOOP
+      plan := plan || line || E'\n';
+    END LOOP;
+    INSERT INTO worker_due_plans VALUES (p_label, lane, plan);
+    IF plan NOT LIKE '%Index Scan using business_events_pending_luna_due%'
+      OR plan LIKE '%Seq Scan on business_events%' THEN
+      RAISE EXCEPTION 'worker state: due plan does not use pending index (%, %): %', p_label, lane, plan;
+    END IF;
+  END LOOP;
+END $f$;
+SELECT pg_temp.worker_due_plan('empty backlog');
+-- Unchecked pending rows cannot use the narrower pending-marker index.
+INSERT INTO public.business_events (id, event_type, attribution_status, occurred_at, metadata)
+VALUES
+  ('00000000-0000-4000-8000-000000000410', 'worker_state.fixture', 'pending_luna', '1999-01-01 00:00Z', '{}'),
+  ('00000000-0000-4000-8000-000000000411', 'worker_state.fixture', 'pending_luna', '1999-01-02 00:00Z', '{"capture_mode":"backfill"}');
+ANALYZE public.business_events;
+SELECT pg_temp.worker_due_plan('sparse backlog');
+-- Prove this plan assertion detects the missing index. The caught exception
+-- rolls the DROP back, preserving the forward stack and existing break proof.
+DO $c$
+BEGIN
+  BEGIN
+    DROP INDEX public.business_events_pending_luna_due;
+    PERFORM pg_temp.worker_due_plan('missing index');
+    RAISE EXCEPTION 'worker state: missing index was not detected';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE 'worker state: due plan does not use pending index%' THEN RAISE; END IF;
+  END;
+END $c$;
+TABLE worker_due_plans;
+SELECT 'PASS: P0-03.1 both due lanes use the pending index for empty and sparse backlogs; missing index detected' AS result;
+ROLLBACK;

@@ -1,6 +1,18 @@
 -- P0-03.1: read-only worker state and due placement rows.
 -- No trigger, schedule, switch or existing function is changed.
 -- The lane selector uses PL/pgSQL for the explicit invalid-lane exception.
+-- Build under the pending-marker migration's lock budget. Writes wait during
+-- the index build; do not queue behind a long writer. No row is changed.
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '120s';
+
+CREATE INDEX IF NOT EXISTS business_events_pending_luna_due
+  ON public.business_events (occurred_at, id)
+  WHERE attribution_status = 'pending_luna';
+
+COMMENT ON INDEX public.business_events_pending_luna_due IS
+  'P0-03.1: oldest-first pending placement reads for both context_attribution_due lanes, including an empty backlog.';
+
 CREATE OR REPLACE FUNCTION public.context_attribution_due(p_lane text, p_limit integer DEFAULT 20)
 RETURNS SETOF public.business_events
 LANGUAGE plpgsql STABLE SECURITY DEFINER
