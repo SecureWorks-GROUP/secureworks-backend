@@ -5,6 +5,7 @@ import {
   projectXeroSettlementEvidence,
   type SettlementEvidence,
   xeroCollection,
+  xeroInstant,
 } from "../_shared/xero_settlement_evidence.ts";
 import { incrementalModifiedSince } from "./sync_window.ts";
 import { JobMarks } from "./job_marks.ts";
@@ -262,6 +263,12 @@ function evidenceSignature(row: SettlementEvidence): string {
     }
     return value;
   };
-  const { captured_at: _observed, ...facts } = row;
-  return JSON.stringify(canonical(facts));
+  const { captured_at: _observed, provider_updated_at, amount, ...facts } = row;
+  // PostgREST and the provider projection can spell the same instant differently.
+  return JSON.stringify(canonical({
+    ...facts,
+    amount: amount === null ? null : Number(amount),
+    provider_updated_at: xeroInstant(provider_updated_at) ??
+      provider_updated_at,
+  }));
 }

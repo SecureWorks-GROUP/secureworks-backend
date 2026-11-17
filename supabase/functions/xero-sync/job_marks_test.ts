@@ -93,6 +93,7 @@ Deno.test("settlement marks: changed payments only, office links, batches and sa
     Invoice: { InvoiceID: invoice(n), Type: "ACCREC" },
     Amount: 100,
     IsReconciled: false,
+    UpdatedDateUTC: "2026-11-17T05:12:33.000Z",
   }));
   const make = (enabled: boolean, failure?: string, writeFailure?: string) => {
     const tables: Record<string, Record<string, unknown>[]> = {
@@ -117,10 +118,10 @@ Deno.test("settlement marks: changed payments only, office links, batches and sa
       return Promise.resolve({ error: null });
     };
     let batches: unknown[] = [];
-    const gets: string[] = [];
+    const gets: unknown[] = [];
     const run = (minute = 0) =>
-      syncSettlementEvidence(client, org, tenant, (path) => {
-        gets.push(path);
+      syncSettlementEvidence(client, org, tenant, (path, params, headers) => {
+        gets.push({ path, params, headers });
         return Promise.resolve(
           path === "/Payments"
             ? { Payments: payments }
@@ -150,13 +151,23 @@ Deno.test("settlement marks: changed payments only, office links, batches and sa
   );
   assertEquals(on.calls.map((c) => c.p_job_id), ["job-a", "job-b"]);
   on.calls.length = 0;
-  assertEquals((await on.run(1)).job_marks, { marked: 0, skipped: null });
+  // PostgREST returns the stored timestamptz in PostgreSQL's wire form.
+  for (const row of on.tables.xero_settlement_evidence) {
+    row.provider_updated_at = "2026-11-17T05:12:33+00:00";
+  }
+  const dailyRereadMinute = 24 * 60;
+  const reread = await on.run(dailyRereadMinute);
+  assertEquals(reread.full_reread, true);
+  assertEquals(reread.job_marks, { marked: 0, skipped: null });
   assertEquals(on.calls, []);
   // Reconciliation has no new provider timestamp. Resolve the office's current
   // link rather than retaining a link captured by the earlier run.
   on.tables.xero_invoices[0].job_id = "job-office";
   payments[0].IsReconciled = true;
-  assertEquals((await on.run(2)).job_marks, { marked: 1, skipped: null });
+  assertEquals((await on.run(dailyRereadMinute + 1)).job_marks, {
+    marked: 1,
+    skipped: null,
+  });
   assertEquals(on.calls, [{
     p_job_id: "job-office",
     p_source: "xero_payment",
@@ -167,7 +178,10 @@ Deno.test("settlement marks: changed payments only, office links, batches and sa
     Type: "RECBATCH",
     Payments: payments.slice(1),
   }]);
-  assertEquals((await on.run(3)).job_marks, { marked: 2, skipped: null });
+  assertEquals((await on.run(dailyRereadMinute + 2)).job_marks, {
+    marked: 2,
+    skipped: null,
+  });
   assertEquals(on.calls.map((c) => c.p_job_id), ["job-a", "job-b"]);
   for (
     const [table, skipped] of [
