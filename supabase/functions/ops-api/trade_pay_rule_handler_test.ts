@@ -90,6 +90,8 @@ type World = {
   // The stored draft a save replaces (returned for a draft lookup).
   priorDraft?: Record<string, unknown>;
   action?: string;
+  draftId?: string;
+  failDraftRead?: boolean;
 };
 
 async function submit(extra_items: any[], world: World = {}): Promise<Captured> {
@@ -203,7 +205,14 @@ async function submit(extra_items: any[], world: World = {}): Promise<Captured> 
       }
       if (world.historyInvoices) return reply(world.historyInvoices);
       const statuses = filterValues(url, "status");
-      if (world.priorDraft && statuses?.includes("draft")) return reply([world.priorDraft]);
+      const selectedIds = filterValues(url, "id");
+      if (world.failDraftRead && selectedIds?.includes(PRIOR_ID)) {
+        return Promise.resolve(Response.json({ code: "XX000", message: "draft unreadable" }, { status: 500 }));
+      }
+      if (world.priorDraft && (statuses?.includes("draft") || selectedIds?.includes(PRIOR_ID))) {
+        const columns = (url.searchParams.get("select") || "*").split(",").map((key) => key.trim());
+        return reply([Object.fromEntries(Object.entries(world.priorDraft).filter(([key]) => columns.includes("*") || columns.includes(key)))]);
+      }
       return reply([]);
     }
     return reply([]);
@@ -214,7 +223,7 @@ async function submit(extra_items: any[], world: World = {}): Promise<Captured> 
     const res = await _opsApiRequestHandlerForTest(new Request(url, {
       method: "POST",
       headers: { authorization: "Bearer trade-jwt", "content-type": "application/json" },
-      body: JSON.stringify({ week_start: world.weekStart ?? WEEK_START, gst_on: false, extra_items }),
+      body: JSON.stringify({ week_start: world.weekStart ?? WEEK_START, draft_id: world.draftId, gst_on: false, extra_items }),
     }));
     const text = await res.text();
     let parsed: any;
@@ -478,3 +487,67 @@ for (const failRepaymentRead of ["rules", "balance"] as const) {
     assertEquals(out.writes, []);
   });
 }
+
+// An undated draft's provisional split is not a dated invoice's pay rule.
+for (const weekStart of ["2026-11-16", "2026-11-23", "2026-11-30"]) {
+  handlerTest(`pay rule: undated draft sent for ${weekStart} takes that date's rule`, async () => {
+    const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 20, 56)], {
+      payRuleOn: true, payRuleFrom: "2026-11-23", weekStart, draftId: PRIOR_ID,
+      priorDraft: { ...priorDraft(null), invoice_source: "hourly", week_start: null, week_end: null },
+    });
+    assertSaved(out);
+    const inv = out.invoiceRows[0];
+    assertEquals([inv.super_basis ?? null, inv.gross_earned, inv.super_amount, inv.net_pay],
+      weekStart < "2026-11-23" ? OLD_SPLIT : INCLUSIVE_SPLIT);
+  });
+}
+
+handlerTest("pay rule: office-dated pre-change draft keeps its rule when sent later", async () => {
+  const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 20, 56)], {
+    payRuleOn: true, payRuleFrom: "2026-11-23", weekStart: "2026-11-23", draftId: PRIOR_ID,
+    priorDraft: { ...priorDraft(null), week_start: "2026-11-16", week_end: "2026-11-22" },
+  });
+  assertSaved(out);
+  const inv = out.invoiceRows[0];
+  assertEquals([inv.super_basis ?? null, inv.gross_earned, inv.super_amount, inv.net_pay], OLD_SPLIT);
+});
+
+handlerTest("pay rule: unreadable selected draft saves nothing; retry reads the undated draft afresh", async () => {
+  const world = {
+    payRuleOn: true, payRuleFrom: "2026-11-23", weekStart: "2026-11-23", draftId: PRIOR_ID,
+    priorDraft: { ...priorDraft(null), invoice_source: "hourly", week_start: null, week_end: null },
+  };
+  const refused = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 20, 56)], { ...world, failDraftRead: true });
+  assertEquals(refused.status, 500);
+  assertEquals(refused.invoiceRows, []);
+  assertEquals(refused.lineRows, []);
+  assertEquals(refused.writes.filter((write) => write.includes("trade_invoice")), []);
+  const retried = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 20, 56)], world);
+  assertSaved(retried);
+  assertEquals(retried.invoiceRows[0].super_basis, "inclusive_12_112_v1");
+});
+
+handlerTest("pay rule: dating an undated draft with switch off preserves main's stored split", async () => {
+  for (const [basis, expected] of [[null, OLD_SPLIT], ["inclusive_12_112_v1", INCLUSIVE_SPLIT]] as const) {
+    const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 20, 56)], {
+      payRuleOn: false, failPaySettings: true, weekStart: "2026-11-23", draftId: PRIOR_ID,
+      priorDraft: { ...priorDraft(basis), invoice_source: "hourly", week_start: null, week_end: null },
+    });
+    assertSaved(out);
+    const inv = out.invoiceRows[0];
+    assertEquals([inv.super_basis ?? null, inv.gross_earned, inv.super_amount, inv.net_pay], expected);
+  }
+});
+
+handlerTest("pay rule: dating an undated draft with unreadable start refuses without replacing it", async () => {
+  const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 20, 56)], {
+    payRuleOn: true, failPaySettings: true, weekStart: "2026-11-23", draftId: PRIOR_ID,
+    priorDraft: { ...priorDraft(null), invoice_source: "hourly", week_start: null, week_end: null },
+  });
+  assertEquals(out.status, 503);
+  assertEquals(out.body.code, "pay_rule_unreadable");
+  assertEquals(out.body.saved, false);
+  assertEquals(out.invoiceRows, []);
+  assertEquals(out.lineRows, []);
+  assertEquals(out.writes.filter((write) => write.includes("trade_invoice") || write.startsWith("RPC ")), []);
+});
