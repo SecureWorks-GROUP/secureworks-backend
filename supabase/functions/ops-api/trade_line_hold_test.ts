@@ -514,3 +514,77 @@ Deno.test("paged billed facts include cap changes and crew holds spend nothing a
   assertEquals(result.held[0].hold_detail?.fallback_reason, null);
   assertEquals(result.backed[0].sent_amount_ex, 120);
 });
+
+Deno.test("P1-05.8: an undated counted line is held not_on_crew with its fallback, never thrown", async () => {
+  const rows: Record<string, any[]> = readRows();
+  let rpcCalls = 0;
+  const db = client(rows);
+  db.rpc = () => {
+    rpcCalls++;
+    return Promise.resolve({ data: false, error: null });
+  };
+  const undated = line({ week_start: undefined, work_date: undefined });
+  const f = await readLineHoldFacts(db, "ZZTEST-TRADE", [undated]);
+  assertEquals(rpcCalls, 0);
+  const result = classifyLines([undated], f);
+  assertEquals(result.backed.length, 0);
+  assertEquals(result.held[0].hold_reason, "not_on_crew");
+  assertEquals(result.held[0].hold_detail?.fallback_reason, null);
+  // A dated line on the same send still reads the crew as before.
+  const dated = line();
+  const both = await readLineHoldFacts(db, "ZZTEST-TRADE", [undated, dated]);
+  assertEquals(rpcCalls, 1);
+  const sorted = classifyLines([undated, dated], both);
+  assertEquals(sorted.held.map((l) => l.hold_reason), ["not_on_crew"]);
+  assertEquals(sorted.backed[0].sent_amount_ex, 120);
+});
+
+Deno.test("P1-05.8 ruling 1: a send keeps only a same-rate hours split exact to the cent", () => {
+  const hours = (extra: Partial<HoldLine> = {}) =>
+    line({
+      line_type: "labour",
+      total_hours: 7.5,
+      quantity: undefined,
+      rate: 40,
+      line_total_ex: 300,
+      ...extra,
+    });
+  // 120 left: 3 h backed (120.00), 4.5 h held (180.00), same rate.
+  const split = classifyLines([hours()], facts(), { sameRateSplitOnly: true });
+  assertEquals(split.backed[0].total_hours, 3);
+  assertEquals(split.backed[0].line_total_ex, 120);
+  assertEquals(split.held[0].total_hours, 4.5);
+  assertEquals(split.held[0].line_total_ex, 180);
+  assertEquals(split.backed[0].rate, split.held[0].rate);
+  assertEquals(split.backed[0].split_group_id, split.held[0].split_group_id);
+  // An amount line is never split by a send: held whole.
+  const amount = classifyLines([line({ line_total_ex: 200, rate: 200 })], facts(), {
+    sameRateSplitOnly: true,
+  });
+  assertEquals(amount.backed.length, 0);
+  assertEquals(amount.held[0].line_total_ex, 200);
+  assertEquals(amount.held[0].hold_reason, "over_amount");
+  // Hours times rate that does not make the line's own total: held whole.
+  const odd = classifyLines([hours({ line_total_ex: 301 })], facts(), {
+    sameRateSplitOnly: true,
+  });
+  assertEquals(odd.backed.length, 0);
+  assertEquals(odd.held[0].line_total_ex, 301);
+  // A line whose start and finish make its hours: held whole.
+  const timed = classifyLines(
+    [hours({ start_time: "07:00", finish_time: "14:30" })],
+    facts(),
+    { sameRateSplitOnly: true },
+  );
+  assertEquals(timed.backed.length, 0);
+  assertEquals(timed.held[0].total_hours, 7.5);
+  // A rate past two decimals cannot be stored the same on both parts: whole.
+  const fine = classifyLines(
+    [hours({ rate: 40.001, line_total_ex: 300.01 })],
+    facts(),
+    { sameRateSplitOnly: true },
+  );
+  assertEquals(fine.backed.length, 0);
+  // The default sorter is unchanged (P1-05.7 behaviour).
+  assertEquals(classifyLines([line({ line_total_ex: 200, rate: 200 })], facts()).backed[0].line_total_ex, 120);
+});

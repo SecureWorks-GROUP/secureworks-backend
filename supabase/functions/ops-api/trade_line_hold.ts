@@ -1,4 +1,4 @@
-// P1-05.7: unused until the held-line send is wired. This module never saves,
+// P1-05.7/P1-05.8: the held-line send's sorter. This module never saves,
 // sends or changes a work order. Only the facts reader performs I/O.
 // deno-lint-ignore-file no-explicit-any
 import {
@@ -141,9 +141,20 @@ function jobReason(
 
 /** Pure, in input order. Missing/claimed/non-owner commission items are named
  * in skipped_items for the send response, never refused or made into pay. */
+export type ClassifyOptions = {
+  /** Director ruling 1 (18 Nov 2026), used by the send: keep a split only when
+   * it is a same-rate split of an hours line, exact to the cent (hours times
+   * rate makes the whole line, and each part, at storage precision), and the
+   * line carries no start or finish time (a time entry makes its own hours).
+   * Any other over-the-amount line is held whole. Default false keeps the
+   * P1-05.7 sorter unchanged. */
+  sameRateSplitOnly?: boolean;
+};
+
 export function classifyLines(
   lines: readonly HoldLine[],
   facts: LineHoldFacts,
+  options: ClassifyOptions = {},
 ): {
   backed: ClassifiedLine[];
   held: ClassifiedLine[];
@@ -308,6 +319,13 @@ export function classifyLines(
       hold(line, "over_amount");
       continue;
     }
+    if (
+      options.sameRateSplitOnly &&
+      !exactSameRateSplit(line, hoursLine, hours, backedHours, rate, asked)
+    ) {
+      hold(line, "over_amount");
+      continue;
+    }
     const paid = hoursLine ? cents(backedHours * rate) : left;
     const split_group_id = facts.split_group_ids[index];
     const paidPart = {
@@ -336,6 +354,25 @@ export function classifyLines(
   return { backed, held, skipped_items };
 }
 
+/** Ruling 1: the two parts must rebuild the line exactly at storage precision
+ * (two decimals for hours and rate, whole cents for money). */
+function exactSameRateSplit(
+  line: HoldLine,
+  hoursLine: boolean,
+  hours: number,
+  backedHours: number,
+  rate: number,
+  asked: number,
+): boolean {
+  if (!hoursLine || rate <= 0) return false;
+  if (line.start_time || line.finish_time) return false;
+  const r = Math.round(rate * 100) / 100;
+  if (r !== rate || Math.round(hours * 100) / 100 !== hours) return false;
+  const heldHours = Math.round((hours - backedHours) * 100) / 100;
+  return cents(hours * r) === asked &&
+    cents(backedHours * r) + cents(heldHours * r) === asked;
+}
+
 export class LineHoldFactsUnreadable extends Error {
   readonly status = 503;
   readonly code = "pay_facts_unreadable";
@@ -354,7 +391,7 @@ const numeric = (value: unknown): number => {
 
 /** Batch all job/receipt ids once, in URL-sized chunks and paged so old billed
  * lines cannot disappear at PostgREST's row limit. No write occurs here.
- * Existing callers must not use this until the held-line send is released. */
+ * Read only when the held-line send is on (trade_line_hold_v1). */
 export async function readLineHoldFacts(
   client: any,
   userId: string,
@@ -614,7 +651,13 @@ export async function readLineHoldFacts(
     for (let start = 0; start < pairs.length; start += 8) {
       await Promise.all(
         pairs.slice(start, start + 8).map(async ([id, startDay]) => {
-          if (!startDay) throw new LineHoldFactsUnreadable();
+          // A counted line with no week and no work date cannot be checked
+          // against the crew. It is held not_on_crew (with the reason the
+          // other rules give as fallback), never thrown (director 18 Nov).
+          if (!startDay) {
+            if (facts.jobs[id]) facts.jobs[id].off_crew_by_week![""] = true;
+            return;
+          }
           const result = await client.rpc("trade_is_off_job_crew", {
             p_user_id: userId,
             p_job_id: id,

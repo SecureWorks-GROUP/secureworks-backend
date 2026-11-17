@@ -2707,6 +2707,15 @@ function tradeXeroBillSearchApiError(error: unknown): never {
   throw error
 }
 
+const HOLDING_INVOICE_NOT_PUSHED_MESSAGE = 'This is a holding invoice for the office. It is never sent to Xero; its lines are paid only when the office moves them onto a payable invoice.'
+export function holdingInvoiceNotPushedError(): ApiError {
+  return new ApiError(HOLDING_INVOICE_NOT_PUSHED_MESSAGE, 409, {
+    ok: false,
+    error: HOLDING_INVOICE_NOT_PUSHED_MESSAGE,
+    code: 'holding_invoice_not_pushed',
+  })
+}
+
 async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops-api:push_trade_invoice_to_xero') {
   const { invoice_id } = body
   if (!invoice_id) throw new ApiError('invoice_id required', 400)
@@ -2718,6 +2727,10 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
     .maybeSingle()
   let { data: inv } = await readInvoice()
   if (!inv) throw new ApiError('Invoice not found', 404)
+  // P1-05.8 (Follow-up 10): a holding invoice is never a bill. Refused before
+  // any line read, group release or Xero call. Its lines reach pay only when
+  // the office moves them onto a payable invoice.
+  if (inv.invoice_kind === 'held') throw holdingInvoiceNotPushedError()
   const canEnterNow = canEnterPushTradeInvoiceToXero(inv.status, inv.xero_bill_id)
 
   const { data: lines, error: linesErr } = await client.from('trade_invoice_lines')
@@ -2756,6 +2769,7 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
     reviewLines = reread || []
     inv = (await readInvoice()).data
     if (!inv) throw new ApiError('Invoice not found', 404)
+    if (inv.invoice_kind === 'held') throw holdingInvoiceNotPushedError()
   }
   if (!canEnterPushTradeInvoiceToXero(inv.status, inv.xero_bill_id)) {
     throw new ApiError('Invoice must be acknowledged before pushing to Xero', 400)
