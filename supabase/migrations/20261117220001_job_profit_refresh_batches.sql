@@ -85,6 +85,9 @@ DECLARE
  RETURN jsonb_build_object('refreshed',v_refreshed,'changed',coalesce(cardinality(v_changed),0),'ms',extract(epoch FROM clock_timestamp()-v_start)*1000);
 END $fn$;
 
+-- The retired unbounded entry point now refuses instead of returning a summary.
+-- output-key-guard: drop public.job_profit_refresh_all refreshed
+-- output-key-guard: drop public.job_profit_refresh_all ms
 CREATE OR REPLACE FUNCTION public.job_profit_refresh_all() RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $fn$
 /* function block */ BEGIN
