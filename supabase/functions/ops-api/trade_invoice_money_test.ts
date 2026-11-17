@@ -24,6 +24,7 @@ import {
   TradeInvoiceMoneyError,
   validatePersistedTradeInvoiceMoney,
   assertTradeInvoiceSuperBaseMatchesLines,
+  groupedMoneyLabel,
   isTradeInvoiceReimbursementLine,
   reimbursementLinesTotalEx,
   TRADE_INVOICE_INCLUSIVE_SUPER_BASIS,
@@ -900,6 +901,63 @@ const INCLUSIVE_LINES: TradeInvoiceXeroLine[] = [
   { Description: "ZZTEST labour", Quantity: 20, UnitAmount: 56, AccountCode: "310" } as TradeInvoiceXeroLine,
 ];
 
+Deno.test("inclusive super: spec test 9, the Xero draft bill carries the three figures", () => {
+  const m = inclusiveMoney(1120);
+  const lines = splitTradeInvoiceXeroLines(INCLUSIVE_LINES, m, { superAccountCode: "478", tradeName: "ZZTEST Crew" });
+  assertEquals(lines.length, 2);
+  assertEquals([lines[0].Quantity, lines[0].UnitAmount, lines[0].TaxType], [20, 56, "NONE"]);
+  const superLine = lines[1];
+  assertEquals([superLine.UnitAmount, superLine.TaxType], [-120, "NONE"]);
+  const text = String(superLine.Description);
+  assert(text.startsWith("Superannuation Guarantee"), text);
+  assertStringIncludes(text, "Total (includes super) $1,120.00");
+  assertStringIncludes(text, "Paid to the super fund $120.00");
+  assertStringIncludes(text, "$1,000.00");
+  assert(!/company contribution/i.test(text), text);
+  const total = lines.reduce((sum, l) => sum + Number(l.Quantity ?? 1) * Number(l.UnitAmount ?? 0), 0);
+  assertEquals(Math.round(total * 100) / 100, 1000);
+  const returned = lines.map((l) => ({
+    ...l,
+    LineAmount: Math.round(Number(l.Quantity ?? 1) * Number(l.UnitAmount ?? 0) * 100) / 100,
+  }));
+  assertReturnedTradeInvoiceXeroSplit(returned, m);
+
+  const gst = splitTradeInvoiceXeroLines(INCLUSIVE_LINES, inclusiveMoney(1120, { gstOn: true }), { superAccountCode: "478" });
+  assertEquals([gst[0].TaxType, gst[1].TaxType], ["INPUT", "NONE"]);
+});
+
+Deno.test("inclusive super: a GST trade's reimbursement is held back from Xero, never sent with GST on it", () => {
+  const m = inclusiveMoney(1200, { reimbursementEx: 80, gstOn: true });
+  const withReimbursement: TradeInvoiceXeroLine[] = [
+    ...INCLUSIVE_LINES,
+    { Description: "ZZTEST reimbursement", Quantity: 1, UnitAmount: 80, AccountCode: "310" } as TradeInvoiceXeroLine,
+  ];
+  assertThrows(
+    () => splitTradeInvoiceXeroLines(withReimbursement, m, { superAccountCode: "478" }),
+    TradeInvoiceMoneyError,
+    "reimbursement",
+  );
+  // Without GST the bill goes, with the reimbursement named on the super line.
+  const noGst = inclusiveMoney(1200, { reimbursementEx: 80 });
+  const lines = splitTradeInvoiceXeroLines(withReimbursement, noGst, { superAccountCode: "478" });
+  assertStringIncludes(String(lines.at(-1)?.Description), "Reimbursements $80.00 carry no super.");
+  const total = lines.reduce((sum, l) => sum + Number(l.Quantity ?? 1) * Number(l.UnitAmount ?? 0), 0);
+  assertEquals(Math.round(total * 100) / 100, 1080);
+});
+
+Deno.test("inclusive super: the audit PDF reads Total (includes super), Paid to your super fund, Paid to you", () => {
+  const m = inclusiveMoney(1120);
+  const text = buildTradeInvoiceAuditText(buildTradeInvoiceAuditModel(INCLUSIVE_LINES, m, "ZZTEST Crew"), {
+    invoiceNumber: "ZZTEST-1",
+    tradeName: "ZZTEST Crew",
+  }).join("\n");
+  const total = text.indexOf("Total (includes super) $1120.00");
+  const fund = text.indexOf("Paid to your super fund $120.00");
+  const you = text.indexOf("Paid to you $1000.00");
+  assert(total >= 0 && fund > total && you > fund, text);
+  assert(!/withheld/i.test(text), text);
+});
+
 Deno.test("inclusive super: job cost reads no company super on top", () => {
   // 20261030170000 trade_employer_super: super_amount - (subtotal_ex - net_pay).
   for (const [gross, reimbursement] of [[1120, 0], [1200, 80], [1000.02, 0], [57.5, 12.25]]) {
@@ -919,4 +977,11 @@ Deno.test("ZZTEST reimbursement retains NONE tax and stays inside the returned t
   assertEquals(lines.reduce((s, l) => s + Number(l.Quantity) * Number(l.UnitAmount), 0), 1080);
   assertReturnedTradeInvoiceXeroSplit(lines, money);
   assertThrows(() => assertReturnedTradeInvoiceXeroSplit(lines.map((l, i) => i === 1 ? { ...l, TaxType: "INPUT" } : l), money));
+});
+
+Deno.test("inclusive super: money labels group thousands", () => {
+  assertEquals(
+    [groupedMoneyLabel(1120), groupedMoneyLabel(0.5), groupedMoneyLabel(1234567.891), groupedMoneyLabel(-80)],
+    ["$1,120.00", "$0.50", "$1,234,567.89", "-$80.00"],
+  );
 });

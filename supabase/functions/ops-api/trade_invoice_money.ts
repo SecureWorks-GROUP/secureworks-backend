@@ -908,6 +908,13 @@ function moneyLabel(value: number): string {
   return `$${value.toFixed(2)}`;
 }
 
+/** $1,120.00: dollars with thousands separators, two decimals. */
+export function groupedMoneyLabel(value: number): string {
+  const cents = Math.round(Math.abs(Number(value)) * 100);
+  const dollars = Math.floor(cents / 100).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${value < 0 ? "-" : ""}$${dollars}.${String(cents % 100).padStart(2, "0")}`;
+}
+
 export function isTradeInvoiceSuperXeroLine(
   line: TradeInvoiceXeroLine | null | undefined,
 ): boolean {
@@ -960,6 +967,25 @@ export function formatTradeInvoiceSuperWithheldDescription(
   tradeName?: unknown,
 ): string {
   const name = String(tradeName || "").trim() || "the trade";
+  if (money.super_basis === TRADE_INVOICE_INCLUSIVE_SUPER_BASIS) {
+    // The three figures the crew bill carries (P1-01.4): the total, what is
+    // paid to the super fund and what is paid to the person. Nothing is paid
+    // on top of the total. The first line keeps the words "Superannuation
+    // Guarantee": isTradeInvoiceSuperXeroLine finds the line by them.
+    const base = money.super_base_ex ?? money.gross_earned;
+    const reimbursement = round2(money.gross_earned - base);
+    return [
+      "Superannuation Guarantee, 12/112 of the total (the total includes super)",
+      `Total (includes super) ${groupedMoneyLabel(base)}. Paid to the super fund ${
+        groupedMoneyLabel(money.super_amount)
+      }. Paid to ${name} ${groupedMoneyLabel(round2(base - money.super_amount))}.${
+        reimbursement > 0
+          ? ` Reimbursements ${groupedMoneyLabel(reimbursement)} carry no super.`
+          : ""
+      }`,
+      `Paid to the super fund separately. Not part of the amount payable to ${name}`,
+    ].join("\n");
+  }
   if (money.super_basis === TRADE_INVOICE_EMPLOYER_SUPER_BASIS) {
     return [
       `Superannuation Guarantee ${rateLabel(money.super_rate)} of submitted total`,
@@ -1024,6 +1050,8 @@ export type TradeInvoiceAuditModel = {
   // What super is charged on: the submitted total less commission when the
   // invoice carries commission, else null (the whole submitted total).
   super_base_ex: number | null;
+  // The invoice's stored super basis (null on the 12/6 split).
+  super_basis: TradeInvoiceSuperBasis | null;
   amount_payable: number;
   gst_amount: number;
   trade_payable: number;
@@ -1082,9 +1110,11 @@ export function buildTradeInvoiceAuditModel(
       !(superBase >= 0 && superBase < money.gross_earned)) ||
     !closeMoney(
       money.super_amount,
-      money.super_basis === TRADE_INVOICE_INCLUSIVE_SUPER_BASIS
-        ? tradeInvoiceInclusiveSuper(superBase ?? money.gross_earned)
-        : round2((superBase ?? money.gross_earned) * money.super_rate),
+      expectedSuperAmount(
+        money.super_basis,
+        superBase ?? money.gross_earned,
+        money.super_rate,
+      ),
     )
   ) {
     throw new TradeInvoiceMoneyError(
@@ -1137,6 +1167,7 @@ export function buildTradeInvoiceAuditModel(
     super_rate: money.super_rate,
     super_amount: money.super_amount,
     super_base_ex: superBase,
+    super_basis: money.super_basis ?? null,
     amount_payable: money.net_pay,
     gst_amount: money.gst_amount,
     trade_payable: money.trade_payable,
@@ -1162,6 +1193,20 @@ export function splitTradeInvoiceXeroLines(
     options.tradeName,
   );
   const taxType = money.gst_on ? "INPUT" : "NONE";
+  // Super inclusive GST is 10% of the total less reimbursements, but every
+  // work line goes to Xero as INPUT, so Xero would charge GST on a
+  // reimbursement line too and the bill would not match the invoice. Refuse
+  // that one shape until reimbursement lines carry their own tax type
+  // (P1-03). No reimbursement line can be saved before then.
+  if (
+    money.super_basis === TRADE_INVOICE_INCLUSIVE_SUPER_BASIS && money.gst_on &&
+    money.super_base_ex !== null && money.super_base_ex !== undefined
+  ) {
+    throw new TradeInvoiceMoneyError(
+      "MONEY_SPLIT_INVALID",
+      "A GST registered trade's reimbursement cannot be put on a super inclusive Xero bill yet",
+    );
+  }
   // Labour stays at the submitted amounts. The minus line is the worker
   // withhold only, so the bill total is cash payable to the trade. Super
   // remittance (super_amount, still 12%) is paid to the fund separately and

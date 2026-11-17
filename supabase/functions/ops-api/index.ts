@@ -708,7 +708,10 @@ import {
   resolvePersistedTradeInvoiceLineAmount,
   resolveTradeInvoiceGstOn,
   splitTradeInvoiceXeroLines,
+  TRADE_INVOICE_EMPLOYER_SUPER_BASIS,
+  TRADE_INVOICE_INCLUSIVE_SUPER_BASIS,
   TradeInvoiceMoneyError,
+  type TradeInvoiceSuperBasis,
   type TradeInvoiceMoney,
   tradeInvoicePayableBeforeDeduction,
   tradeInvoiceXeroBillSubtotal,
@@ -717,6 +720,14 @@ import {
   validatePersistedTradeInvoiceMoney,
   withTradeInvoiceRecurringDeduction,
 } from './trade_invoice_money.ts'
+import {
+  resolveTradePayBasis,
+  resolveTradePayBasisForPreview,
+  TRADE_PAY_PRIOR_INVOICE_COLUMNS,
+  TRADE_PAY_RULE_UNREADABLE_WORDS,
+  type TradePayPriorInvoice,
+  TradePayRuleUnreadable,
+} from './trade_pay_rule.ts'
 import {
   getRunningInvoiceDraft,
   requireRunningDraftAgentCaller,
@@ -2097,7 +2108,7 @@ export async function _findLiveTradeInvoiceForWeek(
   weekEnd: string,
 ): Promise<any | null> {
   const { data, error } = await client.from('trade_invoices')
-    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, total_inc, recurring_deduction_label, recurring_deduction_amount')
+    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, super_base_ex, total_inc, recurring_deduction_label, recurring_deduction_amount')
     .eq('user_id', userId)
     .eq('week_end', weekEnd)
     .order('created_at', { ascending: true })
@@ -2327,6 +2338,8 @@ function tradeInvoiceMoney(
   // The invoice's commission lines, ex GST (commissionLinesTotalEx): no super
   // on commission (Marnin, 12 Nov 2026). 0 leaves super on the whole gross.
   commissionEx: unknown = 0,
+  // The invoice's reimbursement lines, ex GST (reimbursementLinesTotalEx):
+  // read only under the super inclusive rule (P1-01).
   reimbursementEx: unknown = 0,
 ): TradeInvoiceMoney {
   try {
@@ -2336,12 +2349,10 @@ function tradeInvoiceMoney(
   }
 }
 
-async function invoiceReimbursements(client: any, userId: string, items: any[], day: string, priorBasis: unknown = null) {
+async function invoiceReimbursements(client: any, userId: string, items: any[], basis: unknown = null) {
   const requested = (items || []).filter(isReimbursementItem)
-  if (!requested.length) return { lines: [], skipped_items: [], basis: priorBasis }
+  if (!requested.length) return { lines: [], skipped_items: [], basis }
   const { data: flag } = await client.from('feature_flags').select('enabled').eq('flag_name', REIMBURSEMENT_FLAG).maybeSingle()
-  const rule = flag?.enabled === true ? await client.rpc('trade_pay_rule_on', { p_day: day }) : { data: false }
-  const basis = !rule.error && rule.data === true ? 'inclusive_12_112_v1' : priorBasis
   return { ...await resolveReimbursementExtras(client, { userId, items: requested, flagOn: flag?.enabled === true, basis }), basis }
 }
 
@@ -2358,6 +2369,32 @@ async function reimbursementXeroAccount(client: any, lines: any[]): Promise<stri
   const code = String(data?.reimbursement_account_code || '').trim()
   if (!code) throw new ApiError('The account for reimbursements has not been set, so this invoice was not sent to Xero.', 409, { code: 'reimbursement_account_not_set' })
   return code
+}
+
+// Which super rule prices an invoice being saved: the one decision in
+// trade_pay_rule.ts. `prior` is the stored invoice this save replaces (null
+// for a new invoice): a priced prior keeps its stored basis, otherwise the
+// rule for the pay day. Unreadable: 503 pay_rule_unreadable, nothing saved.
+async function tradePayBasisForSave(
+  client: any,
+  prior: TradePayPriorInvoice,
+  payDay: unknown,
+): Promise<TradeInvoiceSuperBasis | null> {
+  try {
+    return await resolveTradePayBasis(client, prior, payDay)
+  } catch (error) {
+    if (error instanceof TradePayRuleUnreadable) {
+      throw new ApiError(TRADE_PAY_RULE_UNREADABLE_WORDS, 503, {
+        ok: false,
+        success: false,
+        saved: false,
+        code: error.code,
+        error: TRADE_PAY_RULE_UNREADABLE_WORDS,
+        userMessage: TRADE_PAY_RULE_UNREADABLE_WORDS,
+      })
+    }
+    throw error
+  }
 }
 
 function persistedTradeInvoiceMoney(value: unknown): TradeInvoiceMoney {
@@ -13552,7 +13589,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // which authorised manager/trade submitted it. The caller's own
             // draft may be cleaned up and retried exactly as before.
             const { data: existingWoInvoices, error: existingWoInvErr } = await client.from('trade_invoices')
-              .select('id, user_id, status')
+              .select(`id, user_id, status, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)
               .eq('org_id', tradeUser.orgId)
               .eq('work_order_id', work_order_id)
             if (existingWoInvErr) throw existingWoInvErr
@@ -13667,10 +13704,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             )
             const sourceWorkOrderDate = weeklyWorkOrderBusinessDate(wo)
             const woInvoiceDate = new Date().toISOString().slice(0, 10)
+            // One super rule (P1-01.3): a work order claim includes super.
+            // No week on this invoice: its pay day is the day it is made. A
+            // retry replaces the caller's own draft and keeps its stored basis.
+            const woSuperBasis = await tradePayBasisForSave(client, retryDrafts[0] ?? null, woInvoiceDate)
             const woMoney = tradeInvoiceMoney(
               invoiceTotals.subtotal_ex,
               woGstOn,
               woInvoiceDate,
+              woSuperBasis,
             )
             const subtotal = woMoney.gross_earned
             const gst = woMoney.gst_amount
@@ -14011,9 +14053,26 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const draftWeekEnd = draftWeekStart
               ? new Date(new Date(draftWeekStart + 'T00:00:00Z').getTime() + 6 * 86400000).toISOString().slice(0, 10)
               : new Date().toISOString().slice(0, 10)
-            let existingDraftId = weeklyShape && draftWeekStart
-              ? await loadReplaceableWeeklyDraftId(client, tradeUser.id, draftWeekStart)
+            // The draft this save replaces, read before pricing so a priced
+            // draft keeps its stored basis (trade_pay_rule.ts).
+            let existingDraft: ({ id: string } & NonNullable<TradePayPriorInvoice>) | null = weeklyShape && draftWeekStart
+              ? await loadReplaceableWeeklyDraft(client, tradeUser.id, draftWeekStart)
               : null
+            // Preserve the legacy draft lookup exactly for hourly invoices.
+            // Weekly work-order drafts use the stricter one-draft resolver above.
+            if (!weeklyShape && draftWeekStart) {
+              const { data: hourlyDraft, error: existingDraftErr } = await client.from('trade_invoices')
+                .select(`id, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)
+                .eq('user_id', tradeUser.id)
+                .eq('week_start', draftWeekStart)
+                .eq('status', 'draft')
+                .order('created_at', { ascending: true })
+                .limit(1)
+                .maybeSingle()
+              if (existingDraftErr) throw new Error('Failed to load existing draft: ' + existingDraftErr.message)
+              existingDraft = hourlyDraft?.id ? hourlyDraft : null
+            }
+            const existingDraftId: string | null = existingDraft?.id || null
             const weeklyInvoice = weeklyShape
               ? await _resolveWeeklyWorkOrderInvoice(
                 client,
@@ -14033,7 +14092,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 return true
               })
               : []
-            const draftReimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(draftExtras) ? draftExtras : [], draftWeekEnd)
+            const draftSuperBasis = await tradePayBasisForSave(client, existingDraft, draftWeekStart || draftWeekEnd)
+            const draftReimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(draftExtras) ? draftExtras : [], draftSuperBasis)
             const draftShareShaped = (item: any) =>
               isGroupShareInvoiceItem(item) || Boolean(item?.group_share_id)
             const plainLabour = labourLines.filter((line: any) => !draftShareShaped(line))
@@ -14095,24 +14155,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // invoice will carry, so the trade sees it before submitting.
             let { money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(
               client,
-              tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd, draftReimbursements.basis, 0, draftReimbursementEx),
+              tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd, draftSuperBasis, 0, draftReimbursementEx),
               { userId: tradeUser.id, weekStart: draftWeekStart || null },
             )
 
-            // Preserve the legacy draft lookup exactly for hourly invoices.
-            // Weekly work-order drafts use the stricter one-draft resolver above.
-            if (!weeklyShape && draftWeekStart) {
-              const { data: existingDraft, error: existingDraftErr } = await client.from('trade_invoices')
-                .select('id')
-                .eq('user_id', tradeUser.id)
-                .eq('week_start', draftWeekStart)
-                .eq('status', 'draft')
-                .order('created_at', { ascending: true })
-                .limit(1)
-                .maybeSingle()
-              if (existingDraftErr) throw new Error('Failed to load existing draft: ' + existingDraftErr.message)
-              existingDraftId = existingDraft?.id || null
-            }
 
             // Build a complete replacement beside the old draft. The old header
             // (and its cascading lines) is deleted only after every replacement
@@ -14290,7 +14336,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 for (let i = hourlyDraftLineRows.length - 1; i >= 0; i--) if (removedIds.has(hourlyDraftLineRows[i].expense_receipt_id)) hourlyDraftLineRows.splice(i, 1)
                 draftReimbursementEx = reimbursementLinesTotalEx(draftReimbursements.lines)
                 draftSubtotal = (weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)) + draftReimbursementEx
-                ;({ money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(client, tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd, draftReimbursements.basis, 0, draftReimbursementEx), { userId: tradeUser.id, weekStart: draftWeekStart || null }))
+                ;({ money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(client, tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd, draftSuperBasis, 0, draftReimbursementEx), { userId: tradeUser.id, weekStart: draftWeekStart || null }))
                 Object.assign(hourlyDraftPayload, tradeInvoiceMoneyFields(draftMoney), { subtotal_ex: draftMoney.gross_earned, gst: draftMoney.gst_amount, total_inc: draftMoney.total_inc }, tradeRecurringDeductionInvoiceFields(draftRecurringDeduction))
               })
             await markTradeInvoiceJobsChanged(client, hourlyDraftLineRows)
@@ -14541,7 +14587,43 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 body,
               )
               : null
-            const reimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(extra_items) ? extra_items : [], weekEnd || new Date().toISOString().slice(0, 10), groupInvoiceBasis.superBasis)
+            let priorDraft: ({ id: string } & NonNullable<TradePayPriorInvoice>) | null = null
+            if (weeklyInvoice && week_start) {
+              const weeklyDraft = await loadReplaceableWeeklyDraft(client, tradeUser.id, week_start)
+              if (draft_id && String(draft_id) !== String(weeklyDraft?.id || '')) {
+                throw new ApiError('The selected weekly draft is no longer the replaceable draft for this week', 409)
+              }
+              priorDraft = weeklyDraft
+            } else if (draft_id) {
+              const { data: draftToSubmit } = await client.from('trade_invoices')
+                .select(`id, status, week_start, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)
+                .eq('id', draft_id)
+                .eq('user_id', tradeUser.id)
+                .maybeSingle()
+              if (draftToSubmit?.status === 'draft') {
+                priorDraft = draftToSubmit
+              }
+            }
+            if (!weeklyInvoice && !priorDraft && week_start) {
+              const { data: existingDrafts, error: existingDraftErr } = await client.from('trade_invoices')
+                .select(`id, status, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)
+                .eq('user_id', tradeUser.id)
+                .eq('week_start', week_start)
+                .eq('status', 'draft')
+                .order('created_at', { ascending: true })
+                .limit(1)
+              if (existingDraftErr) {
+                throw new Error('Failed to look up the weekly draft invoice: ' + existingDraftErr.message)
+              }
+              const existingDraft = (existingDrafts || [])[0]
+              if (existingDraft) {
+                priorDraft = existingDraft
+              }
+            }
+            const priorDraftId: string | null = priorDraft?.id || null
+            const invoiceSuperBasis = groupInvoiceBasis.superBasis ??
+              await tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10))
+            const reimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(extra_items) ? extra_items : [], invoiceSuperBasis)
             const invoiceExtraItems = weeklyInvoice
               ? weeklyInvoiceLineRows(weeklyInvoice).map((line: any) => ({
                 ...line,
@@ -15341,6 +15423,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour' })),
               ...extraLineItems,
             ])
+            // One super rule (P1-01.3): from the start date every amount
+            // includes super and reimbursement lines carry none. A group
+            // share keeps its group's basis.
+            // The draft this submit replaces, read before pricing so a priced
+            // draft keeps its stored basis (trade_pay_rule.ts).
             // Recurring deduction (for example Ute hire): taken off the amount
             // payable of a weekly invoice, after super and GST. The lines,
             // subtotal, super and GST below are untouched by it. An invoice
@@ -15348,7 +15435,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // trade has a deduction that week.
             let { money, decision: recurringDeduction } = await applyTradeRecurringDeduction(
               client,
-              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, reimbursements.basis, invoiceCommissionEx, reimbursementEx),
+              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, invoiceSuperBasis, invoiceCommissionEx, reimbursementEx),
               {
                 userId: tradeUser.id,
                 weekStart: week_start || null,
@@ -15485,40 +15572,6 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let invoiceNumberSkip = 0
             let invoiceNumber = await nextTradeInvoiceNumber(client, { userId: tradeUser.id, initials, day: today })
               .catch((error) => { throw new ApiError(error instanceof Error ? error.message : String(error), 503) })
-
-            let priorDraftId: string | null = null
-            if (weeklyInvoice && week_start) {
-              const weeklyDraftId = await loadReplaceableWeeklyDraftId(client, tradeUser.id, week_start)
-              if (draft_id && String(draft_id) !== String(weeklyDraftId || '')) {
-                throw new ApiError('The selected weekly draft is no longer the replaceable draft for this week', 409)
-              }
-              priorDraftId = weeklyDraftId
-            } else if (draft_id) {
-              const { data: draftToSubmit } = await client.from('trade_invoices')
-                .select('id, status, week_start')
-                .eq('id', draft_id)
-                .eq('user_id', tradeUser.id)
-                .maybeSingle()
-              if (draftToSubmit?.status === 'draft') {
-                priorDraftId = draftToSubmit.id
-              }
-            }
-            if (!weeklyInvoice && !priorDraftId && week_start) {
-              const { data: existingDrafts, error: existingDraftErr } = await client.from('trade_invoices')
-                .select('id, status')
-                .eq('user_id', tradeUser.id)
-                .eq('week_start', week_start)
-                .eq('status', 'draft')
-                .order('created_at', { ascending: true })
-                .limit(1)
-              if (existingDraftErr) {
-                throw new Error('Failed to look up the weekly draft invoice: ' + existingDraftErr.message)
-              }
-              const existingDraft = (existingDrafts || [])[0]
-              if (existingDraft) {
-                priorDraftId = existingDraft.id
-              }
-            }
 
             const invoicePayload = {
               ...(weeklyInvoice ? { org_id: tradeUser.orgId } : {}),
@@ -15819,7 +15872,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 extraSubtotal -= removed.reduce((sum: number, line: any) => sum + Number(line.line_total_ex), 0)
                 subtotal = roundMoney(labourSubtotal + extraSubtotal)
                 reimbursementEx = reimbursementLinesTotalEx(reimbursements.lines)
-                ;({ money, decision: recurringDeduction } = await applyTradeRecurringDeduction(client, tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, reimbursements.basis, invoiceCommissionEx, reimbursementEx), { userId: tradeUser.id, weekStart: week_start || null, weekless: { kind: 'no_invoice_week', day: invoiceEarningsDate } }))
+                ;({ money, decision: recurringDeduction } = await applyTradeRecurringDeduction(client, tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, invoiceSuperBasis, invoiceCommissionEx, reimbursementEx), { userId: tradeUser.id, weekStart: week_start || null, weekless: { kind: 'no_invoice_week', day: invoiceEarningsDate } }))
                 gst = money.gst_amount
                 totalInc = money.total_inc
                 Object.assign(invoicePayload, tradeInvoiceMoneyFields(money), { subtotal_ex: money.gross_earned, gst, total_inc: totalInc }, tradeRecurringDeductionInvoiceFields(recurringDeduction))
@@ -16420,7 +16473,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               })
             }
 
-            const groupCrewRelease = officeReviewHold && money.super_basis
+            const groupCrewRelease = officeReviewHold && money.super_basis === TRADE_INVOICE_EMPLOYER_SUPER_BASIS
               ? await releaseGroupCrewBills(client, String(invoice.id), `user:${tradeUser.id}`)
               : null
             if (officeReviewHold) {
@@ -18257,13 +18310,15 @@ function weeklyInvoiceSourceUseAllowed(
     String(parent?.week_start || '') === weekStart
 }
 
-async function loadReplaceableWeeklyDraftId(
+// The week's one replaceable draft, with its stored basis and base so the
+// save that replaces it keeps the rule it was priced under (trade_pay_rule.ts).
+async function loadReplaceableWeeklyDraft(
   client: any,
   userId: string,
   weekStart: string,
-): Promise<string | null> {
+): Promise<({ id: string } & NonNullable<TradePayPriorInvoice>) | null> {
   const { data, error } = await client.from('trade_invoices')
-    .select('id, xero_bill_id, xero_pushed_at')
+    .select(`id, xero_bill_id, xero_pushed_at, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)
     .eq('user_id', userId)
     .eq('week_start', weekStart)
     .eq('status', 'draft')
@@ -18278,7 +18333,7 @@ async function loadReplaceableWeeklyDraftId(
   if (draft && tradeInvoiceHasExternalXeroIdentity(draft)) {
     throw new ApiError('The weekly draft already has an external Xero identity and cannot be replaced', 409)
   }
-  return draft?.id || null
+  return draft?.id ? draft : null
 }
 
 export async function _resolveWeeklyWorkOrderInvoice(
@@ -57900,7 +57955,11 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   // submitting. It is taken off this preview only when the preview covers it.
   // A failed rule read is logged and shows no deduction; it never fails the
   // hours view. The submit path does not share that leniency.
-  let previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding)
+  // One super rule (P1-01.3): the preview shows the rule this week will be
+  // priced under. An unreadable rule shows no money figures
+  // (money_unavailable); the hours still show.
+  const previewRule = await resolveTradePayBasisForPreview(client, null, weekStart || weekEnding)
+  let previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding, previewRule.basis)
   let previewRecurringDeduction: TradeRecurringDeductionDecision | null = null
   try {
     const previewed = await applyTradeRecurringDeduction(client, previewMoney, { userId, weekStart })
@@ -57967,11 +58026,19 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     week_ending: weekEnding,
     week_start: weekStart,
     total_hours: Math.round(totalHours * 100) / 100,
-    ...tradeInvoiceMoneyResponse(previewMoney),
-    ...(previewRecurringDeduction ? tradeRecurringDeductionResponse(previewRecurringDeduction) : {}),
+    ...(previewRule.unavailable
+      ? { money: null, money_unavailable: true as const }
+      : {
+        ...tradeInvoiceMoneyResponse(previewMoney),
+        ...(previewRecurringDeduction ? tradeRecurringDeductionResponse(previewRecurringDeduction) : {}),
+        gst,
+        total: previewMoney.total_inc,
+        // The split as one object, with the rule it was worked out on
+        // (super_basis null: the old rule). trade.html reads super_basis.
+        money: { ...tradeInvoiceMoneyResponse(previewMoney), super_basis: previewMoney.super_basis ?? null },
+        money_unavailable: false as const,
+      }),
     subtotal,
-    gst,
-    total: previewMoney.total_inc,
     already_submitted: !!existingInvoice,
     running_invoice_draft: runningInvoiceDraftEnabled(userRow?.trade_details),
     // True when how each job is invoiced could not be read; every card's
@@ -64082,7 +64149,7 @@ async function listExpenses(client: any, params: URLSearchParams, caller?: { id:
   if (!tradeCaller) return { expenses: data || [] }
   const expenses = []
   for (const row of data || []) {
-    const result = await invoiceReimbursements(client, caller.id, [{ type: 'reimbursement', expense_receipt_id: row.id }], new Date().toISOString().slice(0, 10))
+    const result = await invoiceReimbursements(client, caller.id, [{ type: 'reimbursement', expense_receipt_id: row.id }], await tradePayBasisForSave(client, null, new Date().toISOString().slice(0, 10)))
     expenses.push({ ...row, reimbursement: { claimable: result.lines.length > 0, reason: result.skipped_items[0]?.code || null } })
   }
   return { expenses }
