@@ -185,8 +185,9 @@ BEGIN
 END $$;
 ROLLBACK;
 
--- 9. The persists carry the basis and the base onto the row; a payload with
---    none inserts exactly as before.
+-- 9. The persists carry the basis and the base onto the row as priced (the
+--    persist checks the figures, not which lines are free of super); a
+--    payload with none inserts exactly as before.
 BEGIN;
 INSERT INTO public.users (id, org_id, name) VALUES
   ('f1170000-0000-4000-8000-00000000000a', '00000000-0000-0000-0000-000000000001', 'ZZTEST Crew');
@@ -212,7 +213,7 @@ BEGIN
       'description', 'ZZTEST labour', 'quantity', 1, 'unit', 'ea', 'unit_rate', 1120,
       'total_hours', 0, 'line_total_ex', 1120, 'line_position', 0),
     jsonb_build_object('job_id', 'f1170000-0000-4000-8000-000000000101', 'job_number', 'ZZTEST-INC-JOB', 'line_type', 'other',
-      'description', 'ZZTEST reimbursement', 'quantity', 1, 'unit', 'ea', 'unit_rate', 80,
+      'description', 'ZZTEST other line', 'quantity', 1, 'unit', 'ea', 'unit_rate', 80,
       'total_hours', 0, 'line_total_ex', 80, 'line_position', 1));
   inv := public.persist_weekly_trade_invoice_v1(v_header, v_lines, NULL);
   SELECT super_basis, super_base_ex, super_amount, net_pay INTO got FROM public.trade_invoices WHERE id = inv;

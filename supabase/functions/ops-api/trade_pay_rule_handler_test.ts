@@ -261,7 +261,7 @@ function assertNotAgreed(out: Captured, jobNumber: string) {
 const ON_FROM = { payRuleOn: true, payRuleFrom: "2026-11-02" }; // WEEK_START, a Monday
 
 handlerTest("pay rule: a week on or after the start date is priced inclusive", async () => {
-  const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Labour", 20, 56)], ON_FROM);
+  const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 20, 56)], ON_FROM);
   assertSaved(out);
   const inv = out.invoiceRows[0];
   assertEquals(
@@ -272,7 +272,7 @@ handlerTest("pay rule: a week on or after the start date is priced inclusive", a
 });
 
 handlerTest("pay rule: a week before the start date is priced and stored on the old rule", async () => {
-  const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Labour", 20, 50)], { payRuleOn: true, payRuleFrom: "2026-11-09" });
+  const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 20, 50)], { payRuleOn: true, payRuleFrom: "2026-11-09" });
   assertSaved(out);
   const inv = out.invoiceRows[0];
   assertEquals([inv.gross_earned, inv.super_amount, inv.net_pay], [1000, 120, 940]);
@@ -281,7 +281,7 @@ handlerTest("pay rule: a week before the start date is priced and stored on the 
 
 handlerTest("pay rule: switch off, or no start date, prices every week on the old rule", async () => {
   for (const world of [{ payRuleOn: false, payRuleFrom: "2026-11-02" }, { payRuleOn: true, payRuleFrom: null }]) {
-    const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Labour", 20, 50)], world);
+    const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 20, 50)], world);
     assertSaved(out);
     const inv = out.invoiceRows[0];
     assertEquals([inv.super_amount, inv.net_pay], [120, 940]);
@@ -291,7 +291,7 @@ handlerTest("pay rule: switch off, or no start date, prices every week on the ol
 
 handlerTest("pay rule: commission is in the base on the new rule", async () => {
   const out = await submit([
-    plainLine(OPEN_JOB, "ZZF-2002", "Labour", 10, 56),
+    plainLine(OPEN_JOB, "ZZF-2002", "Materials", 10, 56),
     { ...plainLine(CREATED_JOB, "ZZM-2003", "Commission", 1, 560), row_type: "commission" },
   ], ON_FROM);
   assertSaved(out);
@@ -303,7 +303,7 @@ handlerTest("pay rule: commission is in the base on the new rule", async () => {
 // ── spec test 8: unreadable refuses ─────────────────────────────────────────
 
 handlerTest("pay rule: an unreadable start date refuses the submit and writes no invoice", async () => {
-  const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Labour", 20, 56)], { payRuleOn: true, failPaySettings: true });
+  const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 20, 56)], { payRuleOn: true, failPaySettings: true });
   assertEquals(out.status, 503, JSON.stringify(out.body));
   assertEquals(out.body.code, "pay_rule_unreadable");
   assertEquals(out.body.saved, false);
@@ -324,7 +324,7 @@ handlerTest("pay rule: an agreed work order on the new rule bills its total, sup
     [inv.super_basis, inv.gross_earned, inv.super_amount, inv.net_pay, inv.total_inc],
     ["inclusive_12_112_v1", 1850.5, 198.27, 1652.23, 1850.5],
   );
-  assert(inv.net_pay + inv.super_amount <= 1850.5);
+  assert(Math.round(inv.net_pay * 100) + Math.round(inv.super_amount * 100) <= 185050);
   for (const allocated of [1850.51, 2000]) {
     const refused = await submit([woRow(AGREED_JOB, "ZZF-2001", allocated)], ON_FROM);
     assertEquals(refused.status, 409, JSON.stringify(refused.body));
