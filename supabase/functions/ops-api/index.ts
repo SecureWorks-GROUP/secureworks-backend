@@ -1645,6 +1645,7 @@ import {
   setReviewOptOut,
 } from './job_closeout.ts'
 import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
+import { readPipelineStamp } from './pipeline_stamp.ts'
 import {
   type AutoStartDeps,
   loadJobAutoStartCandidates,
@@ -6659,6 +6660,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // The paid close-out block reads service-role close-out tables: staff only.
         includeCloseout: _opsApiCallerIsStaffOperator(authMode, authUser),
       }))
+      // The Jobs board's change stamp (P0-15.1, pipeline_stamp.ts): three small reads
+      // so the 5 minute refresh loads the board only when something changed.
+      case 'pipeline_stamp': {
+        if (authMode !== 'jwt' || !_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: 'A signed-in operator session is required.', code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+        const { stamp } = await readPipelineStamp(client, String(authUser?.orgId || ''))
+        return json({ ok: true, stamp })
+      }
       case 'makesafe_board': {
         // Outer JWT / projection gates live in makesafeBoardAction so the trade
         // envelope is one function the HTTP case and the deterministic proof share.
