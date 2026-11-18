@@ -1,4 +1,4 @@
--- Rollback of cl-payrun-escape (20261118999901). Run it before
+-- Rollback of cl-payrun-escape (20261118170500). Run it before
 -- 20261118163000's rollback (that one drops the push claim columns this
 -- function clears).
 --

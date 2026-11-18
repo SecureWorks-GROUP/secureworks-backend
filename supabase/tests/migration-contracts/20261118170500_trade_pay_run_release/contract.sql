@@ -7,8 +7,8 @@
 BEGIN;
 SET LOCAL statement_timeout = '120s';
 -- Rule 17: re-apply what this contract asserts on.
-\ir ../../../migrations/20261118999901_trade_pay_run_release.sql
-\ir ../../../migrations/20261118999901_trade_pay_run_release.sql
+\ir ../../../migrations/20261118170500_trade_pay_run_release.sql
+\ir ../../../migrations/20261118170500_trade_pay_run_release.sql
 
 CREATE FUNCTION pg_temp.zz_assert(ok boolean, words text) RETURNS void
 LANGUAGE plpgsql AS $$ BEGIN
@@ -38,13 +38,13 @@ SELECT pg_temp.zz_assert(NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'p
 SAVEPOINT zz_collide;
 CREATE OR REPLACE FUNCTION public.release_trade_pay_run_invoice(p_run_id uuid, p_invoice_id uuid, p_actor uuid, p_reason text, p_xero_check jsonb DEFAULT NULL)
 RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
-\ir ../../../migrations/20261118999901_trade_pay_run_release.sql
+\ir ../../../migrations/20261118170500_trade_pay_run_release.sql
 ROLLBACK TO SAVEPOINT zz_collide;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_apply_error \gset
 SAVEPOINT zz_collide;
 CREATE OR REPLACE FUNCTION public.release_trade_pay_run_invoice(p_run_id uuid, p_invoice_id uuid, p_actor uuid, p_reason text, p_xero_check jsonb DEFAULT NULL)
 RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
-\ir ../../../rollbacks/20261118999901_trade_pay_run_release_down.sql
+\ir ../../../rollbacks/20261118170500_trade_pay_run_release_down.sql
 ROLLBACK TO SAVEPOINT zz_collide;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_down_error \gset
 \set ON_ERROR_ROLLBACK off
@@ -58,7 +58,7 @@ SELECT pg_temp.zz_assert(:'collide_down_error' LIKE '%release_trade_pay_run_invo
 \set ON_ERROR_ROLLBACK on
 SAVEPOINT zz_collide_col;
 COMMENT ON COLUMN public.trade_pay_run_invoices.release_reason IS 'someone else';
-\ir ../../../migrations/20261118999901_trade_pay_run_release.sql
+\ir ../../../migrations/20261118170500_trade_pay_run_release.sql
 ROLLBACK TO SAVEPOINT zz_collide_col;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_col_error \gset
 \set ON_ERROR_ROLLBACK off
@@ -67,10 +67,10 @@ SELECT pg_temp.zz_assert(:'collide_col_error' LIKE '%columns release_reason exis
   'a foreign column must be refused: ' || :'collide_col_error');
 -- The rollback, then a re-apply, round-trip to this body.
 SAVEPOINT zz_round;
-\ir ../../../rollbacks/20261118999901_trade_pay_run_release_down.sql
+\ir ../../../rollbacks/20261118170500_trade_pay_run_release_down.sql
 SELECT pg_temp.zz_assert(to_regprocedure('public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,jsonb)') IS NULL,
   'the rollback drops the function');
-\ir ../../../migrations/20261118999901_trade_pay_run_release.sql
+\ir ../../../migrations/20261118170500_trade_pay_run_release.sql
 RELEASE SAVEPOINT zz_round;
 
 -- Fixtures: four crew invoices for one week, n x 112 inclusive of n x 12
@@ -367,7 +367,7 @@ SELECT pg_temp.zz_assert((:'zz_last'::jsonb)->>'run_status' = 'pushed'
 \set ON_ERROR_STOP off
 \set ON_ERROR_ROLLBACK on
 SAVEPOINT zz_recorded;
-\ir ../../../rollbacks/20261118999901_trade_pay_run_release_down.sql
+\ir ../../../rollbacks/20261118170500_trade_pay_run_release_down.sql
 ROLLBACK TO SAVEPOINT zz_recorded;
 SELECT :'LAST_ERROR_MESSAGE' AS recorded_down \gset
 \set ON_ERROR_ROLLBACK off
