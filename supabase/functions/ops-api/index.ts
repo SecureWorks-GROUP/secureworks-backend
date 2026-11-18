@@ -1576,7 +1576,7 @@ import {
 import { readXeroDrafts, XeroDraftsError } from './xero_drafts_read.ts'
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
-import { TradePayRunError, payRunReadsFromClient, readPayRun } from './trade_pay_run.ts'
+import { TradePayRunError, TradePayRunRefusal, PAY_RUN_SWITCH, approvePayRun, payRunApproveDepsFromClient, payRunReadsFromClient, readPayRun } from './trade_pay_run.ts'
 // Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
 import { PAY_FIGURES_APPROVER_ACTIONS, payFiguresApproverRefusal } from './pay_figures_approver.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
@@ -10124,6 +10124,38 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             actorUserId: authMode === 'jwt' ? (authUser?.id || null) : null,
           }))
         } catch (err) {
+          if (err instanceof TradePayRunError) {
+            return json({ ok: false, error: err.code, message: err.message }, err.status)
+          }
+          throw err
+        }
+      }
+
+      // Approve the weekly pay run in one press (P1-10.3). POST
+      // { week_start, expected_clean_ids_hash }. Behind trade_pay_run_v1
+      // (409 while off). A signed-in approver only: the server key alone is
+      // 403, and approvePayRun re-reads the week (approver check first) and
+      // approves only the server's own clean list, never ids from the client.
+      // Records the run and marks its clean invoices approved; never calls Xero.
+      case 'approve_pay_run': {
+        if (req.method !== 'POST') {
+          return json({ ok: false, error: 'method_not_allowed', message: 'approve_pay_run requires POST' }, 405)
+        }
+        try {
+          return json(await approvePayRun(
+            payRunApproveDepsFromClient(client, () => readFlag(client, PAY_RUN_SWITCH)),
+            {
+              orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
+              weekStart: body?.week_start,
+              expectedHash: body?.expected_clean_ids_hash,
+              // resolveRequestActor: only a verified signed-in user is a person.
+              actorUserId: requestActor.source === 'jwt' && authMode === 'jwt' ? (authUser?.id || null) : null,
+            },
+          ))
+        } catch (err) {
+          if (err instanceof TradePayRunRefusal) {
+            return json({ ok: false, error: err.code, message: err.message, ...err.extra }, err.status)
+          }
           if (err instanceof TradePayRunError) {
             return json({ ok: false, error: err.code, message: err.message }, err.status)
           }

@@ -8,9 +8,13 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  approvePayRun,
   cleanIdsHash,
   defaultPayRunWeek,
+  PAY_RUN_CHECK_RULE,
   PAY_RUN_REACH,
+  type PayRunApproveDeps,
+  payRunApproveDepsFromClient,
   payRunCutOff,
   payRunEligible,
   payRunPlacement,
@@ -18,8 +22,12 @@ import {
   payRunReadsFromClient,
   payRunWeek,
   readPayRun,
+  type ReconcileRaise,
+  type ReconcileWithdraw,
   STANDING_CHECK_CODES,
+  storedRunPays,
   TradePayRunError,
+  TradePayRunRefusal,
 } from "./trade_pay_run.ts";
 import {
   _opsApiActionNeedsStaffRole,
@@ -33,6 +41,8 @@ const APPROVER = "0a200000-0000-4000-8000-000000000001";
 const OFFICE = "0a200000-0000-4000-8000-000000000002";
 const id = (n: number) => `0a200000-0000-4000-8000-0000000003${10 + n}`;
 const user = (n: number) => `0a200000-0000-4000-8000-0000000000${10 + n}`;
+const JOB_A = "0a200000-0000-4000-8000-000000000801";
+const JOB_B = "0a200000-0000-4000-8000-000000000802";
 
 // Invoice n: n x 1120 inclusive of n x 120 super, no GST.
 function invoice(n: number, extra: Record<string, unknown> = {}) {
@@ -799,4 +809,693 @@ Deno.test("pay run: the production reader reads a recorded week against the inst
     out.invoices.map((i: any) => [i.invoice_id, i.verdict]),
     [[id(2), "stopped"], [id(1), "clean"]],
   );
+});
+
+// ════════════════════════════════════════════════════════════
+// P1-10.3: approve the run in one press. Every value, id and name is made up.
+// ════════════════════════════════════════════════════════════
+
+type ApproveWorld = World & {
+  switchOn?: boolean;
+  rpcError?: string;
+  rpcAnswer?: any;
+  raiseFails?: boolean;
+  withdrawFails?: boolean;
+  jobLines?: Array<
+    {
+      trade_invoice_id: string;
+      job_id: string | null;
+      job_number: string | null;
+    }
+  >;
+  roles?: Array<{ id: string; role: string }>;
+};
+
+type ApproveCalls = {
+  approve: any[];
+  raise: ReconcileRaise[];
+  withdraw: ReconcileWithdraw[];
+  logs: Record<string, unknown>[];
+  invoicesById: string[][];
+};
+
+function approveDeps(w: ApproveWorld, calls: ApproveCalls): PayRunApproveDeps {
+  const base = reads(w);
+  return {
+    reads: {
+      ...base,
+      invoicesById: (ids) => {
+        calls.invoicesById.push(ids);
+        return base.invoicesById(ids);
+      },
+    },
+    switchOn: () => Promise.resolve(w.switchOn ?? true),
+    approve: (params) => {
+      calls.approve.push(params);
+      if (w.rpcError) {
+        return Promise.resolve({
+          data: null,
+          error: { message: w.rpcError },
+        });
+      }
+      const inv = (params.p_snapshot as any).invoices as any[];
+      const clean = inv.filter((i) => i.verdict === "clean");
+      // The database records the run: later reads see it.
+      w.run = { id: RUN_ID, org_id: ORG, week_start: WEEK, status: "approved" };
+      w.runInvoices = inv.map((i) => ({
+        invoice_id: i.invoice_id,
+        pushed_at: null,
+      }));
+      return Promise.resolve({
+        data: w.rpcAnswer ?? {
+          run_id: RUN_ID,
+          week_start: WEEK,
+          invoice_count: clean.length,
+          stopped_count: inv.length - clean.length,
+          run_invoice_rows: inv.length,
+          approved_count: clean.length,
+        },
+        error: null,
+      });
+    },
+    raise: (item) => {
+      calls.raise.push(item);
+      return w.raiseFails
+        ? Promise.reject(new Error("ZZTEST raise down"))
+        : Promise.resolve();
+    },
+    withdraw: (item) => {
+      calls.withdraw.push(item);
+      return w.withdrawFails
+        ? Promise.reject(new Error("ZZTEST withdraw down"))
+        : Promise.resolve();
+    },
+    invoiceJobs: (ids) =>
+      Promise.resolve(
+        (w.jobLines ?? []).filter((l) => ids.includes(l.trade_invoice_id)),
+      ),
+    userRoles: (ids) =>
+      Promise.resolve((w.roles ?? []).filter((u) => ids.includes(u.id))),
+    log: (line) => calls.logs.push(line),
+  };
+}
+
+const RUN_ID = "0a200000-0000-4000-8000-000000000901";
+
+function newCalls(): ApproveCalls {
+  return { approve: [], raise: [], withdraw: [], logs: [], invoicesById: [] };
+}
+
+/** The hash the pay run read gives the approver for this world. */
+async function shownHash(w: World): Promise<string> {
+  const out: any = await run(structuredClone(w));
+  return out.clean_ids_hash;
+}
+
+async function press(
+  w: ApproveWorld,
+  calls: ApproveCalls,
+  opts: { actor?: string | null; hash?: unknown; week?: unknown } = {},
+) {
+  return await approvePayRun(approveDeps(w, calls), {
+    orgId: ORG,
+    weekStart: "week" in opts ? opts.week : WEEK,
+    expectedHash: "hash" in opts ? opts.hash : await shownHash(w),
+    actorUserId: "actor" in opts ? opts.actor : APPROVER,
+    now: NOW,
+  });
+}
+
+async function refusedWith(
+  p: Promise<unknown>,
+  code: string,
+  status: number,
+): Promise<TradePayRunError> {
+  const e = await assertRejects(() => p, TradePayRunError);
+  assertEquals((e as TradePayRunError).code, code);
+  assertEquals((e as TradePayRunError).status, status);
+  return e as TradePayRunError;
+}
+
+const noAmounts = (logs: Record<string, unknown>[]) => {
+  for (const l of logs) {
+    for (const v of Object.values(l)) {
+      assert(
+        typeof v !== "number",
+        `log carries a number: ${JSON.stringify(l)}`,
+      );
+    }
+  }
+};
+
+Deno.test("approve pay run: spec test 28, a non-approver is 403, an approver records the run, a second press is 409", async () => {
+  const w: ApproveWorld = {
+    rows: [1, 2, 3, 4].map((n) => invoice(n)),
+    v2Stops: { [id(4)]: STOP },
+  };
+  const hash = await shownHash(w);
+
+  // Office (signed in, not on the list): refused before any pay is read.
+  const office = newCalls();
+  const e = await refusedWith(
+    press(w, office, { actor: OFFICE, hash }),
+    "pay_run_not_approver",
+    403,
+  );
+  assertEquals(
+    e.message,
+    "Only the bookkeeper and the owner can approve the run.",
+  );
+  assertEquals(office.approve.length, 0);
+
+  // The approver records the run with the server's own snapshot.
+  const calls = newCalls();
+  const out: any = await press(w, calls, { hash });
+  assertEquals(calls.approve.length, 1);
+  const p = calls.approve[0];
+  assertEquals(p.p_org_id, ORG);
+  assertEquals(p.p_week_start, WEEK);
+  assertEquals(p.p_actor, APPROVER);
+  assertEquals(p.p_snapshot.check_rule, PAY_RUN_CHECK_RULE);
+  assertEquals(
+    p.p_snapshot.invoices.map((
+      i: any,
+    ) => [i.invoice_id, i.verdict, i.pays, i.super_amount]).sort(),
+    [
+      [id(1), "clean", 1000, 120],
+      [id(2), "clean", 2000, 240],
+      [id(3), "clean", 3000, 360],
+      [id(4), "stopped", 4000, 480],
+    ],
+  );
+  assertEquals(out.ok, true);
+  assertEquals(out.run.run_id, RUN_ID);
+  assertEquals(out.run.invoice_count, 3);
+  assertEquals(out.clean_invoice_ids, [id(1), id(2), id(3)].sort());
+
+  // A second press finds the run already recorded.
+  const again = newCalls();
+  await refusedWith(press(w, again, { hash }), "pay_run_already_approved", 409);
+  assertEquals(again.approve.length, 0);
+  noAmounts([...calls.logs, ...again.logs]);
+});
+
+Deno.test("approve pay run: the server key alone, or no signed-in person, is 403 before any read", async () => {
+  const w: ApproveWorld = { rows: [invoice(1)] };
+  for (const actor of [null, "", "not-a-uuid"]) {
+    const calls = newCalls();
+    await refusedWith(
+      press(w, calls, { actor, hash: "a".repeat(64) }),
+      "pay_run_named_person_required",
+      403,
+    );
+    assertEquals(calls.approve.length, 0);
+    assertEquals(calls.invoicesById.length, 0);
+  }
+});
+
+Deno.test("approve pay run: the switch off gives 409 and nothing is read or written", async () => {
+  const calls = newCalls();
+  let read = false;
+  const deps = approveDeps({ rows: [invoice(1)], switchOn: false }, calls);
+  deps.reads.approvers = () => {
+    read = true;
+    return Promise.resolve([APPROVER]);
+  };
+  await refusedWith(
+    approvePayRun(deps, {
+      orgId: ORG,
+      weekStart: WEEK,
+      expectedHash: "a".repeat(64),
+      actorUserId: APPROVER,
+      now: NOW,
+    }),
+    "pay_run_switch_off",
+    409,
+  );
+  assertEquals(read, false);
+  assertEquals(calls.approve.length, 0);
+});
+
+Deno.test("approve pay run: a week that changed since it was shown is 409 and writes nothing", async () => {
+  const w: ApproveWorld = { rows: [1, 2, 3].map((n) => invoice(n)) };
+  const hash = await shownHash(w);
+  // The office changes one invoice by a cent after it was shown.
+  w.rows[1] = invoice(2, { net_pay: 1999.99, super_amount: 240.01 });
+  const calls = newCalls();
+  const e = await refusedWith(
+    press(w, calls, { hash }),
+    "pay_run_changed_since_shown",
+    409,
+  );
+  assertEquals(
+    e.message,
+    "The pay run changed since you opened it. Check it again.",
+  );
+  assertEquals(calls.approve.length, 0);
+  assertEquals(calls.raise.length, 0);
+  assertEquals(calls.withdraw.length, 0);
+});
+
+Deno.test("approve pay run: a blocked week is 409, records no run and raises one pay_run_stopped item", async () => {
+  const w: ApproveWorld = {
+    rows: [1, 2].map((n) => invoice(n)),
+    runBlocked: true,
+  };
+  const calls = newCalls();
+  const deps = approveDeps(w, calls);
+  const base = deps.reads.standing;
+  deps.reads.standing = async (p) => {
+    const a = await base(p);
+    a.checks[0].expected = 3000;
+    a.checks[0].actual = 2875.5;
+    return a;
+  };
+  const hash = await shownHash(w);
+  const e = await assertRejects(
+    () =>
+      approvePayRun(deps, {
+        orgId: ORG,
+        weekStart: WEEK,
+        expectedHash: hash,
+        actorUserId: APPROVER,
+        now: NOW,
+      }),
+    TradePayRunRefusal,
+  );
+  assertEquals(e.code, "pay_run_standing_check_failed");
+  assertEquals(e.status, 409);
+  assertEquals(e.extra.run_blocked_words, "ZZTEST pay and job cost differ");
+  assertEquals(calls.approve.length, 0);
+  assertEquals(calls.raise.length, 1);
+  const item = calls.raise[0];
+  assertEquals(item.kind, "pay_run_stopped");
+  assertEquals(item.subject_table, "trade_pay_run_weeks");
+  assertEquals(item.subject_id, `${ORG}:${WEEK}`);
+  assertEquals(item.job_ids, []);
+  assertEquals(item.suggestion, { action: "find_the_difference" });
+  assertEquals(item.raised_by, "phase1:pay_run");
+  assertEquals(item.evidence.reason, "run_total_mismatch");
+  assertEquals(item.evidence.amount_ex, 124.5);
+  assertEquals(item.evidence.document_date, WEEK);
+  assertEquals(item.evidence.summary, {
+    words: "ZZTEST pay and job cost differ",
+    week_start: WEEK,
+  });
+  assert(Array.isArray(item.evidence.standing));
+});
+
+Deno.test("approve pay run: a blocked week whose office item fails still refuses and is logged by code", async () => {
+  const w: ApproveWorld = {
+    rows: [invoice(1)],
+    runBlocked: true,
+    raiseFails: true,
+  };
+  const calls = newCalls();
+  await refusedWith(press(w, calls), "pay_run_standing_check_failed", 409);
+  assertEquals(calls.approve.length, 0);
+  assertEquals(calls.logs.map((l) => [l.event, l.op, l.code]), [
+    ["pay_run_office_item_failed", "raise", "raise_failed"],
+  ]);
+});
+
+Deno.test("approve pay run: a standing stop on one of four invoices approves the other three and raises its item", async () => {
+  const w: ApproveWorld = {
+    rows: [1, 2, 3, 4].map((n) => invoice(n)),
+    standingStops: {
+      [id(2)]: [{
+        code: "standing_super_is_12_over_112",
+        words: "ZZTEST super wrong",
+      }],
+    },
+    jobLines: [
+      { trade_invoice_id: id(2), job_id: JOB_A, job_number: "SWF-ZZ1" },
+      { trade_invoice_id: id(2), job_id: JOB_B, job_number: "SWF-ZZ2" },
+      { trade_invoice_id: id(2), job_id: JOB_A, job_number: "SWF-ZZ1" },
+      { trade_invoice_id: id(1), job_id: JOB_B, job_number: "SWF-ZZ2" },
+    ],
+    roles: [{ id: user(2), role: "lead_installer" }],
+  };
+  const calls = newCalls();
+  const out: any = await press(w, calls);
+  const snap = calls.approve[0].p_snapshot.invoices;
+  assertEquals(
+    snap.filter((i: any) => i.verdict === "clean").map((i: any) => i.invoice_id)
+      .sort(),
+    [id(1), id(3), id(4)].sort(),
+  );
+  const stopped = snap.find((i: any) => i.invoice_id === id(2));
+  assertEquals(stopped.verdict, "stopped");
+  assertEquals(stopped.stops, [{
+    code: "standing_super_is_12_over_112",
+    words: "ZZTEST super wrong",
+  }]);
+  assertEquals(out.clean_invoice_ids, [id(1), id(3), id(4)].sort());
+
+  assertEquals(calls.raise.length, 1);
+  const item = calls.raise[0];
+  assertEquals(item.kind, "pay_claim_stopped");
+  assertEquals(item.subject_table, "trade_invoices");
+  assertEquals(item.subject_id, id(2));
+  assertEquals(item.job_ids, [JOB_A, JOB_B]);
+  assertEquals(item.suggestion, { action: "fix_or_send_back" });
+  assertEquals(item.raised_by, "phase1:pay_run");
+  assertEquals(item.evidence.reason, "standing_super_is_12_over_112");
+  assertEquals(item.evidence.amount_ex, 2240);
+  assertEquals(item.evidence.document_date, WEEK);
+  assertEquals(item.evidence.summary, {
+    words: "ZZTEST super wrong",
+    trade_user_id: user(2),
+    trade_name: "ZZTEST Trade 2",
+    trade_role: "lead_installer",
+    job_number: "SWF-ZZ1",
+    week_start: WEEK,
+  });
+  assertEquals(item.evidence.stops, stopped.stops);
+
+  // Every invoice clean now has its old item withdrawn (a no-op when none).
+  assertEquals(
+    calls.withdraw.map((x) => [x.kind, x.subject_table, x.subject_id, x.reason])
+      .sort(),
+    [id(1), id(3), id(4)].sort().map((i) => [
+      "pay_claim_stopped",
+      "trade_invoices",
+      i,
+      "Clean in this pay run",
+    ]),
+  );
+  assertEquals(out.office_items, { raised: 1, withdrawn: 3, failed: 0 });
+});
+
+Deno.test("approve pay run: each stopped invoice raises one item carrying its first stop's reason", async () => {
+  const w: ApproveWorld = {
+    rows: [1, 2, 3].map((n) => invoice(n)),
+    v2Stops: {
+      [id(1)]: [
+        { code: "work_order_over_agreed", words: "ZZTEST over." },
+        { code: "crew_not_accepted", words: "ZZTEST crew." },
+      ],
+      [id(3)]: [{ code: "no_work_order", words: "ZZTEST none." }],
+    },
+  };
+  const calls = newCalls();
+  await press(w, calls);
+  assertEquals(
+    calls.raise.map((
+      r,
+    ) => [r.subject_id, r.evidence.reason, (r.evidence.summary as any).words])
+      .sort(),
+    [
+      [id(1), "work_order_over_agreed", "ZZTEST over. ZZTEST crew."],
+      [id(3), "no_work_order", "ZZTEST none."],
+    ].sort(),
+  );
+  assertEquals(calls.withdraw.map((x) => x.subject_id), [id(2)]);
+});
+
+Deno.test("approve pay run: a failed raise or withdraw is logged by code and never undoes the approval", async () => {
+  const w: ApproveWorld = {
+    rows: [1, 2].map((n) => invoice(n)),
+    v2Stops: { [id(2)]: STOP },
+    raiseFails: true,
+    withdrawFails: true,
+  };
+  const calls = newCalls();
+  const out: any = await press(w, calls);
+  assertEquals(out.ok, true);
+  assertEquals(out.run.run_id, RUN_ID);
+  assertEquals(out.office_items, { raised: 0, withdrawn: 0, failed: 2 });
+  assertEquals(
+    calls.logs.filter((l) => l.event === "pay_run_office_item_failed").map((
+      l,
+    ) => [l.op, l.subject_id]).sort(),
+    [["raise", id(2)], ["withdraw", id(1)]].sort(),
+  );
+  noAmounts(calls.logs);
+});
+
+Deno.test("approve pay run: the database's own refusals map to the ticket's answers", async () => {
+  const cases: Array<[string, string, number]> = [
+    ["pay_run_not_approver", "pay_run_not_approver", 403],
+    ["pay_run_already_approved", "pay_run_already_approved", 409],
+    ["pay_run_changed_since_shown", "pay_run_changed_since_shown", 409],
+    ["pay_run_standing_check_failed", "pay_run_standing_check_failed", 409],
+    ["pay_run_snapshot_invalid", "pay_run_snapshot_invalid", 503],
+    ["pay_run_figures_unreadable", "pay_run_figures_unreadable", 503],
+    [
+      "pay_run_standing_check_unreadable",
+      "pay_run_standing_check_unreadable",
+      503,
+    ],
+    [
+      "canceling statement due to statement timeout",
+      "pay_run_approve_failed",
+      503,
+    ],
+  ];
+  for (const [raised, code, status] of cases) {
+    const w: ApproveWorld = { rows: [invoice(1)], rpcError: raised };
+    const calls = newCalls();
+    const e = await refusedWith(press(w, calls), code, status);
+    if (code === "pay_run_not_approver") {
+      assertEquals(
+        e.message,
+        "Only the bookkeeper and the owner can approve the run.",
+      );
+    }
+    if (code === "pay_run_standing_check_failed") {
+      assert(e instanceof TradePayRunRefusal);
+    }
+    // A refused approval raises and withdraws nothing.
+    assertEquals(calls.raise.length, 0);
+    assertEquals(calls.withdraw.length, 0);
+    noAmounts(calls.logs);
+  }
+});
+
+Deno.test("approve pay run: an answer with no run id is 503, never reported as recorded", async () => {
+  const w: ApproveWorld = { rows: [invoice(1)], rpcAnswer: { ok: true } };
+  const calls = newCalls();
+  await refusedWith(press(w, calls), "pay_run_approve_failed", 503);
+  assertEquals(calls.withdraw.length, 0);
+});
+
+Deno.test("approve pay run: the snapshot's pays is what the database reads for GST and a recurring deduction", async () => {
+  const gstRow = invoice(1, {
+    subtotal_ex: 1200,
+    gross_earned: 1200,
+    super_base_ex: 1120,
+    super_amount: 120,
+    net_pay: 1080,
+    gst_on: true,
+    gst: 112,
+    total_inc: 1312,
+  });
+  const deductionRow = invoice(2, {
+    recurring_deduction_amount: 50,
+    recurring_deduction_label: "ZZTEST deduction",
+  });
+  const w: ApproveWorld = { rows: [gstRow, deductionRow] };
+  const calls = newCalls();
+  await press(w, calls);
+  const snap = calls.approve[0].p_snapshot.invoices as any[];
+  for (const row of [gstRow, deductionRow]) {
+    const e = snap.find((i) => i.invoice_id === row.id);
+    assertEquals(e.verdict, "clean");
+    // approve_trade_pay_run: round(net_pay + gst when on - deduction, 2).
+    assertEquals(e.pays, storedRunPays(row));
+    assertEquals(e.super_amount, row.super_amount);
+  }
+  assertEquals(snap.find((i) => i.invoice_id === id(1)).pays, 1192);
+  assertEquals(snap.find((i) => i.invoice_id === id(2)).pays, 1950);
+});
+
+Deno.test("approve pay run: a stopped invoice whose figures could not be shown records its stored figures, or refuses", async () => {
+  // Pay figures that do not add up: shown stopped money_unreadable.
+  const broken = invoice(2, { net_pay: 1500 });
+  const w: ApproveWorld = { rows: [invoice(1), broken] };
+  const calls = newCalls();
+  await press(w, calls);
+  const e = (calls.approve[0].p_snapshot.invoices as any[]).find((i) =>
+    i.invoice_id === id(2)
+  );
+  assertEquals(e.verdict, "stopped");
+  assertEquals(e.pays, 1500);
+  assertEquals(e.super_amount, 240);
+
+  // Missing stored figures: refused, never sent as 0.
+  const missing = invoice(2, { net_pay: null });
+  const w2: ApproveWorld = { rows: [invoice(1), missing] };
+  const calls2 = newCalls();
+  await refusedWith(
+    press(w2, calls2),
+    "pay_run_stopped_figures_unreadable",
+    503,
+  );
+  assertEquals(calls2.approve.length, 0);
+});
+
+Deno.test("approve pay run: the press must name its week and the hash it was shown; client ids are ignored", async () => {
+  const w: ApproveWorld = { rows: [invoice(1)] };
+  for (const week of [undefined, null, "", "2026-11-17", 20261116]) {
+    const calls = newCalls();
+    await refusedWith(
+      press(w, calls, { week, hash: "a".repeat(64) }),
+      "pay_run_week_invalid",
+      400,
+    );
+    assertEquals(calls.approve.length, 0);
+  }
+  for (const hash of [undefined, null, "", "abc", 123, "g".repeat(64)]) {
+    const calls = newCalls();
+    await refusedWith(press(w, calls, { hash }), "pay_run_hash_required", 400);
+    assertEquals(calls.approve.length, 0);
+  }
+  // Upper-case hex of the right hash is the same hash.
+  const calls = newCalls();
+  await press(w, calls, { hash: (await shownHash(w)).toUpperCase() });
+  assertEquals(calls.approve.length, 1);
+});
+
+Deno.test("approve pay run: a failed read is 503 and nothing is written", async () => {
+  for (const fail of ["approvers", "run", "candidates", "v2", "standing"]) {
+    const w: ApproveWorld = { rows: [invoice(1)], fail };
+    const calls = newCalls();
+    await refusedWith(
+      press(w, calls, { hash: "a".repeat(64) }),
+      "pay_run_unreadable",
+      503,
+    );
+    assertEquals(calls.approve.length, 0);
+    assertEquals(calls.raise.length, 0);
+  }
+});
+
+Deno.test("approve pay run: staff only at the ops-api front door, POST only, no routine or agent key", () => {
+  const url = new URL("https://example.invalid/ops-api?action=approve_pay_run");
+  assertEquals(_opsApiActionNeedsStaffRole(url), true);
+  assertEquals(AGENT_READ_ALLOWED_ACTIONS.has("approve_pay_run"), false);
+  assertEquals(LEAD_INSTALLER_READ_ACTIONS.has("approve_pay_run"), false);
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url));
+  const routine = src.slice(
+    src.indexOf("const ROUTINE_ALLOWED_ACTIONS = new Set(["),
+  );
+  assertEquals(
+    routine.slice(0, routine.indexOf("])")).includes("'approve_pay_run'"),
+    false,
+  );
+  const caseAt = src.indexOf("case 'approve_pay_run': {");
+  assert(caseAt > 0);
+  const body = src.slice(
+    caseAt,
+    src.indexOf("case 'list_work_orders':", caseAt),
+  );
+  assert(body.includes("req.method !== 'POST'"));
+  assert(body.includes("requestActor.source === 'jwt'"));
+  // The approve path never reaches Xero.
+  assertEquals(/xero/i.test(body.replace(/never calls Xero/, "")), false);
+});
+
+async function migrationText(suffix: string): Promise<string> {
+  const dir = new URL("../../migrations/", import.meta.url);
+  for await (const e of Deno.readDir(dir)) {
+    if (e.name.endsWith(suffix)) {
+      return await Deno.readTextFile(new URL(e.name, dir));
+    }
+  }
+  throw new Error(`no migration ending ${suffix}`);
+}
+
+/** The named parameters of `public.<fn>(` as the migration declares them. */
+function declaredParams(sql: string, fn: string): string[] {
+  const at = sql.indexOf(`FUNCTION public.${fn}(`);
+  assert(at >= 0, `${fn} not declared`);
+  const open = at + `FUNCTION public.${fn}(`.length;
+  const args = sql.slice(open, sql.indexOf(")", open));
+  return args.split(",").map((a) => a.trim().split(/\s+/)[0]);
+}
+
+Deno.test("approve pay run: the production dependencies call what the migrations install", async () => {
+  const calls: Array<{ kind: string; name: string; args: any }> = [];
+  const selects = new Map<string, string[]>();
+  const client = {
+    rpc: (name: string, args: any) => {
+      calls.push({ kind: "rpc", name, args });
+      return Promise.resolve({ data: { run_id: RUN_ID }, error: null });
+    },
+    from(table: string) {
+      const q: any = {
+        select(cols: string) {
+          selects.set(table, cols.split(",").map((c) => c.trim()));
+          return q;
+        },
+        in: () => q,
+        order: () => q,
+        range: () => q,
+        then: (res: (v: any) => unknown) =>
+          Promise.resolve({ data: [], error: null }).then(res),
+      };
+      return q;
+    },
+  };
+  const deps = payRunApproveDepsFromClient(client, () => Promise.resolve(true));
+  await deps.approve({
+    p_org_id: ORG,
+    p_week_start: WEEK,
+    p_actor: APPROVER,
+    p_snapshot: { check_rule: PAY_RUN_CHECK_RULE, invoices: [] },
+  });
+  await deps.withdraw({
+    kind: "pay_claim_stopped",
+    subject_table: "trade_invoices",
+    subject_id: id(1),
+    reason: "Clean in this pay run",
+  });
+  await deps.raise({
+    kind: "pay_claim_stopped",
+    subject_table: "trade_invoices",
+    subject_id: id(1),
+    job_ids: [],
+    suggestion: {},
+    evidence: { reason: "x" },
+    raised_by: "phase1:pay_run",
+  });
+  await deps.invoiceJobs([id(1)]);
+  await deps.userRoles([user(1)]);
+
+  const runs = await migrationText("_trade_pay_runs.sql");
+  assertEquals(
+    Object.keys(calls.find((c) => c.name === "approve_trade_pay_run")!.args),
+    declaredParams(runs, "approve_trade_pay_run"),
+  );
+  const reconcile = await migrationText("_reconcile_item_raise.sql");
+  assertEquals(
+    Object.keys(calls.find((c) => c.name === "reconcile_item_withdraw")!.args),
+    declaredParams(reconcile, "reconcile_item_withdraw"),
+  );
+  // reconcile_item_raise declares its arguments by position and names them by
+  // ALIAS inside; the call uses those names, in order (open gap: PostgREST
+  // calls by name, see the PR).
+  const aliases = [
+    ...reconcile.matchAll(/(p_\w+) ALIAS FOR \$(\d)/g),
+  ].sort((a, b) => Number(a[2]) - Number(b[2])).map((m) => m[1]);
+  assertEquals(aliases.length, 7);
+  assertEquals(
+    Object.keys(calls.find((c) => c.name === "reconcile_item_raise")!.args),
+    aliases,
+  );
+
+  // trade_invoice_lines job columns as created (20260325000003).
+  const timer = await migrationText("_timer_invoice_system.sql");
+  const lineTable = timer.slice(
+    timer.indexOf("CREATE TABLE trade_invoice_lines ("),
+  );
+  const lineCols = lineTable.slice(0, lineTable.indexOf(");"));
+  for (const col of selects.get("trade_invoice_lines")!) {
+    assert(
+      new RegExp(`\\b${col}\\b`).test(lineCols),
+      `trade_invoice_lines.${col}`,
+    );
+  }
+  assertEquals(selects.get("users"), ["id", "role"]);
 });
