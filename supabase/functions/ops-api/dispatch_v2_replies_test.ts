@@ -630,6 +630,44 @@ Deno.test("scan: counts each kind of mail and moves the cursor", async () => {
   assertEquals(result.cursor_sequence, 108);
 });
 
+// Read now (item 19, contract section 3j): peek reads the rows saved in the
+// last two minutes too, but the cursor moves only over the settled ones.
+Deno.test("scan: peek stores a row saved a minute ago but keeps the cursor before it", async () => {
+  const t = setup();
+  t.store.events = MAIL.map(eventRow);
+  t.store.scan.cursor_sequence = 100;
+  const r = await t.run("dispatch_v2_replies_scan", { peek: true });
+  assertEquals(r.read, 9); // 110 is read now; 109 (private) never is
+  assert(t.store.emails.some((e) => e.sequence_number === 110));
+  assertEquals(r.cursor_sequence, 108);
+  assertEquals(t.store.scan.cursor_sequence, 108);
+});
+
+Deno.test("scan: after a peek, the next run skips the row as stored and moves past it", async () => {
+  const t = setup();
+  t.store.events = MAIL.map(eventRow);
+  t.store.scan.cursor_sequence = 100;
+  await t.run("dispatch_v2_replies_scan", { peek: true });
+  const before = t.store.emails.length;
+  t.ctx.now = () => "2026-10-23T08:05:00Z";
+  const r = await t.run("dispatch_v2_replies_scan");
+  assertEquals(r.read, 1);
+  assertEquals(r.already_stored, 1);
+  assertEquals(r.stored, 0);
+  assertEquals(t.store.emails.length, before);
+  assertEquals(r.cursor_sequence, 110);
+});
+
+Deno.test("scan: peek with only fresh rows stores them and leaves the cursor where it was", async () => {
+  const t = setup();
+  t.store.events = MAIL.filter((c) => c.seq === 110).map(eventRow);
+  t.store.scan.cursor_sequence = 100;
+  const r = await t.run("dispatch_v2_replies_scan", { peek: true });
+  assertEquals(r.read, 1);
+  assertEquals(r.cursor_sequence, 100);
+  assertEquals(t.store.scan.cursor_sequence, 100);
+});
+
 Deno.test("scan: rung 1, same thread, with a delivery suggestion", async () => {
   const { bySeq, store } = await scanned();
   const e = bySeq(101)!;

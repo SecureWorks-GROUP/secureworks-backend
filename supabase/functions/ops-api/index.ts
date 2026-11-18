@@ -431,6 +431,7 @@ import {
 import { postgrestReplyPdfReader } from './dispatch_v2_reply_pdf.ts'
 import { postgrestRepliesStore } from './dispatch_v2_replies_store.ts'
 import { postgrestDispatchRepliesSources } from './dispatch_v2_replies_sources.ts'
+import { makeReadNowRunner, outlookPollMail } from './dispatch_v2_read_now.ts'
 import {
   addTrayAttachments,
   openTrayAttachment,
@@ -5645,6 +5646,37 @@ export const OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS: ReadonlySet<string> = new 
   'dispatch_v2_replies_scan', // trigger_dispatch_v2_replies_scan, cron dispatch-v2-replies-scan (sw_service_key())
 ])
 
+// The supplier reply scan, as cron dispatch-v2-replies-scan runs it: the scan
+// (dispatch_v2_replies.ts), then the sweep of confirmed orders for new supplier
+// PDFs. Shared by the cron action and Read now (item 19, contract section 3j),
+// so Read now runs exactly what the cron runs.
+async function dispatchV2RepliesScanLive(client: any, params: URLSearchParams, body: any): Promise<any> {
+  const scanned: any = await runDispatchV2RepliesAction('dispatch_v2_replies_scan', params, body, {
+    orgId: DEFAULT_ORG_ID,
+    actor: { userId: null, email: null, orgId: null },
+    via: 'terminal',
+    store: postgrestRepliesStore(client),
+    sources: postgrestDispatchRepliesSources(client),
+    // Contract section 3g (6 Nov): an order sent from admin@ in Outlook
+    // becomes that supplier's Dispatch order when it is sent (never
+    // sends anything, never moves a job's status).
+    onSend: postgrestOnSendStore(client),
+    // Tweak 2 (contract section 3f.2): an email its words cannot place
+    // is matched by the one job number in its stored PDFs (read only).
+    pdfs: postgrestReplyPdfReader(client),
+  })
+  if (scanned?.skipped === 'flag_off') return scanned
+  // Never throws; a failed sweep only means no new documents this run.
+  const orderDocuments = await sweepDispatchV2OrderDocuments(client, {
+    orgId: DEFAULT_ORG_ID,
+    now: new Date().toISOString(),
+  })
+  return { ...scanned, order_documents: orderDocuments }
+}
+
+// Read now's one-at-a-time guard lives as long as this worker.
+const dispatchV2ReadNowRunner = makeReadNowRunner()
+
 export function _opsApiServiceCredentialOptions(url: URL): ServiceCredentialOptions {
   return OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS.has(url.searchParams.get('action') || '')
     ? { legacy: 'service_role_claim' }
@@ -8190,31 +8222,40 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ error: 'dispatch_v2_replies_scan is POST only', code: 'method_not_allowed' }, 405)
         }
         try {
-          const scanned: any = await runDispatchV2RepliesAction(action, url.searchParams, body, {
-            orgId: DEFAULT_ORG_ID,
-            actor: { userId: null, email: null, orgId: null },
-            via: 'terminal',
-            store: postgrestRepliesStore(client),
-            sources: postgrestDispatchRepliesSources(client),
-            // Contract section 3g (6 Nov): an order sent from admin@ in Outlook
-            // becomes that supplier's Dispatch order when it is sent (never
-            // sends anything, never moves a job's status).
-            onSend: postgrestOnSendStore(client),
-            // Tweak 2 (contract section 3f.2): an email its words cannot place
-            // is matched by the one job number in its stored PDFs (read only).
-            pdfs: postgrestReplyPdfReader(client),
-          })
-          if (scanned?.skipped === 'flag_off') return json(scanned)
-          // Never throws; a failed sweep only means no new documents this run.
-          const orderDocuments = await sweepDispatchV2OrderDocuments(client, {
-            orgId: DEFAULT_ORG_ID,
-            now: new Date().toISOString(),
-          })
-          return json({ ...scanned, order_documents: orderDocuments })
+          return json(await dispatchV2RepliesScanLive(client, url.searchParams, body))
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
           throw e
         }
+      }
+      // Dispatch v2 item 19 (18 Nov 2026): Read now (contract section 3j;
+      // dispatch_v2_read_now.ts). One press (POST) by office staff: reads
+      // Outlook now (the reader cron outlook-mail-poll calls, mode poll) and
+      // then runs the supplier reply scan above with peek on, so a reply that
+      // just landed is matched now. Honours the capture lane, as both crons
+      // do. Absent from ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and
+      // LEAD_INSTALLER_READ_ACTIONS. Reads mail only: no send, no job stage or
+      // status, no Xero; writes only what those two crons write.
+      case 'dispatch_v2_read_now': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const readNowReplies = postgrestRepliesStore(client)
+        return json(await dispatchV2ReadNowRunner({
+          now: () => Date.now(),
+          captureLaneOn: async () => {
+            const { data, error } = await client.rpc('automation_lane_enabled', { lane: 'capture' })
+            if (error) throw Object.assign(new Error('capture lane read failed'), { code: 'lane_read_failed' })
+            return data === true
+          },
+          pollMail: outlookPollMail({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
+          scanReplies: () => dispatchV2RepliesScanLive(client, new URLSearchParams(), { peek: true, actor: 'dispatch-v2-read-now' }),
+          leftToSort: async () => {
+            const { counts } = await readNowReplies.tray(DEFAULT_ORG_ID, { includeOther: false, limit: 1 })
+            return (Number(counts?.needs_confirmation) || 0) + (Number(counts?.unmatched_order_desk) || 0)
+          },
+        }))
       }
       case 'dispatch_v2_outlook_catch_up': {
         // Contract section 3g.2: the one-off catch-up of orders sent from
