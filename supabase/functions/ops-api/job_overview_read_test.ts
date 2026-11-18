@@ -708,6 +708,35 @@ Deno.test("GET job_overview: every part, read only, no network, the card passed 
   ]);
 });
 
+Deno.test("Follow-up 32: a stored money block's as-at time reaches the page unchanged; a live one has none", async () => {
+  const money = {
+    lines: ["Invoiced $1,000.00 inc GST, paid $500.00."],
+    complete: true,
+    computed_at: "2026-10-09T01:08:00.000Z",
+  };
+  const stored = { ...STORY_TEXT, money };
+  const o: any = await noNetwork(() =>
+    jobOverviewAction(
+      fullClient({ rpc: { context_job_story_text_get: stored } }),
+      new URLSearchParams(`jobId=${JOB}`),
+      deps(),
+    )
+  );
+  assertEquals(o.story_text, stored);
+  assertEquals(o.story_text.money.computed_at, "2026-10-09T01:08:00.000Z");
+  const { computed_at: _gone, ...liveMoney } = money;
+  const live = { ...STORY_TEXT, money: liveMoney };
+  const l: any = await noNetwork(() =>
+    jobOverviewAction(
+      fullClient({ rpc: { context_job_story_text_get: live } }),
+      new URLSearchParams(`jobId=${JOB}`),
+      deps(),
+    )
+  );
+  assertEquals(l.story_text, live);
+  assertEquals("computed_at" in l.story_text.money, false);
+});
+
 Deno.test("Matching: rows waiting for this job are counted, a cut page says more, and an unread count is never zero", async () => {
   const rows = Array.from({ length: 201 }, (_, i) => ({
     event_id: `e${i}`,
