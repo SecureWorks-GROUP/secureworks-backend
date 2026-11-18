@@ -181,6 +181,7 @@ Deno.test("off preserves the response and makes no extra reads; failed reads fal
       reads++;
       const query: any = {
         select: () => query,
+        neq: () => query,
         eq: () => query,
         not: () => query,
         lte: () => query,
@@ -338,6 +339,10 @@ function handlerClient(
       const q: any = {
         select(value: string) {
           cols = value;
+          return q;
+        },
+        neq(key: string, value: any) {
+          filters.push((row) => row[key] !== value);
           return q;
         },
         eq(key: string, value: any) {

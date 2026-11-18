@@ -230,6 +230,10 @@ export function pdfFromTextLines(lines: string[]): Uint8Array<ArrayBuffer> {
     return utf8(ops.join("\n"));
   });
 
+  return assembleTextPdf(contentStreams);
+}
+
+export function assembleTextPdf(contentStreams: Uint8Array[], pageHeight = 792, winAnsi = false): Uint8Array<ArrayBuffer> {
   const pageCount = contentStreams.length;
   const pageIds = contentStreams.map((_, i) => 4 + i * 2);
   const contentIds = contentStreams.map((_, i) => 5 + i * 2);
@@ -241,11 +245,11 @@ export function pdfFromTextLines(lines: string[]): Uint8Array<ArrayBuffer> {
     }] /Count ${pageCount} >>`,
   );
   byNumber[3] = utf8(
-    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica${winAnsi ? " /Encoding /WinAnsiEncoding" : ""} >>`,
   );
   for (let i = 0; i < pageCount; i++) {
     byNumber[pageIds[i]] = utf8(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 ${pageHeight}] /Contents ${
         contentIds[i]
       } 0 R /Resources << /Font << /F1 3 0 R >> >> >>`,
     );

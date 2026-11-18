@@ -1,13 +1,19 @@
 BEGIN;
 SET LOCAL statement_timeout = '120s';
--- Rule 17: re-apply what this contract asserts. P2-03.1 is re-applied only if an
--- earlier contract removed it; this migration is always re-applied.
+-- Rule 17: re-apply what this contract asserts when an earlier contract removed
+-- it; when a guarded successor is installed, test that live surface directly.
 SELECT to_regclass('public.reconcile_items') IS NULL AS raise_contract_needs_tables \gset
 \if :raise_contract_needs_tables
 \ir ../20261118060051_reconcile_tables/main_lines_reader.sql
 \ir ../../../migrations/20261118060051_reconcile_tables.sql
 \endif
+SELECT to_regprocedure('public.reconcile_item_raise(text,text,text,uuid[],jsonb,jsonb,text)') IS NULL
+   OR to_regprocedure('public.reconcile_item_org(text,text,uuid[])') IS NULL
+   OR to_regprocedure('public.reconcile_item_withdraw(text,text,text,text)') IS NULL
+   AS raise_contract_needs_functions \gset
+\if :raise_contract_needs_functions
 \ir ../../../migrations/20261118073218_reconcile_item_raise.sql
+\endif
 SET LOCAL statement_timeout = '120s';
 
 CREATE FUNCTION pg_temp.expect_failure(command text, expected text) RETURNS void

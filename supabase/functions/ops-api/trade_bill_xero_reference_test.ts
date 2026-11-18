@@ -33,7 +33,9 @@ Deno.test("the SW invoice number is preferred, the reference string is the fallb
 });
 
 Deno.test("the super line uses the dedicated account constant on every push path", () => {
-  assertEquals((INDEX.match(/superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE/g) || []).length, 3);
+  // The fourth is the work-order door's held-line rebuild (P1-05.8), the
+  // same bill priced on its paid lines only.
+  assertEquals((INDEX.match(/superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE/g) || []).length, 4);
   assertEquals((INDEX.match(/superAccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE\b/g) || []).length, 0);
   // Unconfigured, it must fall back to 306 so nothing moves silently.
   if (!Deno.env.get("TRADE_SUPER_XERO_ACCOUNT_CODE")) {
