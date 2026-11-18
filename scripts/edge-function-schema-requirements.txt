@@ -1335,6 +1335,10 @@ ops-api|supabase/migrations/20261118194200_trade_pay_run_xero_found.sql|function
 # through these two functions (the switch off answers before either is called).
 ops-api|supabase/migrations/20261118195200_reconcile_list_page.sql|function|reconcile_list_page
 ops-api|supabase/migrations/20261118195200_reconcile_list_page.sql|function|reconcile_list_counts
+# Follow-up 66 mirror rule: the sync and the edge bills backfill ask the one
+# rule through this function before writing a bill's cost lines, so xero-sync
+# must not deploy ahead of the migration.
+xero-sync|supabase/migrations/20261118195500_trade_invoice_bill_mirror_rule.sql|function|trade_invoice_bill_mirror_verdicts
 # P2-02.8: the matcher runner reads each bill through match_bill_read and keeps
 # its slow-bill counts in match_slow_bills, so xero-sync must not deploy first.
 xero-sync|supabase/migrations/20261119010000_match_apply_held_unchanged.sql|table|match_slow_bills

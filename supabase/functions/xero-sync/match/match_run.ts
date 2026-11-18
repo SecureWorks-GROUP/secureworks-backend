@@ -173,7 +173,7 @@ export function proposalOnly(result: MatchResult): Record<string, unknown> {
 const dayMinus = (day: string, days: number) =>
   new Date(Date.parse(day.slice(0, 10) + "T00:00:00Z") - days * 86_400_000).toISOString().slice(0, 10);
 
-function clueJson(c: Clue) {
+export function clueJson(c: Clue) {
   return {
     clue_code: c.clue_code,
     root: c.root,
@@ -801,13 +801,14 @@ export type SyncMatchReport = MatchRunReport & {
  */
 export async function syncMatchRun(
   sb: Sb,
-  opts: { on: boolean; changed: string[]; now?: () => number; budgetMs?: number },
+  opts: { on: boolean; changed: string[]; now?: () => number; budgetMs?: number; deadline?: number },
 ): Promise<SyncMatchReport> {
   const report: SyncMatchReport = { ...emptyReport(), switch: opts.on ? "on" : "off", changed: 0, queued: 0, backlog: 0, errors: [] };
   if (!opts.on) return report;
   const now = opts.now ?? Date.now;
   const budgetMs = opts.budgetMs ?? MATCH_RUN_BUDGET_MS;
-  const deadline = now() + budgetMs;
+  // A caller sharing one budget with a later step (syncMatchStep) passes its deadline.
+  const deadline = opts.deadline ?? now() + budgetMs;
   const changed = subjectsOf(opts.changed).filter((s) => s.startsWith("xero_bill:"));
   const run = changed.slice(0, MATCH_RUN_LIMIT);
   const requeue: Requeue[] = changed.slice(MATCH_RUN_LIMIT).map((id) => ({ id, reason: "over_run_cap" }));

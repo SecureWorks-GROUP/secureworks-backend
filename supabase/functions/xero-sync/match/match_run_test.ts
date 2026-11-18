@@ -559,13 +559,14 @@ Deno.test("sync: index.ts reads the switch before the paging, collects changed b
   const costSwitchAt = fn.indexOf("'job_cost_lines_sync_v1'");
   const pagingAt = fn.indexOf("hasMore = invoices.length === 100");
   const cursorAt = fn.indexOf("key: 'sync_invoices', cursor_at: runStartedAt");
-  const stepAt = fn.indexOf("syncMatchRun(sb, { on: true, changed: [...matchChanged] })");
+  const stepAt = fn.indexOf("syncMatchStep(sb, { on: true, changed: [...matchChanged] })");
   assert(readAt > 0 && readAt < costSwitchAt, "switch read at the start, beside the cost-line switch");
   assert(stepAt > pagingAt && stepAt > cursorAt, "matching after the Xero paging");
-  assertEquals(fn.split("syncMatchRun(").length - 1, 1, "one matcher step a sync");
+  assertEquals(fn.split("syncMatchStep(").length - 1, 1, "one matcher step a sync");
+  assertEquals(fn.split("syncMatchRun(").length - 1, 0, "bills and credits through the one step");
   assert(!/runMatchFor\(/.test(src), "no per-page runner call");
   assert(/if \(matcher\.on\) \{\s*for \(const id of data\?\.changed/.test(fn), "changed bills collected only when on");
-  assert(/if \(matcher\.on\) \{\s*try \{\s*matchRun = await syncMatchRun/.test(fn), "the step runs only when on");
+  assert(/if \(matcher\.on\) \{\s*try \{\s*matchRun = await syncMatchStep/.test(fn), "the step runs only when on");
 });
 
 Deno.test("sync, switch on: 60 changed bills, 50 run, 10 requeued in one timed statement, no queue or backlog read", async () => {

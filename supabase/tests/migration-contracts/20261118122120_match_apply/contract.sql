@@ -177,6 +177,45 @@ END $atomic$;
 DROP TRIGGER zztest_refuse_withdraw ON public.reconcile_items;
 SELECT pg_temp.check_that(pg_temp.apply('fault',pg_temp.pair())->>'applied'='auto','retry succeeds');
 
+-- A supplier credit note left unallocated (Follow-up 66, the credit raiser):
+-- subject xero_credit_note:<id>, item kind credit, a negative line. The item
+-- functions read the subject generically. The line keeps its reason and the
+-- stops ride the item.
+INSERT INTO public.job_cost_lines(org_id,kind,document_kind,document_id,line_key,document_date,lane,
+ amount_ex,source_hash,state,needs_reason)
+VALUES ('02060000-0000-4000-8000-000000000010','supplier_credit','xero_credit_note','ZZTEST-0206:credit',
+ 'unallocated','2026-01-02','materials',-80.00,'test','needs_person','credit_not_allocated');
+DO $credit$
+DECLARE s text := 'xero_credit_note:ZZTEST-0206:credit'; r jsonb; i public.reconcile_items;
+ res jsonb := '{"result":"suggest","reason":"credit_not_allocated","outcome":"job","job_id":"02060000-0000-4000-8000-000000000001","from_clue_index":0}';
+ v_stops jsonb := '[{"code":"possible_duplicate"}]';
+BEGIN
+ PERFORM pg_temp.check_that(public.match_lock_cost_document(s)='02060000-0000-4000-8000-000000000010'
+  AND public.match_apply_stop(s) IS NULL,'credit subject: organisation and no person hold');
+ UPDATE public.feature_flags SET enabled=false WHERE flag_name='reconcile_matcher_v1';
+ r := public.match_apply('cost_document',s,gen_random_uuid(),'credit',
+  jsonb_build_array(pg_temp.clue('job_number','doc:ZZTEST-0206:credit')),res,v_stops,'{"number":"ZZTEST-CN"}','v1');
+ PERFORM pg_temp.check_that(r='{"applied":"shadow"}'
+  AND (SELECT count(*)=1 FROM public.match_shadow_runs WHERE subject_id=s AND match_shadow_runs.stops=v_stops)
+  AND NOT EXISTS (SELECT FROM public.reconcile_items WHERE subject_id=s),'credit with the switch off: shadow only');
+ UPDATE public.feature_flags SET enabled=true WHERE flag_name='reconcile_matcher_v1';
+ r := public.match_apply('cost_document',s,gen_random_uuid(),'credit',
+  jsonb_build_array(pg_temp.clue('job_number','doc:ZZTEST-0206:credit')),res,v_stops,'{"number":"ZZTEST-CN"}','v1');
+ SELECT * INTO STRICT i FROM public.reconcile_items WHERE id=(r->>'item_id')::uuid;
+ PERFORM pg_temp.check_that(r->>'applied'='item' AND i.kind='credit' AND i.subject_table='cost_document'
+  AND i.subject_id=s AND i.status='open' AND i.reason='credit_not_allocated' AND i.amount_ex=-80.00
+  AND i.org_id='02060000-0000-4000-8000-000000000010' AND i.evidence->'stops'=v_stops
+  AND i.suggestion->>'job_id'='02060000-0000-4000-8000-000000000001'
+  AND (SELECT state='needs_person' AND needs_reason='credit_not_allocated' AND decision_id IS NULL
+       FROM public.job_cost_lines WHERE document_kind='xero_credit_note' AND document_id='ZZTEST-0206:credit')
+  AND NOT EXISTS (SELECT FROM public.reconcile_decisions WHERE subject_id=s),
+  'credit item: kind credit, negative amount, stops on the item, the line keeps its reason');
+ -- A person's decision on the credit holds it against the matcher.
+ UPDATE public.job_cost_lines SET decided_by_kind='person'
+  WHERE document_kind='xero_credit_note' AND document_id='ZZTEST-0206:credit';
+ PERFORM pg_temp.check_that(public.match_apply_stop(s)='held_by_person','credit held by a person');
+END $credit$;
+
 SELECT pg_temp.check_that(count(*)=5 AND bool_and(has_function_privilege('service_role',oid,'EXECUTE')
  AND NOT has_function_privilege('anon',oid,'EXECUTE') AND NOT has_function_privilege('authenticated',oid,'EXECUTE')),
  'five service-only functions') FROM pg_proc WHERE pronamespace='public'::regnamespace
