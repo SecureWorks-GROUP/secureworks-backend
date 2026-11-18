@@ -1,6 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
-// P1-06.6. Staff read the pay settings; only a named approver changes one of
-// the four settable fields, through the database writer set_trade_pay_setting
+// P1-06.6. Only a signed-in pay run approver reads the pay settings, checked
+// before any setting or change is read; only an approver changes one of the
+// four settable fields, through the database writer set_trade_pay_setting
 // (P1-06.5), which records every change. The start date and the approver list
 // are never accepted here, and approver ids are never returned.
 type Caller = { staff: boolean; userId: string | null };
@@ -116,33 +117,50 @@ export async function tradePaySettingsAction(
   return { status: 200, body: { setting: saved.data } };
 }
 
+const UNAVAILABLE = () =>
+  result(
+    503,
+    "pay_settings_unavailable",
+    "The pay settings could not be read. Try again in a minute.",
+  );
+
 async function readSettings(client: any, caller: Caller) {
-  const settings = await client.from("trade_pay_settings").select(
-    "inclusive_super_from, tax_set_aside_percent, reimbursement_account_code, repayment_account_code, not_job_work_account_code, pay_run_approver_user_ids",
-  ).eq("id", 1).maybeSingle();
-  if (settings.error) {
+  // Pay settings are for the pay run approvers only: a server key has no
+  // person to check, and the approver ids are read alone before anything else.
+  if (!caller.userId) {
     return result(
-      503,
-      "pay_settings_unavailable",
-      "The pay settings could not be read. Try again in a minute.",
+      403,
+      "pay_setting_sign_in_required",
+      "A signed-in person is required to see pay settings.",
     );
   }
+  const gate = await client.from("trade_pay_settings").select(
+    "pay_run_approver_user_ids",
+  ).eq("id", 1).maybeSingle();
+  if (gate.error) return UNAVAILABLE();
+  const approvers: string[] = Array.isArray(
+      gate.data?.pay_run_approver_user_ids,
+    )
+    ? gate.data.pay_run_approver_user_ids.map(String)
+    : [];
+  if (!approvers.includes(caller.userId)) {
+    return result(
+      403,
+      "pay_setting_not_approver",
+      "Only the bookkeeper and the owner can see pay settings.",
+    );
+  }
+  const settings = await client.from("trade_pay_settings").select(
+    "inclusive_super_from, tax_set_aside_percent, reimbursement_account_code, repayment_account_code, not_job_work_account_code",
+  ).eq("id", 1).maybeSingle();
+  if (settings.error) return UNAVAILABLE();
   // trade_pay_settings_changes is append-only and written one row per
   // approver press; it holds a handful of rows.
   const changes = await client.from("trade_pay_settings_changes").select(
     "field, from_value, to_value, changed_by, changed_at",
   ).order("changed_at", { ascending: false }).limit(20);
-  if (changes.error) {
-    return result(
-      503,
-      "pay_settings_unavailable",
-      "The pay settings could not be read. Try again in a minute.",
-    );
-  }
+  if (changes.error) return UNAVAILABLE();
   const row = settings.data ?? {};
-  const approvers: string[] = Array.isArray(row.pay_run_approver_user_ids)
-    ? row.pay_run_approver_user_ids.map(String)
-    : [];
   const changeRows: any[] = Array.isArray(changes.data) ? changes.data : [];
   const who = [
     ...new Set(changeRows.map((c) => c.changed_by).filter(Boolean)),
@@ -164,7 +182,7 @@ async function readSettings(client: any, caller: Caller) {
       inclusive_super_from: row.inclusive_super_from ?? null,
       ...values,
       approvers_set: approvers.length > 0,
-      can_edit: !!caller.userId && approvers.includes(caller.userId),
+      can_edit: true,
       missing: TRADE_PAY_SETTABLE_FIELDS.filter((f) => values[f] === null),
       recent_changes: changeRows.map((c) => ({
         field: c.field,

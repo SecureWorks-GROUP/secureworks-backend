@@ -22,16 +22,25 @@ type Store = {
   settings: Record<string, any> | null;
   changes: any[];
   users: any[];
-  fail?: { settings?: boolean; changes?: boolean; users?: boolean };
+  fail?: {
+    settings?: boolean;
+    changes?: boolean;
+    users?: boolean;
+    // Fail only a settings read that asks for more than the approver ids.
+    settingsValues?: boolean;
+  };
   rpcError?: string;
 };
 
 function fakeClient(store: Store) {
   const rpcs: any[] = [];
   const writes: any[] = [];
+  // Every table read, with the columns asked for, in order.
+  const reads: { table: string; columns: string }[] = [];
   const client: any = {
     rpcs,
     writes,
+    reads,
     rpc(name: string, args: any) {
       rpcs.push({ name, args });
       if (name === "trade_repayment_balance") return { data: 0, error: null };
@@ -59,8 +68,13 @@ function fakeClient(store: Store) {
     },
     from(table: string) {
       let write: any;
+      let columns = "";
       const q: any = {
-        select: () => q,
+        select: (cols = "*") => {
+          columns = cols;
+          reads.push({ table, columns: cols });
+          return q;
+        },
         eq: () => q,
         in: () => q,
         or: () => q,
@@ -86,8 +100,10 @@ function fakeClient(store: Store) {
             });
           }
           if (table === "trade_pay_settings") {
+            const failValues = store.fail?.settingsValues &&
+              columns !== "pay_run_approver_user_ids";
             return resolve(
-              store.fail?.settings
+              store.fail?.settings || failValues
                 ? { data: null, error: { message: "boom" } }
                 : { data: store.settings, error: null },
             );
@@ -152,41 +168,78 @@ const read = (client: any, caller: any) =>
 const set = (client: any, caller: any, body: any) =>
   tradePaySettingsAction(client, "set_trade_pay_setting", "POST", body, caller);
 
-Deno.test("ZZTEST read: staff and approver see the same values, can_edit differs, no approver ids", async () => {
+// The only read a refused caller may cause: the approver ids, alone.
+const GATE_ONLY = [{
+  table: "trade_pay_settings",
+  columns: "pay_run_approver_user_ids",
+}];
+
+Deno.test("ZZTEST read: an approver sees the values, never approver ids", async () => {
   const store = unsetStore();
-  const asStaff: any = await read(fakeClient(store), staff);
-  const asApprover: any = await read(fakeClient(store), approver);
-  const asServer: any = await read(fakeClient(store), serverKey);
-  assertEquals(asStaff.status, 200);
-  assertEquals(asStaff.body.can_edit, false);
-  assertEquals(asApprover.body.can_edit, true);
-  assertEquals(asServer.body.can_edit, false);
-  assertEquals(asStaff.body.approvers_set, true);
-  assertEquals(asStaff.body.inclusive_super_from, "2099-01-05");
-  assertEquals(asStaff.body.missing, [
+  const out: any = await read(fakeClient(store), approver);
+  assertEquals(out.status, 200);
+  assertEquals(out.body.can_edit, true);
+  assertEquals(out.body.approvers_set, true);
+  assertEquals(out.body.inclusive_super_from, "2099-01-05");
+  assertEquals(out.body.missing, [
     "tax_set_aside_percent",
     "reimbursement_account_code",
     "repayment_account_code",
     "not_job_work_account_code",
   ]);
-  for (const out of [asStaff, asApprover, asServer]) {
-    assert(!JSON.stringify(out.body).includes(APPROVER), "approver id leaked");
-    assert(!("pay_run_approver_user_ids" in out.body));
+  assert(!JSON.stringify(out.body).includes(APPROVER), "approver id leaked");
+  assert(!("pay_run_approver_user_ids" in out.body));
+});
+
+Deno.test("ZZTEST read: non-approver staff get 403 after reading only the approver ids", async () => {
+  const store = unsetStore();
+  store.settings!.tax_set_aside_percent = "20.00";
+  store.changes = [{
+    field: "tax_set_aside_percent",
+    from_value: null,
+    to_value: "20.00",
+    changed_by: APPROVER,
+    changed_at: "2099-01-05T00:00:00Z",
+  }];
+  for (let i = 0; i < 2; i++) {
+    const client = fakeClient(store);
+    const out: any = await read(client, staff);
+    assertEquals(out.status, 403);
+    assertEquals(out.body.code, "pay_setting_not_approver");
+    assert(!JSON.stringify(out.body).includes("20.00"), "value leaked");
+    assertEquals(client.reads, GATE_ONLY);
   }
 });
 
-Deno.test("ZZTEST read: no approvers set means nobody can edit", async () => {
-  const store = unsetStore();
-  store.settings!.pay_run_approver_user_ids = [];
-  const out: any = await read(fakeClient(store), approver);
-  assertEquals(out.body.approvers_set, false);
-  assertEquals(out.body.can_edit, false);
+Deno.test("ZZTEST read: a server key gets 403 with no read at all", async () => {
+  const client = fakeClient(unsetStore());
+  const out: any = await read(client, serverKey);
+  assertEquals(out.status, 403);
+  assertEquals(out.body.code, "pay_setting_sign_in_required");
+  assertEquals(client.reads, []);
+  assertEquals(client.rpcs, []);
 });
 
-Deno.test("ZZTEST read: a failed settings or changes read is an error, never all missing", async () => {
-  for (const fail of [{ settings: true }, { changes: true }]) {
+Deno.test("ZZTEST read: no approvers set, or no settings row, refuses everyone", async () => {
+  for (const settings of [{ pay_run_approver_user_ids: [] }, null]) {
+    const store = unsetStore();
+    store.settings = settings as any;
+    const client = fakeClient(store);
+    const out: any = await read(client, approver);
+    assertEquals(out.status, 403);
+    assertEquals(out.body.code, "pay_setting_not_approver");
+    assertEquals(client.reads, GATE_ONLY);
+  }
+});
+
+Deno.test("ZZTEST read: a failed gate, settings or changes read is an error, never all missing", async () => {
+  for (
+    const fail of [{ settings: true }, { settingsValues: true }, {
+      changes: true,
+    }]
+  ) {
     const store = { ...unsetStore(), fail };
-    const out: any = await read(fakeClient(store), staff);
+    const out: any = await read(fakeClient(store), approver);
     assertEquals(out.status, 503);
     assertEquals(out.body.code, "pay_settings_unavailable");
     assert(!("missing" in out.body));
@@ -281,7 +334,7 @@ Deno.test("ZZTEST set: a trade sign-in and a server key are refused before any w
     })).status,
     403,
   );
-  // A server key may read but never set: there is no person to record.
+  // A server key may neither read nor set: there is no person to check.
   const out: any = await set(client, serverKey, {
     field: "tax_set_aside_percent",
     value: "20",
@@ -436,4 +489,81 @@ Deno.test("ZZTEST set repayment account: it is the default; a typed account stil
   }, repayCaller);
   assertEquals(out.status, 200);
   assertEquals(client.writes[0].row.xero_account_code, "ZZ-TYPED");
+});
+
+Deno.test("ZZTEST repayment: a non-approver is refused after reading only the approver ids", async () => {
+  const store = unsetStore();
+  store.settings!.repayment_account_code = "ZZ-DEFAULT";
+  for (
+    const action of [
+      "set_trade_repayment",
+      "stop_trade_repayment",
+      "list_trade_repayments",
+    ]
+  ) {
+    const client = fakeClient(store);
+    const out: any = await tradeRepaymentsAction(
+      client,
+      action,
+      action === "list_trade_repayments" ? "GET" : "POST",
+      action === "stop_trade_repayment" ? { id: "ZZTEST-rule" } : repayment,
+      { ...repayCaller, userId: STAFF },
+    );
+    assertEquals(out.status, 403, action);
+    assertEquals(out.body.code, "repayment_not_approver");
+    assertEquals(client.reads, GATE_ONLY, action);
+    assertEquals(client.writes.length, 0);
+  }
+  // A server key has no person: refused before any read.
+  const client = fakeClient(store);
+  const out: any = await tradeRepaymentsAction(
+    client,
+    "set_trade_repayment",
+    "POST",
+    repayment,
+    { ...repayCaller, userId: null },
+  );
+  assertEquals(out.status, 403);
+  assertEquals(client.reads, []);
+});
+
+Deno.test("ZZTEST repayment: the default account is read only after the approver check, and a failed read refuses", async () => {
+  const store = unsetStore();
+  store.settings!.repayment_account_code = "ZZ-DEFAULT";
+  store.users = [{ id: "ZZTEST-trade" }];
+  const client = fakeClient(store);
+  const out: any = await tradeRepaymentsAction(
+    client,
+    "set_trade_repayment",
+    "POST",
+    repayment,
+    repayCaller,
+  );
+  assertEquals(out.status, 200);
+  assertEquals(client.reads.slice(0, 2), [
+    ...GATE_ONLY,
+    { table: "trade_pay_settings", columns: "repayment_account_code" },
+  ]);
+  // A typed account needs no settings read beyond the gate.
+  const typed = fakeClient(store);
+  await tradeRepaymentsAction(typed, "set_trade_repayment", "POST", {
+    ...repayment,
+    xero_account_code: "ZZ-TYPED",
+  }, repayCaller);
+  assertEquals(
+    typed.reads.filter((r: any) => r.table === "trade_pay_settings"),
+    GATE_ONLY,
+  );
+  // A failed default read is refused, never read as no account.
+  const failing = fakeClient({ ...store, fail: { settingsValues: true } });
+  await assertRejects(() =>
+    tradeRepaymentsAction(
+      failing,
+      "set_trade_repayment",
+      "POST",
+      repayment,
+      repayCaller,
+    )
+  );
+  assertEquals(failing.writes.length, 0);
 });
