@@ -63,11 +63,11 @@ CREATE TABLE IF NOT EXISTS public.jobs (
 CREATE TABLE IF NOT EXISTS public.feature_flags (flag_name text PRIMARY KEY, enabled boolean, description text);
 \i supabase/migrations/20261117163100_xero_draft_standard.sql
 \i supabase/migrations/20261118080638_job_division_option.sql
-\i supabase/migrations/20261118083148_division_rulings.sql
-\i supabase/migrations/20261118083148_division_rulings.sql
-\i supabase/tests/migration-contracts/20261118083148_division_rulings/examples.sql
-\i supabase/rollbacks/20261118083148_division_rulings_down.sql
-\i supabase/tests/migration-contracts/20261118083148_division_rulings/rollback-contract.sql
+\i supabase/migrations/20261118120115_division_rulings.sql
+\i supabase/migrations/20261118120115_division_rulings.sql
+\i supabase/tests/migration-contracts/20261118120115_division_rulings/examples.sql
+\i supabase/rollbacks/20261118120115_division_rulings_down.sql
+\i supabase/tests/migration-contracts/20261118120115_division_rulings/rollback-contract.sql
 ROLLBACK;
 SQL
 )

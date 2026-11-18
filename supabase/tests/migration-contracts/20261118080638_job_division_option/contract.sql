@@ -2,7 +2,7 @@ BEGIN;
 -- Exercise the predecessor at its own revision, even on a full successor stack.
 SELECT to_regprocedure('public.job_division_option(text,text,uuid)') IS NOT NULL AS has_successor \gset
 \if :has_successor
-\ir ../../../rollbacks/20261118083148_division_rulings_down.sql
+\ir ../../../rollbacks/20261118120115_division_rulings_down.sql
 \endif
 \ir ../../../migrations/20261118080638_job_division_option.sql
 DO $test$ BEGIN
