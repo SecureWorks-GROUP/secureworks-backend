@@ -88,6 +88,9 @@ X15 now has separate read-only preview and privileged apply tools. Apply require
 - `ops-api/xero_accpay_books.ts :: updateSupplierBill :: POST /Invoices/{id}`
 - `ops-api/xero_accpay_books.ts :: createSupplierCreditNote :: PUT /CreditNotes`
 - `ops-api/xero_attachment.ts :: attachPdfToXeroInvoice :: PUT /Invoices/{id}/Attachments/{id}`
+- `ops-api/xero_attachment.ts :: attachFileToXeroDocument :: PUT /{id}/{id}/Attachments/{id}`
+
+P3-01.5 adds the last transport for PDF, JPEG or PNG files up to 10 MB on supplier bills or credit notes. It has no caller and does not inspect document ownership; a future caller must prove ACCPAY or ACCPAYCREDIT, never ACCREC, before invoking it. The dynamic endpoint is limited to `Invoices` or `CreditNotes`. It makes one PUT and surfaces failures, including 429, without retrying. This registration does not activate a route or extend the earlier CFO confirmation: the director's word and exact-head money review are required before this addition ships.
 
 ### X10 · Customer variation invoice draft
 
