@@ -25,14 +25,23 @@ CREATE TABLE IF NOT EXISTS public.feature_flags (
 );
 
 CREATE TABLE IF NOT EXISTS public.organisations (
-  id uuid PRIMARY KEY
+  id uuid PRIMARY KEY,
+  name text
 );
+ALTER TABLE public.organisations ADD COLUMN IF NOT EXISTS name text;
 
 CREATE TABLE IF NOT EXISTS public.jobs (
   id uuid PRIMARY KEY,
   org_id uuid,
+  status text,
+  type text,
   job_number text
 );
+ALTER TABLE public.jobs
+  ADD COLUMN IF NOT EXISTS org_id uuid,
+  ADD COLUMN IF NOT EXISTS status text,
+  ADD COLUMN IF NOT EXISTS type text,
+  ADD COLUMN IF NOT EXISTS job_number text;
 
 CREATE TABLE IF NOT EXISTS public.context_email_attachments (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

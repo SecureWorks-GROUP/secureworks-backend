@@ -56,10 +56,13 @@ DECLARE
   v_res jsonb;
   v_draft_id uuid;
 /* block */ BEGIN
-  INSERT INTO public.organisations (id) VALUES (v_org), (v_other_org) ON CONFLICT DO NOTHING;
-  INSERT INTO public.jobs (id, org_id, job_number) VALUES
-    (v_job, v_org, 'ZZTEST-SWF-260002'),
-    (v_foreign_job, v_other_org, 'ZZTEST-SWF-999999')
+  INSERT INTO public.organisations (id, name) VALUES
+    (v_org, 'ZZTEST Org'),
+    (v_other_org, 'ZZTEST Other Org')
+  ON CONFLICT (id) DO NOTHING;
+  INSERT INTO public.jobs (id, org_id, status, type, job_number) VALUES
+    (v_job, v_org, 'accepted', 'fencing', 'ZZTEST-SWF-260002'),
+    (v_foreign_job, v_other_org, 'accepted', 'fencing', 'ZZTEST-SWF-999999')
   ON CONFLICT (id) DO NOTHING;
 
   INSERT INTO public.context_email_attachments (
@@ -388,7 +391,7 @@ END $plans$;
 ROLLBACK TO SAVEPOINT p3023_plans;
 
 -- Re-apply proves idempotence and guard post-image acceptance.
-\ir ../../../migrations/20261118135507_supplier_credit_propose.sql
+\ir ../../../migrations/20261118141207_supplier_credit_propose.sql
 
 SELECT 'PASS P3-02.3: candidate filter, bill match, duplicate skip, atomic reconcile raise, service_role privileges, and index-bound plans';
 ROLLBACK;
