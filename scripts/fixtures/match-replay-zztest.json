@@ -1,0 +1,180 @@
+[
+  {
+    "subject_id": "xero_bill:ZZTEST-BILL-001",
+    "clues": [
+      {
+        "clue_code": "job_number",
+        "class": "key",
+        "family": "doc_text",
+        "root": "doc:ZZTEST-BILL-001",
+        "outcome": "job",
+        "job_id": "SWF-990001",
+        "names_one": true
+      },
+      {
+        "clue_code": "sealed_scope_order",
+        "class": "key",
+        "family": "order",
+        "root": "order:ZZTEST-ORD-001",
+        "outcome": "job",
+        "job_id": "SWF-990001",
+        "names_one": true
+      }
+    ],
+    "clue_types": {
+      "job_number": {
+        "code": "job_number",
+        "class": "key",
+        "family": "doc_text",
+        "mode": "counts"
+      },
+      "sealed_scope_order": {
+        "code": "sealed_scope_order",
+        "class": "key",
+        "family": "order",
+        "mode": "counts"
+      },
+      "ai_read": {
+        "code": "ai_read",
+        "class": "ai",
+        "family": "ai",
+        "mode": "suggest_only"
+      }
+    },
+    "stops": [],
+    "answer": {
+      "outcome": "job",
+      "job_id": "SWF-990001",
+      "division": null
+    }
+  },
+  {
+    "subject_id": "xero_bill:ZZTEST-BILL-002",
+    "clues": [
+      {
+        "clue_code": "job_number",
+        "class": "key",
+        "family": "doc_text",
+        "root": "doc:ZZTEST-BILL-002",
+        "outcome": "job",
+        "job_id": "SWF-990001",
+        "names_one": true
+      },
+      {
+        "clue_code": "sealed_scope_order",
+        "class": "key",
+        "family": "order",
+        "root": "order:ZZTEST-ORD-002",
+        "outcome": "job",
+        "job_id": "SWF-990001",
+        "names_one": true
+      }
+    ],
+    "clue_types": {
+      "job_number": {
+        "code": "job_number",
+        "class": "key",
+        "family": "doc_text",
+        "mode": "counts"
+      },
+      "sealed_scope_order": {
+        "code": "sealed_scope_order",
+        "class": "key",
+        "family": "order",
+        "mode": "counts"
+      },
+      "ai_read": {
+        "code": "ai_read",
+        "class": "ai",
+        "family": "ai",
+        "mode": "suggest_only"
+      }
+    },
+    "stops": [],
+    "answer": {
+      "outcome": "job",
+      "job_id": "SWP-990002",
+      "division": null
+    }
+  },
+  {
+    "subject_id": "xero_bill:ZZTEST-BILL-003",
+    "clues": [
+      {
+        "clue_code": "job_number",
+        "class": "key",
+        "family": "doc_text",
+        "root": "doc:ZZTEST-BILL-003",
+        "outcome": "job",
+        "job_id": "SWP-990002",
+        "names_one": true
+      }
+    ],
+    "clue_types": {
+      "job_number": {
+        "code": "job_number",
+        "class": "key",
+        "family": "doc_text",
+        "mode": "counts"
+      },
+      "sealed_scope_order": {
+        "code": "sealed_scope_order",
+        "class": "key",
+        "family": "order",
+        "mode": "counts"
+      },
+      "ai_read": {
+        "code": "ai_read",
+        "class": "ai",
+        "family": "ai",
+        "mode": "suggest_only"
+      }
+    },
+    "stops": [],
+    "answer": {
+      "outcome": "job",
+      "job_id": "SWP-990002",
+      "division": null
+    }
+  },
+  {
+    "subject_id": "xero_bill:ZZTEST-BILL-004",
+    "clues": [
+      {
+        "clue_code": "ai_read",
+        "class": "ai",
+        "family": "ai",
+        "root": "ai:ZZTEST-BILL-004",
+        "outcome": "job",
+        "job_id": "SWF-990010",
+        "names_one": true
+      }
+    ],
+    "clue_types": {
+      "job_number": {
+        "code": "job_number",
+        "class": "key",
+        "family": "doc_text",
+        "mode": "counts"
+      },
+      "sealed_scope_order": {
+        "code": "sealed_scope_order",
+        "class": "key",
+        "family": "order",
+        "mode": "counts"
+      },
+      "ai_read": {
+        "code": "ai_read",
+        "class": "ai",
+        "family": "ai",
+        "mode": "suggest_only"
+      }
+    },
+    "stops": [],
+    "answer": {
+      "outcome": "unsure",
+      "job_id": null,
+      "division": null
+    }
+  }
+]

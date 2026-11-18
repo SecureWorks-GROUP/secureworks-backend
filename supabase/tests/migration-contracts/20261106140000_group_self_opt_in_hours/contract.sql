@@ -3,6 +3,10 @@
 -- population (an office admin watching is not crew; anyone on the crew is).
 -- Synthetic records only; rolled back.
 BEGIN;
+-- P1-13.2 (20261118082253): the split stops at the sign-off only while the
+-- sign-off switch is on, so the switch is on here.
+INSERT INTO public.feature_flags(flag_name, enabled) VALUES ('trade_invoice_requires_client_signoff_v1', true)
+  ON CONFLICT (flag_name) DO UPDATE SET enabled = true;
 DO $$
 DECLARE
   org uuid := '00000000-0000-0000-0000-000000000001';
