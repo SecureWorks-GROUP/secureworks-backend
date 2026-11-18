@@ -1586,7 +1586,7 @@ import {
 import { readXeroDrafts, XeroDraftsError } from './xero_drafts_read.ts'
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
-import { TradePayRunError, TradePayRunRefusal, PAY_RUN_SWITCH, approvePayRun, payRunApproveDepsFromClient, payRunReadsFromClient, readPayRun } from './trade_pay_run.ts'
+import { TradePayRunError, TradePayRunRefusal, PAY_RUN_SWITCH, approvePayRun, markPayRunSuperPaid, payRunApproveDepsFromClient, payRunPushDepsFromClient, payRunReadsFromClient, pushPayRunInvoice, readPayRun } from './trade_pay_run.ts'
 // Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
 import { PAY_FIGURES_APPROVER_ACTIONS, payFiguresApproverRefusal } from './pay_figures_approver.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
@@ -10157,6 +10157,42 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }))
         } catch (err) {
           if (err instanceof TradePayRunCheckError) throw new ApiError(err.message, err.status)
+          throw err
+        }
+      }
+
+      // Push an approved run (P1-10.5). POST { run_id, invoice_id } pushes one
+      // clean invoice of the run through the existing one-invoice push (a DRAFT
+      // bill, never authorised or paid; no crewmate's bill). POST { run_id }
+      // marks the run's super paid once every clean invoice is pushed. Behind
+      // trade_pay_run_v1 (409 while off); a signed-in approver only.
+      case 'push_pay_run_invoice':
+      case 'mark_pay_run_super_paid': {
+        if (req.method !== 'POST') {
+          return json({ ok: false, error: 'method_not_allowed', message: `${action} requires POST` }, 405)
+        }
+        try {
+          const pushDeps = payRunPushDepsFromClient(
+            client,
+            () => readFlag(client, PAY_RUN_SWITCH),
+            (invoiceId, runId) => pushTradeInvoiceToXeroAction(
+              client,
+              { invoice_id: invoiceId },
+              `ops-api:push_pay_run_invoice:${runId}`,
+            ),
+          )
+          const pressOpts = {
+            orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
+            runId: body?.run_id,
+            actorUserId: requestActor.source === 'jwt' && authMode === 'jwt' ? (authUser?.id || null) : null,
+          }
+          return json(action === 'push_pay_run_invoice'
+            ? await pushPayRunInvoice(pushDeps, { ...pressOpts, invoiceId: body?.invoice_id })
+            : await markPayRunSuperPaid(pushDeps, pressOpts))
+        } catch (err) {
+          if (err instanceof TradePayRunError) {
+            return json({ ok: false, error: err.code, message: err.message }, err.status)
+          }
           throw err
         }
       }
@@ -45393,15 +45429,17 @@ export function tradeViewerQuoteVisibleForJob(
   return managed.includes(_jobVertical(job))
 }
 
-// Colleagues' PAY — `trade_rates.hourly_rate`, the per-person hours and the cost
-// derived from them — is a narrower question than the quote, and the open-pool
-// tier is the reason it needs its own rule. `makesafe_open` is a REPORT door: it
-// admits ANY signed-in trade to ANY make-safe job before a named assignment
-// exists (isMakesafeAccessJobForClient asks only whether the job is a make-safe,
-// never whether it is open to this caller). That is the right trade for filing a
-// field report and the wrong one for a payroll read, so it is refused wherever a
-// response carries another trade's rate. Office, division manager of the job's
-// vertical, and an allocated crew member on the job all pass.
+// Who may open the labour door (`trade_labour_budget`) at all. `makesafe_open`
+// is a REPORT door: it admits ANY signed-in trade to ANY make-safe job before a
+// named assignment exists (isMakesafeAccessJobForClient asks only whether the
+// job is a make-safe, never whether it is open to this caller). That is the
+// right trade for filing a field report and the wrong one for a labour read, so
+// it is refused here. Office, division manager of the job's vertical, and an
+// allocated crew member on the job pass the door, but only office and division
+// manager receive money: the labour budget, any rate, any cost and the
+// remainder (ruling 17: the budget reaches no trade surface). An allocated
+// trade gets hours and shift counts only, and trade_rates is never read for
+// that tier (tradeLabourBudget).
 export function tradeLabourCostVisibleForTier(tier: TradeJobAccessTier): boolean {
   return tier === 'office' || tier === 'division_manager' || tier === 'allocated'
 }
@@ -59712,6 +59750,10 @@ async function tradeLabourBudget(
   if (!tradeLabourCostVisibleForTier(accessDecision.tier)) {
     throw new Error('You are not assigned to this job')
   }
+  // Ruling 17: an allocated trade sees hours, never money. Answered before any
+  // purchase order, quote or trade_rates read, so no figure is loaded for this
+  // tier and a crewmate's missing rate cannot fail the hours card.
+  if (accessDecision.tier === 'allocated') return tradeLabourHoursOnly(client, jobId)
   const quoteVisible = tradeQuoteVisibleForTier(accessDecision.tier)
 
   // Get PO total for this job (material + labour)
@@ -59804,6 +59846,37 @@ async function withAgreedLabourForAllocatedJobsOnly(
   return out
 }
 export const _withAgreedLabourForAllocatedJobsOnlyForTest = withAgreedLabourForAllocatedJobsOnly
+
+// The allocated-trade shape of trade_labour_budget: total hours and, per crew
+// member, name, hours and the number of shifts. No budget, rate, cost or
+// remainder exists in it. No shift is priced or left out, so the two rate
+// counts are zero by construction, not because a rate read succeeded.
+async function tradeLabourHoursOnly(client: any, jobId: string) {
+  const { data: assignments, error: assignmentError } = await client.from('job_assignments')
+    .select('user_id, started_at, completed_at, users:user_id(name)')
+    .eq('job_id', jobId)
+    .eq('status', 'complete')
+    .not('started_at', 'is', null)
+    .not('completed_at', 'is', null)
+  if (assignmentError || !assignments) throw new ApiError('labour_assignments_read_failed', 503)
+  const byUser = new Map<string, { user_id: string, name: string, hours: number, shifts: number }>()
+  for (const a of assignments) {
+    const hours = Math.round(((new Date(a.completed_at).getTime() - new Date(a.started_at).getTime()) / 3600000) * 100) / 100
+    const userId = String(a.user_id)
+    const row = byUser.get(userId) ?? { user_id: userId, name: a.users?.name || 'Trade', hours: 0, shifts: 0 }
+    row.hours += hours
+    row.shifts += 1
+    byUser.set(userId, row)
+  }
+  const trades = [...byUser.values()]
+  const totalHours = trades.reduce((sum, trade) => sum + trade.hours, 0)
+  return {
+    rate_assumed: 0,
+    rate_missing: 0,
+    total_hours: Math.round(totalHours * 100) / 100,
+    trades,
+  }
+}
 
 // ════════════════════════════════════════════════════════════
 // JOB COMPLETION PACKAGE

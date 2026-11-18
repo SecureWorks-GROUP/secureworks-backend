@@ -51,6 +51,8 @@ import { BILLS_WINDOW_COLUMNS, readBillsInWindow } from './bills_window_read.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { PREMATCH_ROWS_PER_RUN, readAll, runBillPrematch } from './bill_prematch_run.ts'
+import { proposeSupplierCredits, SUPPLIER_CREDIT_DEFAULT_LIMIT, SUPPLIER_CREDIT_DRAFTS_FLAG } from './supplier_credit_propose.ts'
+import { readSwitch } from '../_shared/switch_cache.ts'
 import { buildDocumentIndex, DEAD_JOB_STATUSES, duplicateDocumentsOf, poIsDead, poNamedIn } from './bill_prematch.ts'
 import { isDepositAdvanceJobType, isDepositInvoice } from '../_shared/job_deposit_paid.ts'
 import { builderReferenceAnnotation, decideBuilderReference, loadBuilderReferenceCandidates } from './builder_reference_match.ts'
@@ -2368,16 +2370,25 @@ async function scheduledBillPrematch(sb: any) {
     prematch = { ran: false, reason: 'error', error: (e as Error).message }
     console.error('[materials] bill pre-match failed:', (e as Error).message)
   }
+  const creditsOn = await readSwitch(sb, SUPPLIER_CREDIT_DRAFTS_FLAG)
+  const supplierCredits = await proposeSupplierCredits(sb, DEFAULT_ORG_ID, {
+    limit: SUPPLIER_CREDIT_DEFAULT_LIMIT,
+  })
+  const payload = creditsOn ? { prematch, supplier_credits: supplierCredits } : { prematch }
   await sb.from('webhook_log').insert({
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'bill_prematch',
-    payload: { prematch },
+    payload,
     status: 'processed',
   }).then(() => undefined, () => undefined)
-  console.log(`[materials] bill pre-match: ${JSON.stringify(prematch)}`)
-  return { success: true, prematch }
+  console.log(`[materials] bill pre-match: ${JSON.stringify(payload)}`)
+  return creditsOn
+    ? { success: true, prematch, supplier_credits: supplierCredits }
+    : { success: true, prematch }
 }
+
+export const _scheduledBillPrematchForTest = scheduledBillPrematch
 
 
 // ════════════════════════════════════════════════════════════

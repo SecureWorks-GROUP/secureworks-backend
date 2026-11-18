@@ -1439,3 +1439,392 @@ export function payRunApproveDepsFromClient(
     },
   };
 }
+
+// ════════════════════════════════════════════════════════════
+// Push an approved run's invoice into Xero as a draft (P1-10.5).
+//
+//   push_pay_run_invoice     POST { run_id, invoice_id }
+//   mark_pay_run_super_paid  POST { run_id }
+//
+// An approver pushes one clean invoice of an approved run per press, through
+// the existing one-invoice push (a DRAFT bill with its PDFs, which reuses a
+// bill already made for the same invoice). Nothing here authorises or pays a
+// bill, calls a Xero payment endpoint, or pushes a crewmate's bill. A Xero
+// failure is the push's own error; pushed_at stays null and the press can be
+// repeated.
+// ════════════════════════════════════════════════════════════
+
+export type PayRunRunRow = {
+  id: string;
+  org_id: string;
+  week_start: string;
+  status: string;
+  super_marked_paid_at: string | null;
+  super_marked_paid_by: string | null;
+};
+
+export type PayRunPushDeps = {
+  /** trade_pay_run_v1; an unreadable switch reads off. */
+  switchOn(): Promise<boolean>;
+  /** The approver list; throws 503 when it cannot be read. */
+  approvers(): Promise<string[]>;
+  /** trade_pay_runs by id, or null. Throws 503 on a failed read. */
+  runById(runId: string): Promise<PayRunRunRow | null>;
+  /** The run's row for this invoice, or null. Throws 503 on a failed read. */
+  runInvoice(
+    runId: string,
+    invoiceId: string,
+  ): Promise<
+    | {
+      verdict: string;
+      pays: unknown;
+      pushed_at: string | null;
+      xero_bill_id: string | null;
+    }
+    | null
+  >;
+  /** The invoice's stamp, status, bill and stored pay figures, or null. */
+  invoiceForPush(invoiceId: string): Promise<Record<string, any> | null>;
+  /** The existing one-invoice push. Throws the push's own error. */
+  push(invoiceId: string, runId: string): Promise<Record<string, unknown>>;
+  /** Records the push on the run row; true when this call wrote it. */
+  markPushed(runId: string, invoiceId: string, billId: string): Promise<void>;
+  /** Clean rows of the run with no push yet. Throws 503 on a failed read. */
+  cleanUnpushed(runId: string): Promise<number>;
+  /** approved -> pushed; does nothing once it is pushed. */
+  markRunPushed(runId: string): Promise<void>;
+  /** Stamps super paid once; returns the row's stamp either way. */
+  markSuperPaid(
+    runId: string,
+    actor: string,
+  ): Promise<{ super_marked_paid_at: string; super_marked_paid_by: string }>;
+  log(line: Record<string, unknown>): void;
+};
+
+async function payRunPressGate(
+  deps: Pick<PayRunPushDeps, "switchOn" | "approvers" | "runById">,
+  opts: {
+    orgId: string | null | undefined;
+    actorUserId: string | null | undefined;
+    runId: unknown;
+  },
+): Promise<{ actor: string; run: PayRunRunRow }> {
+  if (!(await deps.switchOn())) {
+    throw new TradePayRunError(
+      "pay_run_switch_off",
+      "The weekly pay run is switched off.",
+      409,
+    );
+  }
+  const actor = String(opts.actorUserId ?? "").trim();
+  if (!UUID_RE.test(actor)) {
+    throw new TradePayRunError(
+      "pay_run_named_person_required",
+      "A pay run is pushed by a signed-in person, never by the server key alone.",
+      403,
+    );
+  }
+  // Same check as the approval: the approver list, before anything is read.
+  if (!(await deps.approvers()).includes(actor)) throw notApprover();
+  const runId = typeof opts.runId === "string" ? opts.runId.trim() : "";
+  if (!UUID_RE.test(runId)) {
+    throw new TradePayRunError(
+      "pay_run_id_invalid",
+      "run_id must be the pay run's id.",
+      400,
+    );
+  }
+  const orgId = String(opts.orgId ?? "").trim();
+  const run = await deps.runById(runId);
+  if (!run || !UUID_RE.test(orgId) || String(run.org_id) !== orgId) {
+    throw new TradePayRunError(
+      "pay_run_not_found",
+      "No pay run with that id.",
+      404,
+    );
+  }
+  return { actor, run };
+}
+
+export async function pushPayRunInvoice(
+  deps: PayRunPushDeps,
+  opts: {
+    orgId: string | null | undefined;
+    actorUserId: string | null | undefined;
+    runId: unknown;
+    invoiceId: unknown;
+  },
+): Promise<Record<string, unknown>> {
+  const { actor, run } = await payRunPressGate(deps, opts);
+  const invoiceId = typeof opts.invoiceId === "string"
+    ? opts.invoiceId.trim()
+    : "";
+  if (!UUID_RE.test(invoiceId)) {
+    throw new TradePayRunError(
+      "pay_run_invoice_invalid",
+      "invoice_id must be an invoice of the run.",
+      400,
+    );
+  }
+  const row = await deps.runInvoice(run.id, invoiceId);
+  if (!row) {
+    throw new TradePayRunError(
+      "invoice_not_in_run",
+      "That invoice is not in this pay run.",
+      409,
+    );
+  }
+  if (row.verdict !== "clean") {
+    throw new TradePayRunError(
+      "invoice_not_clean",
+      "That invoice was stopped in this pay run, so it is not pushed.",
+      409,
+    );
+  }
+  // Already pushed on this run: say so, call nothing.
+  if (row.pushed_at) {
+    return {
+      ok: true,
+      run_id: run.id,
+      invoice_id: invoiceId,
+      xero_bill_id: row.xero_bill_id,
+      already_pushed: true,
+      run_status: run.status,
+    };
+  }
+  // The invoice itself must still be the run's (a clean row is unique per
+  // invoice; this reads the stamp the approval wrote).
+  const inv = await deps.invoiceForPush(invoiceId);
+  if (!inv || String(inv.pay_run_id ?? "") !== run.id) {
+    throw new TradePayRunError(
+      "invoice_not_in_run",
+      "That invoice is not in this pay run.",
+      409,
+    );
+  }
+  // A bill already made for this invoice (an earlier press whose record did
+  // not land, or another door): record it, never call Xero again.
+  const existingBill = String(inv.xero_bill_id ?? "").trim();
+  if (
+    existingBill !== "" &&
+    ["pushed_to_xero", "paid"].includes(String(inv.status ?? ""))
+  ) {
+    return await recordPushed(deps, run, invoiceId, existingBill, actor, {
+      recorded_existing_bill: true,
+      pdf_attached: null,
+    });
+  }
+  // The invoice must still pay what the run recorded, to the cent. A figure
+  // that cannot be read refuses; a changed one (for example a repayment
+  // re-checked since the press) is never sent to Xero.
+  const nowPays = storedRunPays(inv);
+  const runPays = num(row.pays);
+  if (nowPays === null || runPays === null) {
+    throw unreadable("the invoice's pay figures");
+  }
+  if (cents(nowPays) !== cents(runPays)) {
+    deps.log({
+      at: "push_pay_run_invoice",
+      outcome: "pays_changed",
+      run_id: run.id,
+      invoice_id: invoiceId,
+    });
+    throw new TradePayRunError(
+      "pay_run_pays_changed",
+      "This invoice no longer pays what the run approved. It is not pushed; the office needs to check it.",
+      409,
+    );
+  }
+
+  let pushed: Record<string, unknown>;
+  try {
+    pushed = await deps.push(invoiceId, run.id);
+  } catch (e) {
+    deps.log({
+      at: "push_pay_run_invoice",
+      outcome: "push_failed",
+      run_id: run.id,
+      invoice_id: invoiceId,
+      code: (e as { body?: { code?: unknown } })?.body?.code ?? null,
+    });
+    throw e;
+  }
+  const billId = typeof pushed?.xero_bill_id === "string"
+    ? pushed.xero_bill_id.trim()
+    : "";
+  if (billId === "") {
+    // The push answered without a bill: nothing is recorded as pushed.
+    throw new TradePayRunError(
+      "pay_run_push_unconfirmed",
+      "Xero did not confirm a draft bill for this invoice. Check Xero before pushing it again.",
+      502,
+    );
+  }
+  return await recordPushed(deps, run, invoiceId, billId, actor, {
+    recorded_existing_bill: false,
+    pdf_attached: pushed?.pdf_attached ?? null,
+  });
+}
+
+async function recordPushed(
+  deps: PayRunPushDeps,
+  run: PayRunRunRow,
+  invoiceId: string,
+  billId: string,
+  actor: string,
+  extra: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  await deps.markPushed(run.id, invoiceId, billId);
+  let runStatus = run.status;
+  if ((await deps.cleanUnpushed(run.id)) === 0) {
+    await deps.markRunPushed(run.id);
+    runStatus = "pushed";
+  }
+  deps.log({
+    at: "push_pay_run_invoice",
+    outcome: extra.recorded_existing_bill ? "recorded_existing_bill" : "pushed",
+    run_id: run.id,
+    invoice_id: invoiceId,
+    actor,
+    run_status: runStatus,
+  });
+  return {
+    ok: true,
+    run_id: run.id,
+    invoice_id: invoiceId,
+    xero_bill_id: billId,
+    already_pushed: false,
+    run_status: runStatus,
+    ...extra,
+  };
+}
+
+export async function markPayRunSuperPaid(
+  deps: PayRunPushDeps,
+  opts: {
+    orgId: string | null | undefined;
+    actorUserId: string | null | undefined;
+    runId: unknown;
+  },
+): Promise<Record<string, unknown>> {
+  const { actor, run } = await payRunPressGate(deps, opts);
+  if (run.super_marked_paid_at) {
+    return {
+      ok: true,
+      run_id: run.id,
+      super_marked_paid_at: run.super_marked_paid_at,
+      super_marked_paid_by: run.super_marked_paid_by,
+      already_marked: true,
+    };
+  }
+  if (run.status !== "pushed") {
+    throw new TradePayRunError(
+      "pay_run_not_pushed",
+      "Push every clean invoice of the run to Xero before marking its super paid.",
+      409,
+    );
+  }
+  const stamp = await deps.markSuperPaid(run.id, actor);
+  return {
+    ok: true,
+    run_id: run.id,
+    ...stamp,
+    already_marked: stamp.super_marked_paid_by !== actor,
+  };
+}
+
+/** The real reads and writes, through the service client. */
+export function payRunPushDepsFromClient(
+  // deno-lint-ignore no-explicit-any
+  client: any,
+  switchOn: () => Promise<boolean>,
+  push: (invoiceId: string, runId: string) => Promise<Record<string, unknown>>,
+): PayRunPushDeps {
+  const reads = payRunReadsFromClient(client);
+  const writeFailed = (what: string) =>
+    new TradePayRunError(
+      "pay_run_write_failed",
+      `The pay run could not be updated (${what}). Open the pay run again.`,
+      503,
+    );
+  return {
+    switchOn,
+    approvers: () => reads.approvers(),
+    async runById(runId) {
+      // trade_pay_runs_pkey.
+      const { data, error } = await client.from("trade_pay_runs")
+        .select(
+          "id, org_id, week_start, status, super_marked_paid_at, super_marked_paid_by",
+        )
+        .eq("id", runId).maybeSingle();
+      if (error) throw unreadable("the run record");
+      return data ?? null;
+    },
+    async runInvoice(runId, invoiceId) {
+      // trade_pay_run_invoices_pkey (run_id, invoice_id).
+      const { data, error } = await client.from("trade_pay_run_invoices")
+        .select("verdict, pays, pushed_at, xero_bill_id")
+        .eq("run_id", runId).eq("invoice_id", invoiceId).maybeSingle();
+      if (error) throw unreadable("the run's invoice");
+      return data ?? null;
+    },
+    async invoiceForPush(invoiceId) {
+      // trade_invoices_pkey.
+      const { data, error } = await client.from("trade_invoices")
+        .select(
+          "pay_run_id, status, xero_bill_id, net_pay, gst, gst_on, recurring_deduction_amount",
+        ).eq("id", invoiceId).maybeSingle();
+      if (error) throw unreadable("the invoice");
+      return data ?? null;
+    },
+    push,
+    async markPushed(runId, invoiceId, billId) {
+      // trade_pay_run_invoices_pkey; a second writer finds pushed_at set.
+      const { error } = await client.from("trade_pay_run_invoices")
+        .update({ pushed_at: new Date().toISOString(), xero_bill_id: billId })
+        .eq("run_id", runId).eq("invoice_id", invoiceId).eq("verdict", "clean")
+        .is("pushed_at", null);
+      if (error) throw writeFailed("the pushed invoice");
+    },
+    async cleanUnpushed(runId) {
+      // trade_pay_run_invoices_pkey leads with run_id.
+      const { count, error } = await client.from("trade_pay_run_invoices")
+        .select("invoice_id", { count: "exact", head: true })
+        .eq("run_id", runId).eq("verdict", "clean").is("pushed_at", null);
+      if (error || typeof count !== "number") {
+        throw unreadable("the run's unpushed invoices");
+      }
+      return count;
+    },
+    async markRunPushed(runId) {
+      // trade_pay_runs_pkey.
+      const { error } = await client.from("trade_pay_runs")
+        .update({ status: "pushed" }).eq("id", runId).eq("status", "approved");
+      if (error) throw writeFailed("the run status");
+    },
+    async markSuperPaid(runId, actor) {
+      // trade_pay_runs_pkey. Only the first stamp is kept.
+      const { data, error } = await client.from("trade_pay_runs")
+        .update({
+          super_marked_paid_at: new Date().toISOString(),
+          super_marked_paid_by: actor,
+        })
+        .eq("id", runId).eq("status", "pushed").is("super_marked_paid_at", null)
+        .select("super_marked_paid_at, super_marked_paid_by").maybeSingle();
+      if (error) throw writeFailed("the super stamp");
+      if (data?.super_marked_paid_at) return data;
+      const { data: again, error: againErr } = await client.from(
+        "trade_pay_runs",
+      )
+        .select("super_marked_paid_at, super_marked_paid_by")
+        .eq("id", runId).maybeSingle();
+      if (againErr || !again?.super_marked_paid_at) {
+        throw unreadable("the super stamp");
+      }
+      return again;
+    },
+    log(line) {
+      console.log(JSON.stringify(line));
+    },
+  };
+}
