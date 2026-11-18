@@ -4,8 +4,8 @@ SELECT to_regprocedure('public.context_ledger_closed_how_stamp(uuid)') IS NULL
   OR to_regprocedure('public.context_ledger_closed_how_install()') IS NULL
   OR to_regclass('public.context_ledger_word_closes') IS NULL AS closed_how_needs_reapply \gset
 \if :closed_how_needs_reapply
-\ir ../../../rollbacks/20261118104131_context_ledger_closed_how_down.sql
-\ir ../../../migrations/20261118104131_context_ledger_closed_how.sql
+\ir ../../../rollbacks/20261118105244_context_ledger_closed_how_down.sql
+\ir ../../../migrations/20261118105244_context_ledger_closed_how.sql
 \endif
 
 BEGIN;
