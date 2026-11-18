@@ -32,8 +32,8 @@
 // job status, stage, order, supplier, Xero, GHL, SMS or email. The save never
 // throws: a failure is reported per file and the email stays put on the job.
 //
-// Not in this build (item 16 Q4): reading the scans to suggest a job. Scanned
-// PDFs have no context_document_texts row, so there are no words to read.
+// Reading the scans to suggest a job (item 16 Q4) is item 16b:
+// dispatch_v2_tray_pdf_read.ts (contract section 3j).
 
 import { ATTACHMENT_STATUS_WORDS } from "./context_message_original.ts";
 import {
