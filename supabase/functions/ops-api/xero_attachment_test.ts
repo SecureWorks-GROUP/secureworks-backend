@@ -5,6 +5,7 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  attachFileToXeroDocument,
   attachPdfBase64ToXeroInvoice,
   attachPdfToXeroInvoiceUntilAttached,
   canEnterPushTradeInvoiceToXero,
@@ -30,6 +31,146 @@ const PDF_BYTES = (() => {
   return bytes;
 })();
 const PDF_B64 = btoa(String.fromCharCode(...PDF_BYTES));
+
+Deno.test("file attachment accepts bounded PDF and photos on bills or credit notes, and refuses before dispatch", async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const deps = {
+    accessToken: "fixture-token",
+    tenantId: "fixture-tenant",
+    fetchImpl: ((url, init) => {
+      calls.push({ url: String(url), init: init! });
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as typeof fetch,
+  };
+  const jpeg = new Uint8Array(9 * 1024 * 1024);
+  jpeg.set([0xff, 0xd8, 0xff]);
+  await attachFileToXeroDocument(deps, {
+    endpoint: "Invoices",
+    documentId: "ZZTEST-bill/1",
+    filename: "../receipt photo.jpg",
+    bytes: jpeg,
+    contentType: "image/jpeg",
+  });
+  assertEquals(calls.length, 1);
+  assertEquals(
+    calls[0].url,
+    "https://api.xero.com/api.xro/2.0/Invoices/ZZTEST-bill%2F1/Attachments/_receipt_photo.jpg",
+  );
+  assertEquals(calls[0].init.method, "PUT");
+  assertEquals(
+    new Headers(calls[0].init.headers).get("Content-Type"),
+    "image/jpeg",
+  );
+  assertEquals(calls[0].init.body, jpeg);
+
+  const png = new Uint8Array(10 * 1024 * 1024);
+  png.set([0x89, 0x50, 0x4e, 0x47]);
+  await attachFileToXeroDocument(deps, {
+    endpoint: "CreditNotes",
+    documentId: "ZZTEST-credit",
+    filename: "receipt.png",
+    bytes: png,
+    contentType: "image/png",
+  });
+  assertEquals(calls.length, 2);
+  assertEquals(
+    calls[1].url,
+    "https://api.xero.com/api.xro/2.0/CreditNotes/ZZTEST-credit/Attachments/receipt.png",
+  );
+  assertEquals(
+    new Headers(calls[1].init.headers).get("Content-Type"),
+    "image/png",
+  );
+  await attachFileToXeroDocument(deps, {
+    endpoint: "CreditNotes",
+    documentId: "ZZTEST-credit",
+    filename: "credit",
+    bytes: PDF_BYTES,
+    contentType: "application/pdf",
+  });
+  assertEquals(calls[2].url.endsWith("/Attachments/credit.pdf"), true);
+  assertEquals(
+    new Headers(calls[2].init.headers).get("Content-Type"),
+    "application/pdf",
+  );
+
+  const rejected = async (
+    bytes: Uint8Array,
+    contentType: "application/pdf" | "image/jpeg" | "image/png",
+    code: string,
+  ) => {
+    const error = await assertRejects(() =>
+      attachFileToXeroDocument(deps, {
+        endpoint: "Invoices",
+        documentId: "ZZTEST-bill",
+        filename: "receipt",
+        bytes,
+        contentType,
+      }), XeroPdfAttachError);
+    assertEquals(error.code, code);
+    assertEquals(calls.length, 3);
+  };
+  await rejected(
+    new Uint8Array(11 * 1024 * 1024),
+    "image/jpeg",
+    "FILE_TOO_LARGE",
+  );
+  for (const type of ["application/pdf", "image/jpeg", "image/png"] as const) {
+    await rejected(new Uint8Array(), type, "FILE_TYPE_NOT_ALLOWED");
+    await rejected(
+      new Uint8Array([0, 1, 2, 3, 4]),
+      type,
+      "FILE_TYPE_NOT_ALLOWED",
+    );
+  }
+  await rejected(PDF_BYTES, "image/jpeg", "FILE_TYPE_NOT_ALLOWED");
+  await rejected(jpeg, "image/png", "FILE_TYPE_NOT_ALLOWED");
+});
+
+Deno.test("file attachment surfaces refusal once and lets an explicit retry replace the same file", async () => {
+  let calls = 0;
+  const urls: string[] = [];
+  const deps = {
+    accessToken: "fixture-token",
+    tenantId: "fixture-tenant",
+    fetchImpl: ((url) => {
+      urls.push(String(url));
+      return Promise.resolve(
+        ++calls === 1
+          ? new Response(null, {
+            status: 429,
+            headers: { "Retry-After": "60" },
+          })
+          : new Response("{}", { status: 200 }),
+      );
+    }) as typeof fetch,
+  };
+  const input = {
+    endpoint: "Invoices" as const,
+    documentId: "ZZTEST-bill",
+    filename: "receipt.pdf",
+    bytes: PDF_BYTES,
+    contentType: "application/pdf" as const,
+  };
+  await assertRejects(
+    () => attachFileToXeroDocument(deps, input),
+    XeroCooldownError,
+  );
+  assertEquals(calls, 1);
+  await attachFileToXeroDocument(deps, input);
+  assertEquals(calls, 2);
+  assertEquals(urls[0], urls[1]);
+  deps.fetchImpl = (() => {
+    calls++;
+    return Promise.resolve(new Response("unavailable", { status: 502 }));
+  }) as typeof fetch;
+  const error = await assertRejects(
+    () => attachFileToXeroDocument(deps, input),
+    XeroPdfAttachError,
+  );
+  assertEquals(error.status, 502);
+  assertEquals(calls, 3);
+});
 
 Deno.test("decodePdfBase64 accepts a bounded PDF and rejects junk", () => {
   const bytes = decodePdfBase64(PDF_B64);
