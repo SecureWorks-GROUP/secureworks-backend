@@ -2,7 +2,7 @@
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
 import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, linesInJobOrder, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, tradeLineHoldFlagOn, type SendRow, type SortedSend } from './trade_line_send.ts'
-import { readJobAmountsLeft, type LineHoldFacts } from './trade_line_hold.ts'
+import { readJobAmountsState, type LineHoldFacts } from './trade_line_hold.ts'
 import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine, ownMoneyReimbursementItems, reimbursementSkipAnswer } from './trade_invoice_reimbursement.ts'
 import { ExpenseCaptureError, expenseCaptureFields, expenseNextStep, refuseBilledReimbursement } from './expense_capture_v2.ts'
 import { assertUnbookedApprovalConfirmed, assertUnbookedMoveAllowed, expenseJobIdOf, expenseUnbookedJobMark } from './expense_own_job.ts'
@@ -59375,14 +59375,17 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   // job has left on its approved work order (null: no approved amount), so the
   // app can say before sending that a line goes to the office. A failed read
   // says so (job_left_unavailable) rather than reading as "no amount".
+  // Follow-up 49 item 9(b): job_capped says whether the job is under the cap at
+  // all (work_order_cap_scope); false holds nothing and job_left_ex is null.
   const lineHoldWeek = await lineHoldSendApplies(client, weekStart || weekEnding, paySettingsRead)
   let jobLeftUnavailable = false
   if (lineHoldWeek) {
     // Balance only: no commission, salesperson or rate is read here.
     let left: Record<string, number | null> = {}
+    let capped: Record<string, boolean> = {}
     if (invoiceModeJobIds.length > 0) {
       try {
-        left = await readJobAmountsLeft(client, userId, invoiceModeJobIds)
+        ({ left, capped } = await readJobAmountsState(client, userId, invoiceModeJobIds))
       } catch (leftErr) {
         console.error('[ops-api] my_hours: job amounts unreadable:', lineSendLogCode(leftErr))
         jobLeftUnavailable = true
@@ -59392,8 +59395,16 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
       const value = left[jobId]
       return value == null ? null : roundMoney(value)
     }
-    for (const a of enriched) a.job_left_ex = jobLeft(String(a.jobs?.id || ''))
-    for (const r of groupRouteJobs) r.job_left_ex = jobLeft(String(r.job_id || ''))
+    const jobCapped = (jobId: string): boolean | null =>
+      jobLeftUnavailable ? null : capped[jobId] === true
+    for (const a of enriched) {
+      a.job_left_ex = jobLeft(String(a.jobs?.id || ''))
+      a.job_capped = jobCapped(String(a.jobs?.id || ''))
+    }
+    for (const r of groupRouteJobs) {
+      r.job_left_ex = jobLeft(String(r.job_id || ''))
+      r.job_capped = jobCapped(String(r.job_id || ''))
+    }
   }
 
   // Check verification state across assignments

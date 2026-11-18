@@ -1109,6 +1109,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # P0-09.5: Job Profit's reads go through the switch
                       # views (job_profit.ts, job_profit_rollup.ts).
                       ("20261118170100", "job_profit_read_views"),
+                      # cl-payrun-escape: the release door and the run read's
+                      # released_at (trade_pay_run.ts).
+                      ("20261118170500", "trade_pay_run_release"),
                       # cl-receipt-ownjob: the not-booked-on-this-job receipt
                       # mark (expense_own_job.ts).
                       ("20261118194000", "expense_unbooked_job_mark")]:

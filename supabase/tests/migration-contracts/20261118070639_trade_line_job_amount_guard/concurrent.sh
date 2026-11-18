@@ -18,6 +18,10 @@ first=f1050900-0000-4000-8000-000000000004
 second=f1050900-0000-4000-8000-000000000005
 old_flag=$(psql "$CONTRACT_DATABASE_URL" -XAt -v ON_ERROR_STOP=1 -c "SELECT enabled FROM public.feature_flags WHERE flag_name='trade_line_hold_v1'")
 old_trigger=$(psql "$CONTRACT_DATABASE_URL" -XAt -v ON_ERROR_STOP=1 -c "SELECT tgenabled FROM pg_trigger WHERE tgname='trade_invoice_lines_job_amount_guard' AND tgrelid='public.trade_invoice_lines'::regclass")
+# 20261118193817 caps only jobs approved on or after work_order_cap_settings.cap_start_on;
+# this race needs its job capped, so a start date before the fixture's approval is set and
+# the earlier value put back on exit.
+old_start=$(psql "$CONTRACT_DATABASE_URL" -XAt -v ON_ERROR_STOP=1 -c "SELECT CASE WHEN to_regclass('public.work_order_cap_settings') IS NULL THEN 'absent' ELSE coalesce((SELECT cap_start_on::text FROM public.work_order_cap_settings WHERE id=1),'null') END")
 old_header=$(psql "$CONTRACT_DATABASE_URL" -XAt -v ON_ERROR_STOP=1 -c "SELECT tgenabled FROM pg_trigger WHERE tgname='trade_invoices_job_amount_guard' AND tgrelid='public.trade_invoices'::regclass")
 first_pid=
 cleanup() {
@@ -32,6 +36,11 @@ DELETE FROM public.jobs WHERE id='$job';
 UPDATE public.feature_flags SET enabled='$old_flag' WHERE flag_name='trade_line_hold_v1';
 COMMIT;
 SQL
+ case "$old_start" in
+  absent) ;;
+  null) psql "$CONTRACT_DATABASE_URL" -Xq -v ON_ERROR_STOP=1 -c "UPDATE public.work_order_cap_settings SET cap_start_on=NULL WHERE id=1" ;;
+  *) psql "$CONTRACT_DATABASE_URL" -Xq -v ON_ERROR_STOP=1 -c "UPDATE public.work_order_cap_settings SET cap_start_on='$old_start' WHERE id=1" ;;
+ esac
  case "$old_trigger" in
   '') psql "$CONTRACT_DATABASE_URL" -Xq -v ON_ERROR_STOP=1 -c 'SELECT public.remove_trade_line_job_amount_guard()' >/dev/null ;;
   O) psql "$CONTRACT_DATABASE_URL" -Xq -v ON_ERROR_STOP=1 -c 'ALTER TABLE public.trade_invoice_lines ENABLE TRIGGER trade_invoice_lines_job_amount_guard' ;;
@@ -64,6 +73,11 @@ BEGIN;
 SET LOCAL session_replication_role=replica;
 \i '$case_dir/fixture.sql'
 UPDATE public.feature_flags SET enabled=true WHERE flag_name='trade_line_hold_v1';
+DO \$s\$ BEGIN
+ IF to_regclass('public.work_order_cap_settings') IS NOT NULL THEN
+  UPDATE public.work_order_cap_settings SET cap_start_on='2000-01-01' WHERE id=1;
+ END IF;
+END \$s\$;
 SELECT public.install_trade_line_job_amount_guard();
 ALTER TABLE public.trade_invoice_lines ENABLE ALWAYS TRIGGER trade_invoice_lines_job_amount_guard;
 ALTER TABLE public.trade_invoices ENABLE ALWAYS TRIGGER trade_invoices_job_amount_guard;

@@ -17,6 +17,7 @@ import {
   type ExtraRateRules,
 } from "./trade_invoice_extra_rate_rule.ts";
 import { isTradeInvoiceTimeLineType } from "./trade_invoice_time_entry.ts";
+import { readWorkOrderCapScope } from "./work_order_cap_scope.ts";
 
 export const HOLD_REASONS = [
   "no_work_order",
@@ -72,6 +73,11 @@ export type JobHoldFacts = {
   allowed_ex: number;
   backed_billed_ex: number;
   hourly: boolean;
+  /** Follow-up 49 item 9(b): false when the job is outside the cap's scope
+   * (no start date; or an order approved before it; or no approved order on a
+   * job created before it), so no work order reason holds its lines. The
+   * reader always sets it; absent keeps the earlier rule (every job capped). */
+  cap_in_scope?: boolean;
   off_crew?: boolean;
   /** Reader keys crew decisions by week so a different week's rejection
    * never holds this week's work. off_crew is the single-week shorthand. */
@@ -129,6 +135,8 @@ function jobReason(
   job: JobHoldFacts | undefined,
   left: number,
 ): HoldReason | null {
+  // Out of the cap's scope: no work order, amount, maximum or over-amount hold.
+  if (job?.cap_in_scope === false) return null;
   const hourly = job?.hourly && isTradeInvoiceTimeLineType(line.line_type);
   if (
     !job?.workOrder || !["draft", "approved"].includes(job.workOrder.status)
@@ -517,6 +525,7 @@ export async function readLineHoldFacts(
       budgets,
       groups,
       flags,
+      capScope,
     ] = await Promise.all([
       read("users", "id,org_id,invoice_type", "id", [userId]),
       read("jobs", "id,org_id,job_number,type,metadata", "id", jobIds),
@@ -575,6 +584,7 @@ export async function readLineHoldFacts(
       read("feature_flags", "flag_name,enabled", "flag_name", [
         JOB_LABOUR_BUDGET_FLAG,
       ]),
+      readWorkOrderCapScope(client, jobIds),
     ]);
     if (users.length !== 1) throw new LineHoldFactsUnreadable();
     // Which of those jobs carry a record at all: job id only, no salesperson
@@ -658,6 +668,7 @@ export async function readLineHoldFacts(
         allowed_ex: balance.allowedCents / 100,
         backed_billed_ex: balance.billedCents / 100,
         hourly: mode.invoice_mode === "hourly",
+        cap_in_scope: capScope.get(row.id) === true,
         off_crew_by_week: {},
       };
     }
@@ -738,21 +749,36 @@ export async function readLineHoldFacts(
 }
 
 /** my_hours: what is left on each job's approved work order, and nothing
- * else (null: no approved amount). A balance-only read: no commission, no
- * salesperson, no rate and no receipt is fetched. Throws
- * LineHoldFactsUnreadable on any failed read; the caller says so, never 0. */
+ * else (null: no approved amount, or the job is outside the cap's scope, which
+ * holds nothing). A balance-only read: no commission, no salesperson, no rate
+ * and no receipt is fetched. Throws LineHoldFactsUnreadable on any failed
+ * read; the caller says so, never 0. */
 export async function readJobAmountsLeft(
   client: any,
   userId: string,
   jobIds: readonly string[],
 ): Promise<Record<string, number | null>> {
+  return (await readJobAmountsState(client, userId, jobIds)).left;
+}
+
+/** readJobAmountsLeft plus, per job, whether it is under the cap
+ * (work_order_cap_scope). A job outside it has left null and capped false. */
+export async function readJobAmountsState(
+  client: any,
+  userId: string,
+  jobIds: readonly string[],
+): Promise<{
+  left: Record<string, number | null>;
+  capped: Record<string, boolean>;
+}> {
   try {
     const ids = [...new Set(jobIds.filter((id) => !!id))];
     const out: Record<string, number | null> = {};
-    if (ids.length === 0) return out;
+    const capped: Record<string, boolean> = {};
+    if (ids.length === 0) return { left: out, capped };
     // users_pkey; jobs_pkey; uq_work_orders_job_current;
     // idx_work_order_customer_variations_job.
-    const [users, jobs, orders, variations] = await Promise.all([
+    const [users, jobs, orders, variations, scope] = await Promise.all([
       readChunked(client, "users", "id,org_id", "id", [userId]),
       readChunked(client, "jobs", "id,org_id", "id", ids),
       readChunked(
@@ -770,6 +796,7 @@ export async function readJobAmountsLeft(
         "job_id",
         ids,
       ),
+      readWorkOrderCapScope(client, ids),
     ]);
     if (users.length !== 1) throw new LineHoldFactsUnreadable();
     const ownJobs = jobs.filter((row) =>
@@ -792,11 +819,12 @@ export async function readJobAmountsLeft(
         o.job_id === row.id && o.status === "approved"
       );
       const balance = workOrderBalanceCents(row.id, wo, variations, changes, billed);
-      out[row.id] = !wo || balance.agreed === null
+      capped[row.id] = scope.get(row.id) === true;
+      out[row.id] = !capped[row.id] || !wo || balance.agreed === null
         ? null
         : (balance.allowedCents - balance.billedCents) / 100;
     }
-    return out;
+    return { left: out, capped };
   } catch {
     throw new LineHoldFactsUnreadable();
   }
