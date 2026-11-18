@@ -8,7 +8,7 @@
 // pricing estimate, never today's cost table (director, P1-05.5). A sealed
 // budget with no labour amount proposes nothing and the row says so.
 //
-// The press: one call to confirm_job_work_order_labour (20261118153001),
+// The press: one call to confirm_job_work_order_labour (20261118170000),
 // which re-reads the sealed budget under the work order's row lock, writes
 // agreed_labour_ex on the draft and records who and when, in one transaction.
 // Approving the work order stays the named approver's separate press.

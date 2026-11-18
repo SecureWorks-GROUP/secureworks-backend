@@ -1,8 +1,8 @@
--- Contract for 20261118153001_job_work_order_labour_confirm.sql. Every
+-- Contract for 20261118170000_job_work_order_labour_confirm.sql. Every
 -- fixture write is inside one transaction that rolls back. Made-up amounts,
 -- ZZTEST job numbers, roles only.
 
-\ir ../../../migrations/20261118153001_job_work_order_labour_confirm.sql
+\ir ../../../migrations/20261118170000_job_work_order_labour_confirm.sql
 
 -- 1. Shape: switch seeded off, the write is service-role only, the record is
 -- not readable by browser roles.

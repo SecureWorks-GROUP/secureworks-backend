@@ -38,7 +38,7 @@ orders, so a confirmed draft does not count until it is approved.
   `budget.labour.work_order_amount_ex_gst`, through `budgetAgreedLabour`.
   It is never the quote's pricing estimate and never today's cost table
   (P1-05.5).
-- Write: `confirm_job_work_order_labour` (`20261118153001`).
+- Write: `confirm_job_work_order_labour` (`20261118170000`).
   - In one transaction it writes `work_orders.agreed_labour_ex` on the
     draft and one append-only row in `job_work_order_labour_confirmations`
     (who, when, budget, revision, amount).
@@ -55,4 +55,4 @@ orders, so a confirmed draft does not count until it is approved.
 
 Code: `supabase/functions/ops-api/job_work_order_labour_confirm.ts`. Tests:
 `job_work_order_labour_confirm_test.ts`, migration contract
-`20261118153001_job_work_order_labour_confirm`.
+`20261118170000_job_work_order_labour_confirm`.

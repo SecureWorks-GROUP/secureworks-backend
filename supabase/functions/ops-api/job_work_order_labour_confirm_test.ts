@@ -2,7 +2,7 @@
 // FU49 9(a) option A: office confirm list and one-press confirm. Made-up
 // amounts, ZZTEST job numbers, roles only. The database half (lock, re-read,
 // append-only record) is the migration contract
-// 20261118153001_job_work_order_labour_confirm.
+// 20261118170000_job_work_order_labour_confirm.
 import {
   assert,
   assertEquals,
