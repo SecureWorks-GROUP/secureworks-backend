@@ -13,7 +13,7 @@ SELECT to_regprocedure('public.context_job_story_credit_sig_fast(uuid)') IS NULL
 \if :bg_restore_fu58
 \ir ../../../migrations/20261118170400_context_story_credit_sig_job.sql
 \endif
-\ir ../../../migrations/20261118999905_context_story_credit_sig_bill_line_guard.sql
+\ir ../../../migrations/20261118170600_context_story_credit_sig_bill_line_guard.sql
 CREATE FUNCTION pg_temp.bg_assert(ok boolean,msg text) RETURNS void LANGUAGE plpgsql AS $f$
 BEGIN IF ok IS NOT TRUE THEN RAISE EXCEPTION 'FU58 guard: %',msg; END IF; END $f$;
 CREATE FUNCTION pg_temp.bg_job(num text) RETURNS uuid LANGUAGE sql AS $f$ SELECT id FROM public.jobs WHERE job_number=num $f$;
@@ -80,12 +80,12 @@ SELECT pg_temp.bg_assert(pg_temp.bg_md5('public.context_job_story_credit_sig_fas
 SELECT public.install_context_story_credit_sig_job();
 SELECT pg_temp.bg_assert(pg_temp.bg_md5('public.context_job_story_credit_sig(uuid)')='26bd02ef6d2b66bd87f58e40a4e3382d','old install did not take');
 CREATE TEMP TABLE bg_before AS SELECT id, public.context_job_story_money_sig(id) AS sig FROM public.jobs;
-\ir ../../../migrations/20261118999905_context_story_credit_sig_bill_line_guard.sql
+\ir ../../../migrations/20261118170600_context_story_credit_sig_bill_line_guard.sql
 SELECT pg_temp.bg_assert(pg_temp.bg_md5('public.context_job_story_credit_sig(uuid)')='9177840caa26158636d32d399bebb809','installed live name did not take the guard');
 SELECT pg_temp.bg_assert(has_function_privilege('service_role','public.context_job_story_credit_sig(uuid)','EXECUTE')
  AND NOT has_function_privilege('anon','public.context_job_story_credit_sig(uuid)','EXECUTE'),'re-install changed grants');
 SELECT pg_temp.bg_assert(NOT EXISTS(SELECT 1 FROM bg_before b WHERE public.context_job_story_money_sig(b.id) IS DISTINCT FROM b.sig),'money_sig moved');
-\ir ../../../migrations/20261118999905_context_story_credit_sig_bill_line_guard.sql
+\ir ../../../migrations/20261118170600_context_story_credit_sig_bill_line_guard.sql
 SELECT public.remove_context_story_credit_sig_job();
 SELECT public.remove_context_story_credit_sig_job();
 SELECT pg_temp.bg_assert(pg_temp.bg_md5('public.context_job_story_credit_sig(uuid)')='a5d0f9f74c14ab88cc502f2d2ad98f27','remove did not restore');
