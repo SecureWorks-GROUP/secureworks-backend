@@ -35,6 +35,7 @@ import {
   WorkOrderTotalCapReadError,
   type WorkOrderTotalCapRefusal,
 } from './work_order_total_cap.ts'
+import { listOverbilledJobWorkOrders, OverbilledReadError } from './work_order_overbilled.ts'
 import {
   assertTradeMayBillExtraJobs,
   commissionLinesTotalEx,
@@ -433,6 +434,7 @@ import {
 import { postgrestReplyPdfReader } from './dispatch_v2_reply_pdf.ts'
 import { postgrestRepliesStore } from './dispatch_v2_replies_store.ts'
 import { postgrestDispatchRepliesSources } from './dispatch_v2_replies_sources.ts'
+import { makeReadNowRunner, outlookPollMail } from './dispatch_v2_read_now.ts'
 import {
   addTrayAttachments,
   openTrayAttachment,
@@ -893,6 +895,14 @@ import {
   stripJobWorkOrderCardMoney,
   xeroSyncRefusal,
 } from './crew_invoice_job_work_order.ts'
+import {
+  type PayRunWait,
+  holdTradeInvoiceForPayRun,
+  payRunNoXeroBoundary,
+  payRunWaitHttpStatus,
+  payRunWaitResponse,
+  readPayRunSwitchForSubmit,
+} from './trade_pay_run_wait.ts'
 import {
   approveOfficeJobWorkOrder,
   fillJobWorkOrderAllowance,
@@ -1576,7 +1586,7 @@ import {
 import { readXeroDrafts, XeroDraftsError } from './xero_drafts_read.ts'
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
-import { TradePayRunError, TradePayRunRefusal, PAY_RUN_SWITCH, approvePayRun, payRunApproveDepsFromClient, payRunReadsFromClient, readPayRun } from './trade_pay_run.ts'
+import { TradePayRunError, TradePayRunRefusal, PAY_RUN_SWITCH, approvePayRun, markPayRunSuperPaid, payRunApproveDepsFromClient, payRunPushDepsFromClient, payRunReadsFromClient, pushPayRunInvoice, readPayRun } from './trade_pay_run.ts'
 // Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
 import { PAY_FIGURES_APPROVER_ACTIONS, payFiguresApproverRefusal } from './pay_figures_approver.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
@@ -5670,6 +5680,37 @@ export const OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS: ReadonlySet<string> = new 
   'dispatch_v2_replies_scan', // trigger_dispatch_v2_replies_scan, cron dispatch-v2-replies-scan (sw_service_key())
 ])
 
+// The supplier reply scan, as cron dispatch-v2-replies-scan runs it: the scan
+// (dispatch_v2_replies.ts), then the sweep of confirmed orders for new supplier
+// PDFs. Shared by the cron action and Read now (item 19, contract section 3j),
+// so Read now runs exactly what the cron runs.
+async function dispatchV2RepliesScanLive(client: any, params: URLSearchParams, body: any): Promise<any> {
+  const scanned: any = await runDispatchV2RepliesAction('dispatch_v2_replies_scan', params, body, {
+    orgId: DEFAULT_ORG_ID,
+    actor: { userId: null, email: null, orgId: null },
+    via: 'terminal',
+    store: postgrestRepliesStore(client),
+    sources: postgrestDispatchRepliesSources(client),
+    // Contract section 3g (6 Nov): an order sent from admin@ in Outlook
+    // becomes that supplier's Dispatch order when it is sent (never
+    // sends anything, never moves a job's status).
+    onSend: postgrestOnSendStore(client),
+    // Tweak 2 (contract section 3f.2): an email its words cannot place
+    // is matched by the one job number in its stored PDFs (read only).
+    pdfs: postgrestReplyPdfReader(client),
+  })
+  if (scanned?.skipped === 'flag_off') return scanned
+  // Never throws; a failed sweep only means no new documents this run.
+  const orderDocuments = await sweepDispatchV2OrderDocuments(client, {
+    orgId: DEFAULT_ORG_ID,
+    now: new Date().toISOString(),
+  })
+  return { ...scanned, order_documents: orderDocuments }
+}
+
+// Read now's one-at-a-time guard lives as long as this worker.
+const dispatchV2ReadNowRunner = makeReadNowRunner()
+
 export function _opsApiServiceCredentialOptions(url: URL): ServiceCredentialOptions {
   return OPS_API_CRON_SERVICE_ROLE_CLAIM_ACTIONS.has(url.searchParams.get('action') || '')
     ? { legacy: 'service_role_claim' }
@@ -7944,7 +7985,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
       }
       // Dispatch v2 slice 8, supplier replies and suggested moves (contract:
-      // replies.md; engine dispatch_v2_replies.ts). Two reads (GET) and seven
+      // replies.md; engine dispatch_v2_replies.ts). Two reads (GET) and eight
       // presses (POST), gated as the other Dispatch actions. Absent from
       // ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and
       // LEAD_INSTALLER_READ_ACTIONS. They write only the dispatch_v2_* reply
@@ -7958,7 +7999,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'dispatch_v2_replies_hide':
       case 'dispatch_v2_replies_clear':
       case 'dispatch_v2_suggestion_accept':
-      case 'dispatch_v2_suggestion_dismiss': {
+      case 'dispatch_v2_suggestion_dismiss':
+      // Items 17 and 5 (18 Nov 2026): Dismiss on a supplier reply. Writes
+      // only the reply's dismissed fields and a job_events row.
+      case 'dispatch_v2_replies_seen': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
           return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
         }
@@ -8215,31 +8259,40 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ error: 'dispatch_v2_replies_scan is POST only', code: 'method_not_allowed' }, 405)
         }
         try {
-          const scanned: any = await runDispatchV2RepliesAction(action, url.searchParams, body, {
-            orgId: DEFAULT_ORG_ID,
-            actor: { userId: null, email: null, orgId: null },
-            via: 'terminal',
-            store: postgrestRepliesStore(client),
-            sources: postgrestDispatchRepliesSources(client),
-            // Contract section 3g (6 Nov): an order sent from admin@ in Outlook
-            // becomes that supplier's Dispatch order when it is sent (never
-            // sends anything, never moves a job's status).
-            onSend: postgrestOnSendStore(client),
-            // Tweak 2 (contract section 3f.2): an email its words cannot place
-            // is matched by the one job number in its stored PDFs (read only).
-            pdfs: postgrestReplyPdfReader(client),
-          })
-          if (scanned?.skipped === 'flag_off') return json(scanned)
-          // Never throws; a failed sweep only means no new documents this run.
-          const orderDocuments = await sweepDispatchV2OrderDocuments(client, {
-            orgId: DEFAULT_ORG_ID,
-            now: new Date().toISOString(),
-          })
-          return json({ ...scanned, order_documents: orderDocuments })
+          return json(await dispatchV2RepliesScanLive(client, url.searchParams, body))
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
           throw e
         }
+      }
+      // Dispatch v2 item 19 (18 Nov 2026): Read now (contract section 3j;
+      // dispatch_v2_read_now.ts). One press (POST) by office staff: reads
+      // Outlook now (the reader cron outlook-mail-poll calls, mode poll) and
+      // then runs the supplier reply scan above with peek on, so a reply that
+      // just landed is matched now. Honours the capture lane, as both crons
+      // do. Absent from ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and
+      // LEAD_INSTALLER_READ_ACTIONS. Reads mail only: no send, no job stage or
+      // status, no Xero; writes only what those two crons write.
+      case 'dispatch_v2_read_now': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const readNowReplies = postgrestRepliesStore(client)
+        return json(await dispatchV2ReadNowRunner({
+          now: () => Date.now(),
+          captureLaneOn: async () => {
+            const { data, error } = await client.rpc('automation_lane_enabled', { lane: 'capture' })
+            if (error) throw Object.assign(new Error('capture lane read failed'), { code: 'lane_read_failed' })
+            return data === true
+          },
+          pollMail: outlookPollMail({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
+          scanReplies: () => dispatchV2RepliesScanLive(client, new URLSearchParams(), { peek: true, actor: 'dispatch-v2-read-now' }),
+          leftToSort: async () => {
+            const { counts } = await readNowReplies.tray(DEFAULT_ORG_ID, { includeOther: false, limit: 1 })
+            return (Number(counts?.needs_confirmation) || 0) + (Number(counts?.unmatched_order_desk) || 0)
+          },
+        }))
       }
       case 'dispatch_v2_outlook_catch_up': {
         // Contract section 3g.2: the one-off catch-up of orders sent from
@@ -10108,6 +10161,42 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
       }
 
+      // Push an approved run (P1-10.5). POST { run_id, invoice_id } pushes one
+      // clean invoice of the run through the existing one-invoice push (a DRAFT
+      // bill, never authorised or paid; no crewmate's bill). POST { run_id }
+      // marks the run's super paid once every clean invoice is pushed. Behind
+      // trade_pay_run_v1 (409 while off); a signed-in approver only.
+      case 'push_pay_run_invoice':
+      case 'mark_pay_run_super_paid': {
+        if (req.method !== 'POST') {
+          return json({ ok: false, error: 'method_not_allowed', message: `${action} requires POST` }, 405)
+        }
+        try {
+          const pushDeps = payRunPushDepsFromClient(
+            client,
+            () => readFlag(client, PAY_RUN_SWITCH),
+            (invoiceId, runId) => pushTradeInvoiceToXeroAction(
+              client,
+              { invoice_id: invoiceId },
+              `ops-api:push_pay_run_invoice:${runId}`,
+            ),
+          )
+          const pressOpts = {
+            orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
+            runId: body?.run_id,
+            actorUserId: requestActor.source === 'jwt' && authMode === 'jwt' ? (authUser?.id || null) : null,
+          }
+          return json(action === 'push_pay_run_invoice'
+            ? await pushPayRunInvoice(pushDeps, { ...pressOpts, invoiceId: body?.invoice_id })
+            : await markPayRunSuperPaid(pushDeps, pressOpts))
+        } catch (err) {
+          if (err instanceof TradePayRunError) {
+            return json({ ok: false, error: err.code, message: err.message }, err.status)
+          }
+          throw err
+        }
+      }
+
       // The weekly pay run (P1-10.2): the week's invoices clean or stopped
       // (pay-run check v2 plus the standing checks), the clean totals, super
       // owed per person and the hash P1-10.3 approves against. Read only;
@@ -10175,6 +10264,26 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           ))
         }
         return json(await listWorkOrders(client, url.searchParams))
+      // Jobs billed over their approved job work order's agreed labour, by the
+      // count the cap refuses by (work_order_overbilled.ts). Driven by the jobs
+      // a trade billed in the last `days` (90 unless sent), capped; a window
+      // too wide is refused 422, never cut short. Read only, staff only, GET
+      // only; job-level figures, no trade, rate or line. A failed read refuses
+      // 503, never an empty list.
+      case 'list_overbilled_job_work_orders':
+        try {
+          return json(await listOverbilledJobWorkOrders(client, {
+            method: req.method,
+            isStaff: _opsApiCallerIsStaffOperator(authMode, authUser),
+            days: url.searchParams.get('days'),
+            hourlyLimits: (jobIds) => readHourlyLabourLimits(client, jobIds),
+          }))
+        } catch (err) {
+          if (err instanceof OverbilledReadError) {
+            return json({ ok: false, error: err.message, code: err.code }, err.status)
+          }
+          throw err
+        }
       case 'job_work_order':
         return json(await runJobWorkOrder(() => readJobWorkOrder(client, {
           jobId: url.searchParams.get('job_id'),
@@ -14238,6 +14347,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               })
             }
 
+            // P1-10.4: read once per send. Not off: the invoice waits for the
+            // weekly pay run and this door never opens Xero (no token either).
+            const woPayRunSwitch = await readPayRunSwitchForSubmit(client)
+
             // Persist the complete local invoice and its source claims inside
             // the same organization-scoped transaction as weekly invoices.
             // No competing route can pass the source check before this commit,
@@ -14270,7 +14383,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               },
               woPersistLines,
               retryDrafts[0]?.id || null,
-              weekAutofill ? { onPersisted: () => markTradeInvoiceJobsChanged(client, workOrderLines, 'trade_invoice') } : {},
+              {
+                ...(weekAutofill ? { onPersisted: () => markTradeInvoiceJobsChanged(client, workOrderLines, 'trade_invoice') } : {}),
+                ...(woPayRunSwitch !== 'off' ? { openXeroBoundary: payRunNoXeroBoundary } : {}),
+              },
             )
             // Step 8: one retry on a job amount guard refusal (P1-05.9); a
             // second holds the whole job, so every line waits for the office.
@@ -14323,6 +14439,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               },
             )
             await noteTradeRecurringDeductionNotTaken(client, tradeInvoiceId, woRecurringDeduction)
+
+            // P1-10.4: waits for the pay run. The draft becomes
+            // pending_ops_review; no office-review status move and no Xero.
+            const woPayRunWait = await holdTradeInvoiceForPayRun(client, tradeInvoiceId, 'draft', woPayRunSwitch)
+            if (woPayRunWait.waits) {
+              return json({
+                invoice_id: tradeInvoiceId,
+                total,
+                ...tradeInvoiceMoneyResponse(woMoney),
+                negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
+                pending_ops_review: woPayRunWait.held,
+                ...payRunWaitResponse(woPayRunWait),
+              }, payRunWaitHttpStatus(woPayRunWait))
+            }
 
             // Saved line stamps hold the bill whether or not the review flag
             // can be read. A work-order invoice is inserted as draft, so a
@@ -17072,15 +17202,32 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             }
             await recordWoLabourIssues(woLabourIssues)
 
+            // P1-10.4: with the weekly pay run on (or its switch unreadable)
+            // the saved invoice waits for the run as pending_ops_review. No
+            // office-review status move, no Xero call and no crew release
+            // below; the run's check stops a held line itself. Off: unchanged.
+            // An all-in crew bill (employer super) keeps the whole-crew release
+            // path: it is never held for the pay run (cl-1622-crew-in-run (1)).
+            const payRunWait: PayRunWait = money.super_basis === TRADE_INVOICE_EMPLOYER_SUPER_BASIS
+              ? { waits: false }
+              : await holdTradeInvoiceForPayRun(
+                client,
+                invoice.id,
+                'pending_acknowledgment',
+                await readPayRunSwitchForSubmit(client),
+              )
+
             // Office review holds the whole invoice out of Xero. The invoice
             // and its lines are already saved. The saved stamps are read
             // whether or not the review flag can be read: a failed flag read
             // must not push a line the database already stamped awaiting. A
             // failed line read fails closed. A null stamp does not hold.
-            const officeReview = await readInvoiceOfficeReview(client, invoice.id)
+            const officeReview = payRunWait.waits ? null : await readInvoiceOfficeReview(client, invoice.id)
             let officeReviewHold: ReturnType<typeof xeroSyncRefusal> = null
             let officeReviewUnreadable = false
-            if (!officeReview.ok) {
+            if (!officeReview) {
+              // Waits for the pay run: nothing below touches its status or Xero.
+            } else if (!officeReview.ok) {
               // Switches off, the line read still failed. Mark the saved
               // invoice retryable and skip Xero. The existing
               // XERO_PUSH_FAILED return below is that state.
@@ -17106,7 +17253,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // B5: nothing holds it, so it leaves pending acknowledgment before
             // the push. A push that never runs or fails leaves it approved,
             // which push_trade_invoice_to_xero can always finish.
-            if (!officeReviewHold && !officeReviewUnreadable) {
+            if (!officeReviewHold && !officeReviewUnreadable && !payRunWait.waits) {
               await markTradeInvoiceReadyForXero(client, invoice.id)
             }
 
@@ -17120,7 +17267,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let xeroContactId: string | null = null
             let createdXeroBillId = ''
             let pdfAttached = false
-            if (!officeReviewHold && !officeReviewUnreadable) try {
+            if (!officeReviewHold && !officeReviewUnreadable && !payRunWait.waits) try {
               const reimbursementAccount = await reimbursementXeroAccount(client, extraLineItems)
               const { accessToken, tenantId } = await getToken(client)
               const tradeEmail = tradeUser.email || ''
@@ -17403,6 +17550,24 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const groupCrewRelease = officeReviewHold && money.super_basis === TRADE_INVOICE_EMPLOYER_SUPER_BASIS
               ? await releaseGroupCrewBills(client, String(invoice.id), `user:${tradeUser.id}`)
               : null
+            if (payRunWait.waits) {
+              return json({
+                invoice_id: invoice.id,
+                invoice_number: invoiceNumber,
+                total_hours: totalHours,
+                ...tradeInvoiceMoneyResponse(money),
+                ...(payView ? { pay_view: payView } : {}),
+                skipped_items: reimbursements.skipped_items,
+                ...tradeRecurringDeductionResponse(recurringDeduction),
+                ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
+                line_count: lineItems.length + extraLineItems.length,
+                pending_ops_review: payRunWait.held,
+                soft_review_flag: softReviewFlag,
+                review_flag: reviewFlag,
+                wo_labour_unresolved: woLabourIssues.map((i) => i.trade_name),
+                ...payRunWaitResponse(payRunWait),
+              }, payRunWaitHttpStatus(payRunWait))
+            }
             if (officeReviewHold) {
               return json({
                 success: true,
@@ -45283,15 +45448,17 @@ export function tradeViewerQuoteVisibleForJob(
   return managed.includes(_jobVertical(job))
 }
 
-// Colleagues' PAY — `trade_rates.hourly_rate`, the per-person hours and the cost
-// derived from them — is a narrower question than the quote, and the open-pool
-// tier is the reason it needs its own rule. `makesafe_open` is a REPORT door: it
-// admits ANY signed-in trade to ANY make-safe job before a named assignment
-// exists (isMakesafeAccessJobForClient asks only whether the job is a make-safe,
-// never whether it is open to this caller). That is the right trade for filing a
-// field report and the wrong one for a payroll read, so it is refused wherever a
-// response carries another trade's rate. Office, division manager of the job's
-// vertical, and an allocated crew member on the job all pass.
+// Who may open the labour door (`trade_labour_budget`) at all. `makesafe_open`
+// is a REPORT door: it admits ANY signed-in trade to ANY make-safe job before a
+// named assignment exists (isMakesafeAccessJobForClient asks only whether the
+// job is a make-safe, never whether it is open to this caller). That is the
+// right trade for filing a field report and the wrong one for a labour read, so
+// it is refused here. Office, division manager of the job's vertical, and an
+// allocated crew member on the job pass the door, but only office and division
+// manager receive money: the labour budget, any rate, any cost and the
+// remainder (ruling 17: the budget reaches no trade surface). An allocated
+// trade gets hours and shift counts only, and trade_rates is never read for
+// that tier (tradeLabourBudget).
 export function tradeLabourCostVisibleForTier(tier: TradeJobAccessTier): boolean {
   return tier === 'office' || tier === 'division_manager' || tier === 'allocated'
 }
@@ -59602,6 +59769,10 @@ async function tradeLabourBudget(
   if (!tradeLabourCostVisibleForTier(accessDecision.tier)) {
     throw new Error('You are not assigned to this job')
   }
+  // Ruling 17: an allocated trade sees hours, never money. Answered before any
+  // purchase order, quote or trade_rates read, so no figure is loaded for this
+  // tier and a crewmate's missing rate cannot fail the hours card.
+  if (accessDecision.tier === 'allocated') return tradeLabourHoursOnly(client, jobId)
   const quoteVisible = tradeQuoteVisibleForTier(accessDecision.tier)
 
   // Get PO total for this job (material + labour)
@@ -59659,6 +59830,37 @@ async function tradeLabourBudget(
   }
 }
 export const _tradeLabourBudgetForTest = tradeLabourBudget
+
+// The allocated-trade shape of trade_labour_budget: total hours and, per crew
+// member, name, hours and the number of shifts. No budget, rate, cost or
+// remainder exists in it. No shift is priced or left out, so the two rate
+// counts are zero by construction, not because a rate read succeeded.
+async function tradeLabourHoursOnly(client: any, jobId: string) {
+  const { data: assignments, error: assignmentError } = await client.from('job_assignments')
+    .select('user_id, started_at, completed_at, users:user_id(name)')
+    .eq('job_id', jobId)
+    .eq('status', 'complete')
+    .not('started_at', 'is', null)
+    .not('completed_at', 'is', null)
+  if (assignmentError || !assignments) throw new ApiError('labour_assignments_read_failed', 503)
+  const byUser = new Map<string, { user_id: string, name: string, hours: number, shifts: number }>()
+  for (const a of assignments) {
+    const hours = Math.round(((new Date(a.completed_at).getTime() - new Date(a.started_at).getTime()) / 3600000) * 100) / 100
+    const userId = String(a.user_id)
+    const row = byUser.get(userId) ?? { user_id: userId, name: a.users?.name || 'Trade', hours: 0, shifts: 0 }
+    row.hours += hours
+    row.shifts += 1
+    byUser.set(userId, row)
+  }
+  const trades = [...byUser.values()]
+  const totalHours = trades.reduce((sum, trade) => sum + trade.hours, 0)
+  return {
+    rate_assumed: 0,
+    rate_missing: 0,
+    total_hours: Math.round(totalHours * 100) / 100,
+    trades,
+  }
+}
 
 // ════════════════════════════════════════════════════════════
 // JOB COMPLETION PACKAGE

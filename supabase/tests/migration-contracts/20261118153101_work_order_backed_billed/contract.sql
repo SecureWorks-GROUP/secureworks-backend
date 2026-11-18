@@ -2,10 +2,10 @@ BEGIN;
 SET LOCAL statement_timeout='90s';
 -- Restore and reapply the exact definitions inside this transaction.
 SELECT public.remove_trade_line_job_amount_guard();
-\ir ../../../rollbacks/20261118130751_work_order_backed_billed_down.sql
+\ir ../../../rollbacks/20261118153101_work_order_backed_billed_down.sql
 -- Simulate an installation from before override-only edits fired the guard.
 SELECT public.install_trade_line_job_amount_guard();
-\ir ../../../migrations/20261118130751_work_order_backed_billed.sql
+\ir ../../../migrations/20261118153101_work_order_backed_billed.sql
 SET LOCAL session_replication_role=replica;
 \ir ../20261118070639_trade_line_job_amount_guard/fixture.sql
 SET LOCAL lock_timeout='0';
