@@ -482,7 +482,7 @@ auto_issue_job_work_orders # probe=source-only
 resend_work_order_variation_emails # probe=source-only
 correct_work_order_variation # probe=source-only
 # Jobs billed over their agreed labour (work_order_overbilled.ts). A read, but
-#    a bare call scans every approved job work order, so never probed live.
+#    a bare call checks every job billed in the last 90 days, so never probed live.
 list_overbilled_job_work_orders # probe=source-only
 # Work order lines from the accepted quote (docs/quote-work-order-lines-v1.md).
 #    A pure read; a bare call is refused 400 "job_id required" before any query.

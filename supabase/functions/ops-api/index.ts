@@ -10124,14 +10124,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         return json(await listWorkOrders(client, url.searchParams))
       // Jobs billed over their approved job work order's agreed labour, by the
-      // count the cap refuses by (work_order_overbilled.ts). Read only, staff
-      // only, GET only; job-level figures, no trade, rate or line. A failed
-      // read refuses 503, never an empty list.
+      // count the cap refuses by (work_order_overbilled.ts). Driven by the jobs
+      // a trade billed in the last `days` (90 unless sent), capped; a window
+      // too wide is refused 422, never cut short. Read only, staff only, GET
+      // only; job-level figures, no trade, rate or line. A failed read refuses
+      // 503, never an empty list.
       case 'list_overbilled_job_work_orders':
         try {
           return json(await listOverbilledJobWorkOrders(client, {
             method: req.method,
             isStaff: _opsApiCallerIsStaffOperator(authMode, authUser),
+            days: url.searchParams.get('days'),
             hourlyLimits: (jobIds) => readHourlyLabourLimits(client, jobIds),
           }))
         } catch (err) {
