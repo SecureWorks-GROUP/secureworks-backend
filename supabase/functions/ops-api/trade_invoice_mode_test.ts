@@ -374,17 +374,28 @@ function hoursClient(world: { failJobs?: boolean; lineHold?: boolean; billedOnFe
       ? [{ flag_name: "trade_line_hold_v1", enabled: true }, { flag_name: "trade_pay_inclusive_super_v1", enabled: true }]
       : [],
     trade_pay_settings: world.lineHold ? [{ id: 1, inclusive_super_from: "2026-01-05" }] : [],
-    trade_invoice_lines: world.billedOnFence
-      ? [{ id: "zz-billed", job_id: FENCE, line_type: "labour", line_total_ex: world.billedOnFence, override_amount: null, trade_invoices: { status: "pushed_to_xero", invoice_kind: "standard" } }]
-      : [],
   };
   return {
-    rpc: (name: string) => Promise.resolve(name === "trade_is_off_job_crew" ? { data: false, error: null } : { data: null, error: null }),
+    // FU49 item 8: what is billed on a job is the database's one sum
+    // (work_order_backed_billed), one row per job asked.
+    rpc: (name: string, args: any = {}) => {
+      if (name === "trade_is_off_job_crew") return Promise.resolve({ data: false, error: null });
+      if (name === "work_order_backed_billed") {
+        if (world.failBilled) return Promise.resolve({ data: null, error: { message: "boom" } });
+        return Promise.resolve({
+          data: (args.p_job_ids ?? []).map((id: string) => ({
+            job_id: id,
+            billed_ex: id === FENCE ? (world.billedOnFence ?? 0) : 0,
+          })),
+          error: null,
+        });
+      }
+      return Promise.resolve({ data: null, error: null });
+    },
     from(table: string) {
       const filters: Array<[string, string, unknown]> = [];
       const result = () => {
         if (world.failJobs && table === "jobs") return { data: null, error: { message: "boom" } };
-        if (world.failBilled && table === "trade_invoice_lines") return { data: null, error: { message: "boom" } };
         const rows = (tables[table] || []).filter((row) =>
           filters.every(([op, col, val]) =>
             op === "eq"
