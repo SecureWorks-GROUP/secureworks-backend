@@ -21,7 +21,7 @@ SELECT coalesce(
     IN ('72a8fbd89744351d172f7552d2bc7d3f', 'a2eec1f3e0954992b90927f40e99e6f3'),
   false) AS zz_reapply_ok \gset
 \if :zz_reapply_ok
-\ir ../../../migrations/20261118999916_job_cost_proven_share_rules.sql
+\ir ../../../migrations/20261118194700_job_cost_proven_share_rules.sql
 \endif
 
 CREATE FUNCTION pg_temp.check_share_rules(ok boolean, label text) RETURNS void LANGUAGE plpgsql AS $$
@@ -401,19 +401,19 @@ RETURNS TABLE(job_id uuid,cost_proven_ex numeric,cost_on_clues_ex numeric,
               cost_unknown_ex numeric,cost_unknown_items integer,proven_share_pct numeric,
               proven_share_reason text)
 LANGUAGE sql AS $other$ SELECT NULL::uuid,0::numeric,0::numeric,0::numeric,0,0::numeric,NULL::text WHERE false $other$;
-\ir ../../../migrations/20261118999916_job_cost_proven_share_rules.sql
+\ir ../../../migrations/20261118194700_job_cost_proven_share_rules.sql
 ROLLBACK TO SAVEPOINT zz_collide;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_calc_apply_error \gset
 SAVEPOINT zz_collide;
 CREATE OR REPLACE FUNCTION public.job_profit_store_proven_share(p_job_ids uuid[])
 RETURNS void LANGUAGE sql AS $other$ SELECT $other$;
-\ir ../../../migrations/20261118999916_job_cost_proven_share_rules.sql
+\ir ../../../migrations/20261118194700_job_cost_proven_share_rules.sql
 ROLLBACK TO SAVEPOINT zz_collide;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_apply_error \gset
 SAVEPOINT zz_collide;
 CREATE OR REPLACE FUNCTION public.job_profit_store_proven_share(p_job_ids uuid[])
 RETURNS void LANGUAGE sql AS $other$ SELECT $other$;
-\ir ../../../rollbacks/20261118999916_job_cost_proven_share_rules_down.sql
+\ir ../../../rollbacks/20261118194700_job_cost_proven_share_rules_down.sql
 ROLLBACK TO SAVEPOINT zz_collide;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_down_error \gset
 \set ON_ERROR_ROLLBACK off
@@ -426,12 +426,12 @@ SELECT pg_temp.check_share_rules(:'collide_down_error' LIKE '%rollback: another 
   'rollback refuses unknown body');
 
 SAVEPOINT zz_roundtrip;
-\ir ../../../rollbacks/20261118999916_job_cost_proven_share_rules_down.sql
+\ir ../../../rollbacks/20261118194700_job_cost_proven_share_rules_down.sql
 SELECT pg_temp.check_share_rules(
   (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.job_cost_proven_share(uuid[])'::regprocedure)='317bbcbdc920b45a9752ba25d07d413f'
   AND (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.job_profit_store_proven_share(uuid[])'::regprocedure)='72a8fbd89744351d172f7552d2bc7d3f',
   'rollback restores 20261118124326 bodies');
-\ir ../../../migrations/20261118999916_job_cost_proven_share_rules.sql
+\ir ../../../migrations/20261118194700_job_cost_proven_share_rules.sql
 RELEASE SAVEPOINT zz_roundtrip;
 
 ROLLBACK;

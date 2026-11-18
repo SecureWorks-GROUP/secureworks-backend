@@ -1,12 +1,12 @@
 \set ON_ERROR_STOP on
 BEGIN;
--- A later body (20261118999916, the share review and partial rules) is rolled
+-- A later body (20261118194700, the share review and partial rules) is rolled
 -- back first inside this transaction so this contract proves its own body.
 SELECT coalesce((SELECT md5(prosrc) FROM pg_proc
   WHERE oid = to_regprocedure('public.job_cost_proven_share(uuid[])'))
   = 'b7e6c59ac5be46981791590c2c206c73', false) AS zz_share_successor_live \gset
 \if :zz_share_successor_live
-\ir ../../../rollbacks/20261118999916_job_cost_proven_share_rules_down.sql
+\ir ../../../rollbacks/20261118194700_job_cost_proven_share_rules_down.sql
 \endif
 \ir ../../../migrations/20261118124326_job_cost_proven_share.sql
 SET LOCAL statement_timeout='120s';
