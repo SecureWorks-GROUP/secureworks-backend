@@ -257,7 +257,7 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
         const rows = posted();
         const saved = rows.map((row) => ({ ...row, id: `6c2f0a52-0000-4000-8000-0000000fe${String(++nextInvoice).padStart(3, "0")}` }));
         for (const row of saved) invoices.push({ id: row.id, row });
-        return reply(saved.map((row) => ({ id: row.id })));
+        return reply(saved.map((row) => ({ id: row.id, org_id: row.org_id ?? null })));
       }
       if (method === "PATCH" || method === "DELETE") {
         const ids = filterValues(url, "id");
@@ -369,9 +369,12 @@ handlerTest("line hold 48: one pay_line_held raise per held line and one invoice
     assertEquals(raise.p_evidence.reason, "no_work_order");
     assertEquals(raise.p_job_ids, [NO_WO_JOB]);
     assertEquals(raise.p_raised_by, "phase1:work_order_gate");
+    // C11: trade_invoice_lines has no org_id, so the holding invoice's goes with it.
+    assertEquals(raise.p_org_id, ORG_ID);
   }
   const job = out.raises.filter((r) => r.p_kind === "invoice_no_work_order");
   assertEquals(job.map((r) => [r.p_subject_table, r.p_subject_id, r.p_evidence.amount_ex]), [["jobs", NO_WO_JOB, 130]]);
+  assertEquals(job[0].p_org_id, undefined, "a jobs subject resolves its own organisation");
 });
 
 handlerTest("line hold 49: an over-the-amount line carries the four figures", async () => {

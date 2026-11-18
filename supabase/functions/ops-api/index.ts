@@ -14406,6 +14406,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               await markTradeInvoiceJobsChanged(client, [...standardLines, ...(woSorted?.held || [])], weekAutofill ? 'trade_invoice' : 'phase1:trade_invoice')
               if (woHoldingSaved && woFacts) {
                 await raiseHeldLines(client, woHoldingSaved.lines, {
+                  orgId: woHoldingSaved.orgId ?? null,
                   tradeUserId: tradeUser.id,
                   tradeName: tradeXeroUser?.name ?? null,
                   tradeRole: tradeUser.role ?? null,
@@ -16975,6 +16976,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               await markTradeInvoiceJobsChanged(client, [...lineItems, ...extraLineItems, ...(lineHoldSorted?.held || [])], weekAutofill ? 'trade_invoice' : 'phase1:trade_invoice')
               if (lineHoldSaved && lineHoldFacts) {
                 await raiseHeldLines(client, lineHoldSaved.lines, {
+                  orgId: lineHoldSaved.orgId ?? null,
                   tradeUserId: tradeUser.id,
                   tradeName: userProfile?.name ?? null,
                   tradeRole: tradeUser.role ?? null,

@@ -403,9 +403,10 @@ export type HoldingInvoiceInput = {
 export async function saveHoldingInvoice(
   client: any,
   input: HoldingInvoiceInput,
-): Promise<{ id: string; lines: Array<{ id: string; row: HeldRow }> }> {
+): Promise<{ id: string; orgId: string | null; lines: Array<{ id: string; row: HeldRow }> }> {
   const heldAt = input.now ?? new Date().toISOString();
   let invoiceId = "";
+  let orgId: string | null = null;
   for (let attempt = 0;; attempt++) {
     const header = {
       ...(input.orgId ? { org_id: input.orgId } : {}),
@@ -434,9 +435,10 @@ export async function saveHoldingInvoice(
       submitted_at: heldAt,
     };
     const { data, error } = await client.from("trade_invoices")
-      .insert(header).select("id").single();
+      .insert(header).select("id, org_id").single();
     if (!error && data?.id) {
       invoiceId = String(data.id);
+      orgId = data.org_id ? String(data.org_id) : null;
       break;
     }
     if (attempt < 2 && input.isNumberTaken(error)) continue;
@@ -467,6 +469,7 @@ export async function saveHoldingInvoice(
     const byPosition = new Map(saved.map((s: any) => [Number(s.line_position), String(s.id)]));
     return {
       id: invoiceId,
+      orgId,
       lines: input.held.map((row, position) => ({ id: byPosition.get(position) ?? "", row })),
     };
   } catch (error) {
@@ -510,6 +513,10 @@ export type RaiseContext = {
   weekStart: string | null;
   facts: LineHoldFacts;
   backed: readonly SendRow[];
+  /** The holding invoice's stored org_id. trade_invoice_lines has no org_id,
+   * so reconcile_item_org cannot find a held line's organisation; the raise
+   * passes this one (director ruling C11). Null leaves the call as before. */
+  orgId?: string | null;
 };
 
 /** The four over-the-amount figures, worked in cents. Over by is claimed plus
@@ -604,6 +611,7 @@ export async function raiseHeldLines(
         fallback_reason: (row.hold_detail?.fallback_reason as string | null | undefined) ?? null,
       },
       p_raised_by: "phase1:work_order_gate",
+      ...(ctx.orgId ? { p_org_id: ctx.orgId } : {}),
     });
     const reason = row.hold_reason === "not_on_crew"
       ? String(row.hold_detail?.fallback_reason ?? "")
