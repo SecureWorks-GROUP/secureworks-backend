@@ -1,5 +1,5 @@
 BEGIN;
-\ir ../../../migrations/20261118114344_match_rules_learn.sql
+\ir ../../../migrations/20261118122225_match_rules_learn.sql
 CREATE FUNCTION pg_temp.check_ok(v boolean, msg text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN IF v IS DISTINCT FROM true THEN RAISE EXCEPTION 'P2-02.12 %',msg; END IF; END $$;
 SELECT pg_temp.check_ok(NOT EXISTS (SELECT FROM pg_trigger WHERE tgrelid='public.reconcile_decisions'::regclass
