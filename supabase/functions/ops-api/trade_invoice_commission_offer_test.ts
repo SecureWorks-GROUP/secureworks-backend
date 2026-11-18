@@ -11,6 +11,7 @@ const OTHER = "00000000-0000-4000-8000-000000000102";
 const ORG = "00000000-0000-4000-8000-000000000103";
 const JOB = "00000000-0000-4000-8000-000000000104";
 const INVOICE = "00000000-0000-4000-8000-000000000105";
+const LINE = "00000000-0000-4000-8000-000000000106";
 const RECORD = {
   job_id: JOB,
   commission_id: "commission-fixture",
@@ -25,7 +26,7 @@ const RECORD = {
   remaining_ex_gst: 61.25,
 };
 const item = (over: any = {}) => ({
-  id: "extra-fixture",
+  id: LINE,
   type: "Commission",
   job_id: JOB,
   job_number: "ZZTEST-1043",
@@ -262,7 +263,32 @@ test("screen rate and amounts are ignored, with only the line id logged", async 
   ]);
   saved(out, 61.25);
   assertEquals(out.ignored, [["[ops-api] commission_client_amount_ignored", {
-    line_id: "extra-fixture",
+    line_id: LINE,
+  }]]);
+});
+
+test("a line id that is not an app id (an email) is logged as null", async () => {
+  for (
+    const over of [
+      { id: undefined, line_id: "someone@example.com" },
+      { id: "someone@example.com" },
+      { id: "il-1763420000000-ab12", line_id: "someone@example.com" },
+    ]
+  ) {
+    const out = await submit([item({ ...over, rate: 999 })]);
+    saved(out, 61.25);
+    assertEquals(out.ignored, [["[ops-api] commission_client_amount_ignored", {
+      line_id: null,
+    }]]);
+    assert(!JSON.stringify(out.ignored).includes("@"));
+  }
+});
+
+test("the Trade App's own local line id is logged as it is", async () => {
+  const out = await submit([item({ id: "il-1763420000000-ab12", rate: 999 })]);
+  saved(out, 61.25);
+  assertEquals(out.ignored, [["[ops-api] commission_client_amount_ignored", {
+    line_id: "il-1763420000000-ab12",
   }]]);
 });
 
@@ -387,7 +413,7 @@ test("each screen price alias is ignored even without a rate", async () => {
     const out = await submit([item({ [key]: 99 })]);
     saved(out, 61.25);
     assertEquals(out.ignored, [["[ops-api] commission_client_amount_ignored", {
-      line_id: "extra-fixture",
+      line_id: LINE,
     }]]);
   }
 });

@@ -1,3 +1,7 @@
+## Client sign-off sits behind the switch, 18 November 2026
+
+Owner decision 17 Nov 2026: sign-off gates nothing for now. Migration `20261118082253_group_signoff_behind_switch` (P1-13.2) adds `group_client_signoff_gate_passes(job)`, which the split freeze (`group_work_order_write_split`), the share line trigger (`trade_invoice_lines_group_share_snapshot`) and the release check (`group_work_order_release_state`) now read instead of `group_client_signoff_counts`. While `trade_invoice_requires_client_signoff_v1` is off, or its row is missing, the gate passes and no customer signature is needed. With the switch on it is `group_client_signoff_counts` exactly (director ruling B, 18 Nov 2026); that function and every rule below are unchanged. The group screens still ask for a sign-off until P1-13.4.
+
 ## Own hours, any day, no crew approval, 6 November 2026
 
 Owner: "just let them log their own hours" and "just let them sign their own". Migration `20261106140000_group_self_opt_in_hours`:
