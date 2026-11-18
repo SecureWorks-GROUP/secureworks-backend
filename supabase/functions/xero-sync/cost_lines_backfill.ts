@@ -1,6 +1,6 @@
 import { billCostDocument } from "./cost_lines.ts";
 import { readBillMirrorVerdicts } from "./trade_bill_mirror_rule.ts";
-import { type PeopleAccounts, readPeopleAccounts } from "../_shared/people_accounts.ts";
+import { type LabourAccounts, labourAccounts, readPeopleAccounts } from "../_shared/people_accounts.ts";
 
 const PAGE_SIZE = 200;
 const MAX_PAGES = 10;
@@ -38,14 +38,14 @@ export async function backfillCostLines(sb: any, orgId: string, input: Input) {
     if (flagError) throw flagError;
     if (flag?.enabled !== true) return { skipped: "switch_off" };
     let employerSuperOn = false;
-    let people: PeopleAccounts = new Set();
+    let labour: LabourAccounts = labourAccounts([]);
     if (input.kind === "bills") {
       const { data, error } = await sb.from("feature_flags").select("enabled")
         .eq("flag_name", "job_cost_employer_super_v1").maybeSingle();
       if (error) throw error;
       employerSuperOn = data?.enabled === true;
-      // The one set of people accounts; unreadable or empty throws before any write.
-      people = await readPeopleAccounts(sb);
+      // The labour accounts (people_account_codes); unreadable or empty throws before any write.
+      labour = (await readPeopleAccounts(sb)).labour;
     }
     for (let page = 0; page < (input.pages ?? 1); page++) {
       const table = input.kind === "bills"
@@ -101,7 +101,7 @@ export async function backfillCostLines(sb: any, orgId: string, input: Input) {
             billCostDocument({
               ...row,
               raw_json: { LineAmountTypes: row.cost_line_amount_types },
-            }, { orgId, mirrorBillIds: mirrors, employerSuperOn, people })
+            }, { orgId, mirrorBillIds: mirrors, employerSuperOn, labour })
           ).filter((d: unknown) => d !== null);
           if (documents.length) {
             await write(sb, "job_cost_lines_upsert_documents", {

@@ -37,7 +37,7 @@ import {
 } from "./bill_prematch.ts";
 import { AGENT_PREMATCH_SOURCE, assignReconRow } from "../ops-api/materials_recon.ts";
 import { HELD_QUEUE_REASONS } from "./materials_ingest.ts";
-import { type PeopleAccounts, peopleAccountsCode, readPeopleAccounts } from "../_shared/people_accounts.ts";
+import { type LabourAccounts, peopleAccountsCode, readPeopleAccounts } from "../_shared/people_accounts.ts";
 
 const PAGE = 1000;
 const CHUNK = 100;
@@ -246,11 +246,11 @@ export async function runBillPrematch(
     rows_waiting_turn: 0,
   };
 
-  // The one set of people accounts, before any read or write: unreadable or
-  // empty decides nothing and writes nothing.
-  let people: PeopleAccounts;
+  // The labour accounts (people_account_codes), before any read or write:
+  // unreadable or empty decides nothing and writes nothing.
+  let labour: LabourAccounts;
   try {
-    people = await readPeopleAccounts(sb);
+    labour = (await readPeopleAccounts(sb)).labour;
   } catch (e) {
     return { ...result, reason: peopleAccountsCode(e) ?? "people_accounts_unreadable" };
   }
@@ -421,7 +421,7 @@ export async function runBillPrematch(
       emailJobIds: emailJobs.get(bill.xero_invoice_id) || [],
       // Detected on the bill as Xero holds it now, not the queue's older copy.
       duplicateDocuments: duplicateDocumentsOf(currentDocument(bill, invById.get(bill.xero_invoice_id)), documentIndex),
-      people,
+      labour,
     });
     const bucket = d.kind === "job" ? `job_${d.confidence}` : d.kind;
     result.decided[bucket] = (result.decided[bucket] || 0) + 1;

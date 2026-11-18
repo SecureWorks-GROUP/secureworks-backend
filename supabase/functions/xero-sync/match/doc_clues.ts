@@ -13,7 +13,7 @@ import {
   type PrematchJob,
 } from "../bill_prematch.ts";
 import type { Clue, Stop } from "./types.ts";
-import { onPeopleAccount, type PeopleAccounts } from "../../_shared/people_accounts.ts";
+import { type LabourAccounts, onLabourAccount } from "../../_shared/people_accounts.ts";
 
 export interface MatchDocument {
   subject_id: string;
@@ -190,7 +190,7 @@ export function deliveryAddressClue(
   };
 }
 
-export function documentStops(doc: MatchDocument, jobs: MatchJob[], people: PeopleAccounts): Stop[] {
+export function documentStops(doc: MatchDocument, jobs: MatchJob[], labour: LabourAccounts): Stop[] {
   const out: Stop[] = [];
   const stop = (code: string, words: string) => out.push({ code, words });
   const numbers = namedNumbers(doc);
@@ -246,7 +246,7 @@ export function documentStops(doc: MatchDocument, jobs: MatchJob[], people: Peop
     }
   }
   if (
-    doc.lines.some((l) => onPeopleAccount(people, l.account_code))
+    doc.lines.some((l) => l.account_code != null && onLabourAccount(labour, l.account_code))
   ) {
     stop(
       "installer_bill_outside_app",

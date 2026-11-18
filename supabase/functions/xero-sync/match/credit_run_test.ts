@@ -2,6 +2,7 @@
 // The unallocated credit raiser. Fake client only; made-up ids and amounts.
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { CREDIT_BACKLOG_STATE_KEY, CREDIT_REASON, creditSweep, creditSweepRequest, syncCreditRun, syncMatchStep } from "./credit_run.ts";
+import { peopleRows } from "../../_shared/people_accounts_test_support.ts";
 
 const JOB = "11111111-1111-4111-8111-111111111111";
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -15,7 +16,7 @@ type World = {
   notes?: Record<string, any>; // credit id -> xero_supplier_credit_notes row
   openItems?: string[];
   tradeUsers?: string[];
-  people?: string[]; // people_account_codes rows (default 301, 306, 475)
+  people?: Array<Record<string, unknown>>; // people_account_codes rows (default: as migrated)
   fail?: string;
   applyError?: Record<string, unknown>;
   switchOn?: boolean | "fail";
@@ -48,7 +49,7 @@ function fake(w: World) {
           case "match_clue_types":
             return { data: CLUE_TYPES, error: null };
           case "people_account_codes":
-            return { data: (w.people ?? ["301", "306", "475"]).map((account_code) => ({ account_code })), error: null };
+            return { data: w.people ?? peopleRows(), error: null };
           case "job_cost_lines": {
             if (filters.document_id !== undefined) {
               return { data: w.lines?.[String(filters.document_id)] ?? [], error: null };
@@ -325,13 +326,17 @@ Deno.test("sync credits: a failed read takes nothing and keeps the position", as
   }
 });
 
-Deno.test("(2) people accounts: a credit with a line on 475 is labour, never raised; the set is one database row each", async () => {
+// people_account_codes rows: `hidden` codes hidden from Reconcile, `labour` ones labour too.
+const accountRows = (hidden: string[], labour = ["301", "306"]) =>
+  hidden.map((account_code) => ({ account_code, labour: labour.includes(account_code), hidden_from_reconcile: true }));
+
+Deno.test("(2) hidden accounts: a credit with a line on 475 is never raised, counted apart from labour; the flag is a database row", async () => {
   const xero = world({ lines: { c1: [unallocated()] }, notes: { c1: { ...note(), line_items: [{ Description: "Returned", AccountCode: "475" }] } } });
-  assertEquals([applies(xero).length, (await creditSweep(fake(xero))).skipped], [0, { labour_credit: 1 }]);
+  assertEquals([applies(xero).length, (await creditSweep(fake(xero))).skipped], [0, { hidden_account_credit: 1 }]);
   const ours = world({ lines: { c1: [unallocated({ account_code: "475" })] }, notes: { c1: note() } });
-  assertEquals([applies(ours).length, (await creditSweep(fake(ours))).skipped], [0, { labour_credit: 1 }]);
-  // 475 taken out of the set: the same credit is raised, with no code change.
-  const out = world({ lines: { c1: [unallocated({ account_code: "475" })] }, notes: { c1: note() }, people: ["301", "306"] });
+  assertEquals([applies(ours).length, (await creditSweep(fake(ours))).skipped], [0, { hidden_account_credit: 1 }]);
+  // 475 not hidden: the same credit is raised, with no code change.
+  const out = world({ lines: { c1: [unallocated({ account_code: "475" })] }, notes: { c1: note() }, people: accountRows(["301", "306"]) });
   await creditSweep(fake(out));
   assertEquals(applies(out).length, 1);
 });

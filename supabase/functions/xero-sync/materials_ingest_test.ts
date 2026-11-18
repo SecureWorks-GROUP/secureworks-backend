@@ -35,6 +35,8 @@ import {
   matchBill,
   type POCandidate,
 } from "./materials_ingest.ts";
+import { LABOUR } from "../_shared/people_accounts_test_support.ts";
+import { labourAccounts } from "../_shared/people_accounts.ts";
 
 // ── helpers ──────────────────────────────────────────────────
 function bill(overrides: Partial<BillInput> = {}): BillInput {
@@ -619,15 +621,16 @@ Deno.test("an existing sync fact whose bill amount is now unknown goes to staff"
 });
 
 // ── JP-12: installer bills are never placed automatically ────
-Deno.test("isInstallerBill — a money line on a people account", () => {
-  const people = new Set(["301", "306", "475"]);
-  assert(isInstallerBill([{ AccountCode: "306", LineAmount: 500 }], people));
-  assert(isInstallerBill([{ AccountCode: "310", LineAmount: 50 }, { AccountCode: "301", LineAmount: 400 }], people));
-  assert(isInstallerBill([{ AccountCode: " 475", LineAmount: 90 }], people));
-  assert(!isInstallerBill([{ AccountCode: "306", LineAmount: 0 }, { AccountCode: "310", LineAmount: 50 }], people));
-  assert(!isInstallerBill(null, people));
-  // The set is the answer: a code taken out of it is no longer labour, without code.
-  assert(!isInstallerBill([{ AccountCode: "475", LineAmount: 90 }], new Set(["301", "306"])));
+Deno.test("isInstallerBill — a money line on 306 or 301", () => {
+  assert(isInstallerBill([{ AccountCode: "306", LineAmount: 500 }], LABOUR));
+  assert(isInstallerBill([{ AccountCode: "310", LineAmount: 50 }, { AccountCode: "301", LineAmount: 400 }], LABOUR));
+  assert(!isInstallerBill([{ AccountCode: "306", LineAmount: 0 }, { AccountCode: "310", LineAmount: 50 }], LABOUR));
+  assert(!isInstallerBill(null, LABOUR));
+  // 475 is hidden from Reconcile but not labour: its kind is unchanged. A padded code never was labour.
+  assert(!isInstallerBill([{ AccountCode: "475", LineAmount: 90 }], LABOUR));
+  assert(!isInstallerBill([{ AccountCode: " 306", LineAmount: 90 }], LABOUR));
+  // The labour flag decides, not code.
+  assert(isInstallerBill([{ AccountCode: "475", LineAmount: 90 }], labourAccounts(["301", "306", "475"])));
 });
 
 Deno.test("matchBill — an installer bill with a job reference waits for a person", () => {

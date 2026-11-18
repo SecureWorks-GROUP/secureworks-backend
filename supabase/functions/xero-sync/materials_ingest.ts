@@ -24,7 +24,7 @@
 //   - Hard exclusion: a bill whose xero_invoice_id is a trade-invoice mirror
 //     (trade_invoices.xero_bill_id) can NEVER produce a materials fact.
 // ════════════════════════════════════════════════════════════
-import { onPeopleAccount, type PeopleAccounts } from "../_shared/people_accounts.ts";
+import { type LabourAccounts, onLabourAccount } from "../_shared/people_accounts.ts";
 
 // ─────────────────────────────────────────────────────────────
 // Canonical job-number extractor — THE unification fix.
@@ -140,7 +140,7 @@ export type SuggestionReason =
   | "xero_link_conflict"
   // The same supplier document is entered more than once in Xero (CFO-16).
   | "duplicate_document"
-  // An installer bill (a line on a people account): a person
+  // An installer bill (subcontractor labour, account 306 or 301): a person
   // confirms each placement (JP-12), so no automatic path places it.
   | "installer_confirm";
 
@@ -160,11 +160,12 @@ export const HELD_QUEUE_REASONS = new Set<string>([
   "ai_undone",
 ]);
 
-// Installer bills: any money line on a people account (the one database set,
-// _shared/people_accounts.ts). The same rule as ops-api laneOfBillLines.
-export function isInstallerBill(lines: unknown, people: PeopleAccounts): boolean {
+// Installer bills: any money line on subcontractor labour (306, 301), read
+// from the labour flag of people_account_codes (_shared/people_accounts.ts).
+// The same rule as ops-api laneOfBillLines.
+export function isInstallerBill(lines: unknown, labour: LabourAccounts): boolean {
   if (!Array.isArray(lines)) return false;
-  return lines.some((l: any) => Number(l?.LineAmount ?? 0) !== 0 && onPeopleAccount(people, l?.AccountCode));
+  return lines.some((l: any) => Number(l?.LineAmount ?? 0) !== 0 && onLabourAccount(labour, l?.AccountCode));
 }
 
 export interface MatchResult {
@@ -268,7 +269,7 @@ export function matchBill(
     refToken?: string | null; // the extracted token (may exist even when no job found)
     pos: POCandidate[]; // POs to consider (caller may pre-filter to supplier; we re-filter defensively)
     config?: MatchConfig;
-    installer?: boolean; // the bill has a money line on a people account
+    installer?: boolean; // the bill has an installer (306/301) money line
   },
 ): MatchResult {
   const cfg = ctx.config || DEFAULT_MATCH_CONFIG;

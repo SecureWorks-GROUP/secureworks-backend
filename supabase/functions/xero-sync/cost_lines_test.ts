@@ -1,9 +1,11 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { billCostDocument, collectBillCostDocument } from "./cost_lines.ts";
+import { LABOUR } from "../_shared/people_accounts_test_support.ts";
+import { labourAccounts } from "../_shared/people_accounts.ts";
 const ctx = {
   orgId: "10000000-0000-4000-8000-000000000001",
   mirrorBillIds: new Set<string>(),
-  people: new Set(["301", "306", "475"]),
+  labour: LABOUR,
 };
 const bill = {
   xero_invoice_id: "ZZTEST-bill",
@@ -207,10 +209,12 @@ Deno.test("bill costs: six-place rounding breaks negative ties away from zero", 
   );
 });
 
-Deno.test("people accounts: a line on 475 is an installer line in the labour lane; the set decides, not code", () => {
-  const b = { ...bill, line_items: [{ LineAmount: 500, AccountCode: " 475" }] };
-  const d = billCostDocument(b, ctx)!;
-  assertEquals([d.lines[0].kind, d.lines[0].lane], ["installer_bill", "labour"]);
-  const out = billCostDocument(b, { ...ctx, people: new Set(["301", "306"]) })!;
-  assertEquals([out.lines[0].kind, out.lines[0].lane], ["supplier_bill", "other"]);
+Deno.test("labour flag: 306 is an installer line; 475 (hidden, not labour) and a padded 306 keep their kind; no figure moves", () => {
+  const on = (code: string) => billCostDocument({ ...bill, line_items: [{ LineAmount: 500, AccountCode: code }] }, ctx)!.lines[0];
+  assertEquals([on("306").kind, on("306").lane], ["installer_bill", "labour"]);
+  assertEquals([on("475").kind, on("475").lane], ["supplier_bill", "other"]);
+  assertEquals([on(" 306").kind, on(" 306").lane], ["supplier_bill", "other"]);
+  // The flag decides, not code.
+  const flagged = billCostDocument({ ...bill, line_items: [{ LineAmount: 500, AccountCode: "475" }] }, { ...ctx, labour: labourAccounts(["301", "306", "475"]) })!;
+  assertEquals([flagged.lines[0].kind, flagged.lines[0].lane], ["installer_bill", "labour"]);
 });

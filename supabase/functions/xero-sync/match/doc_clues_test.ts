@@ -10,6 +10,8 @@ import {
   orderNumberClue,
   overheadAccountClue,
 } from "./doc_clues.ts";
+import { LABOUR } from "../../_shared/people_accounts_test_support.ts";
+import { labourAccounts } from "../../_shared/people_accounts.ts";
 
 const job: MatchJob = {
   id: "J1",
@@ -39,9 +41,8 @@ const doc = (over: Partial<MatchDocument> = {}): MatchDocument => ({
   }],
   ...over,
 });
-const PEOPLE = new Set(["301", "306", "475"]);
 const codes = (d: MatchDocument, jobs = [job]) =>
-  documentStops(d, jobs, PEOPLE).map((s) => s.code);
+  documentStops(d, jobs, LABOUR).map((s) => s.code);
 
 Deno.test("document number is read as the Xero reference box", () => {
   const c = jobNumberClue(doc(), [job]);
@@ -189,10 +190,14 @@ Deno.test("division tags are only narrower evidence", () => {
   }]);
 });
 
-Deno.test("people accounts: a 475 line gets no overhead clue and stops as a person's pay; the set decides", () => {
-  const d = doc({ lines: [{ ...doc().lines[0], account_code: "475" }] });
-  assertEquals(overheadAccountClue(d), null, "475 is not an overhead account");
-  assert(codes(d).includes("installer_bill_outside_app"));
-  // Taken out of the set: no stop, no code change.
-  assert(!documentStops(d, [job], new Set(["301", "306"])).some((s) => s.code === "installer_bill_outside_app"));
+Deno.test("installer stop reads the labour flag: 306 and 301 stop, 475 does not (not labour), a padded code never did", () => {
+  const on = (code: string) => doc({ lines: [{ ...doc().lines[0], account_code: code }] });
+  assert(codes(on("306")).includes("installer_bill_outside_app"));
+  assert(codes(on("301")).includes("installer_bill_outside_app"));
+  assert(!codes(on("475")).includes("installer_bill_outside_app"));
+  assert(!codes(on(" 306")).includes("installer_bill_outside_app"));
+  // 475 is out of the overhead list; in the matcher the hidden skip runs first anyway.
+  assertEquals(overheadAccountClue(on("475")), null);
+  // The flag decides, not code.
+  assert(documentStops(on("475"), [job], labourAccounts(["301", "306", "475"])).some((s) => s.code === "installer_bill_outside_app"));
 });

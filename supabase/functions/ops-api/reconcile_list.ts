@@ -1,4 +1,3 @@
-import { onPeopleAccount, type PeopleAccounts, readPeopleAccounts } from "../_shared/people_accounts.ts";
 // P2-03.6 (Follow-up 66 lift): the Reconcile cost list the "Cost lines to
 // place" screen reads (secureworks-ux modules/ops-reconcile-place.js).
 //
@@ -271,14 +270,6 @@ export async function reconcileList(
   reconcileListAllowed(caller);
   const input = reconcileListInput(params);
   if (!await listSwitchOn(client)) return { ok: true, enabled: false };
-  // The one set of people accounts (the list functions read the same table):
-  // unreadable or empty refuses the list, never a list with pay on it.
-  let people: PeopleAccounts;
-  try {
-    people = await readPeopleAccounts(client);
-  } catch {
-    throw reconcileListRefusal("reconcile_list_unreadable");
-  }
 
   // The cost kinds and their tabs (reconcile_item_kinds primary key).
   const kindRows = await safe(() => client.from("reconcile_item_kinds").select("kind, tab, words, card").eq("card", "cost").limit(READ_CAP)) as Array<
@@ -439,12 +430,11 @@ export async function reconcileList(
       });
   };
 
-  // A document with a line of a person's labour (kind installer_bill, or a line
-  // on a people account) is never listed, even when its item's kind or reason
-  // says supplier bill (a mixed bill); nor is a credit that follows such a bill.
+  // A document with a line of a person's labour (kind installer_bill) is never
+  // listed, even when its item's kind or reason says supplier bill (a mixed
+  // bill); nor is a credit that follows such a bill.
   const payDocs = new Set([...lines, ...billLines]
-    .filter((l) => UNLISTED_LINE_KINDS.has(l.kind) || onPeopleAccount(people, l.account_code))
-    .map((l) => `${l.document_kind}:${l.document_id}`));
+    .filter((l) => UNLISTED_LINE_KINDS.has(l.kind)).map((l) => `${l.document_kind}:${l.document_id}`));
   const listable = (it: any) => {
     const doc = costDocumentOf(it);
     if (!doc) return true;

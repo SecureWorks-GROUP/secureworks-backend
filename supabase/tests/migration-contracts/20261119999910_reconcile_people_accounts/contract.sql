@@ -12,16 +12,16 @@ DO $$ BEGIN
   PERFORM pg_temp.assert_ok((SELECT array_agg(account_code ORDER BY account_code) FROM public.people_account_codes)
     = ARRAY['301','306'], 're-apply does not reseed a removed row');
 END $$;
-INSERT INTO public.people_account_codes (account_code, note) VALUES ('475', 'Admin (Internal Subcontractors)');
+INSERT INTO public.people_account_codes (account_code, labour, hidden_from_reconcile, note) VALUES ('475', false, true, 'Admin (Internal Subcontractors)');
 \ir ../../../migrations/20261119999910_reconcile_people_accounts.sql
 
 DO $$ BEGIN
-  PERFORM pg_temp.assert_ok((SELECT array_agg(account_code ORDER BY account_code) FROM public.people_account_codes)
-    = ARRAY['301','306','475'], 'the set is 301, 306, 475');
+  PERFORM pg_temp.assert_ok((SELECT array_agg(account_code || ':' || labour || ':' || hidden_from_reconcile ORDER BY account_code) FROM public.people_account_codes)
+    = ARRAY['301:true:true','306:true:true','475:false:true'], 'labour 301 and 306; hidden 301, 306 and 475');
   PERFORM pg_temp.assert_ok((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reconcile_list_page(uuid,text[],integer,jsonb)'::regprocedure)
-    = '6cb7df0b5a2f7cd7d6ebcb4c2568e895', 'page body is this migration''s');
+    = 'bbf31b21435de5495b193e5ca011fefd', 'page body is this migration''s');
   PERFORM pg_temp.assert_ok((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reconcile_list_counts(uuid)'::regprocedure)
-    = '1657ff4926ebae986c2cea784c20cdd4', 'counts body is this migration''s');
+    = '74302b4ce77f0ca64780a95a77032a4a', 'counts body is this migration''s');
   PERFORM pg_temp.assert_ok(obj_description('public.reconcile_list_page(uuid,text[],integer,jsonb)'::regprocedure, 'pg_proc') LIKE 'Reconcile list (P2-03.6)%'
     AND obj_description('public.reconcile_list_counts(uuid)'::regprocedure, 'pg_proc') LIKE 'Reconcile list (P2-03.6)%',
     'comment prefix kept, so 20261118195200 still re-applies');
@@ -39,15 +39,25 @@ DO $$ BEGIN
     'table: RLS on, service_role reads only, no browser role');
 END $$;
 
--- A code with spaces or an empty code is refused.
+-- A code with spaces or an empty code is refused; a labour account is always hidden; no flag is null.
 DO $$ BEGIN
   BEGIN
-    INSERT INTO public.people_account_codes (account_code, note) VALUES (' 999', 'x');
+    INSERT INTO public.people_account_codes (account_code, labour, hidden_from_reconcile, note) VALUES ('998', true, false, 'x');
+    RAISE EXCEPTION 'ZZTEST a labour account not hidden was stored';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO public.people_account_codes (account_code, labour, hidden_from_reconcile, note) VALUES ('997', NULL, true, 'x');
+    RAISE EXCEPTION 'ZZTEST a null flag was stored';
+  EXCEPTION WHEN not_null_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO public.people_account_codes (account_code, labour, hidden_from_reconcile, note) VALUES (' 999', false, true, 'x');
     RAISE EXCEPTION 'ZZTEST a padded code was stored';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
   BEGIN
-    INSERT INTO public.people_account_codes (account_code, note) VALUES ('', 'x');
+    INSERT INTO public.people_account_codes (account_code, labour, hidden_from_reconcile, note) VALUES ('', false, true, 'x');
     RAISE EXCEPTION 'ZZTEST an empty code was stored';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
@@ -97,8 +107,17 @@ DO $$ BEGIN
 END $$;
 RESET ROLE;
 
--- The owner's answer changes one row, no code: without 475 the four come back.
-DELETE FROM public.people_account_codes WHERE account_code = '475';
+-- The list reads only the hidden flag: 301 no longer labour (still hidden) changes nothing.
+UPDATE public.people_account_codes SET labour = false WHERE account_code = '301';
+SET LOCAL ROLE service_role;
+DO $$ BEGIN
+  PERFORM pg_temp.assert_ok(pg_temp.listed() = ARRAY['f3','f6'], 'the labour flag moves nothing in the list: ' || pg_temp.listed()::text);
+END $$;
+RESET ROLE;
+UPDATE public.people_account_codes SET labour = true WHERE account_code = '301';
+
+-- The owner's answer changes one flag, no code: 475 not hidden and the four come back.
+UPDATE public.people_account_codes SET hidden_from_reconcile = false WHERE account_code = '475';
 SET LOCAL ROLE service_role;
 DO $$ BEGIN
   PERFORM pg_temp.assert_ok(pg_temp.listed() = ARRAY['f1','f2','f3','f4','f5','f6'], 'without 475 every item lists: ' || pg_temp.listed()::text);
@@ -107,7 +126,7 @@ END $$;
 RESET ROLE;
 -- A new people account takes effect the same way: with 300 in and 475 out, every
 -- document with a 300 line is hidden and the two 475-only documents list.
-INSERT INTO public.people_account_codes (account_code, note) VALUES ('300', 'ZZTEST');
+INSERT INTO public.people_account_codes (account_code, labour, hidden_from_reconcile, note) VALUES ('300', false, true, 'ZZTEST');
 SET LOCAL ROLE service_role;
 DO $$ BEGIN
   PERFORM pg_temp.assert_ok(pg_temp.listed() = ARRAY['f1','f5'], 'with 300 only the 475-only bill and credit list: ' || pg_temp.listed()::text);
@@ -122,35 +141,13 @@ DO $$ BEGIN
     'no item closed or changed');
 END $$;
 
--- The cost-line twin reads the same set: a 475 line is an installer line in the
--- labour lane, 301 and 306 as before, and the set decides (300 is in it now).
-DO $$
-DECLARE d jsonb;
-BEGIN
+-- The cost-line twin is not touched: main's body (20261118195100), IMMUTABLE,
+-- 301 and 306 written in it. It changes in a later PR, with the labour flag.
+DO $$ BEGIN
   PERFORM pg_temp.assert_ok((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.job_cost_lines_bill_document(uuid,jsonb,boolean)'::regprocedure)
-    = '357e86405fe1820f9446e49b43dfd55b', 'twin body is this migration''s');
-  PERFORM pg_temp.assert_ok((SELECT provolatile FROM pg_proc WHERE oid = 'public.job_cost_lines_bill_document(uuid,jsonb,boolean)'::regprocedure) = 's'
-    AND NOT has_function_privilege('service_role', 'public.job_cost_lines_bill_document(uuid,jsonb,boolean)', 'EXECUTE'),
-    'twin is STABLE and still owner only');
-  INSERT INTO public.people_account_codes (account_code, note) VALUES ('475', 'Admin (Internal Subcontractors)');
-  d := public.job_cost_lines_bill_document('00000000-0000-0000-0000-000000000001', jsonb_build_object(
-    'invoice_type', 'ACCPAY', 'xero_invoice_id', 'ZZTEST-PA-1', 'status', 'AUTHORISED',
-    'line_items', jsonb_build_array(
-      jsonb_build_object('LineItemID', 'zz-a', 'AccountCode', ' 475', 'LineAmount', 90, 'TaxAmount', 0),
-      jsonb_build_object('LineItemID', 'zz-b', 'AccountCode', '306', 'LineAmount', 10, 'TaxAmount', 0),
-      jsonb_build_object('LineItemID', 'zz-c', 'AccountCode', '305', 'LineAmount', 5, 'TaxAmount', 0),
-      jsonb_build_object('LineItemID', 'zz-d', 'AccountCode', '300', 'LineAmount', 5, 'TaxAmount', 0))), false);
-  PERFORM pg_temp.assert_ok((SELECT array_agg((l->>'kind') || '/' || (l->>'lane') ORDER BY (l->>'line_no')::int)
-      FROM jsonb_array_elements(d->'lines') l)
-    = ARRAY['installer_bill/labour','installer_bill/labour','supplier_bill/materials','installer_bill/labour'],
-    'twin lanes: ' || (d->'lines')::text);
-  DELETE FROM public.people_account_codes;
-  BEGIN
-    PERFORM public.job_cost_lines_bill_document('00000000-0000-0000-0000-000000000001', '{"invoice_type":"ACCPAY"}', false);
-    RAISE EXCEPTION 'ZZTEST the twin costed a bill with no people accounts';
-  EXCEPTION WHEN raise_exception THEN
-    IF SQLERRM <> 'people_accounts_empty' THEN RAISE; END IF;
-  END;
+    = '534760eeda42dd472aa643ac27e90368'
+    AND (SELECT provolatile FROM pg_proc WHERE oid = 'public.job_cost_lines_bill_document(uuid,jsonb,boolean)'::regprocedure) = 'i',
+    'the twin is main''s, untouched');
 END $$;
 
 ROLLBACK;

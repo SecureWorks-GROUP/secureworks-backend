@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1";
+import { assertEquals, assertRejects } from "jsr:@std/assert@1";
 import {
   billStateOf,
   READ_CAP,
@@ -18,14 +18,7 @@ const NOW = new Date("2026-11-19T00:00:00Z");
 type Filter = [string, string, unknown];
 type Handler = (table: string, filters: Filter[]) => { data: unknown; error: unknown };
 
-// The one set of people accounts the list reads (as migrated), unless a test passes its own answer.
-const PEOPLE_ROWS = { data: [{ account_code: "301" }, { account_code: "306" }, { account_code: "475" }], error: null };
-
-function fakeClient(
-  handler: Handler,
-  rpcs: Record<string, (args: any) => { data: unknown; error: unknown }> = {},
-  people: { data: unknown; error: unknown } = PEOPLE_ROWS,
-) {
+function fakeClient(handler: Handler, rpcs: Record<string, (args: any) => { data: unknown; error: unknown }> = {}) {
   const calls: string[] = [];
   const rpcArgs: Record<string, unknown> = {};
   const client = {
@@ -44,8 +37,7 @@ function fakeClient(
         eq: (c: string, v: unknown) => (filters.push(["eq", c, v]), b),
         in: (c: string, v: unknown) => (filters.push(["in", c, v]), b),
         limit: (n: number) => (filters.push(["limit", "limit", n]), b),
-        then: (ok: any, bad: any) =>
-          Promise.resolve(table === "people_account_codes" ? people : handler(table, filters)).then(ok, bad),
+        then: (ok: any, bad: any) => Promise.resolve(handler(table, filters)).then(ok, bad),
       };
       return b;
     },
@@ -400,48 +392,6 @@ Deno.test("reconcile list: a document with a person's labour line is never liste
   assertEquals(out.items.map((i: any) => i.id), ["c0000000-0000-4000-8000-0000000000a2"]);
   const text = JSON.stringify(out);
   for (const hidden of ["BX", "BM", "installer_bill", "700", "400"]) assertEquals(text.includes(`"${hidden}"`) || text.includes(`:${hidden},`), false, hidden);
-});
-
-Deno.test("(3) people accounts: a document with a line on a people account is never listed, nor a credit that follows it; the set decides", async () => {
-  const handler = (t: string, f: Filter[]) => {
-    if (t === "feature_flags") return flagOn;
-    if (t === "reconcile_item_kinds") return { data: KINDS, error: null };
-    if (t === "job_cost_lines" && val(f, "document_kind") === "xero_bill") {
-      return { data: [line("M1", "xero_bill", "BM", 300, { account_code: "475 " })], error: null };
-    }
-    if (t === "job_cost_lines") {
-      return { data: [
-        // A mixed bill: a supplies line plus a supplier-kind line on 475.
-        line("X1", "xero_bill", "BX", 100, { account_code: "305" }), line("X2", "xero_bill", "BX", 400, { account_code: "475" }),
-        line("S1", "xero_bill", "BS", 50, { account_code: "305" }),
-        line("Q1", "xero_credit_note", "NQ", -20, { follows_document_kind: "xero_bill", follows_document_id: "BM" }),
-      ], error: null };
-    }
-    if (t === "job_cost_line_parts" || t === "reconcile_items" || t === "match_clues" || t === "jobs") return { data: [], error: null };
-    throw new Error(`unexpected read ${t}`);
-  };
-  const rpcs = {
-    reconcile_list_page: () => ({ data: [
-      item("c0000000-0000-4000-8000-0000000000b1", "bill", "xero_bill:BX", 500),
-      item("c0000000-0000-4000-8000-0000000000b2", "bill", "xero_bill:BS", 50),
-      item("c0000000-0000-4000-8000-0000000000b3", "credit", "xero_credit_note:NQ", -20),
-    ], error: null }),
-    reconcile_list_counts: () => ({ data: [{ kind: "bill", open: 2 }, { kind: "credit", open: 1 }], error: null }),
-  };
-  const c = fakeClient(handler, rpcs);
-  const out: any = await reconcileList(c, new URLSearchParams("tab=bills"), STAFF, NOW);
-  assertEquals(out.items.map((i: any) => i.id), ["c0000000-0000-4000-8000-0000000000b2"]);
-  assert(c.calls.includes("people_account_codes"), "the set is read from the database");
-  // 475 out of the set (one row): all three list, no code changed.
-  const without = fakeClient(handler, rpcs, { data: [{ account_code: "301" }, { account_code: "306" }], error: null });
-  const all: any = await reconcileList(without, new URLSearchParams("tab=bills"), STAFF, NOW);
-  assertEquals(all.items.length, 3);
-  // An unreadable or empty set refuses the list, never a list with pay on it.
-  for (const people of [{ data: null, error: { message: "down" } }, { data: [], error: null }]) {
-    const bad = fakeClient(handler, rpcs, people);
-    const err = await assertRejects(() => reconcileList(bad, new URLSearchParams("tab=bills"), STAFF, NOW), ReconcileListError);
-    assertEquals([err.code, bad.calls.some((x) => x.startsWith("rpc:"))], ["reconcile_list_unreadable", false]);
-  }
 });
 
 Deno.test("reconcile list: any read that comes back with 1000 rows refuses (PostgREST stops at 1000)", async () => {

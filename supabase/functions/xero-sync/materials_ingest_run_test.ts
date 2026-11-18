@@ -1,5 +1,6 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { _ingestMaterialsActualsForTest } from "./index.ts";
+import { peopleRows } from "../_shared/people_accounts_test_support.ts";
 
 type Row = Record<string, any>;
 type Filter = { op: string; args: any[] };
@@ -9,8 +10,8 @@ const ORG = "00000000-0000-0000-0000-000000000001";
 
 function makeClient(seed: Record<string, Row[]>) {
   const tables = structuredClone(seed);
-  // The one set of people accounts, as migrated, unless a test seeds its own.
-  tables.people_account_codes ??= [{ account_code: "301" }, { account_code: "306" }, { account_code: "475" }];
+  // people_account_codes as migrated, unless a test seeds its own.
+  tables.people_account_codes ??= peopleRows();
   const calls: Call[] = [];
 
   function matches(row: Row, filter: Filter): boolean {

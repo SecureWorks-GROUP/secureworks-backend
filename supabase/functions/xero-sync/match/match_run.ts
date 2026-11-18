@@ -28,13 +28,16 @@
 //
 // A bill with a person's labour on it is never matched here: no clue, no
 // shadow row, no item. It is skipped and counted (`labour_bill`). That is a
-// line of kind installer_bill or employer_super, a line on a people account
-// (the one database set, _shared/people_accounts.ts: 301, 306, 475 today), on
-// our cost lines or on Xero's lines, or a bill from a Xero contact that is a
-// Trade App user. Each carries a name and a pay total.
+// line of kind installer_bill or employer_super, a line on an installer account
+// (301, 306: the installer_bill_outside_app stop), or a bill from a Xero
+// contact that is a Trade App user. Each carries a name and a pay total.
+// A bill with a line on an account hidden from Reconcile that is not labour
+// (475, director 03:36) is skipped the same way, counted `hidden_account_bill`:
+// never proposed, its kind unchanged. Both sets are people_account_codes
+// (_shared/people_accounts.ts), checked on our cost lines and Xero's lines.
 
 import { jobNumbersIn } from "../bill_prematch.ts";
-import { onPeopleAccount, type PeopleAccounts, peopleAccountsCode, readPeopleAccounts } from "../../_shared/people_accounts.ts";
+import { hiddenSkip, type PeopleAccounts, peopleAccountsCode, readPeopleAccounts } from "../../_shared/people_accounts.ts";
 import { decideMatch } from "./decide.ts";
 import {
   deliveryAddressClue,
@@ -147,7 +150,7 @@ async function matchOne(
   sb: Sb,
   subjectId: string,
   types: Record<string, ClueType>,
-  people: PeopleAccounts,
+  accounts: PeopleAccounts,
 ): Promise<{ applied: string } | { skipped: string }> {
   const kind = subjectId.split(":", 1)[0];
   const documentId = subjectId.slice(kind.length + 1);
@@ -161,11 +164,9 @@ async function matchOne(
   if (!lines?.length) return { skipped: "no_cost_lines" };
   // A person's labour, alone or beside supplier lines: no read of the bill, no
   // clue, no shadow row, no item.
-  if (
-    lines.some((l) =>
-      LABOUR_LINE_KINDS.has(String(l.kind ?? "")) || onPeopleAccount(people, l.account_code)
-    )
-  ) return { skipped: "labour_bill" };
+  if (lines.some((l) => LABOUR_LINE_KINDS.has(String(l.kind ?? "")))) return { skipped: "labour_bill" };
+  const hiddenOurs = hiddenSkip(accounts, lines.map((l) => l.account_code));
+  if (hiddenOurs) return { skipped: hiddenOurs === "labour" ? "labour_bill" : "hidden_account_bill" };
   // A Trade App user's own bill is their pay (users is small; no index needed).
   const partyId = lines.find((l) => typeof l.party_id === "string" && l.party_id)?.party_id;
   if (partyId) {
@@ -183,9 +184,8 @@ async function matchOne(
     sb.from("xero_invoices").select("xero_invoice_id,invoice_number,reference,xero_contact_id,contact_name,invoice_date,sub_total,line_items")
       .eq("xero_invoice_id", documentId).maybeSingle());
   // Xero's own lines too (a zero line is not a cost line): still before any write.
-  if (Array.isArray(bill?.line_items) && bill.line_items.some((l: any) => onPeopleAccount(people, l?.AccountCode))) {
-    return { skipped: "labour_bill" };
-  }
+  const hiddenXero = hiddenSkip(accounts, Array.isArray(bill?.line_items) ? bill.line_items.map((l: any) => l?.AccountCode) : []);
+  if (hiddenXero) return { skipped: hiddenXero === "labour" ? "labour_bill" : "hidden_account_bill" };
   const first = lines[0];
   const money = counted.map((l) => num(l.amount_ex));
   const doc: MatchDocument = {
@@ -358,7 +358,7 @@ async function matchOne(
   }));
   const all = [...fresh, ...keptClues];
 
-  const stops: Stop[] = [...documentStops(doc, jobs, people)];
+  const stops: Stop[] = [...documentStops(doc, jobs, accounts.labour)];
   const dup = duplicateStop(doc, others);
   if (dup) stops.push(dup);
   const candidate = all.find((c) => c.outcome === "job" && c.job_id && c.names_one && (c.class === "key" || c.class === "clue"));
@@ -452,11 +452,11 @@ async function runCore(
     console.error("[match_run] clue types unreadable");
     return { requeue: ids.map((id) => ({ id, reason: "read_failed" })), reached };
   }
-  // The one set of people accounts, once a run: unreadable or empty runs
-  // nothing and writes nothing (every bill is requeued).
-  let people: PeopleAccounts;
+  // The people accounts (labour and hidden), once a run: unreadable or empty
+  // runs nothing and writes nothing (every bill is requeued).
+  let accounts: PeopleAccounts;
   try {
-    people = await readPeopleAccounts(sb, { timeoutMs: MATCH_STATEMENT_TIMEOUT_MS });
+    accounts = await readPeopleAccounts(sb, { timeoutMs: MATCH_STATEMENT_TIMEOUT_MS });
   } catch (e) {
     const code = peopleAccountsCode(e) ?? "people_accounts_unreadable";
     bump(report.failed, code);
@@ -471,7 +471,7 @@ async function runCore(
     report.run++;
     reached.add(id);
     try {
-      const res = await matchOne(sb, id, types, people);
+      const res = await matchOne(sb, id, types, accounts);
       if ("applied" in res) bump(report.applied, res.applied);
       else bump(report.skipped, res.skipped);
     } catch (e) {

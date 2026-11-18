@@ -1,4 +1,4 @@
-import { onPeopleAccount, type PeopleAccounts } from "../_shared/people_accounts.ts";
+import { type LabourAccounts, onLabourAccount } from "../_shared/people_accounts.ts";
 
 type Line = {
   line_key: string;
@@ -41,8 +41,8 @@ function roundSix(amount: number): number {
 type Context = {
   mirrorBillIds: Set<string>;
   orgId: string;
-  /** The one set of people accounts (read once per run by the caller). */
-  people: PeopleAccounts;
+  /** Labour accounts, 306 and 301 (people_account_codes.labour, read once per run by the caller). */
+  labour: LabourAccounts;
   employerSuperOn?: boolean;
 };
 
@@ -94,7 +94,7 @@ export function billCostDocument(bill: Bill, ctx: Context) {
     if (amount === 0) continue;
     const account = l.AccountCode == null ? null : String(l.AccountCode);
     const description = l.Description == null ? null : String(l.Description);
-    const installer = onPeopleAccount(ctx.people, account);
+    const installer = onLabourAccount(ctx.labour, account ?? "");
     const lane = /commission/i.test(description ?? "")
       ? "commission"
       : installer
