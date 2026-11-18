@@ -511,9 +511,29 @@ function zeroCounts(): ScanCounts {
   };
 }
 
+/** The leading rows (they come in sequence order) saved before `before`.
+ * A row with no recorded_at is treated as not settled. */
+export function settledPrefix<T extends { recorded_at?: string | null }>(
+  rows: T[],
+  before: string,
+): T[] {
+  const cut = Date.parse(before);
+  let n = 0;
+  while (n < rows.length) {
+    const at = Date.parse(rows[n].recorded_at ?? "");
+    if (!Number.isFinite(at) || at >= cut) break;
+    n++;
+  }
+  return rows.slice(0, n);
+}
+
 /** One run of the scan. Body (all optional): from_sequence (start after this
  * business_events.sequence_number instead of the saved cursor), limit, force
- * (run while the flag is off, for a supervised test). */
+ * (run while the flag is off, for a supervised test), peek (Read now, contract
+ * section 3j: also read the rows saved in the last two minutes, but move the
+ * cursor only over the rows older than that, so a row committed a moment late
+ * is still read by the next run; the rows read early are skipped then as
+ * already stored). */
 export async function scanDispatchV2Replies(
   body: any,
   ctx: DispatchV2RepliesContext,
@@ -554,8 +574,16 @@ export async function scanDispatchV2Replies(
   }
 
   const limit = intParam(body?.limit, SCAN_LIMIT_DEFAULT, 1, SCAN_LIMIT_MAX);
-  const before = new Date(Date.parse(now) - SCAN_LAG_MS).toISOString();
-  const rows = await store.readInboundEmails(cursor, before, limit);
+  const settledBefore = new Date(Date.parse(now) - SCAN_LAG_MS).toISOString();
+  const peek = body?.peek === true;
+  const rows = await store.readInboundEmails(
+    cursor,
+    peek ? now : settledBefore,
+    limit,
+  );
+  // The rows the cursor may pass: all of them, or under peek only the run of
+  // rows (in sequence order) saved before the lag.
+  const settled = peek ? settledPrefix(rows, settledBefore) : rows;
   counts.read = rows.length;
   if (rows.length === 0) {
     await store.saveScanState({
@@ -803,7 +831,9 @@ export async function scanDispatchV2Replies(
     }
   }
 
-  const next = rows[rows.length - 1].sequence_number;
+  const next = settled.length > 0
+    ? settled[settled.length - 1].sequence_number
+    : cursor;
   await store.saveScanState({
     cursor_sequence: next,
     last_scan_at: now,

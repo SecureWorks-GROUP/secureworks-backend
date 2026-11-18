@@ -3,6 +3,23 @@
 -- The legacy cost view materialises its trade CTE. A text-id index cannot
 -- bound that read; after_xero retains the view's full legacy cost (recorded in
 -- the contract plan), rather than adding an ineffective production index.
+
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
+
+-- Rule 15: this function is new (absent on main and live, 18 Nov). A re-apply
+-- accepts only its own body; any other body at this signature belongs to
+-- someone else and is never replaced (or later dropped by the rollback).
+DO $guard$
+DECLARE
+  v_md5 text := (SELECT md5(p.prosrc) FROM pg_proc p
+                 WHERE p.oid = to_regprocedure('public.trade_pay_run_standing_checks(uuid,uuid[],text)'));
+/* block */ BEGIN
+  IF v_md5 IS NOT NULL AND v_md5 <> 'b734f7d74eecc7dfee162613f38935a4' THEN
+    RAISE EXCEPTION 'trade_pay_run_standing_checks: Rule 15, another body is installed (md5 %); refusing to replace it', v_md5;
+  END IF;
+END;
+$guard$;
 CREATE OR REPLACE FUNCTION public.trade_pay_run_standing_checks(
  p_org_id uuid, p_invoice_ids uuid[], p_stage text
 ) RETURNS jsonb
@@ -222,3 +239,12 @@ END;
 $fn$;
 REVOKE ALL ON FUNCTION public.trade_pay_run_standing_checks(uuid,uuid[],text) FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.trade_pay_run_standing_checks(uuid,uuid[],text) TO service_role;
+-- The guard's md5 is this file's own body.
+DO $own$
+/* block */ BEGIN
+  IF (SELECT md5(p.prosrc) FROM pg_proc p WHERE p.oid = to_regprocedure('public.trade_pay_run_standing_checks(uuid,uuid[],text)'))
+     IS DISTINCT FROM 'b734f7d74eecc7dfee162613f38935a4' THEN
+    RAISE EXCEPTION 'trade_pay_run_standing_checks: Rule 15 guard md5 is not this migration''s body';
+  END IF;
+END;
+$own$;

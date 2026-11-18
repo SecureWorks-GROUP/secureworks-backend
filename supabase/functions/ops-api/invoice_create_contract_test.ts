@@ -1,5 +1,6 @@
 // deno-lint-ignore-file no-explicit-any no-import-prefix
 import {
+  assert,
   assertEquals,
   assertMatch,
   assertNotEquals,
@@ -37,7 +38,13 @@ const JOB_ID = "10000000-0000-4000-8000-000000000001";
 const CONTACT_ID = "20000000-0000-4000-8000-000000000002";
 const JOB_CONTACT_ID = "30000000-0000-4000-8000-000000000003";
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
-function fixtureClient(options: { jobId?: string; jobOrgId?: string; jobContactJobId?: string; invoice?: Record<string, unknown> } = {}) {
+function fixtureClient(options: {
+  jobId?: string;
+  jobOrgId?: string;
+  jobContactJobId?: string;
+  invoice?: Record<string, unknown>;
+  storedOptions?: string[] | "unreadable" | "thrown";
+} = {}) {
   const events: any[] = [];
   const updates: { table: string; value: any }[] = [];
   const upserts: { table: string; value: any }[] = [];
@@ -86,6 +93,18 @@ function fixtureClient(options: { jobId?: string; jobOrgId?: string; jobContactJ
           : [],
         error: null,
       });
+      const read = () => {
+        if (table === "feature_flags" && filters.flag_name === "xero_draft_standard_v1") {
+          return { data: [{ enabled: options.storedOptions !== undefined }], error: null };
+        }
+        if (table === "xero_tracking_options") {
+          if (options.storedOptions === "thrown") throw new Error("fixture_read_failed");
+          if (options.storedOptions === "unreadable") return { data: null, error: { code: "fixture_read_failed" } };
+          assertEquals(filters, { org_id: DEFAULT_ORG_ID, status: "ACTIVE" });
+          return { data: (options.storedOptions || []).map(option_name => ({ option_name })), error: null };
+        }
+        return response();
+      };
       const b: any = {
         select: () => b,
         eq: (field: string, value: string) => {
@@ -115,12 +134,12 @@ function fixtureClient(options: { jobId?: string; jobOrgId?: string; jobContactJ
         maybeSingle: () => Promise.resolve({ data: single(), error: null }),
         single: () => Promise.resolve({ data: single(), error: null }),
         then: (resolve: any, reject: any) =>
-          Promise.resolve(response()).then(resolve, reject),
+          Promise.resolve().then(read).then(resolve, reject),
       };
       return b;
     },
   };
-  return { client, events, updates, upserts };
+  return { client, events, updates, upserts, job };
 }
 const invoiceBody = () => ({
   job_id: JOB_ID,
@@ -161,10 +180,12 @@ function providerFixture(
     | "blocked"
     | "guard_unavailable" = "accepted",
   invoiceOverride: Record<string, unknown> | ((invoice: any) => Record<string, unknown>) = {},
+  activeXeroOptions: string[] = [],
 ) {
   const original = globalThis.fetch;
   const creates: { key: string | null; body: any }[] = [];
   let emails = 0;
+  let categoryReads = 0;
   globalThis.fetch = (input, init) => {
     const url = String(input);
     if (url.startsWith("https://fixture.supabase.test/rest/v1/org_config")) {
@@ -190,7 +211,10 @@ function providerFixture(
       return Promise.resolve(Response.json([]));
     }
     if (url.includes("/TrackingCategories")) {
-      return Promise.resolve(Response.json({ TrackingCategories: [] }));
+      categoryReads++;
+      return Promise.resolve(Response.json({ TrackingCategories: [{
+        Name: "Business Unit", Status: "ACTIVE", Options: activeXeroOptions.map(Name => ({ Name, Status: "ACTIVE" })),
+      }] }));
     }
     if (/\/Invoices\/[^/]+$/.test(url) && init?.method === "POST") {
       const body = JSON.parse(String(init.body));
@@ -244,6 +268,7 @@ function providerFixture(
   return {
     creates,
     emailCalls: () => emails,
+    categoryReads: () => categoryReads,
     restore: () => {
       globalThis.fetch = original;
     },
@@ -867,3 +892,80 @@ for (const status of ["DRAFT", undefined, "AUTHORISED"]) {
     } finally { provider.restore(); }
   });
 }
+
+Deno.test("the customer invoice uses the bound job for every line and reports stored-option gaps", async () => {
+  const provider = providerFixture();
+  try {
+    const request = invoiceBody();
+    request.line_items.push({ ...request.line_items[0] });
+    for (const [storedOptions, problem] of [
+      [["SW - FENCING"], null],
+      [["SW - PATIOS"], "division_option_not_active"],
+      [[], "options_not_loaded"],
+      ["unreadable", "options_not_loaded"],
+      ["thrown", "options_not_loaded"],
+    ] as const) {
+      const options = typeof storedOptions === "string" ? storedOptions : [...storedOptions];
+      const result = await createInvoice(fixtureClient({ storedOptions: options }).client, request);
+      const invoice = provider.creates.at(-1)!.body.Invoices[0];
+      assertEquals(invoice.Reference, request.reference);
+      assertEquals(invoice.Status, "DRAFT");
+      assertEquals(invoice.LineItems.length, 2);
+      for (const line of invoice.LineItems) {
+        assertEquals(line.Tracking, problem ? undefined : [{ Name: "Business Unit", Option: "SW - FENCING" }]);
+      }
+      assert("division_tag" in result);
+      assertEquals(result.division_tag, problem ? "missing" : "set");
+      assertEquals(result.division_problem, problem);
+    }
+    assertEquals(provider.categoryReads(), 0);
+    assertEquals(provider.emailCalls(), 0);
+  } finally {
+    provider.restore();
+  }
+});
+
+Deno.test("switch off uses the live category and reference and preserves the legacy answer", async () => {
+  const provider = providerFixture("accepted", {}, ["SW - FENCING"]);
+  try {
+    const request = invoiceBody();
+    for (const reference of ["SWF-ZZTEST", "ZZTEST"]) {
+      const result = await createInvoice(fixtureClient().client, { ...request, reference });
+      const invoice = provider.creates.at(-1)!.body.Invoices[0];
+      assertEquals(invoice.Reference, reference);
+      assertEquals(invoice.LineItems[0].Tracking, reference === "SWF-ZZTEST"
+        ? [{ Name: "Business Unit", Option: "SW - FENCING" }]
+        : undefined);
+      assertEquals("division_tag" in result, false);
+      assertEquals("division_problem" in result, false);
+    }
+    assertEquals(provider.categoryReads(), 2);
+    assertEquals(provider.emailCalls(), 0);
+  } finally {
+    provider.restore();
+  }
+});
+
+Deno.test("retry after a preflight refusal reads the corrected job number", async () => {
+  const provider = providerFixture();
+  try {
+    const { client, job } = fixtureClient({ storedOptions: ["SW - FENCING", "SW - PATIOS"] });
+    job.job_number = "";
+    await assertRejects(() => createInvoice(client, invoiceBody()), Error, "job_number");
+    assertEquals(provider.creates.length, 0);
+
+    job.job_number = "SWP-ZZTEST";
+    job.type = "patio";
+    const result = await createInvoice(client, invoiceBody());
+    assert("division_tag" in result);
+    assertEquals(result.division_tag, "set");
+    assertEquals(result.division_problem, null);
+    assertEquals(provider.creates.length, 1);
+    assertEquals(provider.creates[0].body.Invoices[0].LineItems[0].Tracking, [
+      { Name: "Business Unit", Option: "SW - PATIOS" },
+    ]);
+    assertEquals(provider.categoryReads(), 0);
+  } finally {
+    provider.restore();
+  }
+});
