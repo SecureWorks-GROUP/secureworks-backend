@@ -1,4 +1,4 @@
--- Rollback of 20261119000000_reconcile_list_page_labour_docs (PLACEHOLDER version):
+-- Rollback of 20261118195400_reconcile_list_page_labour_docs (PLACEHOLDER version):
 -- puts back 20261118195200's bodies of reconcile_list_page and
 -- reconcile_list_counts, byte for byte. ops-api then drops a labour document
 -- after the page is read, as it did before.

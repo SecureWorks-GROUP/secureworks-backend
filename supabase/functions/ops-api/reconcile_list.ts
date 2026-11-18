@@ -28,7 +28,7 @@
 // that ever came back. A document with any line of kind installer_bill (a
 // mixed bill: the item's kind and reason miss it) is not listed either, nor a
 // credit that follows one: the database functions leave them out of the page
-// and the counts (20261119000000), and this read drops one that ever came back.
+// and the counts (20261118195400), and this read drops one that ever came back.
 // Each item carries the matcher's current clues (match_clues) and, as
 // `against`, the words of the stops it stored. Every read is capped at READ_CAP (1000, the
 // PostgREST row limit): a read, or the lines and parts of one answer, reaching

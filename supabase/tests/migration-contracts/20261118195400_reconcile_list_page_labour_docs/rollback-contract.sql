@@ -13,5 +13,5 @@ DO $$ BEGIN
   END IF;
 END $$;
 -- Runs again cleanly (a re-run finds 20261118195200's bodies).
-\ir ../../../rollbacks/20261119000000_reconcile_list_page_labour_docs_down.sql
+\ir ../../../rollbacks/20261118195400_reconcile_list_page_labour_docs_down.sql
 SELECT 'Reconcile list labour documents rollback contract passed' AS result;
