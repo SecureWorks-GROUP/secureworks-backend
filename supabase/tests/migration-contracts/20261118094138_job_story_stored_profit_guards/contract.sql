@@ -7,7 +7,7 @@ SET LOCAL statement_timeout='120s';
 -- first (FU26.1's re-apply restores its own bodies; this one replaces them).
 \ir ../../../migrations/20261118024514_context_story_book_speed.sql
 \ir ../../../migrations/20261118065939_job_story_stored_profit.sql
-\ir ../../../migrations/20261118080000_job_story_stored_profit_guards.sql
+\ir ../../../migrations/20261118094138_job_story_stored_profit_guards.sql
 -- Rule 17: an earlier contract in the shard may have rebuilt the stored tables.
 -- These are the store's own job indexes (20261117195801), restored if missing.
 CREATE INDEX IF NOT EXISTS job_cost_events_stored_job_idx ON public.job_cost_events_stored(job_id);
@@ -36,7 +36,7 @@ SELECT public.install_context_story_book_speed();
 \ir ../../../migrations/20261118065939_job_story_stored_profit.sql
 SELECT public.install_job_story_stored_profit();
 SELECT pg_temp.sp_assert((SELECT md5(prosrc)='935cecb054f2ff9cc77e05df5e1a199a' FROM pg_proc WHERE oid='public.context_job_story_text_get(uuid,jsonb,boolean)'::regprocedure),'FU26.1 install not in place');
-\ir ../../../migrations/20261118080000_job_story_stored_profit_guards.sql
+\ir ../../../migrations/20261118094138_job_story_stored_profit_guards.sql
 SELECT pg_temp.sp_assert((SELECT md5(prosrc)='0d4040250186678ad880a69be4367df3' FROM pg_proc WHERE oid='public.context_job_story_text_get(uuid,jsonb,boolean)'::regprocedure),'installed staff read did not move');
 SELECT pg_temp.sp_assert(NOT EXISTS(SELECT 1 FROM public.job_story_stored_profit_arm),'store armed without install');
 SELECT public.remove_job_story_stored_profit();
@@ -337,7 +337,7 @@ SELECT public.remove_context_story_book_speed();
 SELECT pg_temp.sp_assert((SELECT md5(prosrc)='fc9a1c8f605a1dfd6c7d1ef7667bfa0d' FROM pg_proc WHERE oid='public.context_job_story_book(uuid,timestamptz)'::regprocedure),'FU26.0 remove after this remove failed');
 -- Re-apply while removed keeps the switch as it is and replaces no entry point.
 \ir ../../../migrations/20261118065939_job_story_stored_profit.sql
-\ir ../../../migrations/20261118080000_job_story_stored_profit_guards.sql
+\ir ../../../migrations/20261118094138_job_story_stored_profit_guards.sql
 SELECT pg_temp.sp_assert((SELECT md5(prosrc)='fc9a1c8f605a1dfd6c7d1ef7667bfa0d' FROM pg_proc WHERE oid='public.context_job_story_book(uuid,timestamptz)'::regprocedure),'re-apply touched the book');
 
 -- 8. No browser role reaches any new door.
