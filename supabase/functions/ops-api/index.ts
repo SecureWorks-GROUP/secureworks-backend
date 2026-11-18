@@ -1585,6 +1585,7 @@ import {
 // TP-01 Xero tie-out (20261029121500): staff read, bills by month and bucket.
 import { readXeroDrafts, XeroDraftsError } from './xero_drafts_read.ts'
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
+import { EffortStatsUnreadable, readPayEffortStats } from './pay_effort_stats.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
 import { TradePayRunError, TradePayRunRefusal, PAY_RUN_SWITCH, approvePayRun, markPayRunSuperPaid, payRunApproveDepsFromClient, payRunPushDepsFromClient, payRunReadsFromClient, pushPayRunInvoice, readPayRun } from './trade_pay_run.ts'
 // Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
@@ -2562,6 +2563,7 @@ async function noteTradeRecurringDeductionNotTaken(
 function presentTradeInvoice<T extends Record<string, unknown>>(
   rawInvoice: T,
   payViewOptions?: Pick<PayViewOptions, 'taxSetAsidePercent' | 'repayment'>,
+  officeSuggestions = false,
 ): T & { trade_payable: number | null } & Record<string, unknown> {
   // A bill voided or deleted in Xero says so on every read.
   const invoice = { ...rawInvoice, ...presentTradeInvoiceBillOutcome(rawInvoice) } as T
@@ -2576,9 +2578,9 @@ function presentTradeInvoice<T extends Record<string, unknown>>(
       to_be_paid: Number(invoice.to_be_paid_ex),
     }
     if (!Array.isArray(invoice.lines)) return { ...presented, ...headerShape }
-    const normalizedLines = [...invoice.lines]
+    const orderedLines = [...invoice.lines]
       .sort((left: any, right: any) => Number(left?.line_position ?? 0) - Number(right?.line_position ?? 0))
-      .map((line: any): WeeklyInvoiceLine => ({
+    const normalizedLines = orderedLines.map((line: any): WeeklyInvoiceLine => ({
         line_type: String(line.line_type || ''),
         description: String(line.description || ''),
         quantity: Number(line.quantity),
@@ -2607,7 +2609,9 @@ function presentTradeInvoice<T extends Record<string, unknown>>(
     }
     return {
       ...presented,
-      lines: normalizedLines,
+      lines: officeSuggestions ? normalizedLines.map((line, i) => ({
+        ...line, suggested: orderedLines[i].suggested, changed_from_suggestion: orderedLines[i].changed_from_suggestion,
+      })) : normalizedLines,
       ...weeklyInvoiceResponse(calculated),
     }
   } catch (error) {
@@ -10147,6 +10151,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // approves the clean bills in one batch. Read only; pay run approvers
       // only (pay_figures_approver.ts, checked before dispatch). Contract:
       // docs/trade-pay-run-check-v1.md.
+      case 'pay_effort_stats': {
+        if (req.method !== 'GET') throw new ApiError('method_not_allowed', 405)
+        if (authMode !== 'jwt' || !_opsApiStaffOperatorRole(authUser?.role)) throw new ApiError('staff_required', 403)
+        try {
+          return json(await readPayEffortStats(client, url.searchParams.get('weeks'), authUser?.orgId || null))
+        } catch (err) {
+          if (err instanceof EffortStatsUnreadable) throw new ApiError(err.message, 503, { ok: false, code: err.message, error: err.message })
+          if (err instanceof TradePayRunCheckError) throw new ApiError(err.message, err.status)
+          throw err
+        }
+      }
+
       case 'trade_pay_run_check': {
         try {
           return json(await readTradePayRunCheck(client, {
@@ -59293,9 +59309,9 @@ const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, note
 // presentTradeInvoice throws MONEY_SPLIT_INVALID on a legacy row whose split
 // does not reconcile. One such row is live; it used to 500 the whole list.
 // Degrade that row to "figures unavailable" and keep the rest.
-function presentTradeInvoiceSafe(inv: any, payViewOptions?: Pick<PayViewOptions, 'taxSetAsidePercent' | 'repayment'>): any {
+function presentTradeInvoiceSafe(inv: any, payViewOptions?: Pick<PayViewOptions, 'taxSetAsidePercent' | 'repayment'>, officeSuggestions = false): any {
   try {
-    return presentTradeInvoice(inv, payViewOptions)
+    return presentTradeInvoice(inv, payViewOptions, officeSuggestions)
   } catch (error) {
     const code = (error as any)?.code || (error as any)?.message || 'MONEY_SPLIT_INVALID'
     console.warn('[ops-api] trade invoice ' + inv?.id + ' figures unavailable: ' + code)
@@ -59539,7 +59555,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
 
   return {
     invoices: mergeTradeBillRows(weekly.data || [], noWeek.data || [], stuckRows.slice(0, STUCK_TRADE_BILLS_CAP))
-      .map((invoice: any) => presentTradeInvoiceSafe(invoice)),
+      .map((invoice: any) => presentTradeInvoiceSafe(invoice, undefined, true)),
     rates: currentRates.map(({ created_by, set_by, ...rate }: any) => ({
       ...rate, ...tradeRateSetter({ ...rate, created_by, set_by }),
     })),
@@ -59553,7 +59569,7 @@ export const _listTradeInvoicesForTest = listTradeInvoices
 /** Most stuck invoices (no Xero bill) one Trade Bills read adds. */
 export const STUCK_TRADE_BILLS_CAP = 200
 
-const TRADE_BILLS_COLUMNS = 'id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, super_base_ex, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, xero_bill_status, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)'
+const TRADE_BILLS_COLUMNS = 'id, accepted_untouched, auto_sent, confirm_seconds, office_sent_back_at, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, super_base_ex, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, xero_bill_status, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, suggested, changed_from_suggestion, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)'
 
 /** Weekly and no-week invoices in one list, newest first by week, else by day made. */
 export function mergeTradeBillRows(weekly: any[], noWeek: any[], stuck: any[] = []): any[] {
