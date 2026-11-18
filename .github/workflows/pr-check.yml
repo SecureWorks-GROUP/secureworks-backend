@@ -720,6 +720,8 @@ jobs:
             supabase/functions/xero-sync/job_marks_test.ts \
             supabase/functions/xero-sync/xero_mirror_check_test.ts \
             supabase/functions/xero-sync/draft_approval_check_test.ts \
+            supabase/functions/_shared/supplier_credit_parse_test.ts \
+            supabase/functions/xero-sync/supplier_credit_propose_test.ts \
             supabase/functions/ops-api/xero_void_mirror_test.ts \
             supabase/functions/xero-sync/xero_age_test.ts \
             supabase/functions/xero-sync/cost_lines_backfill_test.ts \

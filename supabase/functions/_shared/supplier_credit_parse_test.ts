@@ -456,4 +456,59 @@ Deno.test("parseSupplierCredit: checks ex plus GST against inc within one cent a
     incGst: null,
     needsReview: true,
   });
+
+  const bareSummaryGstMismatch = [
+    "CREDIT NOTE CN-2013",
+    "Date: 10/10/2026",
+    "Original invoice INV-6013",
+    "Subtotal (ex GST) $200.00",
+    "GST $25.00",
+    "Total (inc GST) $220.00",
+  ].join("\n");
+  assertEquals(parseSupplierCredit(bareSummaryGstMismatch), {
+    credit_number: "CN-2013",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: null,
+    names_bill_number: "INV-6013",
+    needs_review: true,
+  });
+});
+
+Deno.test("parseSupplierCredit: ignores same-line invoice total and bare total printed before credit subtotal", () => {
+  const sameLineInvoiceTotal = [
+    "CREDIT NOTE CN-2014",
+    "Supplier: ZZTEST Supplies",
+    "Date: 10/10/2026",
+    "Original invoice INV-6014 Total $550.00",
+  ].join("\n");
+  assertEquals(parseSupplierCredit(sameLineInvoiceTotal), {
+    credit_number: "CN-2014",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: null,
+    names_bill_number: "INV-6014",
+    needs_review: false,
+  });
+
+  const bareTotalBeforeCreditSubtotal = [
+    "CREDIT NOTE CN-2015",
+    "Supplier: ZZTEST Supplies",
+    "Date: 10/10/2026",
+    "Original invoice INV-6015",
+    "Total $550.00",
+    "Credit Subtotal (ex GST) $100.00",
+    "Credit GST $10.00",
+  ].join("\n");
+  assertEquals(parseSupplierCredit(bareTotalBeforeCreditSubtotal), {
+    credit_number: "CN-2015",
+    credit_date: "2026-10-10",
+    amount_ex: 100,
+    amount_gst: 10,
+    amount_inc: 110,
+    names_bill_number: "INV-6015",
+    needs_review: false,
+  });
 });
