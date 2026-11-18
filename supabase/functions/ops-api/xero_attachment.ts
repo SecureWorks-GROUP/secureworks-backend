@@ -163,6 +163,82 @@ export async function attachPdfToXeroInvoice(input: {
   }
 }
 
+/** Unused supplier-document transport. Callers must establish ACCPAY or ACCPAYCREDIT ownership, never ACCREC. */
+export async function attachFileToXeroDocument(
+  deps: Pick<
+    Parameters<typeof attachPdfToXeroInvoice>[0],
+    "accessToken" | "tenantId" | "fetchImpl" | "signal"
+  >,
+  input: {
+    endpoint: "Invoices" | "CreditNotes";
+    documentId: string;
+    filename: string;
+    bytes: Uint8Array;
+    contentType: "application/pdf" | "image/jpeg" | "image/png";
+  },
+): Promise<void> {
+  if (input.bytes.length > 10 * 1024 * 1024) {
+    throw new XeroPdfAttachError("File exceeds 10 MB", 413, "FILE_TOO_LARGE");
+  }
+  const signatures = {
+    "application/pdf": [0x25, 0x50, 0x44, 0x46, 0x2d],
+    "image/jpeg": [0xff, 0xd8, 0xff],
+    "image/png": [0x89, 0x50, 0x4e, 0x47],
+  };
+  const signature = signatures[input.contentType];
+  if (!signature || !signature.every((byte, i) => input.bytes[i] === byte)) {
+    throw new XeroPdfAttachError(
+      "File does not match its type",
+      400,
+      "FILE_TYPE_NOT_ALLOWED",
+    );
+  }
+  const documentId = String(input.documentId || "").trim();
+  if (!documentId || !["Invoices", "CreditNotes"].includes(input.endpoint)) {
+    throw new XeroPdfAttachError("Xero document id and endpoint required", 400);
+  }
+  const extension = input.contentType === "application/pdf"
+    ? "pdf"
+    : input.contentType === "image/jpeg"
+    ? "jpg"
+    : "png";
+  // Reuse the existing filename cleaning without appending .pdf to photos.
+  const cleaned = sanitizeXeroPdfFilename(input.filename).replace(
+    /\.pdf$/i,
+    "",
+  );
+  const suffix = extension === "jpg"
+    ? /\.jpe?g$/i
+    : new RegExp(`\\.${extension}$`, "i");
+  const filename = suffix.test(cleaned) ? cleaned : `${cleaned}.${extension}`;
+  const fetchImpl = deps.fetchImpl || fetch;
+  const response = await fetchImpl(
+    `${XERO_API_BASE}/${input.endpoint}/${
+      encodeURIComponent(documentId)
+    }/Attachments/${encodeURIComponent(filename)}`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${deps.accessToken}`,
+        "Xero-tenant-id": deps.tenantId,
+        "Content-Type": input.contentType,
+        "Content-Length": String(input.bytes.length),
+      },
+      body: new Uint8Array(input.bytes),
+      signal: deps.signal,
+    },
+  );
+  if (response.status === 429) throw xeroRateLimitError(response);
+  if (!response.ok) {
+    throw new XeroPdfAttachError(
+      `Xero attachment failed: ${response.status} ${await response.text()}`
+        .slice(0, 500),
+      response.status >= 400 && response.status < 600 ? response.status : 502,
+      "XERO_FILE_ATTACH_FAILED",
+    );
+  }
+}
+
 function isRetryablePdfAttachError(error: unknown): boolean {
   if (error instanceof XeroCooldownError) return false;
   if (!(error instanceof XeroPdfAttachError)) return true;

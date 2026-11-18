@@ -1,0 +1,1 @@
+\ir migration-contracts/20261118072653_customer_invoices_on_no_job/contract.sql
