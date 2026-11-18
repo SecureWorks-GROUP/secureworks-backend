@@ -80,7 +80,7 @@ save pay-bare.txt "$pay"
 for id in C01 C04 C05 C09; do expect "$cap" "$id" PASS; done
 # No repository migration gives trade_invoice_lines an org_id, so a
 # pay_line_held raise cannot resolve its organisation (C11).
-for id in C02 C03 C06 C07 C08 C10 C11 C13 C14 F01 F02 F03; do expect "$cap" "$id" FAIL; done
+for id in C02 C03 C06 C07 C08 C10 C11 C13 C14 C15 F01 F02 F03; do expect "$cap" "$id" FAIL; done
 for id in C12 N01 N02 N03; do expect "$cap" "$id" "NOT CHECKED HERE"; done
 expect_overall "$cap" FAIL
 for id in P01 P02 P03 P04 P07; do expect "$pay" "$id" PASS; done
@@ -94,6 +94,9 @@ SET session_replication_role = replica;
 UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'trade_pay_inclusive_super_v1';
 INSERT INTO public.users(id, org_id, name, role)
   VALUES ('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-000000000001', 'ZZTEST Approver', 'admin');
+-- Test only: the start date is written straight in, never the live way
+-- (set_work_order_cap_start, a signed-in approver).
+UPDATE public.work_order_cap_settings SET cap_start_on = '2026-11-16' WHERE id = 1;
 UPDATE public.trade_pay_settings
   SET inclusive_super_from = date_trunc('week', (now() AT TIME ZONE 'Australia/Perth'))::date - 7,
       pay_run_approver_user_ids = ARRAY['00000000-0000-0000-0000-0000000000a1']::uuid[]
@@ -149,7 +152,7 @@ pay=$(run_script pay-run-switch-preconditions.sql)
 [ "$(state_digest)" = "$before" ] || { echo "FAIL: a script changed state" >&2; failures=$((failures + 1)); }
 save cap-filled.txt "$cap"
 save pay-filled.txt "$pay"
-for id in C01 C02 C03 C04 C05 C06 C07 C08 C09 C10 C11 C13 C14 F01 F02 F03; do expect "$cap" "$id" PASS; done
+for id in C01 C02 C03 C04 C05 C06 C07 C08 C09 C10 C11 C13 C14 C15 F01 F02 F03; do expect "$cap" "$id" PASS; done
 expect "$cap" C12 "NOT CHECKED HERE"
 expect_overall "$cap" PASS
 for id in P01 P02 P03 P04 P05 P06 P07 P08 P09 F01; do expect "$pay" "$id" PASS; done
@@ -187,6 +190,13 @@ take_away "ALTER TABLE public.trade_pay_settings RENAME TO trade_pay_settings_aw
 take_away "ALTER TABLE supabase_migrations.schema_migrations RENAME TO schema_migrations_away" \
   "ALTER TABLE supabase_migrations.schema_migrations_away RENAME TO schema_migrations" \
   cap-switch-preconditions.sql C14
+# No start date: nothing would be capped, so C15 fails; a missing table too.
+take_away "UPDATE public.work_order_cap_settings SET cap_start_on = NULL WHERE id = 1" \
+  "UPDATE public.work_order_cap_settings SET cap_start_on = '2026-11-16' WHERE id = 1" \
+  cap-switch-preconditions.sql C15
+take_away "ALTER TABLE public.work_order_cap_settings RENAME TO work_order_cap_settings_away" \
+  "ALTER TABLE public.work_order_cap_settings_away RENAME TO work_order_cap_settings" \
+  cap-switch-preconditions.sql C15
 # Without #1643's door the raise is positional only and trade_invoice_lines has
 # no org_id: C10 and C11 fail together.
 take_away "ALTER FUNCTION public.reconcile_item_raise_named(text,text,text,uuid[],jsonb,jsonb,text,uuid) RENAME TO zz_door_away" \

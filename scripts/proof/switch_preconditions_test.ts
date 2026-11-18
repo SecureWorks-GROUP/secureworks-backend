@@ -8,7 +8,7 @@ const dir = new URL(".", import.meta.url);
 const scripts = {
   "cap-switch-preconditions.sql": [
     "C01", "C02", "C03", "C04", "C05", "C06", "C07", "C08", "C09", "C10",
-    "C11", "C12", "C13", "C14", "F01", "F02", "F03", "N01", "N02", "N03",
+    "C11", "C12", "C13", "C14", "C15", "F01", "F02", "F03", "N01", "N02", "N03",
   ],
   "pay-run-switch-preconditions.sql": [
     "P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08", "P09", "P15",
