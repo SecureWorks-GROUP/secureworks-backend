@@ -1,4 +1,4 @@
--- Down for 20261118195000_reconcile_list_page (PLACEHOLDER version).
+-- Down for 20261118195200_reconcile_list_page (PLACEHOLDER version).
 -- Removes the two read functions. The switch row is removed only
 -- while it is still off, so a switch someone turned on is never deleted.
 SET LOCAL lock_timeout = '5s';
