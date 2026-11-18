@@ -1,9 +1,9 @@
 BEGIN;
 SET LOCAL statement_timeout = '90s';
 -- Rule 17: stand the door back up as 20261118194100 left it, then apply twice.
-\ir ../../../rollbacks/20261118999910_work_order_cap_switch_guards_down.sql
-\ir ../../../migrations/20261118999910_work_order_cap_switch_guards.sql
-\ir ../../../migrations/20261118999910_work_order_cap_switch_guards.sql
+\ir ../../../rollbacks/20261118194600_work_order_cap_switch_guards_down.sql
+\ir ../../../migrations/20261118194600_work_order_cap_switch_guards.sql
+\ir ../../../migrations/20261118194600_work_order_cap_switch_guards.sql
 
 CREATE FUNCTION pg_temp.assert_ok(ok boolean, label text) RETURNS void LANGUAGE plpgsql AS $$ BEGIN
   IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'ZZTEST %', label; END IF;

@@ -1,4 +1,4 @@
--- Undo 20261118999910 (placeholder version): drop the preview and put the door back as
+-- Undo 20261118194600 (placeholder version): drop the preview and put the door back as
 -- 20261118194100 left it (clearing allowed whatever the switch).
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';

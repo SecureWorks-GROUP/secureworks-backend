@@ -9,6 +9,6 @@ DO $$ BEGIN
   END IF;
 END $$;
 BEGIN;
-\ir ../../../migrations/20261118999910_work_order_cap_switch_guards.sql
+\ir ../../../migrations/20261118194600_work_order_cap_switch_guards.sql
 ROLLBACK;
 SELECT 'FU49-9b cap switch guards rollback passed' AS result;
