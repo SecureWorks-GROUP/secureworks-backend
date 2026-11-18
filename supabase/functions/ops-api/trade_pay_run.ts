@@ -713,8 +713,11 @@ export type PayBackReceipt = {
  * term's, expenseHeldNotBooked). Anything else, an unknown or new status and a
  * missing receipt included, is refused. Queried, rejected and marked-unconfirmed
  * are refused before this (their own reasons). The check's twin is the
- * reimbursement_receipt_not_approved stop (trade_pay_run_check_v2); change
- * them together. */
+ * reimbursement_receipt_not_approved stop (trade_pay_run_check_v2). Both are
+ * proved against one case table, trade_pay_run_receipt_rule_cases.ts, and
+ * trade_pay_run_receipt_rule_parity_test.ts fails when the check contract's
+ * zz_matrix differs from it: change the rule, the cases and a check migration
+ * with its own matrix together. */
 export function payBackReceiptAllowed(
   row: PayBackReceipt | null | undefined,
 ): boolean {
@@ -1915,7 +1918,7 @@ export async function pushPayRunInvoice(
     });
     throw new TradePayRunError(
       "pay_run_receipt_queried_or_rejected",
-      "The office has queried or rejected a pay-back receipt on this invoice, so it is not pushed. Approve the receipt again, or take the invoice out of the run.",
+      "The office has queried or rejected a pay-back receipt on this invoice, so it is not pushed. Approve the receipt, or take the invoice out of the run.",
       409,
     );
   }
