@@ -597,6 +597,7 @@ jobs:
 
       # Weekly pay run read, approval and push (P1-10.2, P1-10.3, P1-10.5), and
       # the run's own state: every old door refuses a run's invoice (cl-1622-fix).
+      # An approver can take a stuck invoice back out of its run (cl-payrun-escape).
       # Every database call is a stub and the Xero push is stubbed or refused
       # before Xero; no switch is turned on anywhere.
       - name: Test weekly pay run
@@ -605,7 +606,8 @@ jobs:
             supabase/functions/ops-api/trade_pay_run_test.ts \
             supabase/functions/ops-api/trade_pay_run_push_test.ts \
             supabase/functions/ops-api/trade_pay_run_hold_test.ts \
-            supabase/functions/ops-api/trade_pay_run_doors_test.ts
+            supabase/functions/ops-api/trade_pay_run_doors_test.ts \
+            supabase/functions/ops-api/trade_pay_run_release_test.ts
 
       # One super rule (P1-01): every amount includes super, chosen by pay week
       # behind trade_pay_inclusive_super_v1. Drives the real

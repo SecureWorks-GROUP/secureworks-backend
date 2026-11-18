@@ -98,7 +98,9 @@ type World = {
   standingStops?: Record<string, Array<{ code: string; words: string }>>;
   runBlocked?: boolean;
   run?: any;
-  runInvoices?: Array<{ invoice_id: string; pushed_at: string | null }>;
+  runInvoices?: Array<
+    { invoice_id: string; pushed_at: string | null; released_at?: string | null }
+  >;
   lines?: any[];
   held?: any[];
   approvers?: string[];
@@ -785,6 +787,24 @@ async function installedColumns(): Promise<Map<string, Set<string>>> {
     }
     tables.set(m[1], cols);
   }
+  // Columns later pay run migrations add to the run rows (the push claim,
+  // cl-payrun-escape's release record), found by name like the one above.
+  for await (const e of Deno.readDir(dir)) {
+    if (
+      !e.name.endsWith("_trade_pay_run_holds_status.sql") &&
+      !e.name.endsWith("_trade_pay_run_release.sql")
+    ) continue;
+    const later = await Deno.readTextFile(new URL(e.name, dir));
+    for (
+      const m of later.matchAll(
+        /ALTER TABLE public\.(\w+)\s+((?:ADD COLUMN IF NOT EXISTS \w+[^,;]*,?\s*)+);/g,
+      )
+    ) {
+      for (const c of m[2].matchAll(/ADD COLUMN IF NOT EXISTS (\w+)/g)) {
+        tables.get(m[1])?.add(c[1]);
+      }
+    }
+  }
   return tables;
 }
 
@@ -869,6 +889,8 @@ Deno.test("pay run: the production reader reads a recorded week against the inst
   const schema = await installedColumns();
   assert(schema.get("trade_pay_run_invoices")?.has("run_id"));
   assert(!schema.get("trade_pay_run_invoices")?.has("pay_run_id"));
+  // cl-payrun-escape: the run read selects the release record.
+  assert(schema.get("trade_pay_run_invoices")?.has("released_at"));
   const RUN = "0a200000-0000-4000-8000-000000000501";
   const rows = [
     invoice(1, { pay_run_id: RUN, status: "approved" }),
@@ -1613,4 +1635,44 @@ Deno.test("approve pay run: the production dependencies call what the migrations
     );
   }
   assertEquals(selects.get("users"), ["id", "role"]);
+});
+
+Deno.test("pay run: an invoice released from the run is stopped there and out of its totals, even when the check reads it clean", async () => {
+  const rows = [
+    invoice(1, { pay_run_id: "run-1", status: "pushed_to_xero", xero_bill_id: "ZZTEST-BILL-1" }),
+    // Released (cl-payrun-escape): back to review, no run id, no bill.
+    invoice(2, { pay_run_id: null, status: "pending_ops_review" }),
+  ];
+  const out: any = await run({
+    rows,
+    run: { id: "run-1", week_start: WEEK },
+    runInvoices: [
+      { invoice_id: id(1), pushed_at: "2026-11-24T01:00:00Z" },
+      { invoice_id: id(2), pushed_at: null, released_at: "2026-11-24T02:00:00Z" },
+    ],
+  }, APPROVER);
+  const released = out.invoices.find((i: any) => i.invoice_id === id(2));
+  assertEquals(released.verdict, "stopped");
+  assertEquals(released.stops.map((x: any) => x.code), ["released_from_run"]);
+  assertEquals(released.pushed, false);
+  assertEquals(out.released_from_run, 1);
+  assertEquals(out.counts.clean, 1);
+  assertEquals(out.totals.super, 120);
+  assertEquals(out.super_by_person.map((p: any) => p.super_amount), [120]);
+});
+
+Deno.test("pay run: next week's read takes an invoice released from last week's run, clean", async () => {
+  // Released from the 2026-11-16 run: back to review, no run id, no bill.
+  const released = invoice(2, { pay_run_id: null, status: "pending_ops_review" });
+  const out: any = await readPayRun(reads({ rows: [released] }), {
+    orgId: ORG,
+    weekStart: "2026-11-23",
+    actorUserId: APPROVER,
+    now: new Date("2026-12-02T02:00:00Z"),
+  });
+  assertEquals(out.invoices.map((i: any) => [i.invoice_id, i.verdict, i.week_start]), [
+    [id(2), "clean", WEEK],
+  ]);
+  assertEquals(out.counts.clean, 1);
+  assertEquals(out.totals.super, 240);
 });
