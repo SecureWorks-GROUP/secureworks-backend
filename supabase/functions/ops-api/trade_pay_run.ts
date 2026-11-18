@@ -698,6 +698,15 @@ export function xeroBillFoundStop(
 /** Invoices counted per note code, whatever their verdict, codes in name
  * order. A note never stops an invoice; this keeps each noted group a plain
  * number on the run. */
+/** A pay-back receipt the office has queried or rejected (any case). Read at
+ * push only: the run's check does not read an unmarked receipt's status. */
+export function payBackReceiptQueriedOrRejected(
+  row: { status?: unknown } | null | undefined,
+): boolean {
+  const status = String(row?.status ?? "").trim().toLowerCase();
+  return status === "queried" || status === "rejected";
+}
+
 export function notedByCode(
   items: readonly { notes: readonly Stop[] }[],
 ): { code: string; invoices: number }[] {
@@ -1865,6 +1874,22 @@ export async function pushPayRunInvoice(
   // marked not booked on its job and not confirmed now is never sent to Xero
   // (the same held rule as the check's reimbursement_not_booked_unconfirmed).
   const receipts = await deps.payBackReceipts(invoiceId);
+  // SEC-465 (c): a receipt the office queried or rejected after the run was
+  // approved is never paid back either, marked or not. A refusal here takes no
+  // claim, so an approver can still take the invoice out of the run.
+  if (receipts.some((r) => payBackReceiptQueriedOrRejected(r))) {
+    deps.log({
+      at: "push_pay_run_invoice",
+      outcome: "receipt_queried_or_rejected",
+      run_id: run.id,
+      invoice_id: invoiceId,
+    });
+    throw new TradePayRunError(
+      "pay_run_receipt_queried_or_rejected",
+      "The office has queried or rejected a pay-back receipt on this invoice, so it is not pushed. Approve the receipt again, or take the invoice out of the run.",
+      409,
+    );
+  }
   if (receipts.some((r) => expenseHeldNotBooked(r))) {
     deps.log({
       at: "push_pay_run_invoice",
@@ -1874,7 +1899,7 @@ export async function pushPayRunInvoice(
     });
     throw new TradePayRunError(
       "pay_run_receipt_not_confirmed",
-      "A pay-back receipt on this invoice is from someone not booked on its job, and the office has not confirmed it, so the invoice is not pushed.",
+      "A pay-back receipt on this invoice is from someone not booked on its job, and the office has not confirmed it, so the invoice is not pushed. Confirm the receipt, or take the invoice out of the run.",
       409,
     );
   }

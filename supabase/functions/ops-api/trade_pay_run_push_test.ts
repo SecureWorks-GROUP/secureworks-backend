@@ -391,8 +391,8 @@ Deno.test("push: an invoice that no longer pays what the run recorded is 409, ne
 // ── A pay-back receipt the office has not confirmed (director 21:45) ──────
 
 Deno.test("push: a pay-back receipt marked not booked and not confirmed now is 409, never pushed, no claim taken", async () => {
-  // Confirmed at the press; the office queried it after the run was approved.
-  for (const status of ["queried", "rejected", "pending", null]) {
+  // Confirmed at the press; the office has not confirmed it since.
+  for (const status of ["pending", "pending_approval", "", null]) {
     const { deps, calls } = makeDeps({
       rows: twoClean(),
       receipts: { [INV_A]: [{ status, unbooked_job_id: "0c400000-0000-4000-8000-0000000000aa" }] },
@@ -402,17 +402,46 @@ Deno.test("push: a pay-back receipt marked not booked and not confirmed now is 4
   }
 });
 
-Deno.test("push: a marked receipt the office confirmed, or an unmarked one, is pushed as before", async () => {
+// ── SEC-465 (c): a receipt queried or rejected after the run was approved ──
+
+Deno.test("push: a pay-back receipt the office queried or rejected, marked or not, is 409, never pushed, no claim taken", async () => {
+  for (const unbooked_job_id of [null, "0c400000-0000-4000-8000-0000000000aa"]) {
+    for (const status of ["queried", "rejected", "Queried", " REJECTED "]) {
+      const { deps, calls } = makeDeps({
+        rows: twoClean(),
+        receipts: { [INV_A]: [{ status: "approved", unbooked_job_id: null }, { status, unbooked_job_id }] },
+      });
+      await refused(press(deps, INV_A), "pay_run_receipt_queried_or_rejected", 409);
+      assertEquals([calls.push.length, calls.claims.length, calls.ready.length], [0, 0, 0]);
+    }
+  }
+});
+
+Deno.test("push: a marked receipt the office confirmed, or an unmarked one not queried or rejected, is pushed as before", async () => {
   for (const receipt of [
     { status: "approved", unbooked_job_id: "0c400000-0000-4000-8000-0000000000aa" },
     { status: "pushed_to_xero", unbooked_job_id: "0c400000-0000-4000-8000-0000000000aa" },
-    { status: "queried", unbooked_job_id: null },
+    { status: "approved", unbooked_job_id: null },
+    { status: "pushed_to_xero", unbooked_job_id: null },
+    // Not covered here: an unmarked receipt still pending (its line carries
+    // the office review hold at submit, which the run's check stops on).
+    { status: "pending", unbooked_job_id: null },
   ]) {
     const { deps, calls } = makeDeps({ rows: twoClean(), receipts: { [INV_A]: [receipt] } });
     const out: any = await press(deps, INV_A);
     assertEquals(out.ok, true);
     assertEquals(calls.push, [INV_A]);
   }
+});
+
+Deno.test("push: an invoice refused for a receipt can be pressed again once the receipt is approved", async () => {
+  const receipts = { [INV_A]: [{ status: "queried", unbooked_job_id: null }] };
+  const { deps, calls } = makeDeps({ rows: twoClean(), receipts });
+  await refused(press(deps, INV_A), "pay_run_receipt_queried_or_rejected", 409);
+  receipts[INV_A] = [{ status: "approved", unbooked_job_id: null }];
+  const out: any = await press(deps, INV_A);
+  assertEquals(out.ok, true);
+  assertEquals(calls.push, [INV_A]);
 });
 
 Deno.test("push: pay-back receipts that cannot be read refuse 503, never push", async () => {
