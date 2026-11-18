@@ -78,6 +78,11 @@ import {
   dispatchV2ApprovedNameFor,
   dispatchV2TermsFor,
 } from "./dispatch_v2_payment.ts";
+import {
+  dispatchV2ReplyFlagged,
+  OUR_SENT_ORDER_SENDER_VIA,
+} from "./dispatch_v2_replies_store.ts";
+import { supplierKeyOf } from "./dispatch_v2_replies_rules.ts";
 
 // ── The request ─────────────────────────────────────────────────────────────
 
@@ -649,8 +654,17 @@ export const DISPATCH_ACCOUNT_ENTRY_SELECT = "id, name, active, on_account";
 // material stage (contract section 3c). snippet, delivery_date and
 // provider_message_id say whether the reply has a PDF, a date or a price
 // (dispatchV2ReplyHasSubstance); only such a reply moves a box.
+//
+// Items 17 and 5 (18 Nov 2026): supplier_key, supplier_name, sender_via and
+// dismissed_at too, for the Supplier replied tags (dispatchBoardReplies) and
+// for the reply that stops Follow up (replied_at on each order).
 export const DISPATCH_BOARD_REPLY_SELECT =
-  "id, job_id, state, order_id, received_at, matched_at, rung, snippet, delivery_date, provider_message_id";
+  "id, job_id, state, order_id, received_at, matched_at, rung, snippet, delivery_date, provider_message_id, supplier_key, supplier_name, sender_via, dismissed_at";
+
+// The open delivery date suggestions (dispatch_v2_delivery_suggestions):
+// Needs you now's "Accept X date" without opening the job (item 5a).
+export const DISPATCH_BOARD_SUGGESTION_SELECT =
+  "id, job_id, order_id, email_id, supplier_name, delivery_date, state";
 const DISPATCH_V2_REPLIES_SWITCH = "dispatch_v2_replies_v1";
 
 export type DispatchBoardSentEmail = {
@@ -705,8 +719,10 @@ export function dispatchBoardSentBySupplier(
 
 // A purchase order on the job (v1 Dispatch orders and orders made elsewhere,
 // for example in Xero). No price column.
+// last_sent_at (item 5c): when an old order with no supplier box was sent,
+// so Follow up can count working days from it.
 export const DISPATCH_BOARD_ORDER_SELECT =
-  "id, job_id, supplier_id, supplier_name, source, status, po_type, po_number, delivery_date, confirmed_delivery_date, created_at";
+  "id, job_id, supplier_id, supplier_name, source, status, po_type, po_number, delivery_date, confirmed_delivery_date, created_at, last_sent_at";
 
 // An order's status that says it has gone to the supplier.
 const ORDER_SENT_STATUSES = new Set([
@@ -738,7 +754,14 @@ export type DispatchArrivalOrder = {
   // (Needs you now "Order drafted", Shaun 13 Nov 2026): Shaun has written
   // it, only the send is left. Always false for a purchase order.
   order_drafted: boolean;
+  // When the order went to the supplier: the box's newest sent order email,
+  // or for an old purchase order with no box its last_sent_at (else when it
+  // was made), once its status says sent (item 5c). Null when not sent.
   sent_at: string | null;
+  // Item 5b: when that supplier last replied to this order (a matched reply
+  // after sent_at, naming the order, or naming no order but from the same
+  // supplier). Any reply stops Follow up. Null when none.
+  replied_at: string | null;
   delivery_date: string | null;
   // Where the date came from: the box (set by hand or from an accepted
   // supplier reply), the date our sent email asked for, or a purchase order.
@@ -877,6 +900,39 @@ function boxDateSource(
 // `shown` is a supplier box's own label, waiting on and next step
 // (dispatchV2BoxStage); a purchase order leaves it out and gets them from its
 // stage here.
+/** Item 5b (18 Nov 2026): the newest matched supplier reply to one sent
+ * order, or null. A reply counts when it came after the order was sent and
+ * names that order, or names no order (matched by job number) and is from
+ * the same supplier. Our own sent orders put on the job never count. */
+export function dispatchOrderRepliedAt(
+  replies: any[] | null | undefined,
+  order: { id: string | null; sent_at: string | null } | null,
+  supplierNames: Array<string | null | undefined>,
+): string | null {
+  if (!order?.sent_at) return null;
+  const sentAt = Date.parse(order.sent_at);
+  if (!Number.isFinite(sentAt)) return null;
+  const keys = new Set(
+    supplierNames.map((n) => supplierKeyOf(n)).filter(Boolean),
+  );
+  let newest: string | null = null;
+  for (const r of replies || []) {
+    if (r?.state !== "matched" || r?.sender_via === OUR_SENT_ORDER_SENDER_VIA) {
+      continue;
+    }
+    const at = text(r?.received_at) ?? text(r?.matched_at);
+    const atMs = at ? Date.parse(at) : NaN;
+    if (!at || !Number.isFinite(atMs) || atMs <= sentAt) continue;
+    const named = text(r?.order_id);
+    const tied = named
+      ? !!order.id && named === order.id
+      : !!text(r?.supplier_key) && keys.has(String(r.supplier_key));
+    if (!tied) continue;
+    if (!newest || atMs > Date.parse(newest)) newest = at;
+  }
+  return newest;
+}
+
 function arrivalEntry(
   base: Omit<
     DispatchArrivalOrder,
@@ -1043,6 +1099,14 @@ export function dispatchArrival(
       order_sent: !!sent || sentByOrder,
       order_drafted: draftSuppliers.has(supplierId),
       sent_at: sent?.sent_at ?? null,
+      replied_at: dispatchOrderRepliedAt(
+        input.replies,
+        sent ? { id: sent.id, sent_at: sent.sent_at } : null,
+        [
+          dispatchV2ApprovedNameFor(input.accounts, supplierId),
+          text(box.supplier_name),
+        ],
+      ),
       delivery_date: deliveryDate,
       date_source: dateSource,
       date_confirmed: dateConfirmed,
@@ -1079,14 +1143,25 @@ export function dispatchArrival(
     const confirmed = text(order.confirmed_delivery_date);
     const expected = text(order.delivery_date);
     const date = confirmed || expected;
+    // Item 5c: an old order with no supplier box counts its Follow up from
+    // when it was sent (else when it was made), like a box's order email.
+    const poSent = ORDER_SENT_STATUSES.has(token(order.status));
+    const poSentAt = poSent
+      ? text(order.last_sent_at) ?? text(order.created_at)
+      : null;
     entries.push(arrivalEntry({
       key: `po:${order.id}`,
       source: order.source === "dispatch" ? "dispatch_order" : "other_order",
       supplier_id: text(order.supplier_id),
       supplier_name: text(order.supplier_name),
-      order_sent: ORDER_SENT_STATUSES.has(token(order.status)),
+      order_sent: poSent,
       order_drafted: false,
-      sent_at: null,
+      sent_at: poSentAt,
+      replied_at: dispatchOrderRepliedAt(
+        input.replies,
+        { id: text(order.id), sent_at: poSentAt },
+        [text(order.supplier_name)],
+      ),
       delivery_date: date ? date.slice(0, 10) : null,
       date_source: date ? "order" : null,
       date_confirmed: !!confirmed,
@@ -1220,7 +1295,57 @@ export type DispatchBoardRow = {
   // True while any pay-first box is unpaid: the screen hides the job-wide
   // "Move to Order Confirmed?" offer. Null when not known.
   payment_hold: boolean | null;
+  // Items 17 and 5: what shows under Supplier replied without opening the
+  // job (dispatchBoardReplies).
+  replies: DispatchBoardReplies;
 };
+
+export type DispatchBoardReplies = {
+  // Every matched supplier reply nobody has dismissed, newest first. Null
+  // when the replies read failed.
+  flagged:
+    | Array<{
+      id: string;
+      supplier_name: string | null;
+      received_at: string | null;
+    }>
+    | null;
+  // The open delivery date suggestions. Null when that read failed.
+  open_suggestions:
+    | Array<{
+      id: string;
+      email_id: string | null;
+      order_id: string | null;
+      supplier_name: string | null;
+      delivery_date: string | null;
+    }>
+    | null;
+};
+
+/** Items 17 and 5 (18 Nov 2026): one job's Supplier replied inputs. */
+export function dispatchBoardReplies(
+  replies: any[] | null,
+  suggestions: any[] | null,
+): DispatchBoardReplies {
+  const flagged = replies === null ? null : replies
+    .filter((r) => dispatchV2ReplyFlagged(r))
+    .map((r) => ({
+      id: String(r.id),
+      supplier_name: text(r.supplier_name),
+      received_at: text(r.received_at) ?? text(r.matched_at),
+    }))
+    .sort((a, b) => (b.received_at ?? "").localeCompare(a.received_at ?? ""));
+  const open = suggestions === null ? null : suggestions
+    .filter((x) => x?.state === "open")
+    .map((x) => ({
+      id: String(x.id),
+      email_id: text(x.email_id),
+      order_id: text(x.order_id),
+      supplier_name: text(x.supplier_name),
+      delivery_date: text(x.delivery_date),
+    }));
+  return { flagged, open_suggestions: open };
+}
 
 export type DispatchBoardWaiting = {
   on_us: boolean;
@@ -1271,6 +1396,9 @@ export type DispatchBoardContext = {
   accounts?: DispatchV2Accounts | null;
   // Matched supplier replies by job id; null or left out = no reply moves.
   repliesByJob?: Map<string, any[]> | null;
+  // Open delivery date suggestions by job id (item 5a); null or left out =
+  // not read.
+  suggestionsByJob?: Map<string, any[]> | null;
 };
 
 // The board fields of one job for the view asked for, or null when the job is
@@ -1354,6 +1482,10 @@ export function dispatchBoardRow(
     arrival,
     waiting: dispatchBoardWaiting(stage, arrival),
     payment_hold: dispatchPaymentHold(arrival),
+    replies: dispatchBoardReplies(
+      ctx.repliesByJob ? ctx.repliesByJob.get(id) || [] : null,
+      ctx.suggestionsByJob ? ctx.suggestionsByJob.get(id) || [] : null,
+    ),
   };
 }
 
@@ -1377,6 +1509,9 @@ export type DispatchBoardReads = {
   accounts: "ok" | "failed";
   // The matched supplier replies. Failed = no reply moves.
   replies: "ok" | "failed";
+  // The open delivery date suggestions (item 5a). Failed = Accept X date
+  // shows only for a job once opened.
+  suggestions?: "ok" | "failed";
 };
 
 function byNumber(a: any, b: any): number {
@@ -1547,6 +1682,8 @@ export type DispatchBoardExtras = {
   accountEntries?: ReadResult<any>;
   // The matched supplier replies. Left out = not read (no reply moves).
   replies?: ReadResult<any>;
+  // The open delivery date suggestions (item 5a). Left out = not read.
+  suggestions?: ReadResult<any>;
 };
 
 // The reads only the v2 board makes, for the jobs the list read returned:
@@ -1566,6 +1703,11 @@ export async function loadDispatchBoardExtras(
     "pipeline.dispatch_board",
   );
   const replies = loadDispatchV2MatchedReplies(
+    client,
+    ids,
+    "pipeline.dispatch_board",
+  );
+  const suggestions = loadDispatchV2OpenSuggestions(
     client,
     ids,
     "pipeline.dispatch_board",
@@ -1654,6 +1796,7 @@ export async function loadDispatchBoardExtras(
     accountLinks: await accountLinks,
     accountEntries: await accountEntries,
     replies: await replies,
+    suggestions: await suggestions,
   };
 }
 
@@ -1780,6 +1923,37 @@ export async function loadDispatchV2MatchedReplies(
   return result;
 }
 
+/** Item 5a: the open delivery date suggestions for these jobs, so the board
+ * shows Accept X date without opening the job. Fails on its own and never
+ * rejects; logged here. */
+export async function loadDispatchV2OpenSuggestions(
+  client: any,
+  jobIds: string[],
+  label: string,
+): Promise<ReadResult<any>> {
+  const ids = [...new Set(jobIds.map((id) => String(id)).filter(Boolean))];
+  const result = await safeRead<any>(async () => {
+    if (!ids.length) return [];
+    return await fetchAllRowsInChunks<any>(
+      ids,
+      (chunk) =>
+        client.from("dispatch_v2_delivery_suggestions")
+          .select(DISPATCH_BOARD_SUGGESTION_SELECT)
+          .in("job_id", chunk)
+          .eq("state", "open"),
+      `${label}_suggestions`,
+      "id",
+    );
+  });
+  if (result.error) {
+    console.error(
+      `[dispatch] ${label} dispatch_v2_delivery_suggestions read failed:`,
+      (result.error as Error)?.message ?? result.error,
+    );
+  }
+  return result;
+}
+
 // The account list's two reads (links and entries), started together; each
 // fails on its own and never rejects. Logged here, so callers only look.
 function loadDispatchAccountList(
@@ -1882,6 +2056,9 @@ export function applyDispatchBoard(
     repliesByJob: extras.replies && !extras.replies.error
       ? groupByJob(extras.replies.data)
       : null,
+    suggestionsByJob: extras.suggestions && !extras.suggestions.error
+      ? groupByJob(extras.suggestions.data)
+      : null,
   };
   const kept: any[] = [];
   for (const row of rows) {
@@ -1901,6 +2078,9 @@ export function applyDispatchBoard(
       arrival: arrivalOk ? "ok" : "failed",
       accounts: accounts?.readOk ? "ok" : "failed",
       replies: extras.replies && !extras.replies.error ? "ok" : "failed",
+      suggestions: extras.suggestions && !extras.suggestions.error
+        ? "ok"
+        : "failed",
     },
   );
   return { rows: kept, summary };
@@ -1919,6 +2099,7 @@ export function emptyDispatchBoardSummary(
     arrival: "ok",
     accounts: "ok",
     replies: "ok",
+    suggestions: "ok",
   });
 }
 

@@ -277,10 +277,36 @@ export function recordedHistorySuper(row: HistoryInvoice): number | null {
   return historyAmount(row.super_amount)
 }
 
-function mondayOf(day: string) {
+export function mondayOf(day: string) {
   const date = new Date(day + 'T00:00:00Z')
   date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7)
   return date.toISOString().slice(0, 10)
+}
+
+export function historyInvoiceTotals(row: HistoryInvoice, day: string, taxPercent: number | null = null, recordedSuper = recordedHistorySuper(row)) {
+  // The pricing validator knows statutory rates only from its effective date.
+  // For earlier legacy invoices sum their recorded split, without guessing a rate.
+  const earlierLegacy = !row.super_basis && day < TRADE_INVOICE_SUPER_EFFECTIVE_FROM
+  const money = recordedSuper === null || earlierLegacy ? null : validatePersistedTradeInvoiceMoney(row)
+  const view = money && buildPayView(money, {
+    reimbursementsEx: r2(money.gross_earned - (money.super_base_ex ?? money.gross_earned)),
+    taxSetAsidePercent: taxPercent, repayment: null,
+  })
+  if (!view && (!Array.isArray(row.reimbursements) ||
+      row.reimbursements.some((line: HistoryInvoice) => num(line.line_total_ex) === null))) {
+    throw new Error('pay_history_unreadable')
+  }
+  const paidToYou = view?.paid_to_you ?? historyAmount(recordedSuper === null ? row.total_inc : row.net_pay)
+  const superAmount = recordedSuper ?? 0
+  if (superAmount < 0 || paidToYou < 0) throw new Error('pay_history_unreadable')
+  const totals = {
+    total_inc_super: view?.total_inc_super ?? r2(paidToYou + superAmount),
+    paid_to_super: superAmount, paid_to_you: paidToYou,
+    reimbursements: view?.reimbursements ?? reimbursementLinesTotalEx(row.reimbursements),
+    // The settled cash on the bill, including a partial payment or an office edit.
+    paid_into_bank: historyAmount(row.amount_paid), invoices: 1,
+  }
+  return { totals, taxSetAside: view?.tax_set_aside?.amount }
 }
 
 export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, opts: HistoryOptions) {
@@ -313,32 +339,13 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
     const comparable = day >= lastFy && day <= lastCutoff
     if (day < start && !comparable) continue
 
-    // The pricing validator knows statutory rates only from its effective date.
-    // For earlier legacy invoices sum their recorded split, without guessing a rate.
-    const earlierLegacy = !row.super_basis && day < TRADE_INVOICE_SUPER_EFFECTIVE_FROM
-    const money = recordedSuper === null || earlierLegacy ? null : validatePersistedTradeInvoiceMoney(row)
-    const view = money && buildPayView(money, {
-      reimbursementsEx: r2(money.gross_earned - (money.super_base_ex ?? money.gross_earned)),
-      taxSetAsidePercent: opts.taxPercent, repayment: null,
-    })
-    if (!view && (!Array.isArray(row.reimbursements) ||
-        row.reimbursements.some((line: HistoryInvoice) => num(line.line_total_ex) === null))) {
-      throw new Error('pay_history_unreadable')
-    }
-    const paidToYou = view?.paid_to_you ?? historyAmount(recordedSuper === null ? row.total_inc : row.net_pay)
-    if (superAmount < 0 || paidToYou < 0) throw new Error('pay_history_unreadable')
-    const totals = {
-      total_inc_super: view?.total_inc_super ?? r2(paidToYou + superAmount),
-      paid_to_super: superAmount, paid_to_you: paidToYou,
-      reimbursements: view?.reimbursements ?? reimbursementLinesTotalEx(row.reimbursements),
-      // The settled cash on the bill, including a partial payment or an office edit.
-      paid_into_bank: historyAmount(row.amount_paid), invoices: 1,
-    }
+    const { totals, taxSetAside } = historyInvoiceTotals(row, day, opts.taxPercent, recordedSuper)
+    const paidToYou = totals.paid_to_you
     if (comparable) addHistory(lastYear, totals)
     if (day < start) continue
     if (day >= thisFy) {
       addHistory(thisYear, totals)
-      if (opts.taxPercent !== null) tax = r2(tax + (view?.tax_set_aside?.amount ?? r2(paidToYou * opts.taxPercent / 100)))
+      if (opts.taxPercent !== null) tax = r2(tax + (taxSetAside ?? r2(paidToYou * opts.taxPercent / 100)))
     }
     const week = row.week_start || mondayOf(day)
     addPeriod(weeks, week, totals)

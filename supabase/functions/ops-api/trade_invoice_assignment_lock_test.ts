@@ -303,7 +303,8 @@ Deno.test("index.ts rolls back a partial claim scoped to the rows it stamped", (
   // alone can match rows stamped by an earlier attempt or a concurrent winner.
   // The rollback must release only the ids the stamp UPDATE returned.
   assertStringIncludes(INDEX, ".update({ invoiced_in: null })");
-  const rollbackAt = INDEX.indexOf(".update({ invoiced_in: null })");
+  // P1-05.8's holding-invoice release (scoped to its own id) comes earlier.
+  const rollbackAt = INDEX.lastIndexOf(".update({ invoiced_in: null })", INDEX.indexOf(".eq('invoiced_in', invoice.id)"));
   const rollback = INDEX.slice(rollbackAt, rollbackAt + 200);
   assertStringIncludes(rollback, ".eq('invoiced_in', invoice.id)");
   assertStringIncludes(rollback, ".in('id', stampedIdList)");

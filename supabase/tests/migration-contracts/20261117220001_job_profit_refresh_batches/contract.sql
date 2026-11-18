@@ -76,7 +76,9 @@ SELECT public.job_profit_refresh_many(ARRAY(SELECT job_id FROM fu21_expected));
 DO $equal$ BEGIN
  IF EXISTS(SELECT 1 FROM fu21_expected e FULL JOIN
   (SELECT * FROM public.job_profit_stored WHERE job_number LIKE 'ZZTEST-FU21-%') s USING(job_id)
-  WHERE to_jsonb(e) IS DISTINCT FROM to_jsonb(s)-'computed_at') THEN
+  -- Compare the full legacy row. The share and its reason exist only in the store.
+  WHERE to_jsonb(e) IS DISTINCT FROM to_jsonb(s)-ARRAY['computed_at','cost_proven_ex',
+   'cost_on_clues_ex','cost_unknown_ex','cost_unknown_items','proven_share_pct','proven_share_reason']) THEN
   RAISE EXCEPTION 'FU21 real credit/unverified/no-cost rows differ'; END IF;
  IF EXISTS(SELECT 1 FROM public.job_profit_stored WHERE job_number='ZZTEST-FU21-3' AND actual_cost_ex IS DISTINCT FROM 0::numeric) THEN
   RAISE EXCEPTION 'FU21 no-cost row changed'; END IF;
