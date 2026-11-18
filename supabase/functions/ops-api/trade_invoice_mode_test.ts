@@ -342,7 +342,10 @@ Deno.test("job_ids: 1 to 50 uuids, deduplicated", () => {
 
 const WEEK_END = "2026-11-08";
 
-function hoursClient(world: { failJobs?: boolean; lineHold?: boolean; billedOnFence?: number; failBilled?: boolean } = {}) {
+const scopeReads = { n: 0 };
+function hoursClient(
+  world: { failJobs?: boolean; lineHold?: boolean; billedOnFence?: number; failBilled?: boolean; outOfScope?: string[]; failScope?: boolean } = {},
+) {
   const card = (id: string, jobId: string, type: string) => ({
     id,
     scheduled_date: "2026-11-04",
@@ -376,14 +379,21 @@ function hoursClient(world: { failJobs?: boolean; lineHold?: boolean; billedOnFe
     trade_pay_settings: world.lineHold ? [{ id: 1, inclusive_super_from: "2026-01-05" }] : [],
   };
   return {
-    // FU49 item 8: what is billed on a job is the database's one sum
-    // (work_order_backed_billed), one row per job asked.
-    rpc: (name: string, args: any = {}) => {
+    rpc: (name: string, args?: any) => {
+      // FU49-9b: the cap scope, every job in scope unless the world names it out.
+      if (name === "work_order_cap_scope") {
+        scopeReads.n++;
+        if (world.failScope) return Promise.resolve({ data: null, error: { message: "boom" } });
+        return Promise.resolve({
+          data: [...new Set<string>(args?.p_job_ids ?? [])].map((job_id) => ({ job_id, in_scope: !(world.outOfScope ?? []).includes(job_id) })),
+          error: null,
+        });
+      }
       if (name === "trade_is_off_job_crew") return Promise.resolve({ data: false, error: null });
       if (name === "work_order_backed_billed") {
         if (world.failBilled) return Promise.resolve({ data: null, error: { message: "boom" } });
         return Promise.resolve({
-          data: (args.p_job_ids ?? []).map((id: string) => ({
+          data: (args?.p_job_ids ?? []).map((id: string) => ({
             job_id: id,
             billed_ex: id === FENCE ? (world.billedOnFence ?? 0) : 0,
           })),
@@ -483,6 +493,20 @@ Deno.test("my_hours, held-line rule on: each card says what its job has left, an
   const cards = Object.fromEntries(out.assignments.map((a: any) => [a.id, a]));
   assertEquals(cards["card-fence"].job_left_ex, 1000, "approved 1,850.50 less 850.50 billed");
   assertEquals(cards["card-makesafe"].job_left_ex, null, "no approved amount");
+  assertEquals(cards["card-fence"].job_capped, true);
+});
+
+Deno.test("FU49-9b my_hours, held-line rule on: a job outside the cap's start date has nothing left to show and job_capped false", async () => {
+  const out: any = await myHours(hoursClient({ lineHold: true, billedOnFence: 850.5, outOfScope: [FENCE] }), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  assert(!("job_left_unavailable" in out));
+  const cards = Object.fromEntries(out.assignments.map((a: any) => [a.id, a]));
+  assertEquals([cards["card-fence"].job_left_ex, cards["card-fence"].job_capped], [null, false]);
+});
+
+Deno.test("FU49-9b my_hours, held-line rule on: a failed scope read says unavailable, never no cap", async () => {
+  const out: any = await myHours(hoursClient({ lineHold: true, billedOnFence: 850.5, failScope: true }), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  assertEquals([out.line_hold, out.job_left_unavailable], [true, true]);
+  for (const a of out.assignments) assertEquals([a.job_left_ex ?? null, a.job_capped ?? null], [null, null]);
 });
 
 Deno.test("my_hours, held-line rule on: an unreadable amount says so and never reads as no amount", async () => {
@@ -492,9 +516,11 @@ Deno.test("my_hours, held-line rule on: an unreadable amount says so and never r
 });
 
 Deno.test("my_hours, held-line rule off: no line_hold and no job_left_ex", async () => {
+  scopeReads.n = 0;
   const out: any = await myHours(hoursClient(), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
   assert(!("line_hold" in out) && !("job_left_unavailable" in out));
-  for (const a of out.assignments) assert(!("job_left_ex" in a));
+  for (const a of out.assignments) assert(!("job_left_ex" in a) && !("job_capped" in a));
+  assertEquals(scopeReads.n, 0, "switch off reads no cap scope");
 });
 
 // ── 5. Through the real handler ─────────────────────────────────────────────

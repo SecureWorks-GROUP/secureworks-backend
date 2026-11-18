@@ -47,6 +47,7 @@ import {
   readCustomerVariations,
   readJobTradeLines,
 } from "./job_work_orders.ts";
+import { readWorkOrderCapScope } from "./work_order_cap_scope.ts";
 
 /**
  * The one line type that never counts against a work order: commission, which
@@ -446,6 +447,10 @@ export type WorkOrderCapSummary = {
   /** On a job paid hourly up to a sealed maximum: allowed_ex is that
    *  maximum plus raises, which is what the doors refuse by (ruling 17c). */
   limit?: "hourly_maximum";
+  /** Only with trade_line_hold_v1 on (Follow-up 49 item 9(b)): false when the
+   *  job is outside the cap's scope (work_order_cap_scope), so it has no
+   *  agreed amount in force and nothing on it is held. Absent with it off. */
+  in_cap_scope?: boolean;
 };
 
 /**
@@ -492,6 +497,22 @@ export async function withWorkOrderCaps<
     for (const [, limit] of hourly) {
       if (capLimit(limit) === null) throw new WorkOrderTotalCapReadError();
     }
+    // With the held-line switch on, say which of these jobs the cap reaches.
+    // feature_flags_pkey; the scope read is work_order_cap_scope's.
+    let scope: Map<string, boolean> | null = null;
+    if (capped.length > 0) {
+      const flag = await client.from("feature_flags").select("enabled")
+        .eq("flag_name", "trade_line_hold_v1");
+      if (flag.error || !Array.isArray(flag.data)) {
+        throw new WorkOrderTotalCapReadError();
+      }
+      if (flag.data[0]?.enabled === true) {
+        scope = await readWorkOrderCapScope(
+          client,
+          capped.map((r) => String(r.job_id)),
+        );
+      }
+    }
     summaries = new Map(capped.map((r) => {
       const jobId = String(r.job_id);
       const hourlyLimit = hourly.has(jobId)
@@ -506,6 +527,7 @@ export async function withWorkOrderCaps<
         billed_in_full: cents(billed) >= cents(allowed),
         over: cents(billed) > cents(allowed),
         ...(hourlyLimit !== null ? { limit: "hourly_maximum" as const } : {}),
+        ...(scope ? { in_cap_scope: scope.get(jobId) === true } : {}),
       }];
     }));
   } catch {
