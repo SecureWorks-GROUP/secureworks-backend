@@ -41,7 +41,7 @@ BEGIN
      OR has_function_privilege('anon', f, 'EXECUTE')
      OR has_function_privilege('authenticated', f, 'EXECUTE') THEN
     RAISE EXCEPTION 'mirror rule: execute grant wrong'; END IF;
-  IF (SELECT prosecdef OR provolatile <> 's' OR NOT ('search_path=""' = ANY (proconfig)))
+  IF (SELECT prosecdef OR provolatile <> 's' OR NOT ('search_path=""' = ANY (proconfig))
        FROM pg_proc WHERE oid = f) THEN
     RAISE EXCEPTION 'mirror rule: must be stable, invoker, with an empty search_path'; END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'trade_invoices'

@@ -1317,3 +1317,7 @@ ops-api|supabase/migrations/20261118194000_expense_unbooked_job_mark.sql|column|
 # through the function, so ops-api must not deploy ahead of the migration.
 ops-api|supabase/migrations/20261118194200_trade_pay_run_xero_found.sql|column|trade_pay_run_invoices.release_xero_found
 ops-api|supabase/migrations/20261118194200_trade_pay_run_xero_found.sql|function|record_trade_pay_run_xero_found
+# Follow-up 66 mirror rule: the sync and the edge bills backfill ask the one
+# rule through this function before writing a bill's cost lines, so xero-sync
+# must not deploy ahead of the migration.
+xero-sync|supabase/migrations/20261119999900_trade_invoice_bill_mirror_rule.sql|function|trade_invoice_bill_mirror_verdicts
