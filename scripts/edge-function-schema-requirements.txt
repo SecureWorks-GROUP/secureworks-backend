@@ -1269,7 +1269,9 @@ xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|table
 # P2-02.7: the matcher runner proposes a job for each changed bill (match/match_run.ts).
 # Without these every call would fail and requeue, so the deploy refuses instead.
 xero-sync|supabase/migrations/20261118122120_match_apply.sql|function|match_apply
-xero-sync|supabase/migrations/20261118122120_match_apply.sql|function|match_requeue
+xero-sync|supabase/migrations/20261117160500_match_tables.sql|column|match_queue.reason
+xero-sync|supabase/migrations/20261117160400_job_cost_lines.sql|column|job_cost_lines.kind
+xero-sync|supabase/migrations/20261117160400_job_cost_lines.sql|index|job_cost_lines_needs_person_idx
 xero-sync|supabase/migrations/20261117160500_match_tables.sql|table|match_queue
 xero-sync|supabase/migrations/20261118060051_reconcile_tables.sql|table|reconcile_items
 xero-sync|supabase/migrations/20261118060051_reconcile_tables.sql|index|reconcile_items_open_subject_idx

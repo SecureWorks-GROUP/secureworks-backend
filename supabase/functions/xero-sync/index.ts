@@ -60,7 +60,7 @@ import { builderReferenceAnnotation, decideBuilderReference, loadBuilderReferenc
 // tests can import matchUnlinkedInvoices without binding a port.
 import { parseBankSummary } from './bank_summary.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { MATCH_RUN_BUDGET_MS, matchPending, matchSweepRequest, runMatchFor } from './match/match_run.ts'
+import { matchPendingRequest, matchSweepRequest, readMatcherSwitch, syncMatchRun, type SyncMatchReport } from './match/match_run.ts'
 import {
   buildMaterialsFactRow,
   buildQueueRow,
@@ -237,10 +237,13 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await refreshToken(sb))
       case 'sync_invoices':
         return json(await syncInvoices(sb))
-      case 'match_pending':
+      case 'match_pending': {
         // P2-02.7: re-match bills waiting in match_queue, 50 at a time. One
-        // query when nothing waits. Proposals only (match/match_run.ts).
-        return json(await matchPending(sb))
+        // query when nothing waits. POST with the exact service key. Proposals
+        // only (match/match_run.ts); the sync drains the queue on its own.
+        const out = await matchPendingRequest(req, sb, SUPABASE_SERVICE_KEY)
+        return json(out.body, out.status)
+      }
       case 'match_sweep': {
         // P2-02.7: bills waiting for a person with no open Reconcile item,
         // 50 a call, by document id descending. POST with the exact service
@@ -781,9 +784,12 @@ async function syncInvoices(sb: any) {
   const { accessToken, tenantId } = await getToken(sb)
   let tradePdfBackfilled = 0
   const costLinesChanged = new Set<string>()
-  const matchRun = { applied: {} as Record<string, number>, failed: {} as Record<string, number>, requeued: 0 }
-  // One matcher time budget for the whole sync; what does not fit waits in match_queue.
-  const matchDeadline = Date.now() + MATCH_RUN_BUDGET_MS
+  // P2-02.7: the matcher switch, read once here. Off (or unreadable), the sync
+  // makes no matcher read or write. On, the bills this sync changes are matched
+  // after the Xero paging, in one bounded step (syncMatchRun).
+  const matcher = await readMatcherSwitch(sb)
+  const matchChanged = new Set<string>()
+  let matchRun: SyncMatchReport | { switch: 'off'; error?: string } = { switch: 'off', ...(matcher.error ? { error: matcher.error } : {}) }
   let costLinesWritten = 0
   const costLinesErrors: string[] = []
   let costLinesOn = false
@@ -1217,14 +1223,8 @@ async function syncInvoices(sb: any) {
           if (error) throw error
           costLinesWritten += Number(data?.lines_written ?? 0)
           for (const id of data?.changed ?? []) costLinesChanged.add(id)
-          // P2-02.7: propose a job for this page's changed bills. Proposals
-          // only (match_run.ts); never fails the sync, which runs on.
-          const pageChanged = (data?.changed ?? []).filter((id: unknown) => typeof id === 'string')
-          if (pageChanged.length) {
-            const run = await runMatchFor(sb, pageChanged, { ruleVersion: 'v1', budgetMs: Math.max(0, matchDeadline - Date.now()) })
-            for (const [k, n] of Object.entries(run.applied)) matchRun.applied[k] = (matchRun.applied[k] ?? 0) + n
-            for (const [k, n] of Object.entries(run.failed)) matchRun.failed[k] = (matchRun.failed[k] ?? 0) + n
-            matchRun.requeued += run.requeued
+          if (matcher.on) {
+            for (const id of data?.changed ?? []) if (typeof id === 'string') matchChanged.add(id)
           }
         } catch (e) {
           const message = (e as Error).message
@@ -1243,6 +1243,18 @@ async function syncInvoices(sb: any) {
     { key: 'sync_invoices', cursor_at: runStartedAt, note: `synced ${totalSynced} since ${modifiedSince || 'the beginning'}`, updated_at: new Date().toISOString() },
     { onConflict: 'key' },
   )
+
+  // P2-02.7: propose a job for the bills this sync changed, then queued and
+  // waiting bills, after the paging and with its own budget. Proposals only;
+  // never fails the sync.
+  if (matcher.on) {
+    try {
+      matchRun = await syncMatchRun(sb, { on: true, changed: [...matchChanged] })
+    } catch {
+      matchRun = { switch: 'off', error: 'match_step_threw' }
+      console.error('[xero-sync] matcher step threw')
+    }
+  }
 
   // ── Paid close-out catch-up: invoiced and final_payment fencing and patio cards whose
   //    last invoice was paid before the card got there (switch on only; ops-api decides).

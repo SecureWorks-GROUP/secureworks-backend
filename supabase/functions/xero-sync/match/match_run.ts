@@ -16,6 +16,17 @@
 //
 // A failed read never counts as "no clue": that subject is skipped, requeued
 // and counted. Logs carry codes and counts only. Every read is per document.
+//
+// The sync (director 01:03): the matcher switch is read once at the start of
+// the sync. Off, the sync makes no matcher read or write at all. On, matching
+// starts after the Xero paging, with one 20 s budget and at most 50 bills a
+// run: the bills the sync changed, then bills waiting in match_queue, then up
+// to 25 waiting bills with no open item, oldest first (syncMatchRun). Every
+// requeue of a run is one batched statement.
+//
+// A bill with a person's labour on it (a line of kind installer_bill or
+// employer_super: a name and a pay total) is never matched here: no clue, no
+// shadow row, no item. It is skipped and counted (`labour_bill`).
 
 import { jobNumbersIn } from "../bill_prematch.ts";
 import { decideMatch } from "./decide.ts";
@@ -47,6 +58,16 @@ import type { Clue, ClueType, MatchResult, Stop } from "./types.ts";
 
 export const MATCH_RUN_LIMIT = 50;
 export const MATCH_RUN_BUDGET_MS = 20_000;
+/** Waiting bills with no open item a sync run takes, oldest first, inside the run's 50. */
+export const MATCH_BACKLOG_LIMIT = 25;
+/** Lines read per backlog page; at most 50 bills of a page are looked at. */
+export const MATCH_BACKLOG_LINE_PAGE = 100;
+/** Client-side limit on the batched requeue and the backlog reads. */
+export const MATCH_STATEMENT_TIMEOUT_MS = 5_000;
+/** A person's labour: never matched or raised here (#1678 hides these bills from the list). */
+export const LABOUR_LINE_KINDS = new Set(["installer_bill", "employer_super"]);
+/** xero_sync_state key holding the backlog position. */
+export const MATCH_BACKLOG_STATE_KEY = "match_backlog";
 const ORDER_WINDOW_DAYS = 60;
 
 // deno-lint-ignore no-explicit-any
@@ -125,9 +146,12 @@ async function matchOne(
   // job_cost_lines_document_idx
   const lines = await read<Array<Record<string, unknown>>>("read_cost_lines",
     sb.from("job_cost_lines").select(
-      "line_key,line_no,description,account_code,xero_tracking_option,amount_ex,state,document_number,document_date,party_id,party_name",
+      "line_key,line_no,kind,description,account_code,xero_tracking_option,amount_ex,state,document_number,document_date,party_id,party_name",
     ).eq("document_kind", "xero_bill").eq("document_id", documentId).order("line_no", { ascending: true }));
   if (!lines?.length) return { skipped: "no_cost_lines" };
+  // A person's labour, alone or beside supplier lines: no read of the bill, no
+  // clue, no shadow row, no item.
+  if (lines.some((l) => LABOUR_LINE_KINDS.has(String(l.kind ?? "")))) return { skipped: "labour_bill" };
   const counted = lines.filter((l) => l.state != null);
   if (!counted.length) return { skipped: "no_counted_lines" };
   // Proposals are for bills waiting for a person. A bill already on a job,
@@ -357,26 +381,38 @@ async function matchOne(
 }
 
 /** Never throws: every failure is counted and the subject requeued. */
-export async function runMatchFor(
-  sb: Sb,
-  subjectIds: string[],
-  opts: { ruleVersion: "v1"; budgetMs?: number; reason?: string; now?: () => number },
-): Promise<MatchRunReport> {
-  const report: MatchRunReport = { run: 0, applied: {}, requeued: 0, skipped: {}, failed: {} };
-  const ids = [...new Set(subjectIds.filter((s) => typeof s === "string" && s.includes(":")))];
-  if (!ids.length) return report;
-  const now = opts.now ?? Date.now;
-  const deadline = now() + (opts.budgetMs ?? MATCH_RUN_BUDGET_MS);
-  const requeue = async (id: string, reason: string) => {
-    try {
-      const { error } = await sb.rpc("match_requeue", { p_subject_kind: "cost_document", p_subject_id: id, p_reason: reason });
-      if (error) bump(report.failed, "requeue_failed");
-      else report.requeued++;
-    } catch {
-      bump(report.failed, "requeue_failed");
-    }
-  };
+type Requeue = { id: string; reason: string };
 
+/**
+ * Every requeue of a run in one statement (an upsert on match_queue, one row
+ * per subject, as match_requeue), with a client-side time limit.
+ */
+async function requeueAll(sb: Sb, rows: Requeue[], report: MatchRunReport): Promise<void> {
+  const byId = new Map<string, string>();
+  for (const r of rows) if (r.id.includes(":") && r.id.trim() && r.reason.trim()) byId.set(r.id, r.reason);
+  if (!byId.size) return;
+  try {
+    const { error } = await sb.from("match_queue")
+      .upsert([...byId].map(([subject_id, reason]) => ({ subject_kind: "cost_document", subject_id, reason })),
+        { onConflict: "subject_kind,subject_id" })
+      .abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS));
+    if (error) report.failed.requeue_failed = (report.failed.requeue_failed ?? 0) + byId.size;
+    else report.requeued += byId.size;
+  } catch {
+    report.failed.requeue_failed = (report.failed.requeue_failed ?? 0) + byId.size;
+  }
+}
+
+/** Runs the bills before the deadline; returns what must be requeued, never writing it. */
+async function runCore(
+  sb: Sb,
+  ids: string[],
+  deadline: number,
+  now: () => number,
+  report: MatchRunReport,
+): Promise<Requeue[]> {
+  const out: Requeue[] = [];
+  if (!ids.length) return out;
   let types: Record<string, ClueType>;
   try {
     const rows = await read<ClueType[]>("read_clue_types", sb.from("match_clue_types").select("code,class,family,mode"));
@@ -384,31 +420,253 @@ export async function runMatchFor(
     if (!Object.keys(types).length) throw new ReadFailed("read_clue_types");
   } catch {
     bump(report.failed, "read_clue_types");
-    for (const id of ids) await requeue(id, "read_failed");
-    console.error("[match_run] clue types unreadable", JSON.stringify(report));
-    return report;
+    console.error("[match_run] clue types unreadable");
+    return ids.map((id) => ({ id, reason: "read_failed" }));
   }
-
   for (const [i, id] of ids.entries()) {
     if (i >= MATCH_RUN_LIMIT || now() > deadline) {
-      await requeue(id, i >= MATCH_RUN_LIMIT ? "over_run_cap" : "over_run_time");
+      out.push({ id, reason: i >= MATCH_RUN_LIMIT ? "over_run_cap" : "over_run_time" });
       continue;
     }
     report.run++;
     try {
-      const out = await matchOne(sb, id, types);
-      if ("applied" in out) bump(report.applied, out.applied);
-      else bump(report.skipped, out.skipped);
+      const res = await matchOne(sb, id, types);
+      if ("applied" in res) bump(report.applied, res.applied);
+      else bump(report.skipped, res.skipped);
     } catch (e) {
       const code = e instanceof ReadFailed ? e.code : "threw";
       bump(report.failed, code);
       // A data refusal from match_apply would refuse again: not requeued. An
       // unreadable switch is not a refusal and is retried.
-      if (!code.startsWith("apply:match_") || code === "apply:match_switch_unreadable") await requeue(id, code.startsWith("apply") ? "apply_failed" : "read_failed");
+      if (!code.startsWith("apply:match_") || code === "apply:match_switch_unreadable") {
+        out.push({ id, reason: code.startsWith("apply") ? "apply_failed" : "read_failed" });
+      }
     }
   }
+  return out;
+}
+
+const emptyReport = (): MatchRunReport => ({ run: 0, applied: {}, requeued: 0, skipped: {}, failed: {} });
+const subjectsOf = (ids: unknown[]) =>
+  [...new Set(ids.filter((s): s is string => typeof s === "string" && s.includes(":")))];
+
+export async function runMatchFor(
+  sb: Sb,
+  subjectIds: string[],
+  opts: { ruleVersion: "v1"; budgetMs?: number; reason?: string; now?: () => number },
+): Promise<MatchRunReport> {
+  const report = emptyReport();
+  const ids = subjectsOf(subjectIds);
+  if (!ids.length) return report;
+  const now = opts.now ?? Date.now;
+  const requeue = await runCore(sb, ids, now() + (opts.budgetMs ?? MATCH_RUN_BUDGET_MS), now, report);
+  await requeueAll(sb, requeue, report);
   if (Object.keys(report.failed).length) console.error("[match_run] failures", JSON.stringify(report.failed));
   return report;
+}
+
+/**
+ * Read once at the start of a sync. Unreadable is off, with a code: the sync
+ * then makes no matcher read or write.
+ */
+export async function readMatcherSwitch(sb: Sb): Promise<{ on: boolean; error?: string }> {
+  try {
+    const { data, error } = await sb.from("feature_flags").select("enabled")
+      .eq("flag_name", "reconcile_matcher_v1").maybeSingle();
+    if (error) return { on: false, error: "matcher_switch_unreadable" };
+    return { on: data?.enabled === true };
+  } catch {
+    return { on: false, error: "matcher_switch_unreadable" };
+  }
+}
+
+type BacklogLine = { document_id: string; created_at: string };
+
+async function timedRead<T>(code: string, q: { abortSignal: (s: AbortSignal) => PromiseLike<{ data: T; error: unknown }> }) {
+  return await read<T>(code, q.abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS)));
+}
+
+/**
+ * Up to `room` waiting bills with no open item and no labour line, oldest
+ * first by (line created_at, document id), from the position kept in
+ * xero_sync_state. The position moves only after the open-item and labour
+ * reads succeed, and goes back to the start once the end is reached, so a bill
+ * skipped today is looked at again on the next pass. Bills in `exclude` (run
+ * already this sync) are passed over.
+ */
+async function backlogBills(
+  sb: Sb,
+  room: number,
+  exclude: Set<string>,
+): Promise<{ ids: string[]; error?: string; looked: number }> {
+  if (room <= 0) return { ids: [], looked: 0 };
+  try {
+    const state = await read<{ cursor_at: string | null; note: string | null } | null>("backlog_state",
+      sb.from("xero_sync_state").select("cursor_at,note").eq("key", MATCH_BACKLOG_STATE_KEY)
+        .abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS)).maybeSingle());
+    const at = state?.cursor_at ?? null;
+    const after = at ? state?.note ?? "" : "";
+    const base = () => sb.from("job_cost_lines").select("document_id,created_at")
+      .eq("document_kind", "xero_bill").eq("state", "needs_person");
+    let lines: BacklogLine[] = [];
+    let full = false;
+    if (at) {
+      // Lines written in one statement share one created_at: the document id
+      // breaks the tie.
+      const same = await timedRead<BacklogLine[]>("backlog_lines",
+        base().eq("created_at", at).gt("document_id", after).order("document_id", { ascending: true })
+          .limit(MATCH_BACKLOG_LINE_PAGE));
+      lines = same ?? [];
+      full = lines.length >= MATCH_BACKLOG_LINE_PAGE;
+    }
+    if (!full) {
+      let q = base();
+      if (at) q = q.gt("created_at", at);
+      const later = await timedRead<BacklogLine[]>("backlog_lines",
+        q.order("created_at", { ascending: true }).order("document_id", { ascending: true })
+          .limit(MATCH_BACKLOG_LINE_PAGE));
+      lines = [...lines, ...(later ?? [])];
+      full = (later ?? []).length >= MATCH_BACKLOG_LINE_PAGE;
+    }
+    // Each bill at its first line's position.
+    const docs: BacklogLine[] = [];
+    const seen = new Set<string>();
+    for (const l of lines) {
+      if (typeof l?.document_id !== "string" || !l.document_id || typeof l.created_at !== "string") continue;
+      if (seen.has(l.document_id)) continue;
+      seen.add(l.document_id);
+      docs.push(l);
+      if (docs.length >= 50) break;
+    }
+    if (!docs.length) {
+      // The end: start again from the oldest next run.
+      if (at) await writeBacklogPosition(sb, null, null);
+      return { ids: [], looked: 0 };
+    }
+    const ids = docs.map((d) => d.document_id);
+    const subjects = ids.map((d) => `xero_bill:${d}`);
+    // reconcile_items_open_subject_idx; job_cost_lines_document_idx.
+    const [open, labour] = await Promise.all([
+      timedRead<Array<{ subject_id: string }>>("backlog_items",
+        sb.from("reconcile_items").select("subject_id").eq("subject_table", "cost_document").eq("status", "open")
+          .in("subject_id", subjects)),
+      timedRead<Array<{ document_id: string }>>("backlog_labour",
+        sb.from("job_cost_lines").select("document_id").eq("document_kind", "xero_bill")
+          .in("kind", [...LABOUR_LINE_KINDS]).in("document_id", ids)),
+    ]);
+    const openSet = new Set((open ?? []).map((r) => r.subject_id));
+    const labourSet = new Set((labour ?? []).map((r) => r.document_id));
+    const taken: string[] = [];
+    let last = docs[docs.length - 1];
+    for (const d of docs) {
+      if (taken.length >= room) break;
+      last = d;
+      if (openSet.has(`xero_bill:${d.document_id}`) || labourSet.has(d.document_id)) continue;
+      if (exclude.has(`xero_bill:${d.document_id}`)) continue;
+      taken.push(`xero_bill:${d.document_id}`);
+    }
+    const reachedEnd = !full && last === docs[docs.length - 1] && docs.length < 50;
+    if (reachedEnd) await writeBacklogPosition(sb, null, null);
+    else await writeBacklogPosition(sb, last.created_at, last.document_id);
+    return { ids: taken, looked: docs.indexOf(last) + 1 };
+  } catch (e) {
+    const code = e instanceof ReadFailed ? e.code : "backlog_failed";
+    return { ids: [], error: code, looked: 0 };
+  }
+}
+
+async function writeBacklogPosition(sb: Sb, at: string | null, documentId: string | null): Promise<void> {
+  const { error } = await sb.from("xero_sync_state").upsert(
+    { key: MATCH_BACKLOG_STATE_KEY, cursor_at: at, note: documentId, updated_at: new Date().toISOString() },
+    { onConflict: "key" },
+  ).abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS));
+  if (error) throw new ReadFailed("backlog_position_write");
+}
+
+export type SyncMatchReport = MatchRunReport & {
+  switch: "on" | "off";
+  changed: number;
+  queued: number;
+  backlog: number;
+  errors: string[];
+};
+
+/**
+ * The sync's matcher step, called once after the Xero paging. With the switch
+ * off it returns at once and touches nothing. On: one budget from now, at most
+ * MATCH_RUN_LIMIT bills (changed, then queued, then up to MATCH_BACKLOG_LIMIT
+ * waiting with no open item), and one batched requeue of what did not fit.
+ */
+export async function syncMatchRun(
+  sb: Sb,
+  opts: { on: boolean; changed: string[]; now?: () => number; budgetMs?: number },
+): Promise<SyncMatchReport> {
+  const report: SyncMatchReport = { ...emptyReport(), switch: opts.on ? "on" : "off", changed: 0, queued: 0, backlog: 0, errors: [] };
+  if (!opts.on) return report;
+  const now = opts.now ?? Date.now;
+  const deadline = now() + (opts.budgetMs ?? MATCH_RUN_BUDGET_MS);
+  const changed = subjectsOf(opts.changed).filter((s) => s.startsWith("xero_bill:"));
+  const run = changed.slice(0, MATCH_RUN_LIMIT);
+  const requeue: Requeue[] = changed.slice(MATCH_RUN_LIMIT).map((id) => ({ id, reason: "over_run_cap" }));
+  report.changed = run.length;
+
+  // Bills waiting in match_queue, oldest queued first, taken off before the run.
+  let room = MATCH_RUN_LIMIT - run.length;
+  if (room > 0) {
+    try {
+      const queued = await timedRead<Array<{ subject_id: string }>>("queue_read",
+        sb.from("match_queue").select("subject_id").eq("subject_kind", "cost_document").like("subject_id", "xero_bill:%")
+          .order("queued_at", { ascending: true }).limit(room));
+      const ids = (queued ?? []).map((r) => r.subject_id).filter((id) => !run.includes(id));
+      if (ids.length) {
+        const del = await sb.from("match_queue").delete().eq("subject_kind", "cost_document").in("subject_id", ids)
+          .abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS));
+        if (del.error) report.errors.push("queue_delete_failed");
+        else {
+          run.push(...ids);
+          report.queued = ids.length;
+        }
+      }
+    } catch (e) {
+      report.errors.push(e instanceof ReadFailed ? e.code : "queue_read");
+    }
+  }
+
+  room = Math.min(MATCH_BACKLOG_LIMIT, MATCH_RUN_LIMIT - run.length);
+  if (room > 0 && now() <= deadline) {
+    const backlog = await backlogBills(sb, room, new Set([...run, ...requeue.map((r) => r.id)]));
+    if (backlog.error) report.errors.push(backlog.error);
+    run.push(...backlog.ids);
+    report.backlog = backlog.ids.length;
+  }
+
+  requeue.push(...await runCore(sb, run, deadline, now, report));
+  await requeueAll(sb, requeue, report);
+  if (Object.keys(report.failed).length || report.errors.length) {
+    console.error("[match_run] sync step", JSON.stringify({ failed: report.failed, errors: report.errors }));
+  }
+  return report;
+}
+
+/**
+ * A manual door (match_pending, match_sweep): only the exact server key, POST
+ * only. Every call writes clue and shadow rows, even with the switch off.
+ */
+function serviceKeyRefusal(req: Request, serviceKey: string): { status: number; body: Record<string, unknown> } | null {
+  if (!serviceKey || req.headers.get("authorization") !== `Bearer ${serviceKey}`) {
+    return { status: 403, body: { error: "service_key_required" } };
+  }
+  if (req.method !== "POST") return { status: 405, body: { error: "post_required" } };
+  return null;
+}
+
+/** The match_pending door. */
+export async function matchPendingRequest(
+  req: Request,
+  sb: Sb,
+  serviceKey: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  return serviceKeyRefusal(req, serviceKey) ?? { status: 200, body: await matchPending(sb) };
 }
 
 /** The match_pending action: one read when nothing waits. */
@@ -505,10 +763,8 @@ export async function matchSweepRequest(
   sb: Sb,
   serviceKey: string,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  if (!serviceKey || req.headers.get("authorization") !== `Bearer ${serviceKey}`) {
-    return { status: 403, body: { error: "service_key_required" } };
-  }
-  if (req.method !== "POST") return { status: 405, body: { error: "post_required" } };
+  const refused = serviceKeyRefusal(req, serviceKey);
+  if (refused) return refused;
   const after = new URL(req.url).searchParams.get("after");
   if (after != null && (after.length === 0 || after.length > 200)) {
     return { status: 400, body: { error: "invalid_after" } };
