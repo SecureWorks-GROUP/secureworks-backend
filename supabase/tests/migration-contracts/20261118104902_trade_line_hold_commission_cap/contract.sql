@@ -2,7 +2,7 @@
 -- Fixtures roll back; the database is left as found.
 -- Merge-safety rule 17: re-apply first (a no-op at this body), so an
 -- earlier contract in the shard cannot leave a different body behind.
-\ir ../../../migrations/20261118075000_trade_line_hold_commission_cap.sql
+\ir ../../../migrations/20261118104902_trade_line_hold_commission_cap.sql
 BEGIN;
 SET LOCAL statement_timeout = '60s';
 INSERT INTO public.users (id, org_id, name, role)

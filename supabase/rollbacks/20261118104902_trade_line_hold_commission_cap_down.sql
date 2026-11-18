@@ -1,4 +1,4 @@
--- Rollback for 20261118075000_trade_line_hold_commission_cap.sql: restore
+-- Rollback for 20261118104902_trade_line_hold_commission_cap.sql: restore
 -- main's assert_job_commission_cap body.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';

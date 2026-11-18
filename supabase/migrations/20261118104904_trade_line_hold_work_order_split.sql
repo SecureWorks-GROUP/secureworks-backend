@@ -1,8 +1,8 @@
 -- P1-05.8 (director ruling 3, 18 Nov 2026): the same split rule on the
 -- work-order door, persist_trade_work_order_invoice_v1, which needs
--- trade_line_hold_merge_v1 from 20261118075001.
+-- trade_line_hold_merge_v1 from 20261118104903.
 -- No table write, no schedule, no switch change.
--- Rollback: supabase/rollbacks/20261118075002_trade_line_hold_work_order_split_down.sql.
+-- Rollback: supabase/rollbacks/20261118104904_trade_line_hold_work_order_split_down.sql.
 
 -- ── 3. The work-order door checks the line as the trade sent it ──────────────
 -- Director ruling 3 (18 Nov 2026): both doors. With a hold on a send,
