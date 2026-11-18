@@ -61,6 +61,9 @@ type World = {
   autofill?: boolean;
   // A weekly work-order send (work_order_blocks) of these crew work orders.
   weeklyWo?: Record<string, unknown> | Array<Record<string, unknown>>;
+  // FU49-9b: jobs outside the cap's scope (default: every job in scope), or a failed scope read.
+  outOfScope?: string[];
+  scopeFails?: boolean;
 };
 
 type Captured = {
@@ -71,6 +74,7 @@ type Captured = {
   raises: any[];
   guardHits: number;
   xero: Array<{ method: string; path: string; body: string | null }>;
+  scopeReads: number;
 };
 
 function filterValues(url: URL, column: string): string[] | null {
@@ -90,6 +94,7 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
   const xero: Captured["xero"] = [];
   let guardLeft = world.guardFailures ?? 0;
   let guardHits = 0;
+  let scopeReads = 0;
   let nextInvoice = 0;
   let nextLine = 0;
   const originalFetch = globalThis.fetch;
@@ -152,6 +157,15 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
         return Promise.resolve(Response.json((args.p_job_ids || []).map((job_id: string) => ({
           job_id,
           billed_ex: job_id === BACKED_JOB ? world.billedBefore ?? 0 : 0,
+        }))));
+      }
+      if (name === "work_order_cap_scope") {
+        scopeReads++;
+        if (world.scopeFails) return fail();
+        const ids: string[] = typeof init?.body === "string" ? JSON.parse(init.body).p_job_ids ?? [] : [];
+        return Promise.resolve(Response.json([...new Set(ids)].map((job_id) => ({
+          job_id,
+          in_scope: !(world.outOfScope ?? []).includes(job_id),
         }))));
       }
       if (name === "persist_trade_work_order_invoice_v1" || name.startsWith("persist_weekly_trade_invoice_v")) {
@@ -286,7 +300,7 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
     } catch {
       body = { raw: text };
     }
-    return { status: res.status, body, invoices, lines, raises, guardHits, xero };
+    return { status: res.status, body, invoices, lines, raises, guardHits, xero, scopeReads };
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -650,4 +664,54 @@ handlerTest("FU49 item 4: switch on, a send's lines reach the database in job id
   assertEquals(off.status, 200, JSON.stringify(off.body));
   assertEquals(off.invoices.length, 1);
   assertEquals(linesOf(off, off.invoices[0].id).map((row) => row.job_id), [COMM_JOB, BACKED_JOB]);
+});
+
+// FU49-9b: the cap reaches only jobs whose job work order was approved on or after the
+// start date (work_order_cap_scope). Outside it a line is paid with no work order hold.
+handlerTest("cap start date: an out-of-scope job's over-amount and no-work-order lines are paid, nothing held", async () => {
+  const out = await send([
+    line(BACKED_JOB, "ZZF-5001", "Labour", 16, 50),
+    line(NO_WO_JOB, "ZZF-5002", "Materials", 6, 50),
+  ], { lineHold: true, agreed: 4000, billedBefore: 3600, outOfScope: [BACKED_JOB, NO_WO_JOB] });
+  assertEquals(out.status, 200, JSON.stringify(out.body));
+  assertEquals(out.invoices.map(kind), ["standard"]);
+  assertEquals(out.lines.filter((l) => l.row.hold_reason), []);
+  assertEquals(out.raises.filter((r) => r.p_kind === "pay_line_held" || r.p_kind === "invoice_no_work_order"), []);
+  assertEquals(out.body.send.held_ex, 0);
+  assertEquals(out.body.send.in_pay_ex, 1100);
+  assert(out.scopeReads >= 1);
+});
+
+handlerTest("cap start date: an in-scope job beside an out-of-scope one is still held to its amount", async () => {
+  const out = await send([
+    line(BACKED_JOB, "ZZF-5001", "Labour", 16, 50),
+    line(NO_WO_JOB, "ZZF-5002", "Materials", 6, 50),
+  ], { lineHold: true, agreed: 4000, billedBefore: 3600, outOfScope: [NO_WO_JOB] });
+  assertEquals(out.status, 200, JSON.stringify(out.body));
+  const held = out.lines.filter((l) => l.row.hold_reason).map((l) => [l.row.job_id, l.row.hold_reason, l.row.line_total_ex]);
+  assertEquals(held, [[BACKED_JOB, "over_amount", 400]]);
+  assertEquals(out.body.send.in_pay_ex, 700);
+});
+
+handlerTest("cap start date: a failed scope read refuses the send with nothing saved", async () => {
+  const out = await send([line(BACKED_JOB, "ZZF-5001", "Materials", 4, 50)], { lineHold: true, agreed: 4000, scopeFails: true });
+  assertEquals(out.status, 503, JSON.stringify(out.body));
+  assertEquals(out.body.code, "line_hold_unreadable");
+  assertEquals(out.invoices, []);
+  assertEquals(out.lines, []);
+});
+
+handlerTest("cap start date, switch off: the scope is never read and an over-amount line is refused exactly as on main", async () => {
+  const inScope = await send([line(BACKED_JOB, "ZZF-5001", "Labour", 16, 50)], { lineHold: false, agreed: 4000, billedBefore: 3600 });
+  const outOfScope = await send([line(BACKED_JOB, "ZZF-5001", "Labour", 16, 50)], {
+    lineHold: false, agreed: 4000, billedBefore: 3600, outOfScope: [BACKED_JOB],
+  });
+  assertEquals([inScope.scopeReads, outOfScope.scopeReads], [0, 0]);
+  assertEquals(outOfScope.status, inScope.status);
+  assertEquals(outOfScope.body, inScope.body);
+  assertEquals(outOfScope.invoices, []);
+  const paid = await send([line(BACKED_JOB, "ZZF-5001", "Materials", 4, 50)], { lineHold: false, agreed: 4000, outOfScope: [BACKED_JOB] });
+  assertEquals(paid.scopeReads, 0);
+  assertEquals(paid.status, 200, JSON.stringify(paid.body));
+  assert(!("send" in paid.body) && !("held_lines" in paid.body), JSON.stringify(paid.body));
 });

@@ -2,6 +2,8 @@ BEGIN;
 SET LOCAL statement_timeout='90s';
 -- Restore and reapply the exact definitions inside this transaction.
 SELECT public.remove_trade_line_job_amount_guard();
+-- A later body of the two guards (20261118193817, the cap start date) is rolled back first.
+\ir ../../../rollbacks/20261118193817_work_order_cap_start_date_down.sql
 \ir ../../../rollbacks/20261118153101_work_order_backed_billed_down.sql
 -- Simulate an installation from before override-only edits fired the guard.
 SELECT public.install_trade_line_job_amount_guard();
