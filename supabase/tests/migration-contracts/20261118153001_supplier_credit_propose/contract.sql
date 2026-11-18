@@ -391,7 +391,7 @@ END $plans$;
 ROLLBACK TO SAVEPOINT p3023_plans;
 
 -- Re-apply proves idempotence and guard post-image acceptance.
-\ir ../../../migrations/20261118141207_supplier_credit_propose.sql
+\ir ../../../migrations/20261118153001_supplier_credit_propose.sql
 
 SELECT 'PASS P3-02.3: candidate filter, bill match, duplicate skip, atomic reconcile raise, service_role privileges, and index-bound plans';
 ROLLBACK;
