@@ -45428,15 +45428,17 @@ export function tradeViewerQuoteVisibleForJob(
   return managed.includes(_jobVertical(job))
 }
 
-// Colleagues' PAY — `trade_rates.hourly_rate`, the per-person hours and the cost
-// derived from them — is a narrower question than the quote, and the open-pool
-// tier is the reason it needs its own rule. `makesafe_open` is a REPORT door: it
-// admits ANY signed-in trade to ANY make-safe job before a named assignment
-// exists (isMakesafeAccessJobForClient asks only whether the job is a make-safe,
-// never whether it is open to this caller). That is the right trade for filing a
-// field report and the wrong one for a payroll read, so it is refused wherever a
-// response carries another trade's rate. Office, division manager of the job's
-// vertical, and an allocated crew member on the job all pass.
+// Who may open the labour door (`trade_labour_budget`) at all. `makesafe_open`
+// is a REPORT door: it admits ANY signed-in trade to ANY make-safe job before a
+// named assignment exists (isMakesafeAccessJobForClient asks only whether the
+// job is a make-safe, never whether it is open to this caller). That is the
+// right trade for filing a field report and the wrong one for a labour read, so
+// it is refused here. Office, division manager of the job's vertical, and an
+// allocated crew member on the job pass the door, but only office and division
+// manager receive money: the labour budget, any rate, any cost and the
+// remainder (ruling 17: the budget reaches no trade surface). An allocated
+// trade gets hours and shift counts only, and trade_rates is never read for
+// that tier (tradeLabourBudget).
 export function tradeLabourCostVisibleForTier(tier: TradeJobAccessTier): boolean {
   return tier === 'office' || tier === 'division_manager' || tier === 'allocated'
 }
@@ -59747,6 +59749,10 @@ async function tradeLabourBudget(
   if (!tradeLabourCostVisibleForTier(accessDecision.tier)) {
     throw new Error('You are not assigned to this job')
   }
+  // Ruling 17: an allocated trade sees hours, never money. Answered before any
+  // purchase order, quote or trade_rates read, so no figure is loaded for this
+  // tier and a crewmate's missing rate cannot fail the hours card.
+  if (accessDecision.tier === 'allocated') return tradeLabourHoursOnly(client, jobId)
   const quoteVisible = tradeQuoteVisibleForTier(accessDecision.tier)
 
   // Get PO total for this job (material + labour)
@@ -59804,6 +59810,37 @@ async function tradeLabourBudget(
   }
 }
 export const _tradeLabourBudgetForTest = tradeLabourBudget
+
+// The allocated-trade shape of trade_labour_budget: total hours and, per crew
+// member, name, hours and the number of shifts. No budget, rate, cost or
+// remainder exists in it. No shift is priced or left out, so the two rate
+// counts are zero by construction, not because a rate read succeeded.
+async function tradeLabourHoursOnly(client: any, jobId: string) {
+  const { data: assignments, error: assignmentError } = await client.from('job_assignments')
+    .select('user_id, started_at, completed_at, users:user_id(name)')
+    .eq('job_id', jobId)
+    .eq('status', 'complete')
+    .not('started_at', 'is', null)
+    .not('completed_at', 'is', null)
+  if (assignmentError || !assignments) throw new ApiError('labour_assignments_read_failed', 503)
+  const byUser = new Map<string, { user_id: string, name: string, hours: number, shifts: number }>()
+  for (const a of assignments) {
+    const hours = Math.round(((new Date(a.completed_at).getTime() - new Date(a.started_at).getTime()) / 3600000) * 100) / 100
+    const userId = String(a.user_id)
+    const row = byUser.get(userId) ?? { user_id: userId, name: a.users?.name || 'Trade', hours: 0, shifts: 0 }
+    row.hours += hours
+    row.shifts += 1
+    byUser.set(userId, row)
+  }
+  const trades = [...byUser.values()]
+  const totalHours = trades.reduce((sum, trade) => sum + trade.hours, 0)
+  return {
+    rate_assumed: 0,
+    rate_missing: 0,
+    total_hours: Math.round(totalHours * 100) / 100,
+    trades,
+  }
+}
 
 // ════════════════════════════════════════════════════════════
 // JOB COMPLETION PACKAGE
