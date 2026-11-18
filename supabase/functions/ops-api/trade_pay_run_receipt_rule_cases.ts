@@ -79,14 +79,41 @@ export const PAY_BACK_RECEIPT_RULE_CASES: readonly PayBackReceiptRuleCase[] = [
   [null, true, false, ...NOT_CONFIRMED],
   ["queried", true, false, ...BOTH],
   ["rejected", true, true, ...BOTH],
+  // Stops: a tab or newline around a status is kept on both sides (Postgres
+  // btrim trims spaces only), so these are no known status.
+  ["\tqueried", false, false, ...NOT_APPROVED],
+  ["rejected\n", false, true, ...NOT_APPROVED],
+  ["approved\t", false, false, ...NOT_APPROVED],
+  ["\npending", false, true, ...NOT_APPROVED],
+  ["pending_extraction\t", false, true, ...NOT_APPROVED],
+  ["\tqueried", true, false, ...NOT_CONFIRMED],
+  ["approved\n", true, false, ...NOT_CONFIRMED],
 ];
+
+/** The push refusal a check answer implies: the push applies queried or
+ * rejected first, then not booked, then not approved (PAY_BACK_RECEIPT_REFUSALS),
+ * so the first of those stops the check shows names the refusal. */
+export function pushRefusalForCheckStops(stops: readonly string[]): string | null {
+  if (stops.includes("reimbursement_queried_or_rejected")) {
+    return "pay_run_receipt_queried_or_rejected";
+  }
+  if (stops.includes("reimbursement_not_booked_unconfirmed")) {
+    return "pay_run_receipt_not_confirmed";
+  }
+  if (stops.includes("reimbursement_receipt_not_approved")) {
+    return "pay_run_receipt_not_approved";
+  }
+  if (stops.length > 0) throw new Error(`unknown receipt stop in ${stops.join(",")}`);
+  return null;
+}
 
 /** A contract's zz_matrix row: status, marked, line approved, want. */
 export type ContractMatrixRow = [string | null, boolean, boolean, string[]];
 
 /** The rows of `INSERT INTO zz_matrix VALUES ...;` in a contract's SQL. Reads
- * only quoted strings ('' escaped), NULL, true and false, and '{a,b}' text
- * arrays; anything else throws, so a reshaped table never reads as empty. */
+ * only quoted strings ('' escaped), E'' strings (\t, \n, \r, \\ and \'),
+ * NULL, true and false, and '{a,b}' text arrays; anything else throws, so a
+ * reshaped table never reads as empty. */
 export function parseContractMatrix(sql: string): ContractMatrixRow[] {
   const start = sql.indexOf("INSERT INTO zz_matrix VALUES");
   if (start < 0) throw new Error("no INSERT INTO zz_matrix VALUES");
@@ -141,11 +168,20 @@ export function parseContractMatrix(sql: string): ContractMatrixRow[] {
       row = null;
       continue;
     }
-    if (ch === "'") {
+    const escaped = (ch === "E" || ch === "e") && src[i + 1] === "'";
+    if (ch === "'" || escaped) {
       let out = "";
-      i++;
+      i += escaped ? 2 : 1;
       for (;;) {
         if (i >= src.length) throw new Error("unterminated string");
+        if (escaped && src[i] === "\\") {
+          const next = src[i + 1];
+          const map: Record<string, string> = { t: "\t", n: "\n", r: "\r", "\\": "\\", "'": "'" };
+          if (!(next in map)) throw new Error(`unsupported escape \\${next}`);
+          out += map[next];
+          i += 2;
+          continue;
+        }
         if (src[i] === "'") {
           if (src[i + 1] === "'") {
             out += "'";
@@ -172,7 +208,9 @@ export function parseContractMatrix(sql: string): ContractMatrixRow[] {
 }
 
 /** Every way the contract's rows differ from the case table, in words; empty
- * when they match row for row, in order. */
+ * when they match row for row, in order, in every column: the status, the
+ * mark, the line approval, the check's stops, and the push refusal those
+ * stops imply (pushRefusalForCheckStops) against the case's push refusal. */
 export function caseTableDifferences(
   cases: readonly PayBackReceiptRuleCase[],
   rows: readonly ContractMatrixRow[],
@@ -183,9 +221,10 @@ export function caseTableDifferences(
   for (let k = 0; k < n; k++) {
     const c = cases[k];
     const r = rows[k];
-    const want = c ? [c[0], c[1], c[2], c[3]] : undefined;
-    if (show(want) !== show(r)) {
-      out.push(`row ${k + 1}: cases ${show(want)}, contract ${show(r)}`);
+    const want = c ? [...c] : undefined;
+    const got = r ? [...r, pushRefusalForCheckStops(r[3])] : undefined;
+    if (show(want) !== show(got)) {
+      out.push(`row ${k + 1}: cases ${show(want)}, contract ${show(got)}`);
     }
   }
   return out;

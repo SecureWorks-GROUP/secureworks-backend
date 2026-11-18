@@ -122,7 +122,13 @@ function makeDeps(w: World) {
       if (w.receipts === "fail") {
         return Promise.reject(new TradePayRunError("pay_run_unreadable", "x", 503));
       }
-      return Promise.resolve((w.receipts ?? {})[id] ?? []);
+      // A receipt the test does not give an image path has one; the image
+      // tests give a blank path on purpose.
+      return Promise.resolve(
+        ((w.receipts ?? {})[id] ?? []).map((r) =>
+          "receipt_storage_path" in r ? r : { ...r, receipt_storage_path: "ZZTEST/receipt.png" }
+        ),
+      );
     },
     readyForRunPush: (_r, id) => {
       calls.ready.push(id);
@@ -484,6 +490,40 @@ Deno.test("allow-list: a pay-back line with no receipt, or a receipt that is gon
   assertEquals(((await press(none.deps, INV_A)) as any).ok, true);
 });
 
+Deno.test("image: a passing receipt whose stored image is blank now is refused at the push, before any claim", async () => {
+  for (const path of [null, "", "   "]) {
+    for (const receipt of [
+      { status: "approved", unbooked_job_id: null },
+      { status: "pushed_to_xero", unbooked_job_id: MARK },
+      { status: "pending", unbooked_job_id: null, line_approved: true },
+    ]) {
+      const { deps, calls } = makeDeps({
+        rows: twoClean(),
+        receipts: { [INV_A]: [{ status: "approved", unbooked_job_id: null }, { ...receipt, receipt_storage_path: path }] },
+      });
+      const err = await assertRejects(() => press(deps, INV_A), TradePayRunError);
+      assertEquals([err.code, err.status], ["pay_run_receipt_no_image", 409], `${receipt.status} ${JSON.stringify(path)}`);
+      assertEquals(
+        err.message,
+        "A pay-back receipt on this invoice has no stored receipt image, so the invoice is not pushed. Store the receipt image, or take the invoice out of the run.",
+      );
+      assertEquals([calls.push.length, calls.claims.length, calls.ready.length], [0, 0, 0]);
+    }
+  }
+  // A refusal before it wins: a queried receipt with no image is refused as queried.
+  const { deps } = makeDeps({
+    rows: twoClean(),
+    receipts: { [INV_A]: [{ status: "queried", unbooked_job_id: null, receipt_storage_path: "" }] },
+  });
+  await refused(press(deps, INV_A), "pay_run_receipt_queried_or_rejected", 409);
+  // The same receipt with its image stored again pushes.
+  const back = makeDeps({
+    rows: twoClean(),
+    receipts: { [INV_A]: [{ status: "approved", unbooked_job_id: null, receipt_storage_path: "ZZTEST/receipt.png" }] },
+  });
+  assertEquals(((await press(back.deps, INV_A)) as any).ok, true);
+});
+
 Deno.test("queried or rejected: the words name the next step, without \"again\" (under ruling B the receipt may never have been approved)", async () => {
   const { deps } = makeDeps({ rows: twoClean(), receipts: { [INV_A]: [{ status: "queried", unbooked_job_id: null, line_approved: true }] } });
   const err = await assertRejects(() => press(deps, INV_A), TradePayRunError);
@@ -529,7 +569,10 @@ Deno.test("writes: the push reads the invoice's pay-back lines, then their recei
       ],
       error: null,
     },
-    expense_receipts: { data: [{ id: "r1", status: "queried", unbooked_job_id: "j1" }], error: null },
+    expense_receipts: {
+      data: [{ id: "r1", status: "queried", unbooked_job_id: "j1", receipt_storage_path: "ZZTEST/r1.png" }],
+      error: null,
+    },
   };
   const client = {
     from(table: string) {
@@ -546,15 +589,15 @@ Deno.test("writes: the push reads the invoice's pay-back lines, then their recei
   // One per pay-back line, with whether the office approved that line; r2's
   // row is gone, so it reads missing (refused, never "none").
   assertEquals(await deps.payBackReceipts(INV_A), [
-    { status: "queried", unbooked_job_id: "j1", line_approved: true },
-    { status: "queried", unbooked_job_id: "j1", line_approved: false },
+    { status: "queried", unbooked_job_id: "j1", line_approved: true, receipt_storage_path: "ZZTEST/r1.png" },
+    { status: "queried", unbooked_job_id: "j1", line_approved: false, receipt_storage_path: "ZZTEST/r1.png" },
     { status: null, unbooked_job_id: null, line_approved: true, missing: true },
   ]);
   assertEquals(seen, [
     "trade_invoice_lines.select(expense_receipt_id, office_review_status)",
     `trade_invoice_lines.eq(trade_invoice_id,${INV_A})`,
     "trade_invoice_lines.eq(line_type,reimbursement)",
-    "expense_receipts.select(id, status, unbooked_job_id)",
+    "expense_receipts.select(id, status, unbooked_job_id, receipt_storage_path)",
     "expense_receipts.in(id,r1|r2)",
   ]);
   // A pay-back line with no receipt id reads missing, without a receipt read.
