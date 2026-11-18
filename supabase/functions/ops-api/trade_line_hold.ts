@@ -389,6 +389,88 @@ const numeric = (value: unknown): number => {
   return n;
 };
 
+/** Batch ids in URL-sized chunks, paged so no row is lost at PostgREST's
+ * row limit. Any error or non-array answer refuses (never reads as none). */
+async function readChunked(
+  client: any,
+  table: string,
+  columns: string,
+  field: string,
+  ids: string[],
+  filter: (q: any) => any = (q) => q,
+): Promise<any[]> {
+  const rows: any[] = [];
+  for (let start = 0; start < ids.length; start += 25) {
+    for (let offset = 0;; offset += 1000) {
+      const response = await filter(
+        client.from(table).select(columns).in(
+          field,
+          ids.slice(start, start + 25),
+        ),
+      )
+        .order(
+          table === "feature_flags"
+            ? "flag_name"
+            : table === "v_job_commission"
+            ? "job_id"
+            : table === "trade_invoice_extra_rate_rules"
+            ? "line_type"
+            : "id",
+        )
+        .range(offset, offset + 999);
+      if (response.error || !Array.isArray(response.data)) {
+        throw new LineHoldFactsUnreadable();
+      }
+      rows.push(...response.data);
+      if (response.data.length < 1000) break;
+    }
+  }
+  return rows;
+}
+
+/** One job's work-order balance in cents: the order's agreed labour plus its
+ * approved variations and amount changes, and what backed (never held)
+ * invoices have billed against it. Shared by the send and my_hours. */
+function workOrderBalanceCents(
+  jobId: string,
+  wo: { id: string; agreed_labour_ex: unknown } | undefined,
+  variations: any[],
+  changes: any[],
+  billed: any[],
+): { agreed: number | null; allowedCents: number; billedCents: number } {
+  const agreed = wo?.agreed_labour_ex == null ? null : numeric(wo.agreed_labour_ex);
+  const added = variations.filter((v) =>
+    v.job_id === jobId && v.work_order_id === wo?.id &&
+    v.status === "approved"
+  )
+    .reduce((s, v) => s + cents(numeric(v.trade_allocation_ex ?? 0)), 0);
+  const changed = changes.filter((c) => c.work_order_id === wo?.id).reduce(
+    (s, c) => s + cents(numeric(c.delta_ex)),
+    0,
+  );
+  const billedCents = billed.filter((l) =>
+    l.job_id === jobId && countsAgainstWorkOrder(l.line_type)
+  ).reduce((sum, l) => {
+    const invoice = Array.isArray(l.trade_invoices)
+      ? l.trade_invoices[0]
+      : l.trade_invoices;
+    if (!invoice) throw new LineHoldFactsUnreadable();
+    if (
+      invoice.invoice_kind === "held" ||
+      !JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(invoice.status)
+    ) return sum;
+    return sum + cents(numeric(l.override_amount ?? l.line_total_ex));
+  }, 0);
+  return {
+    agreed,
+    allowedCents: (agreed === null ? 0 : cents(agreed)) + added + changed,
+    billedCents,
+  };
+}
+
+const COMMISSION_FIGURES =
+  "job_id,commission_id,budget_id,version,state,salesperson_user_id,rule_id,percent,expected_amount_ex_gst,claimed_ex_gst,remaining_ex_gst";
+
 /** Batch all job/receipt ids once, in URL-sized chunks and paged so old billed
  * lines cannot disappear at PostgREST's row limit. No write occurs here.
  * Read only when the held-line send is on (trade_line_hold_v1). */
@@ -408,6 +490,12 @@ export async function readLineHoldFacts(
         ),
       ),
     ];
+    const commissionJobIds = [
+      ...new Set(
+        lines.filter((l) => l.job_id && key(l.line_type) === "commission")
+          .map((l) => l.job_id as string),
+      ),
+    ];
     const typeIds = [
       ...new Set(
         lines.map((l) => l.not_job_work_type_id).filter((id): id is string =>
@@ -415,41 +503,13 @@ export async function readLineHoldFacts(
         ),
       ),
     ];
-    async function read(
+    const read = (
       table: string,
       columns: string,
       field: string,
       ids: string[],
-      filter: (q: any) => any = (q) => q,
-    ): Promise<any[]> {
-      const rows: any[] = [];
-      for (let start = 0; start < ids.length; start += 25) {
-        for (let offset = 0;; offset += 1000) {
-          const response = await filter(
-            client.from(table).select(columns).in(
-              field,
-              ids.slice(start, start + 25),
-            ),
-          )
-            .order(
-              table === "feature_flags"
-                ? "flag_name"
-                : table === "v_job_commission"
-                ? "job_id"
-                : table === "trade_invoice_extra_rate_rules"
-                ? "line_type"
-                : "id",
-            )
-            .range(offset, offset + 999);
-          if (response.error || !Array.isArray(response.data)) {
-            throw new LineHoldFactsUnreadable();
-          }
-          rows.push(...response.data);
-          if (response.data.length < 1000) break;
-        }
-      }
-      return rows;
-    }
+      filter?: (q: any) => any,
+    ) => readChunked(client, table, columns, field, ids, filter);
     // jobs_pkey; users_pkey; uq_work_orders_job_current; job_budgets_version_unique;
     // uq_group_work_orders_job_work_order; idx_trade_invoice_lines_job_work_date
     // plus trade_invoices_pkey for the join. No full scope/pricing blobs.
@@ -490,11 +550,16 @@ export async function readLineHoldFacts(
         "job_id",
         jobIds,
       ),
+      // Commission: figures are read only for the sender's own records, and
+      // only for jobs this send claims commission on. Every other record is
+      // read as its job id alone: another salesperson's id and figures are
+      // never fetched (a record that is not the sender's is skipped not_yours).
       read(
         "v_job_commission",
-        "job_id,commission_id,budget_id,version,state,salesperson_user_id,rule_id,percent,expected_amount_ex_gst,claimed_ex_gst,remaining_ex_gst",
+        COMMISSION_FIGURES,
         "job_id",
-        jobIds,
+        commissionJobIds,
+        (q) => q.eq("salesperson_user_id", userId),
       ),
       // expense_receipts_pkey and not_job_work_types_pkey.
       read("expense_receipts", "id,status,submitted_by", "id", receiptIds),
@@ -528,6 +593,19 @@ export async function readLineHoldFacts(
       ]),
     ]);
     if (users.length !== 1) throw new LineHoldFactsUnreadable();
+    // Which of those jobs carry a record at all: job id only, no salesperson
+    // and no figure (job_commissions_version_unique via the view).
+    const ownCommissionJobs = new Set(
+      commissions.filter((c) => c.salesperson_user_id === userId).map((c) =>
+        String(c.job_id)
+      ),
+    );
+    const otherCommissionJobs = (await read(
+      "v_job_commission",
+      "job_id",
+      "job_id",
+      commissionJobIds.filter((id) => !ownCommissionJobs.has(id)),
+    )).map((c) => String(c.job_id));
     const facts: LineHoldFacts = {
       userId,
       jobs: {},
@@ -559,9 +637,8 @@ export async function readLineHoldFacts(
       const wo = orders.find((o) =>
         o.job_id === row.id && o.status === "approved"
       ) ?? orders.find((o) => o.job_id === row.id && o.status === "draft");
-      const agreed = wo?.agreed_labour_ex == null
-        ? null
-        : numeric(wo.agreed_labour_ex);
+      const balance = workOrderBalanceCents(row.id, wo, variations, changes, billed);
+      const agreed = balance.agreed;
       const budget = budgets.filter((b) =>
         b.job_id === row.id
       ).sort((a, b) => b.version - a.version)[0];
@@ -583,37 +660,13 @@ export async function readLineHoldFacts(
         restorationWorkOrder: isRestorationCard(row) &&
           wo?.status === "approved" && agreed !== null,
       });
-      const added = variations.filter((v) =>
-        v.job_id === row.id && v.work_order_id === wo?.id &&
-        v.status === "approved"
-      )
-        .reduce((s, v) =>
-          s + cents(numeric(v.trade_allocation_ex ?? 0)), 0);
-      const changed = changes.filter((c) => c.work_order_id === wo?.id).reduce(
-        (s, c) => s + cents(numeric(c.delta_ex)),
-        0,
-      );
-      const billedCents = billed.filter((l) =>
-        l.job_id === row.id && countsAgainstWorkOrder(l.line_type)
-      ).reduce((sum, l) => {
-        const invoice = Array.isArray(l.trade_invoices)
-          ? l.trade_invoices[0]
-          : l.trade_invoices;
-        if (!invoice) throw new LineHoldFactsUnreadable();
-        if (
-          invoice.invoice_kind === "held" ||
-          !JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(invoice.status)
-        ) return sum;
-        return sum + cents(numeric(l.override_amount ?? l.line_total_ex));
-      }, 0);
       facts.jobs[row.id] = {
         job_number: row.job_number ?? null,
         workOrder: wo
           ? { id: wo.id, status: wo.status, agreed_ex: agreed }
           : null,
-        allowed_ex: ((agreed === null ? 0 : cents(agreed)) + added + changed) /
-          100,
-        backed_billed_ex: billedCents / 100,
+        allowed_ex: balance.allowedCents / 100,
+        backed_billed_ex: balance.billedCents / 100,
         hourly: mode.invoice_mode === "hourly",
         off_crew_by_week: {},
       };
@@ -628,7 +681,23 @@ export async function readLineHoldFacts(
         facts.notJobTypes[t.id] = t.label;
       }
     }
+    for (const jobId of otherCommissionJobs) {
+      facts.commissions[jobId] = {
+        job_id: jobId,
+        commission_id: "",
+        budget_id: "",
+        version: 0,
+        state: "named",
+        salesperson_user_id: null,
+        rule_id: null,
+        percent: null,
+        expected_amount_ex_gst: null,
+        claimed_ex_gst: 0,
+        remaining_ex_gst: null,
+      };
+    }
     for (const c of commissions) {
+      if (c.salesperson_user_id !== userId) continue;
       facts.commissions[c.job_id] = {
         ...c,
         expected_amount_ex_gst: c.expected_amount_ex_gst == null
@@ -673,6 +742,73 @@ export async function readLineHoldFacts(
       );
     }
     return facts;
+  } catch {
+    throw new LineHoldFactsUnreadable();
+  }
+}
+
+/** my_hours: what is left on each job's approved work order, and nothing
+ * else (null: no approved amount). A balance-only read: no commission, no
+ * salesperson, no rate and no receipt is fetched. Throws
+ * LineHoldFactsUnreadable on any failed read; the caller says so, never 0. */
+export async function readJobAmountsLeft(
+  client: any,
+  userId: string,
+  jobIds: readonly string[],
+): Promise<Record<string, number | null>> {
+  try {
+    const ids = [...new Set(jobIds.filter((id) => !!id))];
+    const out: Record<string, number | null> = {};
+    if (ids.length === 0) return out;
+    // users_pkey; jobs_pkey; uq_work_orders_job_current;
+    // idx_trade_invoice_lines_job_work_date plus trade_invoices_pkey;
+    // idx_work_order_customer_variations_job.
+    const [users, jobs, orders, billed, variations] = await Promise.all([
+      readChunked(client, "users", "id,org_id", "id", [userId]),
+      readChunked(client, "jobs", "id,org_id", "id", ids),
+      readChunked(
+        client,
+        "work_orders",
+        "id,job_id,status,agreed_labour_ex",
+        "job_id",
+        ids,
+        (q) => q.eq("kind", "job").eq("status", "approved"),
+      ),
+      readChunked(
+        client,
+        "trade_invoice_lines",
+        "id,job_id,line_type,line_total_ex,override_amount,trade_invoices!inner(status,invoice_kind)",
+        "job_id",
+        ids,
+      ),
+      readChunked(
+        client,
+        "work_order_customer_variations",
+        "id,job_id,work_order_id,status,trade_allocation_ex",
+        "job_id",
+        ids,
+      ),
+    ]);
+    if (users.length !== 1) throw new LineHoldFactsUnreadable();
+    // work_order_amount_changes_wo_idx, ids bounded to these orders.
+    const changes = await readChunked(
+      client,
+      "work_order_amount_changes",
+      "id,work_order_id,delta_ex",
+      "work_order_id",
+      orders.map((o) => o.id),
+    );
+    for (const row of jobs) {
+      if (row.org_id && row.org_id !== users[0].org_id) continue;
+      const wo = orders.find((o) =>
+        o.job_id === row.id && o.status === "approved"
+      );
+      const balance = workOrderBalanceCents(row.id, wo, variations, changes, billed);
+      out[row.id] = !wo || balance.agreed === null
+        ? null
+        : (balance.allowedCents - balance.billedCents) / 100;
+    }
+    return out;
   } catch {
     throw new LineHoldFactsUnreadable();
   }

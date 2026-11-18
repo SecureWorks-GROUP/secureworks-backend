@@ -468,6 +468,23 @@ export type RaiseContext = {
   backed: readonly SendRow[];
 };
 
+/** The four over-the-amount figures, worked in cents. Over by is claimed plus
+ * the line less the job amount, never below zero; it is not the held amount
+ * (a line held whole can be over by less than itself). Spec example:
+ * 4,000.00 / 3,600.00 / 800.00 / 400.00. */
+export function overAmountFigures(
+  allowedCents: number,
+  claimedCents: number,
+  lineCents: number,
+): { work_order_amount_ex: number; claimed_so_far_ex: number; line_amount_ex: number; over_by_ex: number } {
+  return {
+    work_order_amount_ex: allowedCents / 100,
+    claimed_so_far_ex: claimedCents / 100,
+    line_amount_ex: lineCents / 100,
+    over_by_ex: Math.max(0, claimedCents + lineCents - allowedCents) / 100,
+  };
+}
+
 /** Step 9: the office is told line by line, and once per job that needs a
  * work order. Each call is wrapped: a failure never changes the send. */
 export async function raiseHeldLines(
@@ -507,18 +524,13 @@ export async function raiseHeldLines(
     const job = jobId ? ctx.facts.jobs[jobId] : undefined;
     const amount = money(row.sent_amount_ex);
     const over = row.hold_reason === "over_amount" && job
-      ? {
-        work_order_amount_ex: money(job.allowed_ex),
-        // Spec example: 4,000.00 / 3,600.00 / 800.00 / 400.00. This send's
-        // other backed lines count; the line's own paid part does not, so the
-        // figures add up (claimed + line - amount = over by).
-        claimed_so_far_ex: money((cents(job.backed_billed_ex) + (backedOnJob.get(jobId!) ?? 0) -
-          (row.split_group_id ? ownPaidPart.get(row.split_group_id) ?? 0 : 0)) / 100),
-        line_amount_ex: row.split_group_id
-          ? (splitWhole.get(row.split_group_id) ?? cents(amount)) / 100
-          : amount,
-        over_by_ex: amount,
-      }
+      ? overAmountFigures(
+        cents(job.allowed_ex),
+        // This send's other backed lines count; the line's own paid part does not.
+        cents(job.backed_billed_ex) + (backedOnJob.get(jobId!) ?? 0) -
+          (row.split_group_id ? ownPaidPart.get(row.split_group_id) ?? 0 : 0),
+        row.split_group_id ? (splitWhole.get(row.split_group_id) ?? cents(amount)) : cents(amount),
+      )
       : {};
     await call({
       p_kind: "pay_line_held",

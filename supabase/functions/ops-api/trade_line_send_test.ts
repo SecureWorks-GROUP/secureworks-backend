@@ -9,6 +9,7 @@ import {
   holdWholeJob,
   isKeptDeduction,
   jobAmountGuardJob,
+  overAmountFigures,
   raiseHeldLines,
   sendAnswer,
   stampHeldBookings,
@@ -93,6 +94,26 @@ Deno.test("raiseHeldLines: the four over-the-amount figures add up; a failing ra
   assertEquals([e.work_order_amount_ex, e.claimed_so_far_ex, e.line_amount_ex, e.over_by_ex], [4000, 3600, 800, 400]);
   fail = true;
   assertEquals(await raiseHeldLines(client, [held], ctx), { raised: 0, failed: 1 });
+});
+
+Deno.test("hold 1590: a line held whole is over by the excess, not by the held amount", async () => {
+  const calls: any[] = [];
+  const client = { rpc: (_name: string, args: any) => { calls.push(args); return Promise.resolve({ error: null }); } };
+  const f = facts({ [JOB_A]: { job_number: "ZZF-1", workOrder: { status: "approved" }, allowed_ex: 4000, backed_billed_ex: 3600 } });
+  const held = { id: "zz-h2", row: { job_id: JOB_A, line_type: "labour", line_total_ex: 800, sent_amount_ex: 800, hold_reason: "over_amount" } as any };
+  const ctx = { tradeUserId: "zz-user", tradeName: null, tradeRole: "lead_installer", weekStart: "2026-11-16", facts: f, backed: [] };
+  assertEquals(await raiseHeldLines(client, [held], ctx), { raised: 1, failed: 0 });
+  const e = calls[0].p_evidence;
+  assertEquals([e.work_order_amount_ex, e.claimed_so_far_ex, e.line_amount_ex, e.over_by_ex], [4000, 3600, 800, 400]);
+  assertEquals([e.amount_ex, e.summary.amount_ex], [800, 800], "the held amount stays the whole line");
+});
+
+Deno.test("hold 1590: over by is worked in cents and never below zero", () => {
+  assertEquals(overAmountFigures(400000, 360000, 80000).over_by_ex, 400);
+  assertEquals(overAmountFigures(100010, 100000, 30).over_by_ex, 0.2);
+  // A held whole job whose claims sit under the amount is over by nothing.
+  assertEquals(overAmountFigures(400000, 100000, 50000).over_by_ex, 0);
+  assertEquals(overAmountFigures(0, 0, 12345), { work_order_amount_ex: 0, claimed_so_far_ex: 0, line_amount_ex: 123.45, over_by_ex: 123.45 });
 });
 
 function bookingsClient(assignments: any[], invoices: any[], opts: { readError?: boolean } = {}) {

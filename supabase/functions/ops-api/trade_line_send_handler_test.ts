@@ -542,6 +542,27 @@ handlerTest("work-order door, switch on: a backed work order is paid, its Xero b
   assertEquals(on.body.send.held_ex, 0);
 });
 
+handlerTest("hold 1590: a mixed work-order send (200 backed, 300 held) bills and files the backed lines only", async () => {
+  const wo = CREW_WO({ scope_items: [{ item: "Fence panels", qty: 1, rate: 200 }, { item: "Gate", qty: 1, rate: 300 }] });
+  const out = await send([], { lineHold: true, crewWo: wo, agreed: 200, agreedJob: MISC_JOB });
+  assertEquals(out.status, 200, JSON.stringify(out.body));
+  assertEquals(out.invoices.map(kind), ["standard", "held"]);
+  const [standard, holding] = out.invoices;
+  assertEquals(standard.row.subtotal_ex, 200);
+  assertEquals(linesOf(out, holding.id).map((l) => [l.hold_reason, l.line_total_ex]), [["over_amount", 300]]);
+  const puts = out.xero.filter((x) => x.method === "PUT" && x.path.endsWith("/Invoices"));
+  assertEquals(puts.length, 1, "one bill");
+  const gross = JSON.parse(puts[0].body || "{}").Invoices[0].LineItems
+    .filter((li: any) => Number(li.UnitAmount) > 0)
+    .reduce((sum: number, li: any) => sum + Number(li.Quantity) * Number(li.UnitAmount), 0);
+  assertEquals(Math.round(gross * 100) / 100, 200, "Xero gets the backed line only");
+  // The audit PDF is built from the same backed lines, so it files instead of
+  // failing after Xero has created the bill.
+  assert(out.xero.some((x) => x.path.includes("/Attachments")), "the audit PDF reaches the bill");
+  assertEquals(out.body.pdf_attached, true, JSON.stringify(out.body));
+  assertEquals([out.body.send.in_pay_ex, out.body.send.held_ex], [200, 300]);
+});
+
 handlerTest("line hold: an extra line with no job number is still refused at entry, as today", async () => {
   // Input checks are not work order, cap or commission refusals (spec step 2:
   // "build the lines as today"); nothing is saved and nothing is raised.

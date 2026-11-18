@@ -1,8 +1,8 @@
 // JWT flag: --no-verify-jwt. Keep this line at the top: the deploy workflow reads
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
-import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdLineFromRow, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, type SendRow, type SortedSend } from './trade_line_send.ts'
-import { readLineHoldFacts, type LineHoldFacts } from './trade_line_hold.ts'
+import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, type SendRow, type SortedSend } from './trade_line_send.ts'
+import { readJobAmountsLeft, type LineHoldFacts } from './trade_line_hold.ts'
 import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
 import { listExpenseReceipts } from './expense_list.ts'
 import { factReadOn } from './fact_reader_switch.ts'
@@ -721,6 +721,7 @@ import {
   TRADE_INVOICE_EMPLOYER_SUPER_BASIS,
   TRADE_INVOICE_INCLUSIVE_SUPER_BASIS,
   TradeInvoiceMoneyError,
+  buildTradeInvoiceAuditModel,
   type TradeInvoiceSuperBasis,
   type TradeInvoiceMoney,
   tradeInvoicePayableBeforeDeduction,
@@ -13867,6 +13868,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let subtotal = woMoney.gross_earned
             let gst = woMoney.gst_amount
             let total = woMoney.total_inc
+            // The bill's source lines: Xero and the audit PDF read this one
+            // list. With the held-line send it narrows to the backed lines.
+            let woSubmittedLines = lineItems
             let woXeroLineItems = splitTradeInvoiceXeroLines(
               lineItems,
               woMoney,
@@ -13949,11 +13953,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               gst = woMoney.gst_amount
               total = woMoney.total_inc
               const kept = new Set(woSorted.backed.map((row: any) => Number(row._woIndex)))
+              woSubmittedLines = lineItems.filter((_line: unknown, index: number) => kept.has(index))
               woXeroLineItems = splitTradeInvoiceXeroLines(
-                lineItems.filter((_line: unknown, index: number) => kept.has(index)),
+                woSubmittedLines,
                 woMoney,
                 { tradeName: tradeXeroUser?.name || 'Trade', superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE },
               )
+              // The audit PDF's own gross check, run now: a mismatch refuses
+              // before anything is saved or any Xero call is made, never after
+              // Xero has created the bill.
+              try {
+                buildTradeInvoiceAuditModel(woSubmittedLines, woMoney, tradeXeroUser?.name || 'Trade')
+              } catch (error) {
+                tradeInvoiceMoneyApiError(error)
+              }
             }
             if (woLineHoldMode) {
               woLineHoldApply(await woLineHoldRead())
@@ -14263,7 +14276,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   tenantId: woTi,
                   filename: `${tradeName}-${wo.wo_number || 'work-order'}`,
                   clientPdfBase64: body.pdf_base64,
-                  submittedLines: lineItems,
+                  submittedLines: woSubmittedLines,
                   money: woMoney,
                   tradeName,
                 },
@@ -58734,23 +58747,19 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   const lineHoldWeek = await lineHoldSendApplies(client, weekStart || weekEnding, paySettingsRead)
   let jobLeftUnavailable = false
   if (lineHoldWeek) {
-    let leftFacts: LineHoldFacts | null = null
+    // Balance only: no commission, salesperson or rate is read here.
+    let left: Record<string, number | null> = {}
     if (invoiceModeJobIds.length > 0) {
       try {
-        leftFacts = await readLineHoldFacts(
-          client,
-          userId,
-          invoiceModeJobIds.map((jobId, index) => holdLineFromRow({ job_id: jobId, line_total_ex: 0 }, weekStart || null, index)),
-        )
+        left = await readJobAmountsLeft(client, userId, invoiceModeJobIds)
       } catch (leftErr) {
         console.error('[ops-api] my_hours: job amounts unreadable:', lineSendLogCode(leftErr))
         jobLeftUnavailable = true
       }
     }
     const jobLeft = (jobId: string): number | null => {
-      const job = leftFacts?.jobs[jobId]
-      if (!job?.workOrder || job.workOrder.status !== 'approved' || job.workOrder.agreed_ex === null) return null
-      return roundMoney(Number(job.allowed_ex) - Number(job.backed_billed_ex))
+      const value = left[jobId]
+      return value == null ? null : roundMoney(value)
     }
     for (const a of enriched) a.job_left_ex = jobLeft(String(a.jobs?.id || ''))
     for (const r of groupRouteJobs) r.job_left_ex = jobLeft(String(r.job_id || ''))

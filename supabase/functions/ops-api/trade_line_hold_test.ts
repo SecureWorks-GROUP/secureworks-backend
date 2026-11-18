@@ -7,6 +7,7 @@ import {
   type HoldLine,
   type LineHoldFacts,
   LineHoldFactsUnreadable,
+  readJobAmountsLeft,
   readLineHoldFacts,
 } from "./trade_line_hold.ts";
 import type { JobCommissionRecord } from "./job_commission.ts";
@@ -437,6 +438,8 @@ Deno.test("every facts read fault throws the same 503 and retry reads again", as
               expense_receipt_id: "ZZTEST-RECEIPT",
               not_job_work_type_id: "ZZTEST-TYPE",
             }),
+            // Commission records are read only for a commission line.
+            line({ line_type: "commission" }),
           ]),
         LineHoldFactsUnreadable,
       );
@@ -587,4 +590,117 @@ Deno.test("P1-05.8 ruling 1: a send keeps only a same-rate hours split exact to 
   assertEquals(fine.backed.length, 0);
   // The default sorter is unchanged (P1-05.7 behaviour).
   assertEquals(classifyLines([line({ line_total_ex: 200, rate: 200 })], facts()).backed[0].line_total_ex, 120);
+});
+
+// Hold 1590 (b): records every read so a test can say what was never fetched.
+function recordingClient(rows: Record<string, any[]>) {
+  const reads: Array<{ table: string; columns: string; eq: Record<string, unknown> }> = [];
+  return {
+    reads,
+    from(table: string) {
+      const read = { table, columns: "", eq: {} as Record<string, unknown> };
+      reads.push(read);
+      const q: any = {
+        select: (columns: string) => {
+          read.columns = columns;
+          return q;
+        },
+        in: () => q,
+        eq: (col: string, val: unknown) => {
+          read.eq[col] = val;
+          return q;
+        },
+        order: () => q,
+        range: () => q,
+        then(resolve: any, reject: any) {
+          const data = (rows[table] ?? []).filter((row) =>
+            Object.entries(read.eq).every(([col, val]) =>
+              !(col in row) || row[col] === val
+            )
+          );
+          return Promise.resolve({ data, error: null }).then(resolve, reject);
+        },
+      };
+      return q;
+    },
+    rpc: () => Promise.resolve({ data: false, error: null }),
+  };
+}
+const FIGURES = ["expected_amount_ex_gst", "claimed_ex_gst", "remaining_ex_gst", "salesperson_user_id"];
+
+Deno.test("hold 1590: a send never reads another salesperson's commission id or figures, and still skips that claim", async () => {
+  const rows: Record<string, any[]> = {
+    ...readRows(),
+    jobs: [
+      { id: "ZZTEST-JOB", job_number: "ZZTEST-01", type: "fencing", metadata: {} },
+      { id: "ZZTEST-OWN", job_number: "ZZTEST-02", type: "fencing", metadata: {} },
+    ],
+    v_job_commission: [
+      commission({ salesperson_user_id: "ZZTEST-OTHER", expected_amount_ex_gst: 700, remaining_ex_gst: 700 }),
+      commission({ job_id: "ZZTEST-OWN" }),
+    ],
+  };
+  const db = recordingClient(rows);
+  const lines = [
+    line({ line_type: "commission" }),
+    line({ job_id: "ZZTEST-OWN", line_type: "commission" }),
+  ];
+  const f = await readLineHoldFacts(db, "ZZTEST-TRADE", lines);
+  const commissionReads = db.reads.filter((r) => r.table === "v_job_commission");
+  assertEquals(commissionReads.length, 2);
+  // Figures only with the caller scoped in the query itself.
+  for (const r of commissionReads) {
+    const asksFigures = FIGURES.some((c) => r.columns.split(",").includes(c));
+    assertEquals(asksFigures ? r.eq.salesperson_user_id : "no figures", asksFigures ? "ZZTEST-TRADE" : "no figures");
+  }
+  assertEquals(commissionReads[1].columns, "job_id");
+  // Nothing of the other salesperson's record reaches the facts.
+  assertEquals(f.commissions["ZZTEST-JOB"]?.salesperson_user_id, null);
+  assertEquals(f.commissions["ZZTEST-JOB"]?.expected_amount_ex_gst, null);
+  assertEquals(f.commissions["ZZTEST-OWN"]?.remaining_ex_gst, 80);
+  const result = classifyLines(lines, f);
+  assertEquals(result.skipped_items.map((s) => [s.index, s.reason]), [[0, "not_yours"]]);
+  assertEquals(result.backed.map((l) => [l.job_id, l.line_type, l.sent_amount_ex]), [
+    ["ZZTEST-OWN", "commission", 80],
+  ]);
+});
+
+Deno.test("hold 1590: a send with no commission line reads no commission record at all", async () => {
+  const db = recordingClient({ ...readRows(), v_job_commission: [commission({ salesperson_user_id: "ZZTEST-OTHER" })] });
+  await readLineHoldFacts(db, "ZZTEST-TRADE", [line()]);
+  assertEquals(db.reads.filter((r) => r.table === "v_job_commission"), []);
+});
+
+Deno.test("hold 1590: my_hours' balance read fetches no commission, salesperson, rate or receipt", async () => {
+  const rows: Record<string, any[]> = {
+    ...readRows(),
+    v_job_commission: [commission({ salesperson_user_id: "ZZTEST-OTHER" })],
+    trade_rates: [{ id: "ZZTEST-RATE", hourly_rate: 50, effective_from: "2026-01-01", effective_to: null }],
+  };
+  const db = recordingClient(rows);
+  const left = await readJobAmountsLeft(db, "ZZTEST-TRADE", ["ZZTEST-JOB", "ZZTEST-JOB"]);
+  // approved 1,120.00 less 1,000.00 billed (draft, rejected and held excluded)
+  assertEquals(left, { "ZZTEST-JOB": 120 });
+  assertEquals(
+    [...new Set(db.reads.map((r) => r.table))].sort(),
+    ["jobs", "trade_invoice_lines", "users", "work_order_amount_changes", "work_order_customer_variations", "work_orders"],
+  );
+  for (const r of db.reads) {
+    for (const c of FIGURES) assertEquals(r.columns.split(",").includes(c), false, `${r.table} reads ${c}`);
+  }
+});
+
+Deno.test("hold 1590: my_hours' balance read: no approved order is null, any failed read refuses, never 0", async () => {
+  const rows = readRows();
+  rows.work_orders[0].status = "draft";
+  assertEquals(await readJobAmountsLeft(recordingClient(rows), "ZZTEST-TRADE", ["ZZTEST-JOB"]), { "ZZTEST-JOB": null });
+  assertEquals(await readJobAmountsLeft(recordingClient(readRows()), "ZZTEST-TRADE", []), {});
+  for (const table of ["users", "jobs", "work_orders", "trade_invoice_lines", "work_order_customer_variations", "work_order_amount_changes"]) {
+    for (const throws of [false, true]) {
+      await assertRejects(
+        () => readJobAmountsLeft(client(readRows(), table, throws), "ZZTEST-TRADE", ["ZZTEST-JOB"]),
+        LineHoldFactsUnreadable,
+      );
+    }
+  }
 });
