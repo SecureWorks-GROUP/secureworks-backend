@@ -2,7 +2,7 @@ BEGIN;
 -- Exercise this version and its guarded rollback inside the existing transaction.
 SELECT to_regprocedure('public.reconcile_undo(bigint,uuid)') IS NOT NULL AS undo_installed \gset
 \if :undo_installed
-\ir ../../../rollbacks/20261118195200_reconcile_undo_down.sql
+\ir ../../../rollbacks/20261118195300_reconcile_undo_down.sql
 \endif
 \ir ../../../migrations/20261118122120_match_apply.sql
 SET LOCAL statement_timeout = '60s';

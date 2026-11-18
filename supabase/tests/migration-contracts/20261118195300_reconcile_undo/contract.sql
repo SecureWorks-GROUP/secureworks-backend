@@ -1,6 +1,6 @@
 \set ON_ERROR_STOP on
 BEGIN;
-\ir ../../../migrations/20261118195200_reconcile_undo.sql
+\ir ../../../migrations/20261118195300_reconcile_undo.sql
 CREATE TEMP TABLE undo_checks(label text);
 CREATE FUNCTION pg_temp.check_it(ok boolean,label text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
@@ -235,7 +235,7 @@ SELECT pg_temp.check_it(has_function_privilege('service_role','public.reconcile_
  AND NOT has_function_privilege('authenticated','public.reconcile_undo(bigint,uuid)','execute')
  AND NOT has_function_privilege('anon','public.reconcile_undo(bigint,uuid)','execute'),'service-only rpc');
 SET CONSTRAINTS ALL IMMEDIATE;
-\ir ../../../rollbacks/20261118195200_reconcile_undo_down.sql
+\ir ../../../rollbacks/20261118195300_reconcile_undo_down.sql
 SELECT pg_temp.check_it(to_regprocedure('public.reconcile_undo(bigint,uuid)') IS NULL
  AND (SELECT md5(prosrc)='e5382283d43345f54b314a6fdf6fc897' FROM pg_proc WHERE oid='public.match_apply_stop(text)'::regprocedure)
  AND (SELECT md5(prosrc)='2d37c485e29e0a9a1a2b59985417741f' FROM pg_proc WHERE
