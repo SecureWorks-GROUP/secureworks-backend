@@ -42,6 +42,7 @@ const STOCK_DIVISION_OPTIONS: Record<string, string> = {
 
 // Main's mapper body is retained line for line. Existing invoice create/edit
 // callers never read the switch and never receive the new draft rules.
+// Change this rule in both places; scripts/test-division-twin.sh proves they agree.
 export function divisionTrackingOption(jobNumber: string, jobType?: string | null): string {
   // An explicit type always wins, including when the job has no number yet.
   const type = String(jobType || '').trim().toLowerCase()
