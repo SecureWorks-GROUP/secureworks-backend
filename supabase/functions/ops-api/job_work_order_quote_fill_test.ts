@@ -1992,4 +1992,6 @@ Deno.test("R17 step 4: an unreadable budget, or one with no amount, holds the dr
   const b = await previewQuoteWorkOrderLines(noAmount, JOB);
   assert(b.result.needs_review);
   assert(b.result.lines.every((l: any) => l.flags.includes("job_budget_labour_missing")));
+  // P1-05.5: the quote's estimate is never written as the agreed labour.
+  assertEquals(b.result.agreed_labour_ex, null);
 });
