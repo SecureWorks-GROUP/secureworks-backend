@@ -1,3 +1,4 @@
+import { bookingGrantsContactAccess } from './trade_self_add.ts';
 // Group work orders (owner, confirmed 21 Oct 2026).
 //
 // The pot is the sealed agreed_labour_ex on the job's work order. A
@@ -2819,7 +2820,10 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
   const memberships = await paged(() => client.from("group_work_order_participants")
     .select("group_id").eq("user_id",caller.userId).order("group_id"),"load your group work orders");
   const allocations = await paged(() => client.from("job_assignments")
-    .select("job_id,status,role,is_ghost").eq("user_id",caller.userId).order("id"),"load your group allocations");
+    .select("job_id,status,role,is_ghost,added_by,self_added_status").eq("user_id",caller.userId).order("id"),"load your group allocations");
+  // Membership permits a pay claim, never customer contact before acceptance.
+  const contactAllowed = new Set(allocations.filter(liveAssignment).filter(bookingGrantsContactAccess).map(row => String(row.job_id)));
+  const contactHidden = new Set(allocations.filter(row => !bookingGrantsContactAccess(row)).map(row => String(row.job_id)).filter(id => !contactAllowed.has(id)));
   const memberIds=[...new Set(memberships.map(row=>String(row.group_id)))];
   const assignedIds=[...new Set(allocations.filter(liveAssignment).map(row=>String(row.job_id || "")).filter(Boolean))];
   const byId = new Map<string,Record<string,unknown>>();
@@ -2865,7 +2869,7 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
     if (!job) continue;
     if (!memberIds.includes(String(group.id))) {
       // Allocation grants discovery, never another participant's price or pay.
-      result.push({discovery,group_id:group.id,job_id:group.job_id,job_number:job.job_number,client_name:job.client_name,
+      result.push({discovery,group_id:group.id,job_id:group.job_id,job_number:job.job_number,client_name:contactHidden.has(String(group.job_id)) && !caller.isStaff ? null : job.client_name,
         site_suburb:job.site_suburb,job_type:job.type,pot_total:null,my_share:null,needs_hours:true,
         client_signed:null,awaiting:discovery?.state === "join" ? "needs_join" : "awaiting_office",
         group_share_office_review_required:true});
@@ -2880,7 +2884,7 @@ export async function readMyGroupWorkOrders(client: any, caller: GroupCaller) {
     const crew = { ...await readGroupCrewStatus(client, caller, String(group.id)), ...await readGroupCrewHours(client, caller, group) };
     result.push({ ...share, discovery, ...(submitted ? { submitted } : {}), ...crew, projected_my_share: pay ? Number(pay.invoice_ex) : projectedBudget,
       ...(pay ? {projected_my_budget: projectedBudget, projected_cash_pay: pay.cash_pay, projected_super: pay.super_amount, budget_remainder: pay.budget_remainder} : {}), job_id: group.job_id, job_number: job.job_number,
-      client_name: job.client_name, site_suburb: job.site_suburb, job_type: job.type });
+      client_name: contactHidden.has(String(group.job_id)) && !caller.isStaff ? null : job.client_name, site_suburb: job.site_suburb, job_type: job.type });
   }
   return { enabled: true, group_job_ids: jobIds, groups: result, payable_routes: cardRoutes };
 }
