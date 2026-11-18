@@ -682,6 +682,12 @@ ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_pro
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_cost_events
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_revenue_events
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|function|job_profit
+# P0-09.5: job_profit, job_profit_list and the rollup read these switch views
+# (stored rows when job_profit_stored_read_v1 is on and the row is fresh, else
+# the live views above). The migration must land before the ops-api deploy.
+ops-api|supabase/migrations/20261118170100_job_profit_read_views.sql|table|v_job_profit_read
+ops-api|supabase/migrations/20261118170100_job_profit_read_views.sql|table|v_job_cost_events_read
+ops-api|supabase/migrations/20261118170100_job_profit_read_views.sql|table|v_job_revenue_events_read
 # B4: job_profit's dispatch_orders reads the Dispatch order and bill link views.
 ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|table|v_dispatch_orders
 ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|table|v_dispatch_order_bills
@@ -918,6 +924,8 @@ ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function
 ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_record_invoice_decision
 ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_rows
 ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_left_out
+ops-api|supabase/migrations/20261118073318_reconcile_decide.sql|function|reconcile_decide
+ops-api|supabase/migrations/20261118195300_reconcile_undo.sql|function|reconcile_undo
 # Context reconciliation from a job: the context_job_mail and recon_job_items
 # reads call these, so they must exist before this ops-api ships.
 ops-api|supabase/migrations/20261020165000_context_job_reconciliation.sql|function|context_job_mail
@@ -1244,6 +1252,14 @@ ops-api|supabase/migrations/20261114020000_dispatch_line_budget_cost.sql|column|
 ops-api|supabase/migrations/20261114030000_job_labour_cap.sql|table|job_labour_cap_raises
 ops-api|supabase/migrations/20261114030000_job_labour_cap.sql|function|job_labour_cap_state
 ops-api|supabase/migrations/20261114030000_job_labour_cap.sql|function|raise_job_labour_cap
+# Follow-up 49 item 9(b): the work order cap's start date. ops-api reads the scope by RPC
+# (send sorter, my_hours, office list, and with the hold switch on the code cap), reads the
+# settings row and its record, and sets it through the approver's door.
+ops-api|supabase/migrations/20261118193817_work_order_cap_start_date.sql|table|work_order_cap_settings
+ops-api|supabase/migrations/20261118193817_work_order_cap_start_date.sql|function|work_order_cap_scope
+ops-api|supabase/migrations/20261118194100_work_order_cap_start_set.sql|table|work_order_cap_start_changes
+ops-api|supabase/migrations/20261118194100_work_order_cap_start_set.sql|function|set_work_order_cap_start
+ops-api|supabase/migrations/20261118194600_work_order_cap_switch_guards.sql|function|work_order_cap_start_preview
 # xero-sync writes each bank transaction's lines and the chart of accounts into
 # their own service-role-only tables; ops-api's xero_tieout asks the spend and
 # revenue read beside the bills tie-out.
@@ -1251,6 +1267,19 @@ xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|table
 xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|column|xero_bank_transaction_lines.line_amount_types
 xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|column|xero_bank_transaction_lines.xero_type
 xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|table|xero_accounts
+# P2-02.7: the matcher runner proposes a job for each changed bill (match/match_run.ts).
+# Without these every call would fail and requeue, so the deploy refuses instead.
+xero-sync|supabase/migrations/20261118122120_match_apply.sql|function|match_apply
+xero-sync|supabase/migrations/20261117160500_match_tables.sql|column|match_queue.reason
+xero-sync|supabase/migrations/20261117160400_job_cost_lines.sql|column|job_cost_lines.kind
+xero-sync|supabase/migrations/20261117160400_job_cost_lines.sql|index|job_cost_lines_needs_person_idx
+xero-sync|supabase/migrations/20261117160500_match_tables.sql|table|match_queue
+xero-sync|supabase/migrations/20261118060051_reconcile_tables.sql|table|reconcile_items
+xero-sync|supabase/migrations/20261118060051_reconcile_tables.sql|index|reconcile_items_open_subject_idx
+xero-sync|supabase/migrations/20261117160500_match_tables.sql|table|match_clue_types
+xero-sync|supabase/migrations/20261117160500_match_tables.sql|table|match_rules
+xero-sync|supabase/migrations/20261117173501_v_job_orders.sql|table|v_job_orders
+xero-sync|supabase/migrations/20261116080000_context_job_evidence_for_bills.sql|function|context_job_evidence_for_bills
 ops-api|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|function|xero_spend_revenue_monthly
 # ops-api job_profit and job_profit_list ask the cost close rule beside the
 # Job Profit figures (job_cost_close.ts).
@@ -1282,3 +1311,48 @@ ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_
 ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.saved_amount
 ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.target_date
 ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.updated_at
+
+# Dispatch v2 items 17 and 5: a supplier reply is flagged until someone
+# dismisses it. dispatch_v2_replies.ts (dispatch_v2_replies_dismiss and the reply
+# projection) and dispatch_board.ts (the board replies) read these columns.
+ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|column|dispatch_v2_supplier_emails.dismissed_at
+ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|column|dispatch_v2_supplier_emails.dismissed_by
+ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|column|dispatch_v2_supplier_emails.dismissed_by_email
+ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|column|dispatch_v2_supplier_emails.dismissed_source
+ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|constraint|dispatch_v2_supplier_emails_dismissed_shape
+# cl-payrun-escape (PR 1646): release_pay_run_invoice calls the release
+# function, and the weekly pay run read selects released_at on every recorded
+# run, so ops-api must not deploy ahead of the migration.
+ops-api|supabase/migrations/20261118170500_trade_pay_run_release.sql|column|trade_pay_run_invoices.released_at
+ops-api|supabase/migrations/20261118170500_trade_pay_run_release.sql|function|release_trade_pay_run_invoice
+ops-api|supabase/migrations/20261118194000_expense_unbooked_job_mark.sql|column|expense_receipts.unbooked_job_id
+# cl-payrun-xero-found: the weekly pay run read selects release_xero_found on
+# every recorded run, and release_pay_run_invoice records a found Xero bill
+# through the function, so ops-api must not deploy ahead of the migration.
+ops-api|supabase/migrations/20261118194200_trade_pay_run_xero_found.sql|column|trade_pay_run_invoices.release_xero_found
+ops-api|supabase/migrations/20261118194200_trade_pay_run_xero_found.sql|function|record_trade_pay_run_xero_found
+# P2-03.6: ops-api reconcile_list reads one page and the per-kind counts
+# through these two functions (the switch off answers before either is called).
+ops-api|supabase/migrations/20261118195200_reconcile_list_page.sql|function|reconcile_list_page
+ops-api|supabase/migrations/20261118195200_reconcile_list_page.sql|function|reconcile_list_counts
+# Follow-up 66 mirror rule: the sync and the edge bills backfill ask the one
+# rule through this function before writing a bill's cost lines, so xero-sync
+# must not deploy ahead of the migration.
+xero-sync|supabase/migrations/20261118195500_trade_invoice_bill_mirror_rule.sql|function|trade_invoice_bill_mirror_verdicts
+# Follow-up 66 people accounts (director 03:36): one table, two flags. xero-sync
+# reads both (labour: cost lines, ingest, prematch, matcher stop; hidden: the
+# matcher's and credit step's skip); ops-api reads the row for its labour flag
+# (manual landing). The reader selects all three columns, so neither function
+# deploys ahead of the table.
+xero-sync|supabase/migrations/20261118195700_reconcile_people_accounts.sql|table|people_account_codes
+xero-sync|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.account_code
+xero-sync|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.labour
+xero-sync|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.hidden_from_reconcile
+ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|table|people_account_codes
+ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.account_code
+ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.labour
+ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.hidden_from_reconcile
+# P2-02.8: the matcher runner reads each bill through match_bill_read and keeps
+# its slow-bill counts in match_slow_bills, so xero-sync must not deploy first.
+xero-sync|supabase/migrations/20261118195800_match_apply_held_unchanged.sql|table|match_slow_bills
+xero-sync|supabase/migrations/20261118195800_match_apply_held_unchanged.sql|function|match_bill_read

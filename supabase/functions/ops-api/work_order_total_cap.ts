@@ -32,9 +32,12 @@
 // - Only the office can raise the figure, through an approved customer
 //   variation or a new work order.
 //
-// Refusals carry the job and the most this invoice may still bill on it. They
-// never name another trade or their figure (a trade who knows the agreed
-// amount can still work out the total others billed from the remainder).
+// Refusals carry the job and, only where every billed line on that job is
+// the trade's own, the most this invoice may still bill on it. The remainder
+// is the allowance less what every trade billed, so on a job another trade
+// billed on it would let the trade work out what the others billed: there the
+// words are WORK_ORDER_CAP_WORDS.shared_job and carry no figure (director
+// ruling, 18 Nov 2026). An unreadable owner read hides the figure too.
 //
 // Known limits: the read and the save are not one transaction, so two
 // invoices sent at the same moment can both pass (the commission cap has a
@@ -47,6 +50,7 @@ import {
   readCustomerVariations,
   readJobTradeLines,
 } from "./job_work_orders.ts";
+import { readWorkOrderCapScope } from "./work_order_cap_scope.ts";
 
 /**
  * The one line type that never counts against a work order: commission, which
@@ -88,11 +92,14 @@ export type WorkOrderTotalCapRefusal = {
   jobs: Array<{
     job: string;
     job_id: string;
-    most_this_invoice_ex: number;
+    /** Absent when the figure is hidden (another trade billed on the job). */
+    most_this_invoice_ex?: number;
     /** Only on a job paid hourly up to a sealed maximum. */
     limit?: "hourly_maximum";
     /** That job's whole limit: the work order amount plus raises. */
     hourly_maximum_ex?: number;
+    /** true when the figures are left out of this job's words. */
+    amount_hidden?: true;
   }>;
 };
 
@@ -106,8 +113,27 @@ function dollars(value: number): string {
 }
 
 /**
+ * The words a trade sees for a work order cap refusal, one per case. Change
+ * them here, never at a door. Only `shared_job` is shown on a job another
+ * trade billed on, and it carries no figure.
+ */
+export const WORK_ORDER_CAP_WORDS = {
+  shared_job: "This invoice is more than the agreed work order total. Ask the office.",
+  room: (job: string, most: string) =>
+    `Job ${job}: this invoice can bill at most ${most} on its work order. If someone else on the job billed their part, list them as crew on the work order. Ask the office if the work order needs changing.`,
+  billed_in_full: (job: string) =>
+    `Job ${job}: its work order has been billed in full. Ask the office if it needs changing.`,
+  hourly_room: (job: string, maximum: string, most: string) =>
+    `Job ${job}: it is paid by the hour, and its work order pays the crew at most ${maximum} (the hours and any other work it lists). This invoice can bill at most ${most} more on it. A higher hourly rate does not raise the maximum. Ask the office if it needs raising.`,
+  hourly_billed_in_full: (job: string, maximum: string) =>
+    `Job ${job}: it is paid by the hour, and the most its work order pays the crew, ${maximum}, has been billed in full. A higher hourly rate does not raise it. Ask the office if it needs raising.`,
+} as const;
+
+/**
  * Pure. null when every capped job stays within what its work order allows
  * once this invoice's labour is added to what is already billed on it.
+ * `amountShown` says per job whether its figures may be shown (default: all,
+ * for the pure callers; checkWorkOrderTotalCap always decides it).
  */
 export function workOrderTotalCapRefusal(input: {
   jobs: readonly WorkOrderCapJob[];
@@ -117,7 +143,9 @@ export function workOrderTotalCapRefusal(input: {
   incomingEx: ReadonlyMap<string, number>;
   /** Check a job even when its incoming is 0 or less (a raised deduction). */
   force?: boolean;
+  amountShown?: (jobId: string) => boolean;
 }): WorkOrderTotalCapRefusal | null {
+  const shown = input.amountShown ?? (() => true);
   const over: WorkOrderTotalCapRefusal["jobs"] = [];
   for (const job of input.jobs) {
     const incoming = input.incomingEx.get(job.jobId) ?? 0;
@@ -125,6 +153,10 @@ export function workOrderTotalCapRefusal(input: {
     if (!input.force && cents(incoming) <= 0) continue;
     const billed = input.billedEx.get(job.jobId) ?? 0;
     if (cents(billed) + cents(incoming) <= cents(job.allowedEx)) continue;
+    if (!shown(job.jobId)) {
+      over.push({ job: job.ref, job_id: job.jobId, amount_hidden: true });
+      continue;
+    }
     over.push({
       job: job.ref,
       job_id: job.jobId,
@@ -138,23 +170,21 @@ export function workOrderTotalCapRefusal(input: {
     });
   }
   if (over.length === 0) return null;
-  const message = over.map((j) =>
-    j.limit === "hourly_maximum"
-      ? j.most_this_invoice_ex > 0
-        ? `Job ${j.job}: it is paid by the hour, and its work order pays the crew at most ${
-          dollars(j.hourly_maximum_ex ?? 0)
-        } (the hours and any other work it lists). This invoice can bill at most ${
-          dollars(j.most_this_invoice_ex)
-        } more on it. A higher hourly rate does not raise the maximum. Ask the office if it needs raising.`
-        : `Job ${j.job}: it is paid by the hour, and the most its work order pays the crew, ${
-          dollars(j.hourly_maximum_ex ?? 0)
-        }, has been billed in full. A higher hourly rate does not raise it. Ask the office if it needs raising.`
-      : j.most_this_invoice_ex > 0
-      ? `Job ${j.job}: this invoice can bill at most ${
-        dollars(j.most_this_invoice_ex)
-      } on its work order. If someone else on the job billed their part, list them as crew on the work order. Ask the office if the work order needs changing.`
-      : `Job ${j.job}: its work order has been billed in full. Ask the office if it needs changing.`
-  ).join(" ");
+  const words = over.map((j) => {
+    if (j.amount_hidden) return WORK_ORDER_CAP_WORDS.shared_job;
+    const most = j.most_this_invoice_ex ?? 0;
+    if (j.limit === "hourly_maximum") {
+      const maximum = dollars(j.hourly_maximum_ex ?? 0);
+      return most > 0
+        ? WORK_ORDER_CAP_WORDS.hourly_room(j.job, maximum, dollars(most))
+        : WORK_ORDER_CAP_WORDS.hourly_billed_in_full(j.job, maximum);
+    }
+    return most > 0
+      ? WORK_ORDER_CAP_WORDS.room(j.job, dollars(most))
+      : WORK_ORDER_CAP_WORDS.billed_in_full(j.job);
+  });
+  // The figureless sentence names no job, so it is said once.
+  const message = [...new Set(words)].join(" ");
   return { code: "work_order_total_over_agreed", message, jobs: over };
 }
 
@@ -193,6 +223,8 @@ function billedFromLines(
     if (!JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(line.invoice_status)) {
       continue;
     }
+    // P1-05.8: only standard and follow_on invoices count; held lines wait.
+    if (line.invoice_kind === "held") continue;
     if (!countsAgainstWorkOrder(line.line_type)) continue;
     if (excluded.has(String(line.trade_invoice_line_id))) continue;
     billedEx.set(
@@ -204,8 +236,38 @@ function billedFromLines(
 }
 
 /**
- * What is already billed on each job, by the one count every cap uses
- * (billedFromLines). Throws WorkOrderTotalCapReadError on a failed read.
+ * The jobs among `jobIds` where every billed line is `viewerId`'s own (or
+ * nothing is billed), read by the same billed rule as billedFromLines. A
+ * failed read answers no job, so the figure is hidden, never shown on a guess.
+ */
+export async function readJobsBilledOnlyBy(
+  client: any,
+  jobIds: readonly string[],
+  viewerId: string | null | undefined,
+  excludeLineIds: readonly string[] = [],
+): Promise<Set<string>> {
+  const ids = [...new Set(jobIds.map(String).filter(Boolean))];
+  const viewer = String(viewerId ?? "");
+  if (ids.length === 0 || !viewer) return new Set();
+  const excluded = new Set(excludeLineIds.map(String));
+  const own = new Set(ids);
+  try {
+    for (const line of await readJobTradeLines(client, ids)) {
+      if (!JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(line.invoice_status)) continue;
+      if (line.invoice_kind === "held") continue;
+      if (!countsAgainstWorkOrder(line.line_type)) continue;
+      if (excluded.has(String(line.trade_invoice_line_id))) continue;
+      if (String(line.user_id ?? "") !== viewer) own.delete(String(line.job_id));
+    }
+  } catch {
+    return new Set();
+  }
+  return own;
+}
+
+/**
+ * With held lines enabled, the database guard and the live cap read the
+ * same billed total. An unreadable or incomplete result refuses the check.
  */
 export async function readBilledOnJobs(
   client: any,
@@ -214,13 +276,58 @@ export async function readBilledOnJobs(
 ): Promise<Map<string, number>> {
   const ids = [...new Set(jobIds.map(String).filter(Boolean))];
   if (ids.length === 0) return new Map();
-  let lines: Awaited<ReturnType<typeof readJobTradeLines>>;
   try {
-    lines = await readJobTradeLines(client, ids);
+    const flag = await client.from("feature_flags").select("enabled")
+      .eq("flag_name", "trade_line_hold_v1");
+    if (flag.error || !Array.isArray(flag.data)) throw new WorkOrderTotalCapReadError();
+    if (flag.data[0]?.enabled !== true) {
+      return billedFromLines(await readJobTradeLines(client, ids), opts.excludeLineIds);
+    }
+    return await readWorkOrderBackedBilled(client, ids, opts);
   } catch {
     throw new WorkOrderTotalCapReadError();
   }
-  return billedFromLines(lines, opts.excludeLineIds);
+}
+
+/**
+ * The database's one billed sum (work_order_backed_billed, the same function
+ * the job amount guard and job_backed_room read): per job, every line that is
+ * not commission or reimbursement, unreviewed or approved by the office, on a
+ * standard or follow-on invoice in a billed status, override_amount first.
+ * Every reader of "already billed" with trade_line_hold_v1 on calls this; none
+ * restates the rule. Each id must be a job the caller has read: an id the
+ * database does not answer, or a total it cannot make, throws
+ * WorkOrderTotalCapReadError, never reads as nothing billed.
+ */
+export async function readWorkOrderBackedBilled(
+  client: any,
+  jobIds: readonly string[],
+  opts: { excludeLineIds?: readonly string[] } = {},
+): Promise<Map<string, number>> {
+  const ids = [...new Set(jobIds.map(String).filter(Boolean))];
+  const totals = new Map<string, number>();
+  try {
+    for (let i = 0; i < ids.length; i += 25) {
+      const batch = ids.slice(i, i + 25);
+      const result = await client.rpc("work_order_backed_billed", {
+        p_job_ids: batch,
+        p_exclude_line_ids: opts.excludeLineIds ?? [],
+      });
+      if (result.error || !Array.isArray(result.data) || result.data.length !== batch.length) {
+        throw new WorkOrderTotalCapReadError();
+      }
+      for (const row of result.data) {
+        if (!batch.includes(row?.job_id) || totals.has(row.job_id) ||
+          typeof row.billed_ex !== "number" || !Number.isFinite(row.billed_ex)) {
+          throw new WorkOrderTotalCapReadError();
+        }
+        totals.set(row.job_id, row.billed_ex);
+      }
+    }
+  } catch {
+    throw new WorkOrderTotalCapReadError();
+  }
+  return totals;
 }
 
 /**
@@ -238,12 +345,12 @@ export async function readWorkOrderCapFacts(
 ): Promise<{ jobs: WorkOrderCapJob[]; billedEx: Map<string, number> }> {
   if (jobs.length === 0) return { jobs: [], billedEx: new Map() };
   const ids = jobs.map((j) => j.jobId);
-  let lines: Awaited<ReturnType<typeof readJobTradeLines>>;
+  let billedEx: Map<string, number>;
   let variations: any[];
   let changes: any[];
   try {
-    [lines, variations, changes] = await Promise.all([
-      readJobTradeLines(client, ids),
+    [billedEx, variations, changes] = await Promise.all([
+      readBilledOnJobs(client, ids, opts),
       readCustomerVariations(client, ids),
       (async () => {
         const rows: any[] = [];
@@ -263,7 +370,6 @@ export async function readWorkOrderCapFacts(
   } catch {
     throw new WorkOrderTotalCapReadError();
   }
-  const billedEx = billedFromLines(lines, opts.excludeLineIds);
   const capJobs = jobs.map((j) => {
     const added = variations
       .filter((v) =>
@@ -332,6 +438,9 @@ export async function checkWorkOrderTotalCap(client: any, input: {
    * 0 or less (a deduction raised towards 0 lifts the job's total).
    */
   force?: boolean;
+  /** The trade the refusal is shown to. A figure is shown only on a job
+   *  where every billed line is theirs; without it no figure is shown. */
+  viewerId?: string | null;
 }): Promise<WorkOrderTotalCapRefusal | null> {
   const incoming = incomingLabourByJob(input.lines);
   const jobIds = [...incoming].filter(([, ex]) => input.force || cents(ex) > 0)
@@ -374,7 +483,7 @@ export async function checkWorkOrderTotalCap(client: any, input: {
     { excludeLineIds: input.excludeLineIds },
   );
   const billedEx = new Map([...facts.billedEx, ...hourlyBilled]);
-  return workOrderTotalCapRefusal({
+  const capInput = {
     jobs: [
       ...facts.jobs,
       ...hourly.map((m) => ({
@@ -387,6 +496,18 @@ export async function checkWorkOrderTotalCap(client: any, input: {
     billedEx,
     incomingEx: incoming,
     force: input.force,
+  };
+  const over = workOrderTotalCapRefusal(capInput);
+  if (!over) return null;
+  const own = await readJobsBilledOnlyBy(
+    client,
+    over.jobs.map((j) => j.job_id),
+    input.viewerId,
+    input.excludeLineIds,
+  );
+  return workOrderTotalCapRefusal({
+    ...capInput,
+    amountShown: (jobId) => own.has(jobId),
   });
 }
 
@@ -400,6 +521,10 @@ export type WorkOrderCapSummary = {
   /** On a job paid hourly up to a sealed maximum: allowed_ex is that
    *  maximum plus raises, which is what the doors refuse by (ruling 17c). */
   limit?: "hourly_maximum";
+  /** Only with trade_line_hold_v1 on (Follow-up 49 item 9(b)): false when the
+   *  job is outside the cap's scope (work_order_cap_scope), so it has no
+   *  agreed amount in force and nothing on it is held. Absent with it off. */
+  in_cap_scope?: boolean;
 };
 
 /**
@@ -446,6 +571,22 @@ export async function withWorkOrderCaps<
     for (const [, limit] of hourly) {
       if (capLimit(limit) === null) throw new WorkOrderTotalCapReadError();
     }
+    // With the held-line switch on, say which of these jobs the cap reaches.
+    // feature_flags_pkey; the scope read is work_order_cap_scope's.
+    let scope: Map<string, boolean> | null = null;
+    if (capped.length > 0) {
+      const flag = await client.from("feature_flags").select("enabled")
+        .eq("flag_name", "trade_line_hold_v1");
+      if (flag.error || !Array.isArray(flag.data)) {
+        throw new WorkOrderTotalCapReadError();
+      }
+      if (flag.data[0]?.enabled === true) {
+        scope = await readWorkOrderCapScope(
+          client,
+          capped.map((r) => String(r.job_id)),
+        );
+      }
+    }
     summaries = new Map(capped.map((r) => {
       const jobId = String(r.job_id);
       const hourlyLimit = hourly.has(jobId)
@@ -460,6 +601,7 @@ export async function withWorkOrderCaps<
         billed_in_full: cents(billed) >= cents(allowed),
         over: cents(billed) > cents(allowed),
         ...(hourlyLimit !== null ? { limit: "hourly_maximum" as const } : {}),
+        ...(scope ? { in_cap_scope: scope.get(jobId) === true } : {}),
       }];
     }));
   } catch {

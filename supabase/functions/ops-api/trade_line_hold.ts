@@ -1,11 +1,15 @@
-// P1-05.7: unused until the held-line send is wired. This module never saves,
+// P1-05.7/P1-05.8: the held-line send's sorter. This module never saves,
 // sends or changes a work order. Only the facts reader performs I/O.
 // deno-lint-ignore-file no-explicit-any
 import {
   commissionLineState,
   type JobCommissionRecord,
 } from "./job_commission.ts";
-import { countsAgainstWorkOrder } from "./work_order_total_cap.ts";
+import {
+  countsAgainstWorkOrder,
+  readJobsBilledOnlyBy,
+  readWorkOrderBackedBilled,
+} from "./work_order_total_cap.ts";
 import { decideTradeInvoiceMode } from "./trade_invoice_mode.ts";
 import { budgetLabourPay, JOB_LABOUR_BUDGET_FLAG } from "./job_labour_cap.ts";
 import { isRestorationCard } from "./restoration_workflow_store.ts";
@@ -14,7 +18,7 @@ import {
   type ExtraRateRules,
 } from "./trade_invoice_extra_rate_rule.ts";
 import { isTradeInvoiceTimeLineType } from "./trade_invoice_time_entry.ts";
-import { JOB_WORK_ORDER_BILLED_INVOICE_STATUSES } from "./job_work_orders.ts";
+import { readWorkOrderCapScope } from "./work_order_cap_scope.ts";
 
 export const HOLD_REASONS = [
   "no_work_order",
@@ -46,6 +50,18 @@ export const HOLD_WORDS: Record<HoldReason, string> = {
   rate_above_rule: "With the office: this amount is above the usual rate.",
 };
 
+/** Director ruling (18 Nov 2026, as #1667): the amount left on a job's work
+ * order is the agreed amount less what EVERY trade billed, so it is shown to a
+ * trade only when every billed line on that job is their own
+ * (readJobsBilledOnlyBy). Otherwise these words, with no amount. */
+export const LEFT_HIDDEN_WORDS = {
+  /** The send's hold, in place of HOLD_WORDS.over_amount. */
+  over_amount:
+    "With the office: this line is more than this job's work order has left, so <held> is waiting.",
+  /** my_hours, beside a job whose job_left_ex is not shown. */
+  my_hours: "The amount left on this job's work order is not shown. Ask the office.",
+} as const;
+
 /** Lines are already server-normalised and priced, as for today's cap. In
  * particular rate_source is server-owned, not a claim accepted from the wire. */
 export type HoldLine = {
@@ -70,10 +86,19 @@ export type JobHoldFacts = {
   allowed_ex: number;
   backed_billed_ex: number;
   hourly: boolean;
+  /** Follow-up 49 item 9(b): false when the job is outside the cap's scope
+   * (no start date; or an order approved before it; or no approved order on a
+   * job created before it), so no work order reason holds its lines. The
+   * reader always sets it; absent keeps the earlier rule (every job capped). */
+  cap_in_scope?: boolean;
   off_crew?: boolean;
   /** Reader keys crew decisions by week so a different week's rejection
    * never holds this week's work. off_crew is the single-week shorthand. */
   off_crew_by_week?: Record<string, boolean>;
+  /** False unless every billed line on the job is this trade's own
+   * (readJobsBilledOnlyBy): the hold then says no amount left. The reader
+   * always sets it; absent keeps the earlier words. */
+  left_shown?: boolean;
 };
 export type LineHoldFacts = {
   userId: string;
@@ -96,6 +121,9 @@ export type ClassifiedLine = HoldLine & {
     job_number: string | null;
     allowed_ex: number | null;
     left_ex: number | null;
+    /** True when left_ex and allowed_ex are withheld (another trade billed
+     * on the job). */
+    left_hidden?: boolean;
     asked_ex: number;
     expected: unknown;
     fallback_reason?: HoldReason | null;
@@ -127,6 +155,8 @@ function jobReason(
   job: JobHoldFacts | undefined,
   left: number,
 ): HoldReason | null {
+  // Out of the cap's scope: no work order, amount, maximum or over-amount hold.
+  if (job?.cap_in_scope === false) return null;
   const hourly = job?.hourly && isTradeInvoiceTimeLineType(line.line_type);
   if (
     !job?.workOrder || !["draft", "approved"].includes(job.workOrder.status)
@@ -141,9 +171,20 @@ function jobReason(
 
 /** Pure, in input order. Missing/claimed/non-owner commission items are named
  * in skipped_items for the send response, never refused or made into pay. */
+export type ClassifyOptions = {
+  /** Director ruling 1 (18 Nov 2026), used by the send: keep a split only when
+   * it is a same-rate split of an hours line, exact to the cent (hours times
+   * rate makes the whole line, and each part, at storage precision), and the
+   * line carries no start or finish time (a time entry makes its own hours).
+   * Any other over-the-amount line is held whole. Default false keeps the
+   * P1-05.7 sorter unchanged. */
+  sameRateSplitOnly?: boolean;
+};
+
 export function classifyLines(
   lines: readonly HoldLine[],
   facts: LineHoldFacts,
+  options: ClassifyOptions = {},
 ): {
   backed: ClassifiedLine[];
   held: ClassifiedLine[];
@@ -182,21 +223,27 @@ export function classifyLines(
       reason: HoldReason,
       fallback?: HoldReason | null,
     ) => {
+      const leftHidden = job?.left_shown === false;
       held.push({
         ...part,
         hold_reason: reason,
         office_review_status: "awaiting",
         hold_detail: {
           job_number: job?.job_number ?? null,
-          allowed_ex: job?.allowed_ex ?? null,
-          left_ex: job ? Math.max(0, left) / 100 : null,
+          // Hidden: neither figure is saved, since the agreed amount beside
+          // the asked and held amounts gives the remainder back.
+          allowed_ex: leftHidden ? null : job?.allowed_ex ?? null,
+          left_ex: job && !leftHidden ? Math.max(0, left) / 100 : null,
+          ...(leftHidden ? { left_hidden: true } : {}),
           asked_ex: key(line.line_type) === "commission"
             ? 0
             : line.line_total_ex,
           expected: line.suggested ?? null,
           ...(fallback !== undefined ? { fallback_reason: fallback } : {}),
         },
-        words: HOLD_WORDS[reason].replace(
+        words: (leftHidden && reason === "over_amount"
+          ? LEFT_HIDDEN_WORDS.over_amount
+          : HOLD_WORDS[reason]).replace(
           "<left>",
           dollars(Math.max(0, left) / 100),
         )
@@ -308,6 +355,13 @@ export function classifyLines(
       hold(line, "over_amount");
       continue;
     }
+    if (
+      options.sameRateSplitOnly &&
+      !exactSameRateSplit(line, hoursLine, hours, backedHours, rate, asked)
+    ) {
+      hold(line, "over_amount");
+      continue;
+    }
     const paid = hoursLine ? cents(backedHours * rate) : left;
     const split_group_id = facts.split_group_ids[index];
     const paidPart = {
@@ -336,6 +390,25 @@ export function classifyLines(
   return { backed, held, skipped_items };
 }
 
+/** Ruling 1: the two parts must rebuild the line exactly at storage precision
+ * (two decimals for hours and rate, whole cents for money). */
+function exactSameRateSplit(
+  line: HoldLine,
+  hoursLine: boolean,
+  hours: number,
+  backedHours: number,
+  rate: number,
+  asked: number,
+): boolean {
+  if (!hoursLine || rate <= 0) return false;
+  if (line.start_time || line.finish_time) return false;
+  const r = Math.round(rate * 100) / 100;
+  if (r !== rate || Math.round(hours * 100) / 100 !== hours) return false;
+  const heldHours = Math.round((hours - backedHours) * 100) / 100;
+  return cents(hours * r) === asked &&
+    cents(backedHours * r) + cents(heldHours * r) === asked;
+}
+
 export class LineHoldFactsUnreadable extends Error {
   readonly status = 503;
   readonly code = "pay_facts_unreadable";
@@ -352,9 +425,81 @@ const numeric = (value: unknown): number => {
   return n;
 };
 
+/** Batch ids in URL-sized chunks, paged so no row is lost at PostgREST's
+ * row limit. Any error or non-array answer refuses (never reads as none). */
+async function readChunked(
+  client: any,
+  table: string,
+  columns: string,
+  field: string,
+  ids: string[],
+  filter: (q: any) => any = (q) => q,
+): Promise<any[]> {
+  const rows: any[] = [];
+  for (let start = 0; start < ids.length; start += 25) {
+    for (let offset = 0;; offset += 1000) {
+      const response = await filter(
+        client.from(table).select(columns).in(
+          field,
+          ids.slice(start, start + 25),
+        ),
+      )
+        .order(
+          table === "feature_flags"
+            ? "flag_name"
+            : table === "v_job_commission"
+            ? "job_id"
+            : table === "trade_invoice_extra_rate_rules"
+            ? "line_type"
+            : "id",
+        )
+        .range(offset, offset + 999);
+      if (response.error || !Array.isArray(response.data)) {
+        throw new LineHoldFactsUnreadable();
+      }
+      rows.push(...response.data);
+      if (response.data.length < 1000) break;
+    }
+  }
+  return rows;
+}
+
+/** One job's work-order balance in cents: the order's agreed labour plus its
+ * approved variations and amount changes, and what is already billed on the
+ * job by the database's one sum (readWorkOrderBackedBilled), the same lines
+ * the job amount guard counts. Shared by the send and my_hours. */
+function workOrderBalanceCents(
+  jobId: string,
+  wo: { id: string; agreed_labour_ex: unknown } | undefined,
+  variations: any[],
+  changes: any[],
+  billed: ReadonlyMap<string, number>,
+): { agreed: number | null; allowedCents: number; billedCents: number } {
+  const agreed = wo?.agreed_labour_ex == null ? null : numeric(wo.agreed_labour_ex);
+  const added = variations.filter((v) =>
+    v.job_id === jobId && v.work_order_id === wo?.id &&
+    v.status === "approved"
+  )
+    .reduce((s, v) => s + cents(numeric(v.trade_allocation_ex ?? 0)), 0);
+  const changed = changes.filter((c) => c.work_order_id === wo?.id).reduce(
+    (s, c) => s + cents(numeric(c.delta_ex)),
+    0,
+  );
+  if (!billed.has(jobId)) throw new LineHoldFactsUnreadable();
+  const billedCents = cents(numeric(billed.get(jobId)));
+  return {
+    agreed,
+    allowedCents: (agreed === null ? 0 : cents(agreed)) + added + changed,
+    billedCents,
+  };
+}
+
+const COMMISSION_FIGURES =
+  "job_id,commission_id,budget_id,version,state,salesperson_user_id,rule_id,percent,expected_amount_ex_gst,claimed_ex_gst,remaining_ex_gst";
+
 /** Batch all job/receipt ids once, in URL-sized chunks and paged so old billed
  * lines cannot disappear at PostgREST's row limit. No write occurs here.
- * Existing callers must not use this until the held-line send is released. */
+ * Read only when the held-line send is on (trade_line_hold_v1). */
 export async function readLineHoldFacts(
   client: any,
   userId: string,
@@ -371,6 +516,12 @@ export async function readLineHoldFacts(
         ),
       ),
     ];
+    const commissionJobIds = [
+      ...new Set(
+        lines.filter((l) => l.job_id && key(l.line_type) === "commission")
+          .map((l) => l.job_id as string),
+      ),
+    ];
     const typeIds = [
       ...new Set(
         lines.map((l) => l.not_job_work_type_id).filter((id): id is string =>
@@ -378,49 +529,19 @@ export async function readLineHoldFacts(
         ),
       ),
     ];
-    async function read(
+    const read = (
       table: string,
       columns: string,
       field: string,
       ids: string[],
-      filter: (q: any) => any = (q) => q,
-    ): Promise<any[]> {
-      const rows: any[] = [];
-      for (let start = 0; start < ids.length; start += 25) {
-        for (let offset = 0;; offset += 1000) {
-          const response = await filter(
-            client.from(table).select(columns).in(
-              field,
-              ids.slice(start, start + 25),
-            ),
-          )
-            .order(
-              table === "feature_flags"
-                ? "flag_name"
-                : table === "v_job_commission"
-                ? "job_id"
-                : table === "trade_invoice_extra_rate_rules"
-                ? "line_type"
-                : "id",
-            )
-            .range(offset, offset + 999);
-          if (response.error || !Array.isArray(response.data)) {
-            throw new LineHoldFactsUnreadable();
-          }
-          rows.push(...response.data);
-          if (response.data.length < 1000) break;
-        }
-      }
-      return rows;
-    }
+      filter?: (q: any) => any,
+    ) => readChunked(client, table, columns, field, ids, filter);
     // jobs_pkey; users_pkey; uq_work_orders_job_current; job_budgets_version_unique;
-    // uq_group_work_orders_job_work_order; idx_trade_invoice_lines_job_work_date
-    // plus trade_invoices_pkey for the join. No full scope/pricing blobs.
+    // uq_group_work_orders_job_work_order. No full scope/pricing blobs.
     const [
       users,
       jobs,
       orders,
-      billed,
       variations,
       commissions,
       receipts,
@@ -430,6 +551,7 @@ export async function readLineHoldFacts(
       budgets,
       groups,
       flags,
+      capScope,
     ] = await Promise.all([
       read("users", "id,org_id,invoice_type", "id", [userId]),
       read("jobs", "id,org_id,job_number,type,metadata", "id", jobIds),
@@ -440,12 +562,6 @@ export async function readLineHoldFacts(
         jobIds,
         (q) => q.eq("kind", "job"),
       ),
-      read(
-        "trade_invoice_lines",
-        "id,job_id,line_type,line_total_ex,override_amount,trade_invoices!inner(status,invoice_kind)",
-        "job_id",
-        jobIds,
-      ),
       // idx_work_order_customer_variations_job and job_commissions_version_unique.
       read(
         "work_order_customer_variations",
@@ -453,11 +569,16 @@ export async function readLineHoldFacts(
         "job_id",
         jobIds,
       ),
+      // Commission: figures are read only for the sender's own records, and
+      // only for jobs this send claims commission on. Every other record is
+      // read as its job id alone: another salesperson's id and figures are
+      // never fetched (a record that is not the sender's is skipped not_yours).
       read(
         "v_job_commission",
-        "job_id,commission_id,budget_id,version,state,salesperson_user_id,rule_id,percent,expected_amount_ex_gst,claimed_ex_gst,remaining_ex_gst",
+        COMMISSION_FIGURES,
         "job_id",
-        jobIds,
+        commissionJobIds,
+        (q) => q.eq("salesperson_user_id", userId),
       ),
       // expense_receipts_pkey and not_job_work_types_pkey.
       read("expense_receipts", "id,status,submitted_by", "id", receiptIds),
@@ -489,8 +610,22 @@ export async function readLineHoldFacts(
       read("feature_flags", "flag_name,enabled", "flag_name", [
         JOB_LABOUR_BUDGET_FLAG,
       ]),
+      readWorkOrderCapScope(client, jobIds),
     ]);
     if (users.length !== 1) throw new LineHoldFactsUnreadable();
+    // Which of those jobs carry a record at all: job id only, no salesperson
+    // and no figure (job_commissions_version_unique via the view).
+    const ownCommissionJobs = new Set(
+      commissions.filter((c) => c.salesperson_user_id === userId).map((c) =>
+        String(c.job_id)
+      ),
+    );
+    const otherCommissionJobs = (await read(
+      "v_job_commission",
+      "job_id",
+      "job_id",
+      commissionJobIds.filter((id) => !ownCommissionJobs.has(id)),
+    )).map((c) => String(c.job_id));
     const facts: LineHoldFacts = {
       userId,
       jobs: {},
@@ -510,21 +645,29 @@ export async function readLineHoldFacts(
       })),
       split_group_ids: lines.map(() => crypto.randomUUID()),
     };
-    // work_order_amount_changes_wo_idx, ids bounded to this send.
-    const changes = await read(
-      "work_order_amount_changes",
-      "id,work_order_id,delta_ex",
-      "work_order_id",
-      orders.map((o) => o.id),
+    const ownJobs = jobs.filter((row) =>
+      !row.org_id || row.org_id === users[0].org_id
     );
-    for (const row of jobs) {
-      if (row.org_id && row.org_id !== users[0].org_id) continue;
+    // work_order_amount_changes_wo_idx, ids bounded to this send. Billed:
+    // the database's one sum, only for jobs read above (FU49 item 8).
+    const [changes, billed] = await Promise.all([
+      read(
+        "work_order_amount_changes",
+        "id,work_order_id,delta_ex",
+        "work_order_id",
+        orders.map((o) => o.id),
+      ),
+      readWorkOrderBackedBilled(client, ownJobs.map((row) => row.id)),
+    ]);
+    // Whose lines are billed on each job (#1667's one rule); a failed read
+    // answers no job, so every amount left is withheld.
+    const allMine = await readJobsBilledOnlyBy(client, ownJobs.map((row) => row.id), userId);
+    for (const row of ownJobs) {
       const wo = orders.find((o) =>
         o.job_id === row.id && o.status === "approved"
       ) ?? orders.find((o) => o.job_id === row.id && o.status === "draft");
-      const agreed = wo?.agreed_labour_ex == null
-        ? null
-        : numeric(wo.agreed_labour_ex);
+      const balance = workOrderBalanceCents(row.id, wo, variations, changes, billed);
+      const agreed = balance.agreed;
       const budget = budgets.filter((b) =>
         b.job_id === row.id
       ).sort((a, b) => b.version - a.version)[0];
@@ -546,39 +689,17 @@ export async function readLineHoldFacts(
         restorationWorkOrder: isRestorationCard(row) &&
           wo?.status === "approved" && agreed !== null,
       });
-      const added = variations.filter((v) =>
-        v.job_id === row.id && v.work_order_id === wo?.id &&
-        v.status === "approved"
-      )
-        .reduce((s, v) =>
-          s + cents(numeric(v.trade_allocation_ex ?? 0)), 0);
-      const changed = changes.filter((c) => c.work_order_id === wo?.id).reduce(
-        (s, c) => s + cents(numeric(c.delta_ex)),
-        0,
-      );
-      const billedCents = billed.filter((l) =>
-        l.job_id === row.id && countsAgainstWorkOrder(l.line_type)
-      ).reduce((sum, l) => {
-        const invoice = Array.isArray(l.trade_invoices)
-          ? l.trade_invoices[0]
-          : l.trade_invoices;
-        if (!invoice) throw new LineHoldFactsUnreadable();
-        if (
-          invoice.invoice_kind === "held" ||
-          !JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(invoice.status)
-        ) return sum;
-        return sum + cents(numeric(l.override_amount ?? l.line_total_ex));
-      }, 0);
       facts.jobs[row.id] = {
         job_number: row.job_number ?? null,
         workOrder: wo
           ? { id: wo.id, status: wo.status, agreed_ex: agreed }
           : null,
-        allowed_ex: ((agreed === null ? 0 : cents(agreed)) + added + changed) /
-          100,
-        backed_billed_ex: billedCents / 100,
+        allowed_ex: balance.allowedCents / 100,
+        backed_billed_ex: balance.billedCents / 100,
         hourly: mode.invoice_mode === "hourly",
+        cap_in_scope: capScope.get(row.id) === true,
         off_crew_by_week: {},
+        left_shown: allMine.has(row.id),
       };
     }
     for (const r of receipts) {
@@ -591,7 +712,23 @@ export async function readLineHoldFacts(
         facts.notJobTypes[t.id] = t.label;
       }
     }
+    for (const jobId of otherCommissionJobs) {
+      facts.commissions[jobId] = {
+        job_id: jobId,
+        commission_id: "",
+        budget_id: "",
+        version: 0,
+        state: "named",
+        salesperson_user_id: null,
+        rule_id: null,
+        percent: null,
+        expected_amount_ex_gst: null,
+        claimed_ex_gst: 0,
+        remaining_ex_gst: null,
+      };
+    }
     for (const c of commissions) {
+      if (c.salesperson_user_id !== userId) continue;
       facts.commissions[c.job_id] = {
         ...c,
         expected_amount_ex_gst: c.expected_amount_ex_gst == null
@@ -614,7 +751,13 @@ export async function readLineHoldFacts(
     for (let start = 0; start < pairs.length; start += 8) {
       await Promise.all(
         pairs.slice(start, start + 8).map(async ([id, startDay]) => {
-          if (!startDay) throw new LineHoldFactsUnreadable();
+          // A counted line with no week and no work date cannot be checked
+          // against the crew. It is held not_on_crew (with the reason the
+          // other rules give as fallback), never thrown (director 18 Nov).
+          if (!startDay) {
+            if (facts.jobs[id]) facts.jobs[id].off_crew_by_week![""] = true;
+            return;
+          }
           const result = await client.rpc("trade_is_off_job_crew", {
             p_user_id: userId,
             p_job_id: id,
@@ -630,6 +773,98 @@ export async function readLineHoldFacts(
       );
     }
     return facts;
+  } catch {
+    throw new LineHoldFactsUnreadable();
+  }
+}
+
+/** my_hours: what is left on each job's approved work order, and nothing
+ * else (null: no approved amount, or the job is outside the cap's scope, which
+ * holds nothing). A balance-only read: no commission, no salesperson, no rate
+ * and no receipt is fetched. Throws LineHoldFactsUnreadable on any failed
+ * read; the caller says so, never 0. */
+export async function readJobAmountsLeft(
+  client: any,
+  userId: string,
+  jobIds: readonly string[],
+): Promise<Record<string, number | null>> {
+  return (await readJobAmountsState(client, userId, jobIds)).left;
+}
+
+/** readJobAmountsLeft plus, per job, whether it is under the cap
+ * (work_order_cap_scope). A job outside it has left null and capped false.
+ * hidden: an amount exists but another trade billed on the job (or whose
+ * lines they are could not be read), so left is null for it. */
+export async function readJobAmountsState(
+  client: any,
+  userId: string,
+  jobIds: readonly string[],
+): Promise<{
+  left: Record<string, number | null>;
+  capped: Record<string, boolean>;
+  hidden: Record<string, boolean>;
+}> {
+  try {
+    const ids = [...new Set(jobIds.filter((id) => !!id))];
+    const out: Record<string, number | null> = {};
+    const capped: Record<string, boolean> = {};
+    const hidden: Record<string, boolean> = {};
+    if (ids.length === 0) return { left: out, capped, hidden };
+    // users_pkey; jobs_pkey; uq_work_orders_job_current;
+    // idx_work_order_customer_variations_job.
+    const [users, jobs, orders, variations, scope] = await Promise.all([
+      readChunked(client, "users", "id,org_id", "id", [userId]),
+      readChunked(client, "jobs", "id,org_id", "id", ids),
+      readChunked(
+        client,
+        "work_orders",
+        "id,job_id,status,agreed_labour_ex",
+        "job_id",
+        ids,
+        (q) => q.eq("kind", "job").eq("status", "approved"),
+      ),
+      readChunked(
+        client,
+        "work_order_customer_variations",
+        "id,job_id,work_order_id,status,trade_allocation_ex",
+        "job_id",
+        ids,
+      ),
+      readWorkOrderCapScope(client, ids),
+    ]);
+    if (users.length !== 1) throw new LineHoldFactsUnreadable();
+    const ownJobs = jobs.filter((row) =>
+      !row.org_id || row.org_id === users[0].org_id
+    );
+    // work_order_amount_changes_wo_idx, ids bounded to these orders. Billed:
+    // the database's one sum, the same as the send (FU49 item 8).
+    const [changes, billed] = await Promise.all([
+      readChunked(
+        client,
+        "work_order_amount_changes",
+        "id,work_order_id,delta_ex",
+        "work_order_id",
+        orders.map((o) => o.id),
+      ),
+      readWorkOrderBackedBilled(client, ownJobs.map((row) => row.id)),
+    ]);
+    // Whose lines are billed on each job (#1667's one rule); a failed read
+    // answers no job, so every figure is withheld.
+    const allMine = await readJobsBilledOnlyBy(client, ownJobs.map((row) => row.id), userId);
+    for (const row of ownJobs) {
+      const wo = orders.find((o) =>
+        o.job_id === row.id && o.status === "approved"
+      );
+      const balance = workOrderBalanceCents(row.id, wo, variations, changes, billed);
+      capped[row.id] = scope.get(row.id) === true;
+      const figure = !capped[row.id] || !wo || balance.agreed === null
+        ? null
+        : (balance.allowedCents - balance.billedCents) / 100;
+      // The all-trades remainder never leaves here for a shared job.
+      hidden[row.id] = figure !== null && !allMine.has(row.id);
+      out[row.id] = hidden[row.id] ? null : figure;
+    }
+    return { left: out, capped, hidden };
   } catch {
     throw new LineHoldFactsUnreadable();
   }

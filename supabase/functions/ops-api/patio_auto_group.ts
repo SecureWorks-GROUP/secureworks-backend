@@ -15,6 +15,9 @@
 //      Pay comes from the work order's labour; nothing is frozen, invoiced,
 //      sent or paid. A job already paid by hours is left alone (the
 //      double-pay fence), and so is a job whose group is frozen or void.
+//      P1-13.4: a group opened while the one super rule applies is written
+//      on the inclusive basis (groupPayBasisForNewGroup, read once per run);
+//      an unreadable rule opens no group (reason pay_rule_unreadable).
 // Crew = live allocations (no ghost, observer or cancelled row) of anyone who
 // is not office admin. Never throws: every job comes back with a reason.
 //
@@ -33,8 +36,8 @@
 
 import {
   assertNoNormalPayOnJob,
-  GROUP_PAY_BASIS_EMPLOYER_SUPER,
   groupFeatureOn,
+  groupPayBasisForNewGroup,
   GroupWorkOrderError,
   PATIO_PAY_GROUP_ONLY_FLAG,
   readGroupWorkOrderCrew,
@@ -103,7 +106,8 @@ export type PatioAutoGroupReason =
   | "labour_outside_pool"
   | "group_frozen"
   | "group_void"
-  | "group_failed";
+  | "group_failed"
+  | "pay_rule_unreadable";
 
 export type PatioAutoGroupResult = {
   job_id: string;
@@ -228,6 +232,8 @@ async function autoGroupJobs(client: any, kind: AutoGroupKind) {
       "id, job_id, work_order_id, status, split_frozen_at",
     ).in("job_id", jobIds);
     if (groupError) throw new Error("groups unreadable");
+    // Read once per run, only when a group is about to be opened.
+    let payBasis: string | null | undefined;
     for (const wo of live) {
       if (results.length >= PATIO_AUTO_GROUP_LIMIT) break;
       const job = wo.jobs;
@@ -257,12 +263,24 @@ async function autoGroupJobs(client: any, kind: AutoGroupKind) {
         });
         continue;
       }
+      if (payBasis === undefined) {
+        try {
+          payBasis = await groupPayBasisForNewGroup(client);
+        } catch {
+          console.error(kind.logTag, "pay rule unreadable: no group opened this run");
+          payBasis = null;
+        }
+      }
+      if (payBasis === null) {
+        results.push({ ...base, reason: "pay_rule_unreadable", code: "pay_rule_unreadable" });
+        continue;
+      }
       const { data: created, error: insertError } = await client.from("group_work_orders").insert({
         org_id: job.org_id,
         job_id: jobId,
         work_order_id: String(wo.id),
         status: "open",
-        pay_basis: GROUP_PAY_BASIS_EMPLOYER_SUPER,
+        pay_basis: payBasis,
         share_token: newShareToken(),
         created_by: wo.approved_by ?? null,
       }).select("id").single();

@@ -3,6 +3,7 @@
 
 import {
   parseAmounts,
+  parseCreditAmounts,
   parseInvoiceNumber,
   parseSupplierCredit,
 } from "./supplier_credit_parse.ts";
@@ -30,15 +31,17 @@ Deno.test("parseSupplierCredit: reads full credit note with number, date, amount
     "Date: 3 October 2026",
     "Original invoice INV-5001",
     "Total inc GST $220.00",
-    "GST $20.00",
+    "Total GST $20.00",
   ].join("\n");
 
   assertEquals(parseSupplierCredit(text), {
     credit_number: "CN-1001",
     credit_date: "2026-10-03",
     amount_ex: 200,
+    amount_gst: 20,
     amount_inc: 220,
     names_bill_number: "INV-5001",
+    needs_review: false,
   });
 });
 
@@ -67,8 +70,10 @@ Deno.test("parseSupplierCredit: credit with no total gives null amounts, never 0
     credit_number: "CN-1002",
     credit_date: "2026-10-03",
     amount_ex: null,
+    amount_gst: null,
     amount_inc: null,
     names_bill_number: "INV-5002",
+    needs_review: false,
   });
 
   const zeroTotal = [
@@ -82,8 +87,10 @@ Deno.test("parseSupplierCredit: credit with no total gives null amounts, never 0
     credit_number: "CN-1003",
     credit_date: "2026-10-03",
     amount_ex: null,
+    amount_gst: null,
     amount_inc: null,
     names_bill_number: null,
+    needs_review: false,
   });
 });
 
@@ -208,4 +215,452 @@ Deno.test("materials_email_enrich re-exports shared parseInvoiceNumber and parse
     ),
     { exGst: 1000, incGst: 1100 },
   );
+});
+
+Deno.test("parseSupplierCredit: picks credit/amount-credited total over earlier bare or invoice total", () => {
+  const creditLabelled = [
+    "CREDIT NOTE CN-2001",
+    "Supplier: ZZTEST Supplies",
+    "Date: 10/10/2026",
+    "Original invoice INV-6001",
+    "Total $550.00",
+    "Credited items:",
+    "Subtotal (ex GST) $100.00",
+    "Total GST $10.00",
+    "Credit Total $110.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(creditLabelled), {
+    credit_number: "CN-2001",
+    credit_date: "2026-10-10",
+    amount_ex: 100,
+    amount_gst: 10,
+    amount_inc: 110,
+    names_bill_number: "INV-6001",
+    needs_review: false,
+  });
+
+  const amountCreditedLabelled = [
+    "CREDIT NOTE CN-2002",
+    "Date: 10/10/2026",
+    "Original invoice INV-6002",
+    "Subtotal (ex GST) $500.00",
+    "Total GST $50.00",
+    "Total (inc GST) $550.00",
+    "Amount Credited (inc GST) $110.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(amountCreditedLabelled), {
+    credit_number: "CN-2002",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: 110,
+    names_bill_number: "INV-6002",
+    needs_review: false,
+  });
+});
+
+Deno.test("parseSupplierCredit: refuses two different bare totals and ignores invoice-only total", () => {
+  const twoBareTotals = [
+    "CREDIT NOTE CN-2003",
+    "Date: 10/10/2026",
+    "Original invoice INV-6003",
+    "Subtotal (ex GST) $500.00",
+    "Total GST $50.00",
+    "Total $550.00",
+    "Returned stock:",
+    "Subtotal (ex GST) $100.00",
+    "Total GST $10.00",
+    "Total $110.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(twoBareTotals), {
+    credit_number: "CN-2003",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: null,
+    names_bill_number: "INV-6003",
+    needs_review: true,
+  });
+
+  const invoiceTotalOnly = [
+    "CREDIT NOTE CN-2004",
+    "Date: 10/10/2026",
+    "Original invoice INV-6004",
+    "Original Invoice Total $550.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(invoiceTotalOnly), {
+    credit_number: "CN-2004",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: null,
+    names_bill_number: "INV-6004",
+    needs_review: false,
+  });
+});
+
+Deno.test("parseSupplierCredit: refuses when two credit total candidates differ", () => {
+  const differingCreditTotals = [
+    "CREDIT NOTE CN-2005",
+    "Date: 10/10/2026",
+    "Original invoice INV-6005",
+    "Credit Total $110.00",
+    "Amount Credited $95.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(differingCreditTotals), {
+    credit_number: "CN-2005",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: null,
+    names_bill_number: "INV-6005",
+    needs_review: true,
+  });
+  assertEquals(parseAmounts(differingCreditTotals), {
+    exGst: null,
+    incGst: null,
+  });
+
+  const agreeingCreditTotals = [
+    "CREDIT NOTE CN-2006",
+    "Date: 10/10/2026",
+    "Credit Total $110.00",
+    "Amount Credited $110.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(agreeingCreditTotals)?.amount_inc, 110);
+  assertEquals(parseSupplierCredit(agreeingCreditTotals)?.needs_review, false);
+});
+
+Deno.test("parseSupplierCredit: uses only document-level GST total, leaving ex and GST null on bare or line GST", () => {
+  const lineGstWithoutTotalGst = [
+    "CREDIT NOTE CN-2007",
+    "Supplier: ZZTEST Supplies",
+    "Date: 10/10/2026",
+    "Original invoice INV-6007",
+    "Line 1 post kit  Ex $100.00  GST $10.00  Line $110.00",
+    "Line 2 rail kit  Ex $100.00  GST $10.00  Line $110.00",
+    "Credit Total (inc GST) $220.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(lineGstWithoutTotalGst), {
+    credit_number: "CN-2007",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: 220,
+    names_bill_number: "INV-6007",
+    needs_review: false,
+  });
+
+  const exOnlyWithLineGst = [
+    "CREDIT NOTE CN-2008",
+    "Date: 10/10/2026",
+    "Line 1 GST $10.00",
+    "Subtotal (ex GST) $200.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(exOnlyWithLineGst), {
+    credit_number: "CN-2008",
+    credit_date: "2026-10-10",
+    amount_ex: 200,
+    amount_gst: null,
+    amount_inc: null,
+    names_bill_number: null,
+    needs_review: false,
+  });
+
+  const withDocumentGstTotal = [
+    "CREDIT NOTE CN-2009",
+    "Date: 10/10/2026",
+    "Line 1 GST $10.00",
+    "GST Total $20.00",
+    "Credit Total (inc GST) $220.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(withDocumentGstTotal), {
+    credit_number: "CN-2009",
+    credit_date: "2026-10-10",
+    amount_ex: 200,
+    amount_gst: 20,
+    amount_inc: 220,
+    names_bill_number: null,
+    needs_review: false,
+  });
+});
+
+Deno.test("parseSupplierCredit: checks ex plus GST against inc within one cent and flags needs_review on mismatch", () => {
+  const mismatch = [
+    "CREDIT NOTE CN-2010",
+    "Supplier: ZZTEST Supplies",
+    "Date: 10/10/2026",
+    "Original invoice INV-6010",
+    "Subtotal (ex GST) $200.00",
+    "Total GST $20.00",
+    "Credit Total (inc GST) $250.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(mismatch), {
+    credit_number: "CN-2010",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: null,
+    names_bill_number: "INV-6010",
+    needs_review: true,
+  });
+  assertEquals(parseAmounts(mismatch), { exGst: null, incGst: null });
+
+  const twoCentMismatch = [
+    "CREDIT NOTE CN-2011",
+    "Date: 10/10/2026",
+    "Subtotal (ex GST) $100.00",
+    "Total GST $10.02",
+    "Credit Total (inc GST) $110.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(twoCentMismatch)?.needs_review, true);
+  assertEquals(parseSupplierCredit(twoCentMismatch)?.amount_ex, null);
+  assertEquals(parseSupplierCredit(twoCentMismatch)?.amount_gst, null);
+  assertEquals(parseSupplierCredit(twoCentMismatch)?.amount_inc, null);
+
+  const oneCentRounding = [
+    "CREDIT NOTE CN-2012",
+    "Date: 10/10/2026",
+    "Subtotal (ex GST) $100.00",
+    "Total GST $10.01",
+    "Credit Total (inc GST) $110.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(oneCentRounding), {
+    credit_number: "CN-2012",
+    credit_date: "2026-10-10",
+    amount_ex: 100,
+    amount_gst: 10.01,
+    amount_inc: 110,
+    names_bill_number: null,
+    needs_review: false,
+  });
+
+  const exExceedsInc = parseCreditAmounts(
+    "Subtotal (ex GST) $250.00\nCredit Total (inc GST) $220.00",
+  );
+  assertEquals(exExceedsInc, {
+    exGst: null,
+    gst: null,
+    incGst: null,
+    needsReview: true,
+  });
+
+  const bareSummaryGstMismatch = [
+    "CREDIT NOTE CN-2013",
+    "Date: 10/10/2026",
+    "Original invoice INV-6013",
+    "Subtotal (ex GST) $200.00",
+    "GST $25.00",
+    "Total (inc GST) $220.00",
+  ].join("\n");
+  assertEquals(parseSupplierCredit(bareSummaryGstMismatch), {
+    credit_number: "CN-2013",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: null,
+    names_bill_number: "INV-6013",
+    needs_review: true,
+  });
+});
+
+Deno.test("parseSupplierCredit: ignores same-line invoice total and bare total printed before credit subtotal", () => {
+  const sameLineInvoiceTotal = [
+    "CREDIT NOTE CN-2014",
+    "Supplier: ZZTEST Supplies",
+    "Date: 10/10/2026",
+    "Original invoice INV-6014 Total $550.00",
+  ].join("\n");
+  assertEquals(parseSupplierCredit(sameLineInvoiceTotal), {
+    credit_number: "CN-2014",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: null,
+    names_bill_number: "INV-6014",
+    needs_review: false,
+  });
+
+  const bareTotalBeforeCreditSubtotal = [
+    "CREDIT NOTE CN-2015",
+    "Supplier: ZZTEST Supplies",
+    "Date: 10/10/2026",
+    "Original invoice INV-6015",
+    "Total $550.00",
+    "Credit Subtotal (ex GST) $100.00",
+    "Credit GST $10.00",
+  ].join("\n");
+  assertEquals(parseSupplierCredit(bareTotalBeforeCreditSubtotal), {
+    credit_number: "CN-2015",
+    credit_date: "2026-10-10",
+    amount_ex: 100,
+    amount_gst: 10,
+    amount_inc: 110,
+    names_bill_number: "INV-6015",
+    needs_review: false,
+  });
+
+  const sameLineInvoiceTotalWithCreditTotal = [
+    "CREDIT NOTE CN-2018",
+    "Supplier: ZZTEST Supplies",
+    "Date: 10/10/2026",
+    "Original invoice INV-6018 Total $550.00",
+    "Subtotal (ex GST) $100.00",
+    "Total GST $10.00",
+    "Total $110.00",
+  ].join("\n");
+  assertEquals(parseSupplierCredit(sameLineInvoiceTotalWithCreditTotal), {
+    credit_number: "CN-2018",
+    credit_date: "2026-10-10",
+    amount_ex: 100,
+    amount_gst: 10,
+    amount_inc: 110,
+    names_bill_number: "INV-6018",
+    needs_review: false,
+  });
+});
+
+Deno.test("parseSupplierCredit: sets needs_review with null amounts when credit totalling 110 is followed by Original Invoice block totalling 550", () => {
+  const creditFollowedByOriginalInvoiceBlock = [
+    "CREDIT NOTE CN-2016",
+    "Supplier: ZZTEST Supplies",
+    "Date: 10/10/2026",
+    "Subtotal (ex GST) $100.00",
+    "Total GST $10.00",
+    "Total $110.00",
+    "Original Invoice INV-6016",
+    "Subtotal (ex GST) $500.00",
+    "Total GST $50.00",
+    "Total $550.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(creditFollowedByOriginalInvoiceBlock), {
+    credit_number: "CN-2016",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: null,
+    names_bill_number: "INV-6016",
+    needs_review: true,
+  });
+  assertEquals(parseAmounts(creditFollowedByOriginalInvoiceBlock), {
+    exGst: null,
+    incGst: null,
+  });
+
+  const bareCreditTotalFollowedByOriginalInvoiceBlock = [
+    "CREDIT NOTE CN-2016B",
+    "Supplier: ZZTEST Supplies",
+    "Date: 10/10/2026",
+    "Total (inc GST) $110.00",
+    "Original Invoice INV-6016",
+    "Subtotal (ex GST) $500.00",
+    "Total GST $50.00",
+    "Total (inc GST) $550.00",
+  ].join("\n");
+
+  assertEquals(
+    parseSupplierCredit(bareCreditTotalFollowedByOriginalInvoiceBlock),
+    {
+      credit_number: "CN-2016B",
+      credit_date: "2026-10-10",
+      amount_ex: null,
+      amount_gst: null,
+      amount_inc: null,
+      names_bill_number: "INV-6016",
+      needs_review: true,
+    },
+  );
+
+  const creditLabelledFollowedByOriginalInvoiceBlock = [
+    "CREDIT NOTE CN-2016C",
+    "Supplier: ZZTEST Supplies",
+    "Date: 10/10/2026",
+    "Credit Total (inc GST) $110.00",
+    "Original Invoice INV-6016",
+    "Subtotal (ex GST) $500.00",
+    "Total GST $50.00",
+    "Total $550.00",
+  ].join("\n");
+
+  assertEquals(
+    parseSupplierCredit(creditLabelledFollowedByOriginalInvoiceBlock),
+    {
+      credit_number: "CN-2016C",
+      credit_date: "2026-10-10",
+      amount_ex: null,
+      amount_gst: null,
+      amount_inc: 110,
+      names_bill_number: "INV-6016",
+      needs_review: false,
+    },
+  );
+});
+
+Deno.test("parseSupplierCredit: sets needs_review with null amounts when any two unlabelled totals differ anywhere in document", () => {
+  const twoBareTotals110Then550 = [
+    "CREDIT NOTE CN-2017",
+    "Supplier: ZZTEST Supplies",
+    "Date: 10/10/2026",
+    "Total $110.00",
+    "Total $550.00",
+  ].join("\n");
+
+  assertEquals(parseSupplierCredit(twoBareTotals110Then550), {
+    credit_number: "CN-2017",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: null,
+    names_bill_number: null,
+    needs_review: true,
+  });
+  assertEquals(parseAmounts(twoBareTotals110Then550), {
+    exGst: null,
+    incGst: null,
+  });
+
+  const twoDifferentSubtotals = [
+    "CREDIT NOTE CN-2017B",
+    "Date: 10/10/2026",
+    "Subtotal (ex GST) $100.00",
+    "Subtotal (ex GST) $500.00",
+  ].join("\n");
+  assertEquals(parseSupplierCredit(twoDifferentSubtotals), {
+    credit_number: "CN-2017B",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: null,
+    names_bill_number: null,
+    needs_review: true,
+  });
+
+  const agreeingBareTotals = [
+    "CREDIT NOTE CN-2017C",
+    "Date: 10/10/2026",
+    "Total $110.00",
+    "Amount Due $110.00",
+  ].join("\n");
+  assertEquals(parseSupplierCredit(agreeingBareTotals), {
+    credit_number: "CN-2017C",
+    credit_date: "2026-10-10",
+    amount_ex: null,
+    amount_gst: null,
+    amount_inc: 110,
+    names_bill_number: null,
+    needs_review: false,
+  });
 });

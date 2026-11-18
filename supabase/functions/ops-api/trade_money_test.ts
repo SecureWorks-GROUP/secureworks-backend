@@ -1,5 +1,5 @@
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { fyStartFor, fyLabelFor, summariseTradeMoney, tradeMoneyRow } from "./trade_money.ts";
+import { assert, assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { fyStartFor, fyLabelFor, summariseTradeMoney, superMarkedPaidWords, tradeMoneyRow } from "./trade_money.ts";
 
 const paid = tradeMoneyRow({
   id: "i1", invoice_number: "SW-INV-H-260801-020", week_end: "2026-08-02", status: "paid", xero_bill_status: "PAID",
@@ -81,7 +81,7 @@ function invoice(id: string, week: string, end: string, overrides: TestRow = {})
     id, invoice_number: id, user_id: "trade-a", week_start: week, week_end: end,
     status: "approved", gst_on: false, gst: 0, super_rate: 0.12, super_basis: "inclusive_12_112_v1",
     gross_earned: 112.01, subtotal_ex: 112.01, total_inc: 112.01, super_amount: 12,
-    net_pay: 100.01, amount_paid: 0, pay_run_id: null, reimbursements: [], ...overrides,
+    net_pay: 100.01, amount_paid: 0, pay_run_id: null, xero_bill_id: "bill-" + id, reimbursements: [], ...overrides,
   };
 }
 
@@ -114,6 +114,9 @@ function historyStore() {
         return { data: null, error: { code: "42703", message: "column trade_invoices.pay_run_id does not exist" } };
       }
       return { data: rows.map(row => {
+        if (table === "trade_invoices" && !fields.includes("reimbursements:")) {
+          return Object.fromEntries(fields.split(",").map(key => [key, row[key]]));
+        }
         const copy = { ...row };
         if (!fields.includes("pay_run_id")) delete copy.pay_run_id;
         return copy;
@@ -155,6 +158,11 @@ function historyStore() {
   return { client, tables, state };
 }
 
+Deno.test("pay history: the office's super stamp is shown as a Perth day", () => {
+  assertEquals(superMarkedPaidWords("2026-11-17T17:30:00Z"), { marked_paid_on: "2026-11-18", words: "Marked paid by the office on 18 Nov 2026" });
+  assertThrows(() => superMarkedPaidWords("not a date"));
+});
+
 Deno.test("pay history: three invoices reconcile across weeks, months, FY, super and tax", async () => {
   const { client } = historyStore();
   const { status, body } = await readTradePayHistory(client, "trade-a", historyToday, null);
@@ -168,10 +176,16 @@ Deno.test("pay history: three invoices reconcile across weeks, months, FY, super
   assertEquals(body.years, [{ fy_label: "FY 2026/27", ...fy }]);
   assertEquals(body.this_year_vs_last.this_fy, fy);
   assertEquals(body.super.since_start, 36);
+  assertEquals(body.super.not_recorded_count, 0);
   assertEquals(body.super.this_fy, 36);
   assertEquals(body.super.by_invoice.map(row => [row.invoice_id, row.status]), [
-    ["a3", "to_be_paid"], ["a2", "to_be_paid"], ["a1", "paid_to_fund"],
+    ["a3", "to_be_paid"], ["a2", "to_be_paid"], ["a1", "marked_paid_by_office"],
   ]);
+  // Director 15:22: the office marked it paid; My pay never says it reached the fund.
+  const marked = body.super.by_invoice.find(row => row.invoice_id === "a1");
+  assertEquals([marked?.marked_paid_on, marked?.words], ["2026-09-08", "Marked paid by the office on 8 Sep 2026"]);
+  assert(!JSON.stringify(body).toLowerCase().includes("fund"), "no fund wording anywhere in My pay");
+  assertEquals(body.super.by_invoice.find(row => row.invoice_id === "a2")?.words, undefined);
   assertEquals(body.tax_set_aside, { percent: 20, this_fy_amount: 58.8 });
   assertEquals(body.rate_history, [{ effective_from: "2026-01-01", hourly_rate: 1 }, { effective_from: "2026-05-01", hourly_rate: 2 }]);
 
@@ -180,6 +194,107 @@ Deno.test("pay history: three invoices reconcile across weeks, months, FY, super
   assertEquals(other.body.super.by_invoice.map(row => row.invoice_id), ["b"]);
   assertEquals(other.body.super.since_start, 12);
   assertEquals(other.body.rate_history, [{ effective_from: "2026-05-01", hourly_rate: 9 }]);
+});
+
+Deno.test("history uses the legacy invoice total and counts unrecorded super across the trade's lifetime", async () => {
+  const { tables, client } = historyStore();
+  const legacySplit = { super_amount: null, super_basis: null, super_rate: null, net_pay: null,
+    total_inc: 22.11, gst: 2.01, amount_paid: 7.07 };
+  tables.trade_invoices.push(
+    invoice("legacy", "2026-08-31", "2026-09-06", legacySplit),
+    invoice("prior", "2024-01-01", "2024-01-07", legacySplit),
+    invoice("void", "2024-01-01", "2024-01-07", { ...legacySplit, xero_bill_status: "VOIDED" }),
+    invoice("future", "2026-09-14", "2026-09-20", legacySplit),
+    invoice("other", "2026-08-31", "2026-09-06", { ...legacySplit, user_id: "trade-b" }),
+  );
+  const read = () => readTradePayHistory(client, "trade-a", historyToday, "1");
+  const { status, body } = await read();
+  assertEquals(status, 200);
+  assert("weeks" in body);
+  const week = { total_inc_super: 128.11, paid_to_you: 116.11, paid_to_super: 12, reimbursements: 0,
+    paid_into_bank: 101.07, invoices: 2 };
+  assertEquals(body.weeks[0], { week_start: "2026-08-31", ...week });
+  assertEquals(body.months[0], { month: "2026-09", label: "Sep 2026", ...week });
+  assertEquals(body.this_year_vs_last.this_fy, { total_inc_super: 352.13, paid_to_you: 316.13,
+    paid_to_super: 36, reimbursements: 3.01, paid_into_bank: 124.52, invoices: 4 });
+  assertEquals(body.super.since_start, 36);
+  assertEquals(body.super.not_recorded_count, 2);
+  assertEquals(body.super.by_invoice.find(i => i.invoice_id === "legacy"), {
+    invoice_id: "legacy", invoice_number: "legacy", week_start: "2026-08-31", amount: 0, status: "not_recorded",
+  });
+  assertEquals(body.tax_set_aside?.this_fy_amount, 63.22);
+  const legacy = tables.trade_invoices.find(i => i.id === "legacy")!;
+  legacy.net_pay = 1;
+  assertEquals(await read(), { status, body });
+  legacy.total_inc = null;
+  assertEquals((await read()).status, 503);
+});
+
+Deno.test("an invoice with no Xero bill is listed as not_in_xero and left out of every paid and super total", async () => {
+  const { tables, client } = historyStore();
+  const legacySplit = { super_amount: null, super_basis: null, super_rate: null, net_pay: null,
+    total_inc: 22.11, gst: 2.01, amount_paid: 7.07 };
+  const read = (years: string | null = "1") => readTradePayHistory(client, "trade-a", historyToday, years);
+  tables.trade_invoices.push(invoice("legacy", "2026-08-31", "2026-09-06", legacySplit));
+  const baseline = await read();
+  assert("super" in baseline.body);
+  assertEquals(baseline.body.super.not_in_xero_count, 0);
+
+  tables.trade_invoices.push(
+    // Recent, recorded super, never pushed: on paid and super totals it would add 12 super and 100.01 paid.
+    invoice("unbilled", "2026-08-31", "2026-09-06", { xero_bill_id: null, amount_paid: 5, pay_run_id: "closed" }),
+    // Recent legacy split with no bill: not_in_xero wins over not_recorded.
+    invoice("unbilled-legacy", "2026-08-24", "2026-08-30", { ...legacySplit, xero_bill_id: "" }),
+    // Older than the read window: kept out of lifetime super.
+    invoice("unbilled-old", "2024-01-01", "2024-01-07", { xero_bill_id: null }),
+    // A voided bill stays out entirely, as on main.
+    invoice("void-unbilled", "2026-08-31", "2026-09-06", { xero_bill_id: null, xero_bill_status: "VOIDED" }),
+    // Another trade's unbilled invoice never reaches this trade.
+    invoice("other-unbilled", "2026-08-31", "2026-09-06", { user_id: "trade-b", xero_bill_id: null }),
+  );
+  const { status, body } = await read();
+  assertEquals(status, 200);
+  assert("super" in body && "super" in baseline.body);
+  assertEquals(body.weeks, baseline.body.weeks);
+  assertEquals(body.months, baseline.body.months);
+  assertEquals(body.years, baseline.body.years);
+  assertEquals(body.this_year_vs_last, baseline.body.this_year_vs_last);
+  assertEquals(body.tax_set_aside, baseline.body.tax_set_aside);
+  assertEquals(body.super.this_fy, baseline.body.super.this_fy);
+  assertEquals(body.super.since_start, baseline.body.super.since_start);
+  assertEquals(body.super.not_recorded_count, baseline.body.super.not_recorded_count);
+  assertEquals(body.super.not_recorded_count, 1);
+  assertEquals(body.super.not_in_xero_count, 3);
+  assertEquals(body.super.by_invoice.filter(i => i.status === "not_in_xero"), [
+    { invoice_id: "unbilled", invoice_number: "unbilled", week_start: "2026-08-31", amount: 0, status: "not_in_xero" },
+    { invoice_id: "unbilled-legacy", invoice_number: "unbilled-legacy", week_start: "2026-08-24", amount: 0, status: "not_in_xero" },
+  ]);
+  assertEquals(body.super.by_invoice.find(i => i.invoice_id === "a1")?.status, "marked_paid_by_office");
+  assertEquals(body.super.by_invoice.find(i => i.invoice_id === "legacy")?.status, "not_recorded");
+
+  // The office pushes the bill: a retry counts it like any other invoice.
+  tables.trade_invoices.find(i => i.id === "unbilled")!.xero_bill_id = "bill-pushed";
+  const pushed = await read();
+  assert("super" in pushed.body);
+  assertEquals(pushed.body.super.not_in_xero_count, 2);
+  assertEquals(pushed.body.super.since_start, baseline.body.super.since_start + 12);
+  assertEquals(pushed.body.super.by_invoice.find(i => i.invoice_id === "unbilled")?.status, "marked_paid_by_office");
+
+  // A row returned without the bill column refuses rather than counting as billed or unbilled.
+  delete tables.trade_invoices.find(i => i.id === "a2")!.xero_bill_id;
+  assertEquals((await read()).status, 503);
+});
+
+Deno.test("missing super on an invoice with a recorded basis still refuses recent and older reads", async () => {
+  const { tables, client } = historyStore();
+  const row = invoice("partial", "2026-08-31", "2026-09-06", { super_amount: null });
+  tables.trade_invoices.push(row);
+  const read = () => readTradePayHistory(client, "trade-a", historyToday, "1");
+  assertEquals((await read()).status, 503);
+  row.week_end = "2024-01-07";
+  assertEquals((await read()).status, 503);
+  row.super_basis = null;
+  assertEquals((await read()).status, 200);
 });
 
 Deno.test("one-year history still compares to the same point last FY and counts lifetime super", async () => {

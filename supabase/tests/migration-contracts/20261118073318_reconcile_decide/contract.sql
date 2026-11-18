@@ -6,7 +6,15 @@ SELECT to_regclass('public.reconcile_items') IS NULL AS decide_contract_needs_ta
 \ir ../20261118060051_reconcile_tables/main_lines_reader.sql
 \ir ../../../migrations/20261118060051_reconcile_tables.sql
 \endif
+SELECT to_regprocedure('public.reconcile_item_raise(text,text,text,uuid[],jsonb,jsonb,text)') IS NULL
+   OR to_regprocedure('public.reconcile_item_org(text,text,uuid[])') IS NULL
+   OR to_regprocedure('public.reconcile_item_withdraw(text,text,text,text)') IS NULL
+   AS decide_contract_needs_raise \gset
+\if :decide_contract_needs_raise
 \ir ../../../migrations/20261118073218_reconcile_item_raise.sql
+\endif
+-- 20261118196000 patches this body; take its switch check out before re-applying.
+\ir ../../../rollbacks/20261118196000_reconcile_decide_switch_in_database_down.sql
 \ir ../../../migrations/20261118073318_reconcile_decide.sql
 SET LOCAL statement_timeout = '120s';
 
@@ -205,6 +213,45 @@ DECLARE i uuid := pg_temp.item('SPLIT'); l public.job_cost_lines; s jsonb; dt te
    FROM public.job_cost_line_parts WHERE line_id = l.id) <> 'job:600.00,overhead:300.00,division_stock:100.00' THEN
   RAISE EXCEPTION 'P2-03.3 a split that adds up must commit its three parts'; END IF;
 END $split$;
+
+-- A supplier credit (Follow-up 66): item kind credit on an xero_credit_note
+-- subject, a negative line. Parts keep the line's sign: a positive part
+-- refuses, negative parts that add up commit, and place takes the whole line.
+INSERT INTO public.job_cost_lines(org_id, kind, document_kind, document_id, line_key, line_no, lane, amount_ex,
+  source_hash, state, needs_reason)
+VALUES ('00000000-0000-0000-0000-0000000000a1', 'supplier_credit', 'xero_credit_note', 'ZZTEST-3203-CRSPLIT',
+  'unallocated', 1, 'materials', -100.00, 'zz', 'needs_person', 'credit_not_allocated'),
+ ('00000000-0000-0000-0000-0000000000a1', 'supplier_credit', 'xero_credit_note', 'ZZTEST-3203-CRPLACE',
+  'unallocated', 1, 'materials', -40.00, 'zz', 'needs_person', 'credit_not_allocated');
+DO $credit$
+DECLARE i uuid; l public.job_cost_lines; r jsonb;
+/* block */ BEGIN
+ i := public.reconcile_item_raise('credit', 'cost_document', 'xero_credit_note:ZZTEST-3203-CRSPLIT',
+  ARRAY['32030000-0000-4000-8000-0000000000a1']::uuid[], NULL,
+  jsonb_build_object('reason', 'credit_not_allocated', 'summary', jsonb_build_object('number', 'CRSPLIT')), 'matcher:v1');
+ SELECT * INTO l FROM public.job_cost_lines WHERE document_kind = 'xero_credit_note' AND document_id = 'ZZTEST-3203-CRSPLIT';
+ PERFORM pg_temp.expect_failure(format($f$SELECT pg_temp.decide(%L,'split',%L)$f$, i, jsonb_build_array(
+  jsonb_build_object('line_id', l.id, 'target', 'job', 'job_id', '32030000-0000-4000-8000-0000000000a1', 'amount_ex', -160),
+  jsonb_build_object('line_id', l.id, 'target', 'overhead', 'amount_ex', 60))), 'reconcile_parts_do_not_add_up');
+ r := pg_temp.decide(i, 'split', jsonb_build_array(
+  jsonb_build_object('line_id', l.id, 'target', 'job', 'job_id', '32030000-0000-4000-8000-0000000000a1', 'amount_ex', -60),
+  jsonb_build_object('line_id', l.id, 'target', 'overhead', 'amount_ex', -40)));
+ SELECT * INTO l FROM public.job_cost_lines WHERE id = l.id;
+ IF l.state <> 'split' OR l.decided_by_kind <> 'person' OR r ->> 'item_status' <> 'decided'
+  OR (SELECT string_agg(target || ':' || amount_ex, ',' ORDER BY part_no)
+      FROM public.job_cost_line_parts WHERE line_id = l.id) <> 'job:-60.00,overhead:-40.00'
+  OR (SELECT kind FROM public.reconcile_items WHERE id = i) <> 'credit' THEN
+  RAISE EXCEPTION 'FU66 a credit item must take negative parts that add up: %', r; END IF;
+
+ i := public.reconcile_item_raise('credit', 'cost_document', 'xero_credit_note:ZZTEST-3203-CRPLACE',
+  ARRAY['32030000-0000-4000-8000-0000000000a1']::uuid[], '{"outcome":"job"}'::jsonb,
+  jsonb_build_object('reason', 'credit_not_allocated', 'summary', jsonb_build_object('number', 'CRPLACE')), 'matcher:v1');
+ r := pg_temp.decide(i, 'place', '[{"job_id":"32030000-0000-4000-8000-0000000000a1"}]');
+ SELECT * INTO l FROM public.job_cost_lines WHERE document_kind = 'xero_credit_note' AND document_id = 'ZZTEST-3203-CRPLACE';
+ IF l.state <> 'on_job' OR (SELECT string_agg(target || ':' || amount_ex, ',')
+      FROM public.job_cost_line_parts WHERE line_id = l.id) <> 'job:-40.00' THEN
+  RAISE EXCEPTION 'FU66 placing a credit puts its whole negative line on the job: %', r; END IF;
+END $credit$;
 
 -- overhead, division_stock and duplicate.
 DO $states$

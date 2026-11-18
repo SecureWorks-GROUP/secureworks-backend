@@ -1,0 +1,129 @@
+// A receipt saved on a job its submitter is not booked on is marked for the
+// office (director 18 Nov 2026: flag, not refuse; a manager or runner buying
+// for another crew must not be pushed onto the wrong job).
+//
+// The booking rule is the Trade App receipt screen's: office roles (admin,
+// owner, ops_manager) and the server key may use any job and are never marked;
+// any other signed-in caller is booked when they hold their own job_assignments
+// row on that job that is not cancelled and is not a ghost or watcher row.
+//
+// The mark is expense_receipts.unbooked_job_id: the job the receipt was saved
+// on without a confirmed booking. A failed booking read never counts as
+// booked, so it marks too. The receipt always saves. Approving a marked
+// receipt needs a deliberate confirm (approveExpense). Reads no switch.
+import { ExpenseCaptureError } from "./expense_capture_v2.ts";
+
+// Bounded: a trade holds at most one row per job and date.
+const OWN_BOOKING_READ_LIMIT = 100;
+
+export function expenseJobIdOf(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  // No trim: the id checked is exactly the id written.
+  const id = String(value);
+  return id ? id : null;
+}
+
+/**
+ * The mark to store for a receipt saved on jobId: jobId when the caller is not
+ * confirmed booked there, null when booked, office, or no job. Never throws.
+ * Reads job_assignments by (job_id, user_id), the leading columns of
+ * job_assignments_job_user_date_key.
+ */
+export async function expenseUnbookedJobMark(
+  client: any,
+  input: { jobId: unknown; userId: string | null | undefined; staff: boolean },
+): Promise<string | null> {
+  const jobId = expenseJobIdOf(input.jobId);
+  if (!jobId || input.staff) return null;
+  if (!input.userId) return jobId;
+  let res: { data?: unknown; error?: unknown };
+  try {
+    res = await client.from("job_assignments")
+      .select("id, role, status")
+      .eq("job_id", jobId)
+      .eq("user_id", input.userId)
+      .eq("is_ghost", false)
+      .or("status.is.null,status.neq.cancelled")
+      .limit(OWN_BOOKING_READ_LIMIT);
+  } catch {
+    console.warn("[ops-api] expense_booking_read_failed", { job_id: jobId });
+    return jobId;
+  }
+  if (res?.error || !Array.isArray(res?.data)) {
+    console.warn("[ops-api] expense_booking_read_failed", { job_id: jobId });
+    return jobId;
+  }
+  const booked = (res.data as Array<{ role?: unknown; status?: unknown }>).some(
+    (a) =>
+      String(a?.role ?? "").toLowerCase() !== "observer" &&
+      String(a?.status ?? "").toLowerCase() !== "cancelled",
+  );
+  return booked ? null : jobId;
+}
+
+/**
+ * A marked receipt the office has not confirmed yet. It counts on no job's cost
+ * lines and is paid back on no trade invoice until the office confirms it at
+ * approval (the confirm is the only way to approved; pushed_to_xero needs
+ * approved). The SQL twins are the `held` term in job_cost_lines_sync_receipt
+ * (cost-exclusion migration) and the reimbursement_not_booked_unconfirmed stop
+ * in trade_pay_run_check_v2 (20261118194500); the pay run push re-checks with
+ * this function. Change all three together.
+ */
+export function expenseHeldNotBooked(
+  row: { unbooked_job_id?: unknown; status?: unknown } | null | undefined,
+): boolean {
+  if (!row || !expenseJobIdOf(row.unbooked_job_id)) return false;
+  const status = String(row.status ?? "").toLowerCase();
+  return status !== "approved" && status !== "pushed_to_xero";
+}
+
+/**
+ * Approving a marked receipt needs a signed-in person (director 18 Nov 2026:
+ * the office only, for now) and body.confirm_unbooked === true. The server key
+ * (Jarvis) is refused whatever it sends, in plain words. Query and reject never
+ * need either.
+ */
+export function assertUnbookedApprovalConfirmed(
+  status: string,
+  unbookedJobId: unknown,
+  confirm: unknown,
+  byPerson: boolean,
+): void {
+  if (status !== "approved" || !expenseJobIdOf(unbookedJobId)) return;
+  if (!byPerson) {
+    throw new ExpenseOwnJobError(
+      "expense_unbooked_office_only",
+      "This receipt was sent by someone who is not booked on its job, so only the office can approve it.",
+      409,
+    );
+  }
+  if (confirm === true) return;
+  throw new ExpenseOwnJobError(
+    "expense_unbooked_confirm_needed",
+    "The person who sent this receipt is not booked on its job. Check the job, then confirm to approve.",
+    409,
+  );
+}
+
+/**
+ * An approved receipt moved onto a job its submitter is not booked on would
+ * carry the mark without the office ever confirming it. That one move is left
+ * to the office (409); every other move, and every move by the office, saves.
+ */
+export function assertUnbookedMoveAllowed(status: string, mark: string | null): void {
+  if (status !== "approved" || !mark) return;
+  throw new ExpenseOwnJobError(
+    "expense_approved_move_needs_office",
+    "This receipt is already approved. Ask the office to move it to that job.",
+    409,
+  );
+}
+
+// The app's general error reader shows userMessage before the code, so the
+// refusal carries its words there too (body: error, message, userMessage).
+class ExpenseOwnJobError extends ExpenseCaptureError {
+  override get body() {
+    return { ...super.body, userMessage: this.message };
+  }
+}

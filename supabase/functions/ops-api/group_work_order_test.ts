@@ -32,6 +32,10 @@ import {
   officeApproveGroupHours,
   readyUnreleasedGroupInvoiceIds,
   agentCreateGroupWorkOrder,
+  CLIENT_SIGNOFF_SWITCH,
+  GROUP_PAY_BASIS_INCLUSIVE,
+  groupPayBasisForNewGroup,
+  perthToday,
   entryPointsMicro,
   findFenceProblem,
   freezeGroupWorkOrder,
@@ -82,6 +86,7 @@ import {
   withoutGroupJobAssignments,
 } from "./group_work_order.ts";
 import { TRADE_INVOICE_TIME_LINE_TYPES } from "./trade_invoice_time_entry.ts";
+import { calculateTradeInvoiceMoney } from "./trade_invoice_money.ts";
 
 import { recordOfficeClientConfirmation, readOfficeClientSignedCopy, ClientSignoffFormError, decodeClientSignedCopy } from "./client_signoff_form.ts";
 import { hasOfficeClientConfirmation } from "./client_signoff_form_data.ts";
@@ -3619,4 +3624,243 @@ Deno.test("claim crew: an invalid person is refused before any crew write", asyn
   assertEquals(error.code, "group_person_not_a_trade");
   assertEquals(error.status, 409);
   assertEquals(db.rows("group_work_order_participants").length, 2);
+});
+
+Deno.test("P1-13.6 switch off keeps the old hours submit, share read and delete", async () => {
+  const db = new Memory();
+  seedSplit(db, "open");
+  db.rows("feature_flags").push({ flag_name: "group_claim_flow_v1", enabled: false });
+  const client = db.client();
+  const day = { group_id: GROUP, work_date: "2026-10-20", start_time: "08:00", finish_time: "10:00", break_minutes: 0 };
+  const saved = await submitGroupWorkOrderHours(client, trade(USER_A), day);
+  assertEquals("claim" in saved, false);
+  assertEquals(saved, await readGroupWorkOrderMyShare(client, trade(USER_A), day));
+  const row = db.rows("group_work_order_time_entries").find(e => e.group_id === GROUP && e.user_id === USER_A && e.work_date === day.work_date);
+  assertEquals(row?.hours, 2);
+  assertEquals(row && "suggested" in row, false);
+  const after = await deleteGroupWorkOrderHours(client, trade(USER_A), day);
+  assertEquals("claim" in after, false);
+  assertEquals(db.rows("group_work_order_time_entries").some(e => e.group_id === GROUP && e.user_id === USER_A && e.work_date === day.work_date), false);
+  assertEquals(db.rows("group_work_order_approvals"), []);
+});
+
+
+// ---- P1-13.4 (18 Nov 2026): new groups use the one super rule; sign-off follows the switch ----
+// Roles only and made-up amounts. Pot 2240.00 split 6:3:11 (rate x hours)
+// gives the spec's 672.00, 336.00 and 1232.00.
+
+function payRuleOn(db: Memory) {
+  db.rows("feature_flags").push({ flag_name: "trade_pay_inclusive_super_v1", enabled: true });
+  db.rows("trade_pay_settings").push({ id: 1, inclusive_super_from: "2026-01-05", tax_set_aside_percent: null });
+}
+
+/** A client whose trade_pay_settings read fails (rule unreadable while the switch is on). */
+function settingsDown(db: Memory) {
+  const base = db.client();
+  return { ...base, from(table: string) {
+    if (table !== "trade_pay_settings") return base.from(table);
+    const q: any = { select: () => q, eq: () => q, limit: () => q,
+      then: (resolve: any, reject: any) => Promise.resolve({ data: null, error: { message: "down" } }).then(resolve, reject) };
+    return q;
+  } };
+}
+
+/** Twin of public.group_work_order_pay_for_basis (20261117171901) for the two bases tested here. */
+function payForBasisTwin(basis: unknown, budget: number) {
+  const cents = Math.round(budget * 100);
+  if (basis === "inclusive_12_112_v1") {
+    const superCents = Math.round(cents * 12 / 112);
+    return { pay_basis: basis, budget_ex: cents / 100, invoice_ex: cents / 100, super_amount: superCents / 100,
+      cash_pay: (cents - superCents) / 100, company_contribution: 0, company_total_out: cents / 100, budget_remainder: 0 };
+  }
+  if (basis === "all_in_12_v2") {
+    let gross = Math.floor(cents / 1.12);
+    while (gross + Math.round(gross * 0.12) > cents) gross--;
+    while (gross + 1 + Math.round((gross + 1) * 0.12) <= cents) gross++;
+    const superCents = Math.round(gross * 0.12);
+    return { pay_basis: basis, budget_ex: cents / 100, invoice_ex: gross / 100, cash_pay: gross / 100,
+      super_amount: superCents / 100, company_contribution: superCents / 100,
+      company_total_out: (gross + superCents) / 100, budget_remainder: (cents - gross - superCents) / 100 };
+  }
+  throw new Error("group_pay_basis_unsupported");
+}
+
+function withSharePay(db: Memory) {
+  const base = db.client();
+  return { ...base, rpc(fn: string, args: Record<string, unknown> = {}) {
+    if (fn !== "group_work_order_share_pay") return base.rpc(fn, args);
+    const group = db.rows("group_work_orders").find((g) => g.id === args.p_group_id);
+    return Promise.resolve({ data: payForBasisTwin(group?.pay_basis, Number(args.p_budget_ex)), error: null });
+  } };
+}
+
+/** Three crew on a 2240.00 pot: A 40 x 6h, B 20 x 6h, C 40 x 11h. */
+function seedThreeCrew(db: Memory, basis: string) {
+  seedSplit(db);
+  db.rows("group_work_orders")[0].pay_basis = basis;
+  db.rows("work_orders")[0].agreed_labour_ex = 2240;
+  db.rows("group_work_order_participants").push({ id: "p-c", group_id: GROUP, user_id: USER_C });
+  db.rows("job_assignments").push({ job_id: JOB, user_id: USER_C, scheduled_date: "2026-10-20", status: "scheduled", role: "lead_installer" });
+  db.rows("trade_rates").push({ user_id: USER_C, org_id: ORG, hourly_rate: 40, effective_from: "2026-01-01", effective_to: null });
+  db.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 6 },
+    { group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 6 },
+    { group_id: GROUP, user_id: USER_C, work_date: "2026-10-20", hours: 11 },
+  );
+}
+
+function freshJob(db: Memory) {
+  seedSplit(db);
+  db.rows("group_work_orders").splice(0);
+  db.rows("group_work_order_participants").splice(0);
+  db.rows("users").push(
+    { id: "office-1", name: "Office", role: "ops_manager", org_id: ORG },
+    { id: USER_A, name: "Crew A", role: "crew", org_id: ORG },
+    { id: USER_B, name: "Crew B", role: "crew", org_id: ORG },
+  );
+}
+
+Deno.test("P1-13.4 Perth day: 16:00 UTC is already the next day in Perth", () => {
+  assertEquals(perthToday(new Date("2026-11-22T15:59:59Z")), "2026-11-22");
+  assertEquals(perthToday(new Date("2026-11-22T16:00:00Z")), "2026-11-23");
+});
+
+Deno.test("P1-13.4 create: rule on writes the inclusive basis, rule off keeps all_in_12_v2", async () => {
+  const on = new Memory();
+  freshJob(on);
+  payRuleOn(on);
+  await createGroupWorkOrder(on.client(), trade(USER_A), { job_id: JOB });
+  assertEquals(on.rows("group_work_orders")[0].pay_basis, GROUP_PAY_BASIS_INCLUSIVE);
+  assertEquals(GROUP_PAY_BASIS_INCLUSIVE, "inclusive_12_112_v1");
+
+  const off = new Memory();
+  freshJob(off);
+  await createGroupWorkOrder(off.client(), trade(USER_A), { job_id: JOB });
+  assertEquals(off.rows("group_work_orders")[0].pay_basis, "all_in_12_v2");
+
+  // The agent door and the rule's start date follow the same decision.
+  const agent = new Memory();
+  freshJob(agent);
+  payRuleOn(agent);
+  await agentCreateGroupWorkOrder(agent.client(), { job_id: JOB, requested_by_user_id: "office-1", crew_user_ids: [USER_A, USER_B] });
+  assertEquals(agent.rows("group_work_orders")[0].pay_basis, "inclusive_12_112_v1");
+  const before = new Memory();
+  payRuleOn(before);
+  before.rows("trade_pay_settings")[0].inclusive_super_from = "2026-11-23";
+  assertEquals(await groupPayBasisForNewGroup(before.client(), new Date("2026-11-22T15:59:59Z")), "all_in_12_v2");
+  assertEquals(await groupPayBasisForNewGroup(before.client(), new Date("2026-11-22T16:00:00Z")), "inclusive_12_112_v1");
+});
+
+Deno.test("P1-13.4 create: an unreadable pay rule refuses a new group (503) and writes nothing; a join never reads it", async () => {
+  for (const door of ["trade", "agent"] as const) {
+    const db = new Memory();
+    freshJob(db);
+    payRuleOn(db);
+    const refused = await (door === "trade"
+      ? createGroupWorkOrder(settingsDown(db), trade(USER_A), { job_id: JOB })
+      : agentCreateGroupWorkOrder(settingsDown(db), { job_id: JOB, requested_by_user_id: "office-1", crew_user_ids: [USER_A, USER_B] }))
+      .then(() => null, (err) => err as GroupWorkOrderError);
+    assertEquals([refused?.status, refused?.code], [503, "pay_rule_unreadable"]);
+    assertEquals(db.rows("group_work_orders").length, 0);
+    assertEquals(db.rows("group_work_order_participants").length, 0);
+  }
+  // An existing group keeps its basis and a join does not depend on the rule.
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("group_work_orders")[0].pay_basis = "all_in_12_v2";
+  payRuleOn(db);
+  db.rows("job_assignments").push({ job_id: JOB, user_id: USER_C, scheduled_date: "2026-10-20", status: "scheduled", role: "lead_installer" });
+  await createGroupWorkOrder(settingsDown(db), trade(USER_C), { job_id: JOB });
+  assertEquals(db.rows("group_work_orders").length, 1);
+  assertEquals(db.rows("group_work_orders")[0].pay_basis, "all_in_12_v2");
+  assert(db.rows("group_work_order_participants").some((row) => row.user_id === USER_C));
+});
+
+Deno.test("P1-13.4 share: an inclusive 672.00 share is a 672.00 line on inclusive_12_112_v1 (super 72.00, paid 600.00)", async () => {
+  const db = new Memory();
+  seedThreeCrew(db, GROUP_PAY_BASIS_INCLUSIVE);
+  const client = withSharePay(db);
+  const line = await resolveGroupShareInvoiceExtra(client, { userId: USER_A, item: { type: "group share", group_id: GROUP } });
+  assertEquals([line?.quantity, line?.unit_rate, line?.line_total_ex], [1, 672, 672]);
+  const lineC = await resolveGroupShareInvoiceExtra(client, { userId: USER_C, item: { type: "group share", group_id: GROUP } });
+  assertEquals(lineC?.line_total_ex, 1232);
+  const own = { extra_items: [{ type: "group share", group_id: GROUP }] };
+  assertEquals(await assertAllInGroupInvoiceStandalone(client, trade(USER_A), own), { superBasis: "inclusive_12_112_v1" });
+  // Still its own invoice: a mixed claim is refused, as for every all-in group.
+  await assertRejects(() => assertAllInGroupInvoiceStandalone(client, trade(USER_A), { ...own, week_start: "2026-11-23" }), GroupWorkOrderError);
+  const money = calculateTradeInvoiceMoney({ grossEarned: 672, gstOn: false, earningsDate: "2026-11-23", superBasis: "inclusive_12_112_v1" });
+  assertEquals([money.super_amount, money.net_pay, money.company_total_out], [72, 600, 672]);
+
+  // The crew member's own figures once frozen: share 672.00, super 72.00, paid 600.00.
+  await freezeGroupWorkOrder(client, trade(USER_A), { group_id: GROUP });
+  assertEquals(db.rows("group_work_order_shares").map((r) => Number(r.share_ex)).sort((a, b) => a - b), [336, 672, 1232]);
+  const mine = await readGroupWorkOrderMyShare(client, trade(USER_A), { group_id: GROUP }) as Record<string, unknown>;
+  assertEquals([mine.my_share, mine.my_super, mine.my_cash_pay, mine.budget_remainder, mine.budget_includes_super], [672, 72, 600, 0, true]);
+});
+
+Deno.test("P1-13.4 share: an all_in_12_v2 group prices as before (672.00 budget is a 600.00 line on employer_12_v2)", async () => {
+  const db = new Memory();
+  seedThreeCrew(db, "all_in_12_v2");
+  const client = withSharePay(db);
+  const line = await resolveGroupShareInvoiceExtra(client, { userId: USER_A, item: { type: "group share", group_id: GROUP } });
+  assertEquals(line?.line_total_ex, 600);
+  const own = { extra_items: [{ type: "group share", group_id: GROUP }] };
+  assertEquals(await assertAllInGroupInvoiceStandalone(client, trade(USER_A), own), { superBasis: "employer_12_v2" });
+});
+
+/** A client whose read of the sign-off switch fails; every other flag reads normally. */
+function signoffSwitchDown(db: Memory) {
+  const base = db.client();
+  return { ...base, from(table: string) {
+    const real: any = base.from(table);
+    if (table !== "feature_flags") return real;
+    let name = "";
+    const q: any = {
+      select: (...a: unknown[]) => { real.select(...a); return q; },
+      eq: (c: string, v: unknown) => { if (c === "flag_name") name = String(v); real.eq(c, v); return q; },
+      in: (c: string, v: unknown) => { real.in(c, v); return q; },
+      limit: (n: number) => { real.limit(n); return q; },
+      maybeSingle: () => { real.maybeSingle(); return q; },
+      then: (resolve: any, reject: any) => (name === CLIENT_SIGNOFF_SWITCH
+        ? Promise.resolve({ data: null, error: { message: "down" } })
+        : real).then(resolve, reject),
+    };
+    return q;
+  } };
+}
+
+Deno.test("P1-13.4 sign-off: switch off reads ready with no signature; on, or unreadable, waits as before", async () => {
+  const unsigned = (flag?: boolean) => {
+    const db = new Memory();
+    seedSplit(db, "open");
+    db.rows("group_work_order_time_entries").push(
+      { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 2 },
+      { group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 2 },
+    );
+    if (flag !== undefined) db.rows("feature_flags").push({ flag_name: CLIENT_SIGNOFF_SWITCH, enabled: flag });
+    return db;
+  };
+  const read = (client: any) => readGroupWorkOrderMyShare(client, trade(USER_A), { group_id: GROUP });
+  for (const flag of [undefined, false]) {
+    const db = unsigned(flag);
+    const share = await read(db.client());
+    assertEquals([share.awaiting, share.client_signed], ["ready", false]);
+    const office = await readGroupWorkOrderOffice(db.client(), trade(USER_A, true), { group_id: GROUP });
+    assertEquals([office.awaiting, office.client_signed], ["ready", false]);
+  }
+  const on = await read(unsigned(true).client());
+  assertEquals([on.awaiting, on.client_signed], ["awaiting_signoff", false]);
+  const down = await read(signoffSwitchDown(unsigned(false)));
+  assertEquals(down.awaiting, "awaiting_signoff");
+
+  // Switch on with a counting signature: ready, as today.
+  const signed = new Memory();
+  seedSplit(signed);
+  signed.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 2 },
+    { group_id: GROUP, user_id: USER_B, work_date: "2026-10-20", hours: 2 },
+  );
+  signed.rows("feature_flags").push({ flag_name: CLIENT_SIGNOFF_SWITCH, enabled: true });
+  const ok = await read(signed.client());
+  assertEquals([ok.awaiting, ok.client_signed], ["ready", true]);
 });

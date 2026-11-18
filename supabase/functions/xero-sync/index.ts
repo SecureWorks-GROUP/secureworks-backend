@@ -45,6 +45,8 @@ import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { syncSupplierCreditNotes } from './supplier_credit_notes.ts'
 import { checkDraftsApproved } from './draft_approval_check.ts'
 import { billCostDocument, collectBillCostDocument } from './cost_lines.ts'
+import { readBillMirrorVerdicts } from './trade_bill_mirror_rule.ts'
+import { type LabourAccounts, labourAccounts, readPeopleAccounts } from '../_shared/people_accounts.ts'
 import { handleCostLinesBackfill } from './cost_lines_backfill.ts'
 import { syncCustomerAllocations } from './customer_allocations.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
@@ -52,6 +54,8 @@ import { BILLS_WINDOW_COLUMNS, readBillsInWindow } from './bills_window_read.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { PREMATCH_ROWS_PER_RUN, readAll, runBillPrematch } from './bill_prematch_run.ts'
+import { proposeSupplierCredits, SUPPLIER_CREDIT_DEFAULT_LIMIT, SUPPLIER_CREDIT_DRAFTS_FLAG } from './supplier_credit_propose.ts'
+import { readSwitch } from '../_shared/switch_cache.ts'
 import { buildDocumentIndex, DEAD_JOB_STATUSES, duplicateDocumentsOf, poIsDead, poNamedIn } from './bill_prematch.ts'
 import { isDepositAdvanceJobType, isDepositInvoice } from '../_shared/job_deposit_paid.ts'
 import { builderReferenceAnnotation, decideBuilderReference, loadBuilderReferenceCandidates } from './builder_reference_match.ts'
@@ -59,6 +63,8 @@ import { builderReferenceAnnotation, decideBuilderReference, loadBuilderReferenc
 // tests can import matchUnlinkedInvoices without binding a port.
 import { parseBankSummary } from './bank_summary.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { matchPendingRequest, matchSweepRequest, readMatcherSwitch } from './match/match_run.ts'
+import { creditSweepRequest, syncMatchStep, type SyncMatchStepReport } from './match/credit_run.ts'
 import {
   buildMaterialsFactRow,
   buildQueueRow,
@@ -235,6 +241,31 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await refreshToken(sb))
       case 'sync_invoices':
         return json(await syncInvoices(sb))
+      case 'match_pending': {
+        // P2-02.7: re-match bills waiting in match_queue, 50 at a time. One
+        // query when nothing waits. POST with the exact service key. Proposals
+        // only (match/match_run.ts); the sync drains the queue on its own.
+        const out = await matchPendingRequest(req, sb, SUPABASE_SERVICE_KEY)
+        return json(out.body, out.status)
+      }
+      case 'match_sweep': {
+        // P2-02.7: bills waiting for a person with no open Reconcile item,
+        // 50 a call, by document id descending. POST with the exact service
+        // key; the caller passes back `next` as `?after=` until `done`.
+        // Proposals only, behind reconcile_matcher_v1.
+        const out = await matchSweepRequest(req, sb, SUPABASE_SERVICE_KEY)
+        return json(out.body, out.status)
+      }
+      case 'credit_sweep': {
+        // Supplier credit notes left unallocated (reason credit_not_allocated),
+        // with no open Reconcile item, 50 a call. A credit that follows a bill
+        // rides its bill and is never swept. POST with the exact service key;
+        // pass back `next` as `?after=` until `done`. Proposals only. With
+        // reconcile_matcher_v1 off it writes nothing (match/credit_run.ts).
+        // The sync runs the same raiser after its bills (syncMatchStep).
+        const out = await creditSweepRequest(req, sb, SUPABASE_SERVICE_KEY)
+        return json(out.body, out.status)
+      }
       case 'sync_reports':
         return json(await syncReports(sb))
       case 'sync_projects':
@@ -767,11 +798,21 @@ async function syncInvoices(sb: any) {
   const { accessToken, tenantId } = await getToken(sb)
   let tradePdfBackfilled = 0
   const costLinesChanged = new Set<string>()
+  // P2-02.7: the matcher switch, read once here. Off (or unreadable), the sync
+  // makes no matcher read or write. On, the bills this sync changes are matched
+  // after the Xero paging, in one bounded step (syncMatchStep: bills, then
+  // unallocated supplier credits in what is left of the same 50 and 20 s).
+  const matcher = await readMatcherSwitch(sb)
+  const matchChanged = new Set<string>()
+  let matchRun: SyncMatchStepReport | { switch: 'off'; error?: string } = { switch: 'off', ...(matcher.error ? { error: matcher.error } : {}) }
   let costLinesWritten = 0
   const costLinesErrors: string[] = []
   let costLinesOn = false
   let costEmployerSuperOn = false
-  const costMirrorBillIds = new Set<string>()
+  // The labour accounts (people_account_codes): unreadable or empty writes no cost lines this run.
+  let costLabour: LabourAccounts = labourAccounts([])
+  // Bills not written because only a trade invoice with no organisation holds them.
+  let costMirrorStops = 0
   try {
     const { data, error } = await sb.from('feature_flags').select('enabled')
       .eq('flag_name', 'job_cost_lines_sync_v1').maybeSingle()
@@ -782,15 +823,7 @@ async function syncInvoices(sb: any) {
         .eq('flag_name', 'job_cost_employer_super_v1').maybeSingle()
       if (superError) throw superError
       costEmployerSuperOn = superFlag?.enabled === true
-      // Page the one mirror read so the PostgREST row ceiling cannot admit a mirror.
-      for (let start = 0;; start += 1000) {
-        const { data: mirrors, error: mirrorError } = await sb.from('trade_invoices')
-          .select('xero_bill_id').eq('org_id', DEFAULT_ORG_ID).not('xero_bill_id', 'is', null)
-          .order('id').range(start, start + 999)
-        if (mirrorError || !Array.isArray(mirrors)) throw mirrorError ?? new Error('Mirror read unavailable')
-        for (const row of mirrors) costMirrorBillIds.add(row.xero_bill_id)
-        if (mirrors.length < 1000) break
-      }
+      costLabour = (await readPeopleAccounts(sb)).labour
     }
   } catch (e) {
     costLinesOn = false
@@ -850,6 +883,9 @@ async function syncInvoices(sb: any) {
       }
 
       const costDocuments: NonNullable<ReturnType<typeof billCostDocument>>[] = []
+      // Supplier bills this page upserted; their cost documents are built after
+      // the page, once the mirror rule has answered for all of them.
+      const costBills: any[] = []
       // Upsert each invoice — preserve existing job_id linkage
       for (const inv of invoices) {
         // Check if this invoice already has a job link (set by createInvoice)
@@ -901,11 +937,7 @@ async function syncInvoices(sb: any) {
           console.error(`Failed to upsert invoice ${inv.InvoiceNumber}:`, error.message)
         } else {
           totalSynced++
-          if (costLinesOn) {
-            collectBillCostDocument(record, {
-              orgId: DEFAULT_ORG_ID, mirrorBillIds: costMirrorBillIds, employerSuperOn: costEmployerSuperOn,
-            }, costDocuments, costLinesErrors)
-          }
+          if (costLinesOn && record.invoice_type === 'ACCPAY') costBills.push(record)
 
           // Auto-link invoice to job via SW reference number in Reference field.
           // Matches patterns like SWP-25001, SWF-25002, SW1615, etc.
@@ -1194,12 +1226,32 @@ async function syncInvoices(sb: any) {
         }
       }
 
+      if (costBills.length) {
+        // The one mirror rule (trade_bill_mirror_rule.ts), one call a page. An
+        // unreadable answer writes no cost lines for this page: never "not a mirror".
+        try {
+          const verdicts = await readBillMirrorVerdicts(sb, DEFAULT_ORG_ID, costBills.map((r) => r.xero_invoice_id))
+          for (const record of costBills) {
+            if (verdicts.stopped.has(record.xero_invoice_id)) { costMirrorStops++; continue }
+            collectBillCostDocument(record, {
+              orgId: DEFAULT_ORG_ID, mirrorBillIds: verdicts.mirrors, employerSuperOn: costEmployerSuperOn, labour: costLabour,
+            }, costDocuments, costLinesErrors)
+          }
+        } catch (e) {
+          const message = (e as Error).message
+          costLinesErrors.push(message)
+          console.error('[xero-sync] Bill mirror rule failed:', message)
+        }
+      }
       if (costDocuments.length) {
         try {
           const { data, error } = await sb.rpc('job_cost_lines_upsert_documents', { p_docs: costDocuments })
           if (error) throw error
           costLinesWritten += Number(data?.lines_written ?? 0)
           for (const id of data?.changed ?? []) costLinesChanged.add(id)
+          if (matcher.on) {
+            for (const id of data?.changed ?? []) if (typeof id === 'string') matchChanged.add(id)
+          }
         } catch (e) {
           const message = (e as Error).message
           costLinesErrors.push(message)
@@ -1217,6 +1269,19 @@ async function syncInvoices(sb: any) {
     { key: 'sync_invoices', cursor_at: runStartedAt, note: `synced ${totalSynced} since ${modifiedSince || 'the beginning'}`, updated_at: new Date().toISOString() },
     { onConflict: 'key' },
   )
+
+  // P2-02.7: propose a job for the bills this sync changed, then queued and
+  // waiting bills, then unallocated supplier credits (Follow-up 66), after the
+  // paging and with one budget. Proposals only;
+  // never fails the sync.
+  if (matcher.on) {
+    try {
+      matchRun = await syncMatchStep(sb, { on: true, changed: [...matchChanged] })
+    } catch {
+      matchRun = { switch: 'off', error: 'match_step_threw' }
+      console.error('[xero-sync] matcher step threw')
+    }
+  }
 
   // ── Paid close-out catch-up: invoiced and final_payment fencing and patio cards whose
   //    last invoice was paid before the card got there (switch on only; ops-api decides).
@@ -1386,11 +1451,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, cost_lines: { lines_written: costLinesWritten }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
+    payload: { synced: totalSynced, cost_lines: { lines_written: costLinesWritten, mirrors_stopped: costMirrorStops }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, cost_lines_match: matchRun, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, cost_lines: { lines_written: costLinesWritten }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
+  return { success: true, synced: totalSynced, cost_lines: { lines_written: costLinesWritten, mirrors_stopped: costMirrorStops }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, cost_lines_match: matchRun, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
 }
 
 
@@ -1823,6 +1888,9 @@ async function ingestMaterialsActuals(
   }
 
   try {
+    // 0. The labour accounts (people_account_codes): unreadable or empty stops
+    //    the step before any write (an installer bill is never read as materials).
+    const labour = (await readPeopleAccounts(sb)).labour
     // 1. Mirror set — the hard exclusion key. Any ACCPAY bill whose id is a
     //    trade-invoice mirror can never be a materials fact.
     const mirrorSet = new Set<string>()
@@ -2019,7 +2087,7 @@ async function ingestMaterialsActuals(
       }
 
       const existingQueueStatus = queueStatusById.get(bill.xero_invoice_id)
-      const installer = isInstallerBill(b.line_items)
+      const installer = isInstallerBill(b.line_items, labour)
       // Agent-placed whole-bill facts keep their job. Their amount follows the
       // bill, the same step this path's own facts take on 'keep' (finish line
       // A2: a fact can sit behind an amended bill). A missing amount is not
@@ -2369,16 +2437,25 @@ async function scheduledBillPrematch(sb: any) {
     prematch = { ran: false, reason: 'error', error: (e as Error).message }
     console.error('[materials] bill pre-match failed:', (e as Error).message)
   }
+  const creditsOn = await readSwitch(sb, SUPPLIER_CREDIT_DRAFTS_FLAG)
+  const supplierCredits = await proposeSupplierCredits(sb, DEFAULT_ORG_ID, {
+    limit: SUPPLIER_CREDIT_DEFAULT_LIMIT,
+  })
+  const payload = creditsOn ? { prematch, supplier_credits: supplierCredits } : { prematch }
   await sb.from('webhook_log').insert({
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'bill_prematch',
-    payload: { prematch },
+    payload,
     status: 'processed',
   }).then(() => undefined, () => undefined)
-  console.log(`[materials] bill pre-match: ${JSON.stringify(prematch)}`)
-  return { success: true, prematch }
+  console.log(`[materials] bill pre-match: ${JSON.stringify(payload)}`)
+  return creditsOn
+    ? { success: true, prematch, supplier_credits: supplierCredits }
+    : { success: true, prematch }
 }
+
+export const _scheduledBillPrematchForTest = scheduledBillPrematch
 
 
 // ════════════════════════════════════════════════════════════

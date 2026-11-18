@@ -1,9 +1,9 @@
 // Read only. The route supplies the identity from authTrade, never from the request parameters.
-import { countedHistoryInvoice, historyAmount, payHistoryStart, summariseTradePayHistory } from './trade_money.ts'
+import { countedHistoryInvoice, historyAmount, historyInvoiceInXero, payHistoryStart, recordedHistorySuper, summariseTradePayHistory } from './trade_money.ts'
 import { readTradePaySettings, tradePayTaxPercent } from './trade_pay_rule.ts'
 
-const invoiceColumns = [
-  'id', 'invoice_number', 'week_start', 'week_end', 'created_at', 'status', 'xero_bill_status',
+export const invoiceColumns = [
+  'id', 'invoice_number', 'week_start', 'week_end', 'created_at', 'status', 'xero_bill_id', 'xero_bill_status',
   'amount_paid', 'gross_earned', 'super_rate', 'super_amount', 'super_basis', 'super_base_ex',
   'net_pay', 'subtotal_ex', 'gst_on', 'gst', 'total_inc', 'recurring_deduction_label', 'recurring_deduction_amount',
   'reimbursements:trade_invoice_lines!trade_invoice_id(line_type,line_total_ex)',
@@ -47,7 +47,7 @@ export async function readTradePayHistory(client: any, userId: string, today: st
     })
     const [rows, older, rates, settings] = await Promise.all([
       historyRead,
-      pages(() => invoices('super_amount,status,xero_bill_status').lt('week_end', floor)),
+      pages(() => invoices('super_amount,super_basis,status,xero_bill_id,xero_bill_status').lt('week_end', floor)),
       pages(() => client.from('trade_rates').select('effective_from,hourly_rate').eq('user_id', userId).order('effective_from')),
       readTradePaySettings(client),
     ])
@@ -56,21 +56,33 @@ export async function readTradePayHistory(client: any, userId: string, today: st
     const taxPercent = tradePayTaxPercent(settings)
     if (taxPercent === null && setting.tax_set_aside_percent !== null) throw new Error('pay_history_unreadable')
 
-    const runIds = [...new Set(rows.filter(countedHistoryInvoice).map(row => row.pay_run_id).filter(Boolean))]
-    const paidRuns = new Set<string>()
+    const runIds = [...new Set(rows.filter(row => countedHistoryInvoice(row) && historyInvoiceInXero(row)).map(row => row.pay_run_id).filter(Boolean))]
+    const paidRuns = new Map<string, string>()
     for (let i = 0; i < runIds.length; i += 50) {
       const ids = runIds.slice(i, i + 50)
       const runs = checkedRows(await client.from('trade_pay_runs').select('id,super_marked_paid_at').in('id', ids))
       if (runs.length !== ids.length) throw new Error('pay_history_unreadable')
       for (const run of runs) {
         if (!('super_marked_paid_at' in run)) throw new Error('pay_history_unreadable')
-        if (run.super_marked_paid_at) paidRuns.add(run.id)
+        if (run.super_marked_paid_at) paidRuns.set(run.id, String(run.super_marked_paid_at))
       }
     }
-    const priorSuper = older.filter(countedHistoryInvoice).reduce((cents, row) =>
-      cents + Math.round(historyAmount(row.super_amount) * 100), 0) / 100
+    let priorSuperCents = 0
+    let priorSuperNotRecorded = 0
+    let priorNotInXero = 0
+    for (const row of older) {
+      if (!countedHistoryInvoice(row)) continue
+      if (!historyInvoiceInXero(row)) {
+        priorNotInXero++
+        continue
+      }
+      const recorded = recordedHistorySuper(row)
+      if (recorded === null) priorSuperNotRecorded++
+      else priorSuperCents += Math.round(recorded * 100)
+    }
     const rateHistory = rates.map(row => ({ effective_from: row.effective_from, hourly_rate: historyAmount(row.hourly_rate) }))
-    const body = summariseTradePayHistory(rows, today, { years, taxPercent, rates: rateHistory, paidRuns, priorSuper })
+    const body = summariseTradePayHistory(rows, today, { years, taxPercent, rates: rateHistory, paidRuns,
+      priorSuper: priorSuperCents / 100, priorSuperNotRecorded, priorNotInXero })
     return { status: 200, body }
   } catch {
     return { status: 503, body: { code: 'pay_history_unreadable', error: 'Could not read your pay history. Try again.' } }

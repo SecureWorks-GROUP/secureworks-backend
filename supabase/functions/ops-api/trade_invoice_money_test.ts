@@ -30,6 +30,7 @@ import {
   TRADE_INVOICE_INCLUSIVE_SUPER_BASIS,
   tradeInvoiceInclusiveSuper,
   type TradeInvoiceXeroLine,
+  withTradeInvoiceRecurringDeduction,
 } from "./trade_invoice_money.ts";
 import { buildTradeInvoiceAuditText } from "./trade_invoice_pdf.ts";
 
@@ -945,17 +946,31 @@ Deno.test("inclusive super: an unidentified reimbursement is refused before Xero
   assertEquals(Math.round(total * 100) / 100, 1080);
 });
 
-Deno.test("inclusive super: the audit PDF reads Total (includes super), Paid to your super fund, Paid to you", () => {
+Deno.test("inclusive super: the audit PDF reads Total (includes super), Super on your pay, Your pay", () => {
   const m = inclusiveMoney(1120);
   const text = buildTradeInvoiceAuditText(buildTradeInvoiceAuditModel(INCLUSIVE_LINES, m, "ZZTEST Crew"), {
     invoiceNumber: "ZZTEST-1",
     tradeName: "ZZTEST Crew",
   }).join("\n");
   const total = text.indexOf("Total (includes super) $1120.00");
-  const fund = text.indexOf("Paid to your super fund $120.00");
-  const you = text.indexOf("Paid to you $1000.00");
+  const fund = text.indexOf("Super on your pay $120.00");
+  const you = text.indexOf("Your pay $1000.00");
   assert(total >= 0 && fund > total && you > fund, text);
   assert(!/withheld/i.test(text), text);
+});
+
+Deno.test("inclusive super: the audit PDF reads YOUR PAY after the weekly deduction, never PAID TO YOU", () => {
+  const m = withTradeInvoiceRecurringDeduction(inclusiveMoney(1120), {
+    id: "00000000-0000-4000-8000-000000000001",
+    label: "Ute hire",
+    amount: 100,
+  });
+  const text = buildTradeInvoiceAuditText(buildTradeInvoiceAuditModel(INCLUSIVE_LINES, m, "ZZTEST Crew"), {
+    invoiceNumber: "ZZTEST-1",
+    tradeName: "ZZTEST Crew",
+  }).join("\n");
+  assertStringIncludes(text, "YOUR PAY after the weekly deduction $900.00");
+  assert(!/paid to you/i.test(text), text);
 });
 
 Deno.test("inclusive super: job cost reads no company super on top", () => {

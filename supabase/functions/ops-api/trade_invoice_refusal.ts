@@ -53,11 +53,48 @@ export type TradeInvoiceRefusal = {
   body: { ok: false; error: string; code: string };
 };
 
+/**
+ * The words a trade sees for each refusal code (Follow-up 49 item 6). Short
+ * plain sentences: no internal names, no ids, no amounts and nothing about
+ * another trade's invoice. Change the words here, never at a door.
+ */
+export const TRADE_INVOICE_REFUSAL_WORDS = {
+  work_order_amount_refused: {
+    status: 409,
+    error:
+      "The work order does not have room for this invoice. Ask the office to check the work order, then send it again. Nothing was sent to Xero.",
+  },
+  invoice_changed_before_xero: {
+    status: 409,
+    error:
+      "This invoice changed while it was being sent. Reload to see where it is up to before you try again.",
+  },
+  xero_bill_needs_office: {
+    status: 409,
+    error:
+      "Your invoice reached Xero but could not be finished here. Do not send it again. The office will check it.",
+  },
+} as const satisfies Record<string, { status: number; error: string }>;
+
+type LabelledCode = keyof typeof TRADE_INVOICE_REFUSAL_WORDS;
+
+function labelled(match: RegExp, code: LabelledCode) {
+  return { match, code, ...TRADE_INVOICE_REFUSAL_WORDS[code] };
+}
+
 // Known guard texts, most specific first. Each answer says what happened and
 // what the trade can do next, in trade words.
 const KNOWN_REFUSALS: ReadonlyArray<
   { match: RegExp; code: string; error: string; status?: number }
 > = [
+  // A bill already exists in Xero. Before any guard text, because the
+  // wrapped message can carry the guard's name.
+  labelled(
+    /Xero created bill .* could not be saved|Xero bill .* reconciled, but the local invoice could not be marked pushed/i,
+    "xero_bill_needs_office",
+  ),
+  labelled(/\bjob_amount_guard\b/, "work_order_amount_refused"),
+  labelled(/\bwork_order_invoice_changed_before_xero\b/, "invoice_changed_before_xero"),
   {
     match: /work-order invoice source is no longer complete/i,
     code: "work_order_not_complete",
@@ -152,7 +189,7 @@ function errorText(err: unknown): string {
 // Words that mark a sentence as database or server internals rather than a
 // sentence written for the trade.
 const INTERNAL_TEXT =
-  /failed to|violates|constraint|pgrst|relation|column|function|duplicate key|syntax|null value|invalid input|permission denied|jwt|\brpc\b|\bsql\b|undefined|exception|persist|postgrest|timeout|fetch/i;
+  /failed to|violates|constraint|pgrst|relation|column|function|duplicate key|syntax|null value|invalid input|permission denied|jwt|\brpc\b|\bsql\b|undefined|exception|persist|postgrest|timeout|fetch|xero api/i;
 
 /**
  * A plain `new Error('...')` the server wrote for the trade ("You are not

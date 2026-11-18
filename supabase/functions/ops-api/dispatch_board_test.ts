@@ -28,6 +28,8 @@ import {
   dispatchBoardInstall,
   dispatchBoardMoves,
   dispatchBoardPlacement,
+  dispatchBoardReplies,
+  dispatchOrderRepliedAt,
   dispatchBoardRequest,
   dispatchBoardStage,
   dispatchBoardStageSince,
@@ -878,7 +880,7 @@ Deno.test("pipeline v2 Active: only board jobs, each with its card fields", asyn
 
   assertEquals(result.board.version, "v2");
   assertEquals(result.board.view, "active");
-  assertEquals(result.board.reads, { installs: "ok", days_in_stage: "ok", deposits: "ok", arrival: "ok", accounts: "ok", replies: "ok" });
+  assertEquals(result.board.reads, { installs: "ok", days_in_stage: "ok", deposits: "ok", arrival: "ok", accounts: "ok", replies: "ok", suggestions: "ok" });
   const counts = Object.fromEntries(result.board.groups.map((g: any) => [g.key, g.count]));
   assertEquals(counts.order_materials, 1);
   assertEquals(counts.scheduled, 2);
@@ -981,7 +983,7 @@ Deno.test("pipeline v2: failed side reads are said, and never hide a job", async
   });
   const result: any = await _pipelineForTest(client as any, params("dispatch=1&board=v2"));
   assertEquals(result.total, 5);
-  assertEquals(result.board.reads, { installs: "ok", days_in_stage: "failed", deposits: "failed", arrival: "failed", accounts: "ok", replies: "ok" });
+  assertEquals(result.board.reads, { installs: "ok", days_in_stage: "failed", deposits: "failed", arrival: "failed", accounts: "ok", replies: "ok", suggestions: "ok" });
   const ordering = rowFor(result, 1)!.board;
   assertEquals(ordering.arrival, null);
   assertEquals(ordering.days_in_stage, null);
@@ -1185,4 +1187,98 @@ Deno.test("arrival: no earliest install while an order has no confirmed date, or
     orders: [],
   });
   assertEquals(booked.earliest_install, null);
+});
+
+// ── Items 17 and 5 (18 Nov 2026): Supplier replied and Follow up ─────────────
+
+Deno.test("replies: every matched supplier reply nobody dismissed is flagged, newest first, whatever it says", () => {
+  const out = dispatchBoardReplies([
+    { id: "r1", state: "matched", job_id: "j1", supplier_name: "R&R Fencing", received_at: "2026-11-16T05:46:00Z", snippet: "Thanks for your order" },
+    { id: "r2", state: "matched", job_id: "j1", supplier_name: "Stratco WA", received_at: "2026-11-17T01:00:00Z" },
+    // Dismissed: gone.
+    { id: "r3", state: "matched", job_id: "j1", supplier_name: "Stratco WA", received_at: "2026-11-17T02:00:00Z", dismissed_at: "2026-11-17T03:00:00Z" },
+    // One of our own sent orders put on the job: never a reply.
+    { id: "r4", state: "matched", job_id: "j1", supplier_name: "CMI", received_at: "2026-11-17T04:00:00Z", sender_via: "our_sent_order" },
+  ], [
+    { id: "s1", job_id: "j1", email_id: "r2", order_id: "o1", supplier_name: "Stratco WA", delivery_date: "2026-11-20", state: "open" },
+    { id: "s2", job_id: "j1", email_id: "r1", order_id: null, supplier_name: "R&R Fencing", delivery_date: "2026-11-21", state: "accepted" },
+  ]);
+  assertEquals(out.flagged, [
+    { id: "r2", supplier_name: "Stratco WA", received_at: "2026-11-17T01:00:00Z" },
+    { id: "r1", supplier_name: "R&R Fencing", received_at: "2026-11-16T05:46:00Z" },
+  ]);
+  assertEquals(out.open_suggestions, [
+    { id: "s1", email_id: "r2", order_id: "o1", supplier_name: "Stratco WA", delivery_date: "2026-11-20" },
+  ]);
+  // A failed read is said as null, never as nothing to show.
+  assertEquals(dispatchBoardReplies(null, null), { flagged: null, open_suggestions: null });
+});
+
+Deno.test("follow up: any reply to the order after it was sent stops it, tied by order or by supplier", () => {
+  const order = { id: "e1", sent_at: "2026-11-10T01:00:00Z" };
+  const reply = (over: Record<string, unknown>) => ({ state: "matched", received_at: "2026-11-11T01:00:00Z", ...over });
+  // Names the order.
+  assertEquals(dispatchOrderRepliedAt([reply({ order_id: "e1" })], order, ["Stratco"]), "2026-11-11T01:00:00Z");
+  // Names no order, same supplier.
+  assertEquals(
+    dispatchOrderRepliedAt([reply({ order_id: null, supplier_key: "rrfencing" })], order, ["R&R Fencing"]),
+    "2026-11-11T01:00:00Z",
+  );
+  // Another order, another supplier, before the send, or our own sent order: no.
+  assertEquals(dispatchOrderRepliedAt([reply({ order_id: "e9" })], order, ["Stratco"]), null);
+  assertEquals(dispatchOrderRepliedAt([reply({ order_id: null, supplier_key: "metroll" })], order, ["Stratco"]), null);
+  assertEquals(dispatchOrderRepliedAt([reply({ order_id: "e1", received_at: "2026-11-09T01:00:00Z" })], order, ["Stratco"]), null);
+  assertEquals(dispatchOrderRepliedAt([reply({ order_id: "e1", sender_via: "our_sent_order" })], order, ["Stratco"]), null);
+  assertEquals(dispatchOrderRepliedAt([reply({ order_id: "e1", state: "unmatched" })], order, ["Stratco"]), null);
+  // Not sent: nothing to follow up.
+  assertEquals(dispatchOrderRepliedAt([reply({ order_id: "e1" })], { id: "e1", sent_at: null }, ["Stratco"]), null);
+  // The newest of several.
+  assertEquals(
+    dispatchOrderRepliedAt([reply({ order_id: "e1" }), reply({ order_id: "e1", received_at: "2026-11-12T01:00:00Z" })], order, ["Stratco"]),
+    "2026-11-12T01:00:00Z",
+  );
+});
+
+Deno.test("follow up: a box carries replied_at from its newest sent order email", () => {
+  const arrival = dispatchArrival({
+    today: TODAY,
+    installDay: addDays(TODAY, 10),
+    boxes: [
+      { supplier_id: "s1", supplier_name: "R&R Fencing", position: 0 },
+      { supplier_id: "s2", supplier_name: "Stratco", position: 1 },
+    ],
+    sentEmails: [
+      { id: "e1", supplier_id: "s1", status: "sent", sent_at: "2026-11-10T01:00:00Z" },
+      { id: "e2", supplier_id: "s2", status: "sent", sent_at: "2026-11-10T01:00:00Z" },
+    ],
+    orders: [],
+    replies: [
+      { id: "r1", state: "matched", order_id: null, supplier_key: "rrfencing", received_at: "2026-11-16T05:46:00Z", snippet: "Thanks for your order" },
+    ],
+  });
+  const by = new Map(arrival.orders.map((o) => [o.supplier_name, o]));
+  assertEquals(by.get("R&R Fencing")!.replied_at, "2026-11-16T05:46:00Z");
+  assertEquals(by.get("Stratco")!.replied_at, null);
+});
+
+Deno.test("follow up: an old order with no supplier box counts from when it was sent", () => {
+  const arrival = dispatchArrival({
+    today: TODAY,
+    installDay: addDays(TODAY, 10),
+    boxes: [],
+    orders: [
+      { id: "po1", job_id: "j1", supplier_name: "Metroll", source: "other", status: "sent", po_type: "material", last_sent_at: "2026-11-02T01:00:00Z", created_at: "2026-11-01T01:00:00Z" },
+      { id: "po2", job_id: "j1", supplier_name: "Bunnings", source: "other", status: "submitted", po_type: "material", created_at: "2026-11-03T01:00:00Z" },
+      { id: "po3", job_id: "j1", supplier_name: "Stratco", source: "other", status: "draft", po_type: "material", last_sent_at: "2026-11-04T01:00:00Z", created_at: "2026-11-04T01:00:00Z" },
+    ],
+    replies: [{ id: "r1", state: "matched", order_id: "po1", received_at: "2026-11-05T01:00:00Z" }],
+  });
+  const by = new Map(arrival.orders.map((o) => [o.supplier_name, o]));
+  assertEquals(by.get("Metroll")?.sent_at, "2026-11-02T01:00:00Z");
+  assertEquals(by.get("Metroll")?.replied_at, "2026-11-05T01:00:00Z");
+  // No last_sent_at: when it was made.
+  assertEquals(by.get("Bunnings")?.sent_at, "2026-11-03T01:00:00Z");
+  assertEquals(by.get("Bunnings")?.replied_at, null);
+  // Not sent: no sent time.
+  if (by.has("Stratco")) assertEquals(by.get("Stratco")!.sent_at, null);
 });
