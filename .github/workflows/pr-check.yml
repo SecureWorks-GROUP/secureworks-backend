@@ -733,6 +733,7 @@ jobs:
             supabase/functions/ops-api/job_dispatch_orders_test.ts \
             supabase/functions/ops-api/job_trace_test.ts \
             supabase/functions/_shared/xero_cooldown_test.ts \
+            supabase/functions/_shared/xero_draft_standard_test.ts \
             supabase/functions/_shared/xero_write_register_test.ts \
             supabase/functions/ops-api/invoice_create_contract_test.ts \
             supabase/functions/ops-api/ops_api_operator_auth_test.ts \

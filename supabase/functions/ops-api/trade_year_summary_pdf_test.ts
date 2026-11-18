@@ -123,3 +123,21 @@ Deno.test("a full invoice page continues and all rows fit on one PDF page", asyn
   assert.equal(text.filter(v => v.startsWith("ZZTEST-")).length, 251);
   assert.equal(text[text.indexOf("Total (includes super)") + 1], "$28114.51");
 });
+
+Deno.test("mixed invoices total recorded super and identify every missing split", async () => {
+  const { rows, read } = store();
+  const legacy = { ...invoice("ZZTEST-03", "2026-08-01"), super_basis: null,
+    super_amount: null, net_pay: null, total_inc: 47.23 };
+  rows.push(legacy, { ...legacy, id: "ZZTEST-04", invoice_number: "ZZTEST-04" });
+  const text = await contents(await read());
+  assert.ok(text.includes("Super not recorded on 2 invoices"));
+  assert.equal(text[text.indexOf("Paid to your super fund") + 1], "$24.00");
+  assert.equal(text[text.indexOf("Total (includes super)") + 1], "$318.48");
+  assert.equal(text[text.indexOf("Paid to you") + 1], "$294.48");
+  for (const number of ["ZZTEST-03", "ZZTEST-04"]) {
+    const index = text.indexOf(number);
+    assert.deepEqual(text.slice(index + 2, index + 5), ["$47.23", "Not recorded", "$47.23"]);
+  }
+  rows[0].super_amount = null;
+  assert.equal((await read()).status, 503);
+});

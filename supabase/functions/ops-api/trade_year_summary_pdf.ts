@@ -1,5 +1,5 @@
 import { assembleTextPdf } from "./trade_invoice_pdf.ts";
-import { countedHistoryInvoice, historyAmount, historyInvoiceTotals, mondayOf } from "./trade_money.ts";
+import { countedHistoryInvoice, historyAmount, historyInvoiceTotals, mondayOf, recordedHistorySuper } from "./trade_money.ts";
 import { invoiceColumns } from "./trade_pay_history_read.ts";
 
 const tradeRoles = new Set(["crew", "installer", "lead_installer"]);
@@ -25,13 +25,14 @@ function textAt(text: string, x: number, y: number, size: number, width: number)
 function invoiceLine(row: Row) {
   const day = row.week_end || row.created_at?.slice(0, 10);
   if (!day || !row.invoice_number) throw new Error("summary_unreadable");
-  const { totals } = historyInvoiceTotals(row, day);
+  const recordedSuper = recordedHistorySuper(row);
+  const { totals } = historyInvoiceTotals(row, day, null, recordedSuper);
   const repayment = row.recurring_deduction_amount;
   if (repayment === undefined || (repayment === null && row.recurring_deduction_label)) {
     throw new Error("summary_unreadable");
   }
   return {
-    number: String(row.invoice_number), week: row.week_start || mondayOf(day),
+    recordedSuper, number: String(row.invoice_number), week: row.week_start || mondayOf(day),
     amounts: [totals.total_inc_super, totals.paid_to_super, totals.paid_to_you,
       totals.reimbursements, historyAmount(row.gst), repayment === null ? 0 : historyAmount(repayment)],
   };
@@ -56,6 +57,11 @@ function render(fy: number, profile: Row, rows: Row[]) {
       ops.push(textAt(label, 36, y, 11, 240), textAt(money(cents / 100), 276, y, 11, 290));
       y -= 16;
     });
+  const notRecorded = invoices.filter(invoice => invoice.recordedSuper === null).length;
+  if (notRecorded) {
+    ops.push(textAt(`Super not recorded on ${notRecorded} invoice${notRecorded === 1 ? "" : "s"}`, 36, y, 10, 540));
+    y -= 16;
+  }
   y -= 10;
   const columns = [36, 195, 302, 393, 480, 576];
   function tableRow(values: string[], fontSize: number) {
@@ -65,7 +71,8 @@ function render(fy: number, profile: Row, rows: Row[]) {
   ops.push(`0.6 G 36 ${y - 3} m 576 ${y - 3} l S`);
   for (const invoice of invoices) {
     y -= rowHeight;
-    tableRow([invoice.number, invoice.week, ...invoice.amounts.slice(0, 3).map(money)], Math.min(10, rowHeight - 1));
+    tableRow([invoice.number, invoice.week, money(invoice.amounts[0]),
+      invoice.recordedSuper === null ? "Not recorded" : money(invoice.recordedSuper), money(invoice.amounts[2])], Math.min(10, rowHeight - 1));
   }
   ops.push(textAt(footer, 36, y - 27, 9, 540));
   return assembleTextPdf([new TextEncoder().encode(ops.join("\n"))], height, true);
