@@ -393,13 +393,21 @@ Deno.test("(a) a credit following a bill with a hidden line, ours or Xero's zero
     [{ billLines: { b1: [{ kind: "supplier_bill", account_code: "485" }] }, bills: { b1: [{ AccountCode: "485" }, { AccountCode: "475", LineAmount: 0 }] } }, "hidden_account_credit"],
     [{ billLines: { b1: [{ kind: "supplier_bill", account_code: "306" }] } }, "labour_credit"],
     [{ billLines: { b1: [{ kind: "installer_bill", account_code: "485" }] } }, "labour_credit"],
-    [{ billLines: { b1: [{ kind: "employer_super", account_code: null }] } }, "labour_credit"],
   ];
   for (const [over, code] of cases) {
     const w = followingCredit(over);
     const out = await creditSweep(fake(w));
     assertEquals([applies(w).length, out.skipped], [0, { [code]: 1 }], JSON.stringify(over));
     assertEquals(w.queries.filter((q) => q.table === "job_cost_lines" && q.filters["in:document_id"]).map((q) => q.filters.org_id), [ORG]);
+  }
+});
+
+Deno.test("(a) MUST NOT CHANGE: a credit following a bill whose super line is on no hidden account is raised as before", async () => {
+  // A super line takes its parent's account; only installer_bill and the hidden set skip.
+  for (const code of ["485", null]) {
+    const w = followingCredit({ billLines: { b1: [{ kind: "supplier_bill", account_code: "485" }, { kind: "employer_super", account_code: code }] } });
+    const out = await creditSweep(fake(w));
+    assertEquals([applies(w).length, out.skipped], [1, {}], String(code));
   }
 });
 

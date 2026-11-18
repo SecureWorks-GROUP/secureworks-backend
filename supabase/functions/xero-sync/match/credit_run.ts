@@ -51,7 +51,6 @@ import { decideMatch } from "./decide.ts";
 import { documentStops, jobNumberClue, type MatchDocument, type MatchJob } from "./doc_clues.ts";
 import {
   clueJson,
-  LABOUR_LINE_KINDS,
   MATCH_RUN_BUDGET_MS,
   MATCH_RUN_LIMIT,
   MATCH_STATEMENT_TIMEOUT_MS,
@@ -105,7 +104,7 @@ const emptyCreditReport = (): CreditRunReport => ({ run: 0, applied: {}, skipped
 /**
  * The bills a credit's lines follow (by document, or by a followed line), less
  * a removed line, as the Reconcile list reads them (20261119999920). "labour"
- * when one is a person's labour (a labour line kind or a labour account),
+ * when one has an installer_bill line or a line on a labour account,
  * "hidden" when one has a line on an account hidden from Reconcile, ours or
  * Xero's (a zero line is not a cost line), else null. Reads nothing when the
  * credit follows nothing; a failed read throws, so the credit is counted failed.
@@ -132,7 +131,9 @@ export async function followedBillSkip(
   const billLines = await read<Array<Record<string, unknown>>>("read_followed_bill_lines",
     sb.from("job_cost_lines").select("kind,account_code").eq("org_id", orgId)
       .eq("document_kind", "xero_bill").in("document_id", ids));
-  if ((billLines ?? []).some((l) => LABOUR_LINE_KINDS.has(String(l.kind ?? "")))) return "labour";
+  // installer_bill only, as the list's follow clause reads it: a super line takes
+  // its parent's account, which may be on no hidden account (director 04:38).
+  if ((billLines ?? []).some((l) => l.kind === "installer_bill")) return "labour";
   const xero = await read<Array<{ line_items?: unknown }>>("read_followed_bill",
     sb.from("xero_invoices").select("line_items").eq("org_id", orgId).in("xero_invoice_id", ids));
   const xeroCodes = (xero ?? []).flatMap((b) =>
