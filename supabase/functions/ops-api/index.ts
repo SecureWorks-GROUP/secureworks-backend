@@ -59380,21 +59380,39 @@ async function loadDatedTradeLabour(client: any, assignments: any[], unnamedTrad
     if (!workByTrade.has(userId)) workByTrade.set(userId, [])
     workByTrade.get(userId)!.push({ day, hours })
   }
+  let rateAssumed = 0
+  let rateMissing = 0
   for (const [userId, work] of workByTrade) {
-    const days = work.map((row) => row.day).sort()
-    // One indexed per-trade read for the job's work-date range, not per day.
-    const { data: rates, error } = await client.from('trade_rates')
-      .select('hourly_rate, effective_from, effective_to')
-      .eq('user_id', userId)
-      .lte('effective_from', days[days.length - 1])
-      .or(`effective_to.is.null,effective_to.gte.${days[0]}`)
-      .order('effective_from', { ascending: false })
-    if (error) throw error
+    // idx_trade_rates_user limits history to this trade. Page to retain the
+    // earliest rate even when PostgREST caps a response.
+    const rates: Array<{ hourly_rate: number, effective_from: string, effective_to: string | null }> = []
+    const pageSize = 1000
+    for (let offset = 0; ; offset += pageSize) {
+      const { data, error } = await client.from('trade_rates')
+        .select('hourly_rate, effective_from, effective_to')
+        .eq('user_id', userId)
+        .order('effective_from', { ascending: false })
+        .order('id', { ascending: false })
+        .range(offset, offset + pageSize - 1)
+      if (error || !data) throw new ApiError('trade_rate_read_failed', 503)
+      rates.push(...data)
+      if (data.length < pageSize) break
+    }
+    // A trade with no rate history cannot be priced: leave their shifts out
+    // of every total and count them, rather than blank the whole card.
+    if (!rates.length) {
+      rateMissing += work.length
+      delete trades[userId]
+      continue
+    }
     const trade = trades[userId]
     const usedRates = new Set<number>()
     for (const { day, hours } of work) {
-      const row = (rates || []).find((rate: any) => rate.effective_from <= day && (!rate.effective_to || rate.effective_to >= day))
-      const rate = row ? Number(row.hourly_rate) : 0
+      const covered = rates.find(row => row.effective_from <= day && (!row.effective_to || row.effective_to >= day))
+      const row = covered ?? rates.find(row => row.effective_from <= day) ?? rates[rates.length - 1]
+      const rate = Number(row.hourly_rate)
+      if (!Number.isFinite(rate) || rate <= 0) throw new ApiError('trade_rate_invalid', 409)
+      if (!covered) rateAssumed++
       usedRates.add(rate)
       trade.rate = rate
       trade.hours += hours
@@ -59403,7 +59421,7 @@ async function loadDatedTradeLabour(client: any, assignments: any[], unnamedTrad
     if (trade.hours && usedRates.size > 1) trade.rate = Math.round(trade.cost / trade.hours * 100) / 100
     trade.cost = Math.round(trade.cost * 100) / 100
   }
-  return trades
+  return { trades, rateAssumed, rateMissing }
 }
 
 // ── labour_reconciliation: labour PO budget vs trade hours per job ──
@@ -59448,7 +59466,7 @@ async function labourReconciliation(client: any, params: URLSearchParams) {
   }
 
   // Get trade hours logged against this job
-  const { data: assignments } = await client.from('job_assignments')
+  const { data: assignments, error: assignmentError } = await client.from('job_assignments')
     .select('id, user_id, scheduled_date, started_at, completed_at, role, status, users:user_id(name)')
     .eq('job_id', jobId)
     .eq('status', 'complete')
@@ -59456,7 +59474,8 @@ async function labourReconciliation(client: any, params: URLSearchParams) {
     .not('completed_at', 'is', null)
     .order('scheduled_date')
 
-  const tradeHours = await loadDatedTradeLabour(client, assignments || [], 'Unknown')
+  if (assignmentError || !assignments) throw new ApiError('labour_assignments_read_failed', 503)
+  const { trades: tradeHours, rateAssumed, rateMissing } = await loadDatedTradeLabour(client, assignments, 'Unknown')
   const totalHours = Object.values(tradeHours).reduce((sum, trade) => sum + trade.hours, 0)
 
   // Get trade invoices that reference this job
@@ -59488,6 +59507,8 @@ async function labourReconciliation(client: any, params: URLSearchParams) {
     job_id: jobId,
     job_number: jobNumber,
     labour_budget: labourBudget,
+    rate_assumed: rateAssumed,
+    rate_missing: rateMissing,
     quoted_labour: quotedLabour,
     total_po_costs: totalPOCosts,
     total_hours: Math.round(totalHours * 100) / 100,
@@ -59556,14 +59577,15 @@ async function tradeLabourBudget(
   if (labourBudget === 0 && quotedLabour > 0) labourBudget = quotedLabour
 
   // Get all trade hours for this job
-  const { data: assignments } = await client.from('job_assignments')
+  const { data: assignments, error: assignmentError } = await client.from('job_assignments')
     .select('user_id, scheduled_date, started_at, completed_at, users:user_id(name)')
     .eq('job_id', jobId)
     .eq('status', 'complete')
     .not('started_at', 'is', null)
     .not('completed_at', 'is', null)
 
-  const byUser = await loadDatedTradeLabour(client, assignments || [], 'Trade')
+  if (assignmentError || !assignments) throw new ApiError('labour_assignments_read_failed', 503)
+  const { trades: byUser, rateAssumed, rateMissing } = await loadDatedTradeLabour(client, assignments, 'Trade')
   const trades = Object.entries(byUser).map(([user_id, data]) => ({ user_id, ...data }))
   const totalHours = trades.reduce((sum, trade) => sum + trade.hours, 0)
 
@@ -59571,6 +59593,8 @@ async function tradeLabourBudget(
 
   return {
     labour_budget: labourBudget,
+    rate_assumed: rateAssumed,
+    rate_missing: rateMissing,
     total_hours: Math.round(totalHours * 100) / 100,
     total_cost: totalCost,
     remainder: Math.round((labourBudget - totalCost) * 100) / 100,
