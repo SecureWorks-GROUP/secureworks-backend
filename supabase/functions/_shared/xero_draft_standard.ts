@@ -46,7 +46,7 @@ const STOCK_DIVISION_OPTIONS: Record<string, string> = {
 export function divisionTrackingOption(jobNumber: string, jobType?: string | null): string {
   // An explicit type always wins, including when the job has no number yet.
   const type = String(jobType || '').trim().toLowerCase()
-  // Granny-flat accounting is unresolved. Never infer a division from its retained number.
+  // The legacy invoice path keeps its original answer when a granny flat retains a patio number.
   if (type === 'granny_flat') return ''
   if (type === 'repair') return 'SW - MAKESAFE'
   if (type === 'roofing' || type === 'renovation') return 'SW - PRIVATE ROOFING'
@@ -91,11 +91,12 @@ export async function draftDivisionTrackingOption(
 
   const stock = String(input.stock_division || '').trim()
   if (stock.startsWith('SW - ')) return stock
-  const stockOption = STOCK_DIVISION_OPTIONS[stock.toLowerCase()]
-  if (stockOption) return stockOption
+  const stockKey = stock.toLowerCase()
+  if (Object.hasOwn(STOCK_DIVISION_OPTIONS, stockKey)) return STOCK_DIVISION_OPTIONS[stockKey]
 
   const option = draftJobDivisionCandidate(input.job_number || '', input.job_type)
   if (option === 'Private Renovations') {
+    if (!orgId) return ''
     // Only this org's stored ACTIVE option authorises the exact name.
     // No caller-supplied option list and no Xero option creation.
     try {

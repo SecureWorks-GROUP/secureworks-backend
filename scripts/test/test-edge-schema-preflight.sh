@@ -1102,7 +1102,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261117020000", "trade_pay_inclusive_super"),
                       # A trade's own savings goal (P1-07.4,
                       # trade_savings_goal.ts).
-                      ("20261118042110", "trade_savings_goals")]:
+                      ("20261118042110", "trade_savings_goals"),
+                      # Dispatch items 17 and 5: Dismiss on a supplier reply
+                      # (dispatch_v2_replies.ts, dispatch_board.ts).
+                      ("20261118153000", "dispatch_v2_reply_dismiss")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

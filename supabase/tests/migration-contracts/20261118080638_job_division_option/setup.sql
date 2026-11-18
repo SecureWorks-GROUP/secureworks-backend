@@ -1,0 +1,1 @@
+-- Uses the existing Supabase roles only.

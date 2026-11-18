@@ -50,6 +50,7 @@ import {
   type V2Order,
 } from "./dispatch_v2_replies_rules.ts";
 import {
+  dispatchV2ReplyFlagged,
   type EmailRow,
   type RefLinkRow,
   type RepliesStore,
@@ -88,6 +89,7 @@ export const DISPATCH_V2_REPLIES_WRITE_ACTIONS = [
   "dispatch_v2_replies_clear",
   "dispatch_v2_suggestion_accept",
   "dispatch_v2_suggestion_dismiss",
+  "dispatch_v2_replies_dismiss",
 ] as const;
 
 export const DISPATCH_V2_REPLIES_SCAN_ACTION = "dispatch_v2_replies_scan";
@@ -261,6 +263,12 @@ export function projectEmail(
     decision: e.decision,
     decided_at: e.decided_at,
     decided_by_email: e.decided_by_email,
+    // Items 17 and 5: true while it shows under Supplier replied, until a
+    // person dismisses it.
+    flagged: dispatchV2ReplyFlagged(e),
+    dismissed_at: e.dismissed_at ?? null,
+    dismissed_by_email: e.dismissed_by_email ?? null,
+    dismissed_source: e.dismissed_source ?? null,
   };
 }
 
@@ -459,6 +467,43 @@ async function loadJob(
   return job;
 }
 
+/** The dismissed fields a person's press stamps (items 17 and 5). */
+function dismissedBy(
+  operator: Operator,
+  source: "button" | "suggestion" | "tray",
+  now: string,
+) {
+  return {
+    dismissed_at: now,
+    dismissed_by: operator.userId,
+    dismissed_by_email: operator.email,
+    dismissed_source: source,
+  };
+}
+
+/** Accept or Dismiss on a reply's date also dismisses that reply. Never
+ * fails the press it rides on: false when nothing changed or it could not be
+ * written. */
+async function dismissedWithSuggestion(
+  ctx: DispatchV2RepliesContext,
+  emailId: string | null,
+  operator: Operator,
+  now: string,
+): Promise<boolean> {
+  if (!emailId) return false;
+  try {
+    const changed = await ctx.store.markDismissed(
+      ctx.orgId,
+      [emailId],
+      dismissedBy(operator, "suggestion", now),
+    );
+    return changed.length > 0;
+  } catch (e) {
+    console.error("[dispatch_v2_replies] dismiss with suggestion failed:", e);
+    return false;
+  }
+}
+
 function decided(operator: Operator, decision: string, now: string) {
   return {
     decision,
@@ -511,9 +556,29 @@ function zeroCounts(): ScanCounts {
   };
 }
 
+/** The leading rows (they come in sequence order) saved before `before`.
+ * A row with no recorded_at is treated as not settled. */
+export function settledPrefix<T extends { recorded_at?: string | null }>(
+  rows: T[],
+  before: string,
+): T[] {
+  const cut = Date.parse(before);
+  let n = 0;
+  while (n < rows.length) {
+    const at = Date.parse(rows[n].recorded_at ?? "");
+    if (!Number.isFinite(at) || at >= cut) break;
+    n++;
+  }
+  return rows.slice(0, n);
+}
+
 /** One run of the scan. Body (all optional): from_sequence (start after this
  * business_events.sequence_number instead of the saved cursor), limit, force
- * (run while the flag is off, for a supervised test). */
+ * (run while the flag is off, for a supervised test), peek (Read now, contract
+ * section 3j: also read the rows saved in the last two minutes, but move the
+ * cursor only over the rows older than that, so a row committed a moment late
+ * is still read by the next run; the rows read early are skipped then as
+ * already stored). */
 export async function scanDispatchV2Replies(
   body: any,
   ctx: DispatchV2RepliesContext,
@@ -554,8 +619,16 @@ export async function scanDispatchV2Replies(
   }
 
   const limit = intParam(body?.limit, SCAN_LIMIT_DEFAULT, 1, SCAN_LIMIT_MAX);
-  const before = new Date(Date.parse(now) - SCAN_LAG_MS).toISOString();
-  const rows = await store.readInboundEmails(cursor, before, limit);
+  const settledBefore = new Date(Date.parse(now) - SCAN_LAG_MS).toISOString();
+  const peek = body?.peek === true;
+  const rows = await store.readInboundEmails(
+    cursor,
+    peek ? now : settledBefore,
+    limit,
+  );
+  // The rows the cursor may pass: all of them, or under peek only the run of
+  // rows (in sequence order) saved before the lag.
+  const settled = peek ? settledPrefix(rows, settledBefore) : rows;
   counts.read = rows.length;
   if (rows.length === 0) {
     await store.saveScanState({
@@ -803,7 +876,9 @@ export async function scanDispatchV2Replies(
     }
   }
 
-  const next = rows[rows.length - 1].sequence_number;
+  const next = settled.length > 0
+    ? settled[settled.length - 1].sequence_number
+    : cursor;
   await store.saveScanState({
     cursor_sequence: next,
     last_scan_at: now,
@@ -920,6 +995,8 @@ export async function assignReply(body: any, ctx: DispatchV2RepliesContext) {
       candidates: [],
       matched_at: now,
       ...decided(operator, "assigned", now),
+      // Put on the job from the tray: read there, so it is dismissed.
+      ...dismissedBy(operator, "tray", now),
     },
   );
   if (!updated) {
@@ -986,6 +1063,7 @@ export async function confirmGuess(body: any, ctx: DispatchV2RepliesContext) {
       candidates: [],
       matched_at: now,
       ...decided(operator, "confirmed", now),
+      ...dismissedBy(operator, "tray", now),
     },
   );
   if (!updated) {
@@ -1244,6 +1322,8 @@ export async function acceptSuggestion(
       : { reason: "payment_unknown", suppliers: [] };
     offer = null;
   }
+  // Items 17 and 5: accepting the reply's date dismisses the reply.
+  const replyDismissed = await dismissedWithSuggestion(ctx, s.email_id, operator, now);
   await ctx.store.logJobEvent(
     s.job_id,
     operator.userId,
@@ -1255,6 +1335,7 @@ export async function acceptSuggestion(
       supplier: order.supplier_name,
       delivery_date: s.delivery_date,
       previous_confirmed_delivery_date: order.confirmed_delivery_date,
+      reply_dismissed: replyDismissed,
       operator_email: operator.email,
       via: ctx.via,
     },
@@ -1299,6 +1380,8 @@ export async function acceptSuggestion(
     // The crew pickup line and the documents saved (contract section 3e);
     // null when not run.
     order_confirmed: orderConfirmed,
+    // True when this press dismissed the reply (items 17 and 5).
+    reply_dismissed: replyDismissed,
   };
 }
 
@@ -1324,6 +1407,8 @@ export async function dismissSuggestion(
       "Someone else acted on this suggestion first",
     );
   }
+  // Items 17 and 5: dismissing the reply's date dismisses the reply too.
+  const replyDismissed = await dismissedWithSuggestion(ctx, s.email_id, operator, now);
   await ctx.store.logJobEvent(
     s.job_id,
     operator.userId,
@@ -1334,11 +1419,97 @@ export async function dismissSuggestion(
       order_id: s.order_id,
       supplier: s.supplier_name,
       delivery_date: s.delivery_date,
+      reply_dismissed: replyDismissed,
       operator_email: operator.email,
       via: ctx.via,
     },
   );
-  return { ok: true, suggestion: projectSuggestion(updated) };
+  return {
+    ok: true,
+    suggestion: projectSuggestion(updated),
+    reply_dismissed: replyDismissed,
+  };
+}
+
+// One Dismiss press names at most this many replies ("Dismiss all" on a job).
+const DISMISS_MAX = 50;
+
+/** POST {email_id} or {email_ids: [...]}: Dismiss (items 17 and 5, Shaun 18
+ * Nov 2026). Each reply must be matched to a job. A reply already dismissed
+ * is left as it was and listed in already_dismissed. Stamps who and when, and writes one
+ * job_events row per job. Nothing else changes: no box, no date, no stage. */
+export async function dismissReplies(
+  body: any,
+  ctx: DispatchV2RepliesContext,
+) {
+  const operator = await resolveOperator(body, ctx);
+  const raw: unknown[] = Array.isArray(body?.email_ids)
+    ? body.email_ids
+    : body?.email_id !== undefined && body?.email_id !== null
+    ? [body.email_id]
+    : [];
+  if (!raw.length) {
+    refuse(400, "invalid_request", "email_id or email_ids is required");
+  }
+  if (raw.length > DISMISS_MAX) {
+    refuse(
+      400,
+      "invalid_request",
+      `At most ${DISMISS_MAX} emails can be dismissed at once`,
+    );
+  }
+  const ids = [...new Set(raw.map((v) => uuidParam(v, "email_ids")!))];
+  const rows = await Promise.all(
+    ids.map((id) => ctx.store.getEmail(ctx.orgId, id)),
+  );
+  const missing = ids.filter((_, i) => !rows[i]);
+  if (missing.length) {
+    refuse(404, "email_not_found", "No such email", { email_ids: missing });
+  }
+  const offJob = rows.filter((r) => r!.state !== "matched" || !r!.job_id)
+    .map((r) => r!.id);
+  if (offJob.length) {
+    refuse(
+      409,
+      "not_on_a_job",
+      "Only a supplier reply on a job can be dismissed",
+      { email_ids: offJob },
+    );
+  }
+  const now = nowIso(ctx);
+  const changed = await ctx.store.markDismissed(
+    ctx.orgId,
+    ids,
+    dismissedBy(operator, "button", now),
+  );
+  const byJob = new Map<string, EmailRow[]>();
+  for (const r of changed) {
+    const list = byJob.get(r.job_id!) ?? [];
+    list.push(r);
+    byJob.set(r.job_id!, list);
+  }
+  for (const [jobId, list] of byJob) {
+    await ctx.store.logJobEvent(
+      jobId,
+      operator.userId,
+      "dispatch_v2_reply_dismissed",
+      {
+        email_ids: list.map((r) => r.id),
+        suppliers: [
+          ...new Set(list.map((r) => r.supplier_name || "a supplier")),
+        ],
+        subjects: list.map((r) => r.subject),
+        operator_email: operator.email,
+        via: ctx.via,
+      },
+    );
+  }
+  const changedIds = new Set(changed.map((r) => r.id));
+  return {
+    ok: true,
+    dismissed: await projectEmails(ctx, changed),
+    already_dismissed: ids.filter((id) => !changedIds.has(id)),
+  };
 }
 
 // ── The router's one entry ────────────────────────────────────────────────
@@ -1369,6 +1540,8 @@ export async function runDispatchV2RepliesAction(
         return await acceptSuggestion(body, ctx);
       case "dispatch_v2_suggestion_dismiss":
         return await dismissSuggestion(body, ctx);
+      case "dispatch_v2_replies_dismiss":
+        return await dismissReplies(body, ctx);
       case DISPATCH_V2_REPLIES_SCAN_ACTION:
         return await scanDispatchV2Replies(body, ctx);
       default:
