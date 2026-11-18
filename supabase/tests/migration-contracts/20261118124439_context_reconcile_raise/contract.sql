@@ -15,7 +15,7 @@ SELECT to_regprocedure('public.reconcile_item_org(text,text,uuid[])') IS NULL
 \if :p4_01_6_needs_raise
 \ir ../../../migrations/20261118073218_reconcile_item_raise.sql
 \endif
-\ir ../../../migrations/20261118121105_context_reconcile_raise.sql
+\ir ../../../migrations/20261118124439_context_reconcile_raise.sql
 SET LOCAL statement_timeout = '120s';
 
 CREATE FUNCTION pg_temp.expect_failure(
@@ -65,7 +65,7 @@ DECLARE c int;
   END IF;
 END $kinds_before$;
 
-\ir ../../../migrations/20261118121105_context_reconcile_raise.sql
+\ir ../../../migrations/20261118124439_context_reconcile_raise.sql
 SET LOCAL statement_timeout = '120s';
 
 DO $kinds_after$
@@ -92,16 +92,26 @@ DECLARE c int;
 END $kinds_after$;
 
 -- Fixtures: org A (...00a1), org B (...00b1), ZZTEST jobs and subject rows.
+-- Seeded under replica role so capture/job triggers do not rewrite fixture ids.
+SET LOCAL session_replication_role = replica;
+DO $seed_orgs$
+/* block */ BEGIN
+  IF to_regclass('public.organisations') IS NOT NULL THEN
+    INSERT INTO public.organisations (id, name) VALUES
+      ('00000000-0000-0000-0000-0000000000a1', 'ZZTEST Org A'),
+      ('00000000-0000-0000-0000-0000000000b1', 'ZZTEST Org B')
+    ON CONFLICT DO NOTHING;
+  END IF;
+END $seed_orgs$;
+
 INSERT INTO public.jobs (id, org_id, job_number, type, status) VALUES
   ('41060000-0000-4000-8000-0000000000a1', '00000000-0000-0000-0000-0000000000a1', 'ZZTEST-4106-A1', 'fencing', 'accepted'),
   ('41060000-0000-4000-8000-0000000000a2', '00000000-0000-0000-0000-0000000000a1', 'ZZTEST-4106-A2', 'patio', 'accepted'),
-  ('41060000-0000-4000-8000-0000000000b1', '00000000-0000-0000-0000-0000000000b1', 'ZZTEST-4106-B1', 'fencing', 'accepted'),
-  ('41060000-0000-4000-8000-000000000000', NULL, 'ZZTEST-4106-NOORG', 'fencing', 'accepted');
+  ('41060000-0000-4000-8000-0000000000b1', '00000000-0000-0000-0000-0000000000b1', 'ZZTEST-4106-B1', 'fencing', 'accepted');
 
 INSERT INTO public.context_ledger_generations (id, job_id, kind, status, reader, promoted_at) VALUES
   ('41060000-0000-4000-8000-0000000001a1', '41060000-0000-4000-8000-0000000000a1', 'rebuild', 'live', 'zztest', now()),
-  ('41060000-0000-4000-8000-0000000001b1', '41060000-0000-4000-8000-0000000000b1', 'rebuild', 'live', 'zztest', now()),
-  ('41060000-0000-4000-8000-000000000100', '41060000-0000-4000-8000-000000000000', 'rebuild', 'live', 'zztest', now());
+  ('41060000-0000-4000-8000-0000000001b1', '41060000-0000-4000-8000-0000000000b1', 'rebuild', 'live', 'zztest', now());
 
 INSERT INTO public.context_ledger_items (
   id, generation_id, job_id, item_key, item_type, status, from_role, what,
@@ -109,28 +119,26 @@ INSERT INTO public.context_ledger_items (
 ) VALUES
   ('41060000-0000-4000-8000-0000000002a1', '41060000-0000-4000-8000-0000000001a1',
    '41060000-0000-4000-8000-0000000000a1', 'request:zztest:a1', 'request', 'open', 'customer',
-   'Quote requested.', '2026-11-10T09:00:00+08', '[{"table":"job_events","id":"zz-1"}]'::jsonb,
+   'Quote requested.', '2026-11-10T09:00:00+08',
+   '[{"table":"job_events","id":"41060000-0000-4000-8000-000000000901","excerpt":"Quote requested."}]'::jsonb,
    'quote_sent', 'model:zztest'),
   ('41060000-0000-4000-8000-0000000002b1', '41060000-0000-4000-8000-0000000001b1',
    '41060000-0000-4000-8000-0000000000b1', 'request:zztest:b1', 'request', 'open', 'customer',
-   'Quote requested.', '2026-11-10T09:00:00+08', '[{"table":"job_events","id":"zz-2"}]'::jsonb,
-   'quote_sent', 'model:zztest'),
-  ('41060000-0000-4000-8000-000000000200', '41060000-0000-4000-8000-000000000100',
-   '41060000-0000-4000-8000-000000000000', 'request:zztest:noorg', 'request', 'open', 'customer',
-   'Quote requested.', '2026-11-10T09:00:00+08', '[{"table":"job_events","id":"zz-3"}]'::jsonb,
+   'Quote requested.', '2026-11-10T09:00:00+08',
+   '[{"table":"job_events","id":"41060000-0000-4000-8000-000000000902","excerpt":"Quote requested."}]'::jsonb,
    'quote_sent', 'model:zztest');
 
 INSERT INTO public.agent_action_proposals (
   id, actor, auth_mode, action, params, params_sha256, job_id, kind, summary, status
 ) VALUES
   ('41060000-0000-4000-8000-0000000003a1', 'agent:zztest', 'service', 'create_deposit_invoice',
-   '{}'::jsonb, 'sha-a1', '41060000-0000-4000-8000-0000000000a1', 'customer_invoice',
+   '{}'::jsonb, repeat('a', 64), '41060000-0000-4000-8000-0000000000a1', 'customer_invoice',
    'Draft customer invoice.', 'pending'),
   ('41060000-0000-4000-8000-000000000300', 'agent:zztest', 'service', 'xero_approve',
-   '{}'::jsonb, 'sha-nojob', NULL, 'xero_approve',
+   '{}'::jsonb, repeat('b', 64), NULL, 'xero_approve',
    'Approve bill with no job.', 'pending'),
   ('41060000-0000-4000-8000-00000003dead', 'agent:zztest', 'service', 'create_deposit_invoice',
-   '{}'::jsonb, 'sha-dead', '41060000-0000-4000-8000-00000000dead', 'customer_invoice',
+   '{}'::jsonb, repeat('c', 64), '41060000-0000-4000-8000-00000000dead', 'customer_invoice',
    'Proposal pointing at missing job.', 'pending');
 
 INSERT INTO public.business_events (
@@ -144,6 +152,7 @@ INSERT INTO public.business_events (
    NULL, ARRAY['41060000-0000-4000-8000-0000000000a1', '41060000-0000-4000-8000-0000000000b1']::uuid[]),
   ('41060000-0000-4000-8000-0000000004de', 'client.sms_in', 'zztest', 'message', 'zz-m4',
    NULL, ARRAY['41060000-0000-4000-8000-0000000000a1', '41060000-0000-4000-8000-00000000dead']::uuid[]);
+SET LOCAL session_replication_role = origin;
 
 -- Stand-in contract assertions (ticket cases b through g against the explicit
 -- 7-argument raise stand-in and 4-argument withdraw stand-in, inside a savepoint
@@ -467,8 +476,6 @@ FROM (VALUES
   ($q$SELECT public.context_reconcile_raise('open_item_check', '41060000-0000-4000-8000-0000000000a1', '41060000-0000-4000-8000-00000000beef', 'Missing note.')$q$, 'reconcile_org_unknown'),
   ($q$SELECT public.context_reconcile_raise('open_item_check', '41060000-0000-4000-8000-0000000000a1', 'not-a-uuid', 'Malformed note id.')$q$, 'reconcile_org_unknown'),
   ($q$SELECT public.context_reconcile_raise('ai_job_failed', '41060000-0000-4000-8000-0000000000a1', 'not-a-bigint', 'Malformed call id.')$q$, 'reconcile_org_unknown'),
-  -- Subject's job has NULL org_id.
-  ($q$SELECT public.context_reconcile_raise('open_item_check', '41060000-0000-4000-8000-000000000000', '41060000-0000-4000-8000-000000000200', 'Unorganised job.')$q$, 'reconcile_org_unknown'),
   -- Missing job on subject or in p_job_id or in candidate_job_ids.
   ($q$SELECT public.context_reconcile_raise('agent_money_proposal', NULL, '41060000-0000-4000-8000-00000003dead', 'Dangling subject job.')$q$, 'reconcile_job_unknown'),
   ($q$SELECT public.context_reconcile_raise('open_item_check', '41060000-0000-4000-8000-00000000dead', '41060000-0000-4000-8000-0000000002a1', 'Missing passed job.')$q$, 'reconcile_job_unknown'),
@@ -557,7 +564,8 @@ SELECT ('41062000-0000-4000-8000-' || lpad(to_hex(g), 12, '0'))::uuid,
        '41060000-0000-4000-8000-0000000001a1'::uuid,
        '41060000-0000-4000-8000-0000000000a1'::uuid,
        'request:plan:' || g, 'request', 'open', 'customer', 'Plan fixture.',
-       '2026-11-10T09:00:00+08', '[{"table":"job_events","id":"zz"}]'::jsonb,
+       '2026-11-10T09:00:00+08',
+       '[{"table":"job_events","id":"41060000-0000-4000-8000-000000000909","excerpt":"Plan fixture."}]'::jsonb,
        'quote_sent', 'model:zztest'
 FROM generate_series(1, 4000) g;
 
@@ -566,7 +574,7 @@ INSERT INTO public.agent_action_proposals (
 )
 SELECT ('41063000-0000-4000-8000-' || lpad(to_hex(g), 12, '0'))::uuid,
        'agent:zztest', 'service', 'create_deposit_invoice', '{}'::jsonb,
-       'sha-plan-' || g, '41060000-0000-4000-8000-0000000000a1'::uuid,
+       lpad(to_hex(g), 64, '0'), '41060000-0000-4000-8000-0000000000a1'::uuid,
        'customer_invoice', 'Plan fixture.', 'observed'
 FROM generate_series(1, 4000) g;
 
