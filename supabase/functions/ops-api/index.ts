@@ -11594,7 +11594,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         })
         return json(result.body, result.status)
       }
-      case 'set_trade_rate_ops': return json(await setTradeRate(client, null, body))
+      case 'set_trade_rate_ops': return json(await setTradeRate(client, null, body,
+        requestActor.source === 'jwt' ? requestActor.actor.slice('user:'.length) : null))
+      case 'trade_rate_history': {
+        if (req.method !== 'GET') throw new ApiError('GET required', 405)
+        return json(await tradeRateHistory(client, url.searchParams))
+      }
       case 'approve_trade_invoice': {
         // Ops (Shaun) approves a pending_ops_review trade invoice after verifying
         // manual hours against the schedule. Moves it to 'approved' so the Xero
@@ -58444,7 +58449,7 @@ export const _myMoneyForTest = myMoney
 export const _presentTradeInvoiceSafeForTest = presentTradeInvoiceSafe
 
 // ── set_trade_rate: office sets rate; trade writes are refused ──
-async function setTradeRate(client: any, authUserId: string | null, body: any) {
+async function setTradeRate(client: any, authUserId: string | null, body: any, actorUserId: string | null = null) {
   const { user_id, hourly_rate } = body
   if (authUserId) {
     throw new ApiError('Rates are set by the office. Contact the office to change your rate.', 403)
@@ -58484,7 +58489,7 @@ async function setTradeRate(client: any, authUserId: string | null, body: any) {
       user_id: targetUserId,
       hourly_rate: Number(hourly_rate),
       effective_from: today,
-      created_by: authUserId || targetUserId,
+      created_by: actorUserId ?? null,
     })
     .select()
     .single()
@@ -58495,6 +58500,44 @@ async function setTradeRate(client: any, authUserId: string | null, body: any) {
 
 // ── list_trade_invoices: ops dashboard view ──
 export const _setTradeRateForTest = setTradeRate
+
+function tradeRateSetter(rate: any) {
+  const office = !!rate.created_by && rate.created_by !== rate.user_id
+  return {
+    set_by_kind: office ? 'office' : 'not_recorded',
+    set_by_name: office ? rate.set_by?.name ?? null : null,
+  }
+}
+
+async function tradeRateHistory(client: any, params: URLSearchParams) {
+  const rates: any[] = []
+  const pageSize = 1000
+  // Optional trade filter uses idx_trade_rates_user; both name joins use users' PK.
+  for (let offset = 0; ; offset += pageSize) {
+    let query = client.from('trade_rates')
+      .select('id, user_id, hourly_rate, effective_from, effective_to, created_at, created_by, users:user_id(name), set_by:created_by(name)')
+      .order('effective_from', { ascending: false })
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(offset, offset + pageSize - 1)
+    if (params.get('user_id')) query = query.eq('user_id', params.get('user_id'))
+    const { data, error } = await query
+    if (error) throw error
+    for (const rate of data || []) {
+      rates.push({
+        user_id: rate.user_id,
+        trade_name: rate.users?.name ?? null,
+        hourly_rate: rate.hourly_rate,
+        effective_from: rate.effective_from,
+        effective_to: rate.effective_to,
+        set_at: rate.created_at,
+        ...tradeRateSetter(rate),
+      })
+    }
+    if (!data || data.length < pageSize) break
+  }
+  return { rates }
+}
 
 async function listTradeInvoices(client: any, params: URLSearchParams) {
   const limit = parseInt(params.get('limit') || '50')
@@ -58544,7 +58587,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
   const today = getAWSTDate()
   const { data: rates, error: ratesError } = await client
     .from('trade_rates')
-    .select('user_id, hourly_rate, effective_from, users:user_id(name)')
+    .select('user_id, hourly_rate, effective_from, created_by, users:user_id(name), set_by:created_by(name)')
     .lte('effective_from', today)
     .or(`effective_to.is.null,effective_to.gte.${today}`)
     .order('effective_from', { ascending: false })
@@ -58559,7 +58602,9 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
   return {
     invoices: mergeTradeBillRows(weekly.data || [], noWeek.data || [], stuckRows.slice(0, STUCK_TRADE_BILLS_CAP))
       .map((invoice: any) => presentTradeInvoiceSafe(invoice)),
-    rates: currentRates,
+    rates: currentRates.map(({ created_by, set_by, ...rate }: any) => ({
+      ...rate, ...tradeRateSetter({ ...rate, created_by, set_by }),
+    })),
     ...(stuckCapHit
       ? { stuck_note: `More than ${STUCK_TRADE_BILLS_CAP} invoices are stuck with no Xero bill; only the newest ${STUCK_TRADE_BILLS_CAP} are listed.` }
       : {}),
