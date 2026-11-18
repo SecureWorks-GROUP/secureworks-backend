@@ -1339,3 +1339,16 @@ ops-api|supabase/migrations/20261118195200_reconcile_list_page.sql|function|reco
 # rule through this function before writing a bill's cost lines, so xero-sync
 # must not deploy ahead of the migration.
 xero-sync|supabase/migrations/20261118195500_trade_invoice_bill_mirror_rule.sql|function|trade_invoice_bill_mirror_verdicts
+# Follow-up 66 people accounts (director 03:36): one table, two flags. xero-sync
+# reads both (labour: cost lines, ingest, prematch, matcher stop; hidden: the
+# matcher's and credit step's skip); ops-api reads the row for its labour flag
+# (manual landing). The reader selects all three columns, so neither function
+# deploys ahead of the table.
+xero-sync|supabase/migrations/20261118195700_reconcile_people_accounts.sql|table|people_account_codes
+xero-sync|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.account_code
+xero-sync|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.labour
+xero-sync|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.hidden_from_reconcile
+ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|table|people_account_codes
+ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.account_code
+ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.labour
+ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.hidden_from_reconcile

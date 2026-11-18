@@ -24,6 +24,7 @@
 //   - Hard exclusion: a bill whose xero_invoice_id is a trade-invoice mirror
 //     (trade_invoices.xero_bill_id) can NEVER produce a materials fact.
 // ════════════════════════════════════════════════════════════
+import { type LabourAccounts, onLabourAccount } from "../_shared/people_accounts.ts";
 
 // ─────────────────────────────────────────────────────────────
 // Canonical job-number extractor — THE unification fix.
@@ -159,14 +160,12 @@ export const HELD_QUEUE_REASONS = new Set<string>([
   "ai_undone",
 ]);
 
-// Installer bills: any money line on subcontractor labour (306, 301). The same
-// rule as ops-api laneOfBillLines.
-export const INSTALLER_ACCOUNT_CODES = new Set(["306", "301"]);
-export function isInstallerBill(lines: unknown): boolean {
+// Installer bills: any money line on subcontractor labour (306, 301), read
+// from the labour flag of people_account_codes (_shared/people_accounts.ts).
+// The same rule as ops-api laneOfBillLines.
+export function isInstallerBill(lines: unknown, labour: LabourAccounts): boolean {
   if (!Array.isArray(lines)) return false;
-  return lines.some((l: any) =>
-    Number(l?.LineAmount ?? 0) !== 0 && INSTALLER_ACCOUNT_CODES.has(String(l?.AccountCode ?? ""))
-  );
+  return lines.some((l: any) => Number(l?.LineAmount ?? 0) !== 0 && onLabourAccount(labour, l?.AccountCode));
 }
 
 export interface MatchResult {

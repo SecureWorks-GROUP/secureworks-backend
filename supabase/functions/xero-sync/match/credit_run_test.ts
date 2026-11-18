@@ -2,6 +2,7 @@
 // The unallocated credit raiser. Fake client only; made-up ids and amounts.
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { CREDIT_BACKLOG_STATE_KEY, CREDIT_REASON, creditSweep, creditSweepRequest, syncCreditRun, syncMatchStep } from "./credit_run.ts";
+import { peopleRows } from "../../_shared/people_accounts_test_support.ts";
 
 const JOB = "11111111-1111-4111-8111-111111111111";
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -15,6 +16,7 @@ type World = {
   notes?: Record<string, any>; // credit id -> xero_supplier_credit_notes row
   openItems?: string[];
   tradeUsers?: string[];
+  people?: Array<Record<string, unknown>>; // people_account_codes rows (default: as migrated)
   fail?: string;
   applyError?: Record<string, unknown>;
   switchOn?: boolean | "fail";
@@ -46,6 +48,8 @@ function fake(w: World) {
             return { data: w.state?.[String(filters.key)] ?? null, error: null };
           case "match_clue_types":
             return { data: CLUE_TYPES, error: null };
+          case "people_account_codes":
+            return { data: w.people ?? peopleRows(), error: null };
           case "job_cost_lines": {
             if (filters.document_id !== undefined) {
               return { data: w.lines?.[String(filters.document_id)] ?? [], error: null };
@@ -319,5 +323,32 @@ Deno.test("sync credits: a failed read takes nothing and keeps the position", as
     assertEquals([out.run, applies(w).length, out.errors.length], [0, 0, 1], fail);
     assertEquals(w.state?.[CREDIT_BACKLOG_STATE_KEY], { note: "a" }, fail);
     assertEquals((w.upserts ?? []).length, 0, fail);
+  }
+});
+
+// people_account_codes rows: `hidden` codes hidden from Reconcile, `labour` ones labour too.
+const accountRows = (hidden: string[], labour = ["301", "306"]) =>
+  hidden.map((account_code) => ({ account_code, labour: labour.includes(account_code), hidden_from_reconcile: true }));
+
+Deno.test("(2) hidden accounts: a credit with a line on 475 is never raised, counted apart from labour; the flag is a database row", async () => {
+  const xero = world({ lines: { c1: [unallocated()] }, notes: { c1: { ...note(), line_items: [{ Description: "Returned", AccountCode: "475" }] } } });
+  assertEquals([applies(xero).length, (await creditSweep(fake(xero))).skipped], [0, { hidden_account_credit: 1 }]);
+  const ours = world({ lines: { c1: [unallocated({ account_code: "475" })] }, notes: { c1: note() } });
+  assertEquals([applies(ours).length, (await creditSweep(fake(ours))).skipped], [0, { hidden_account_credit: 1 }]);
+  // 475 not hidden: the same credit is raised, with no code change.
+  const out = world({ lines: { c1: [unallocated({ account_code: "475" })] }, notes: { c1: note() }, people: accountRows(["301", "306"]) });
+  await creditSweep(fake(out));
+  assertEquals(applies(out).length, 1);
+});
+
+Deno.test("people accounts: an unreadable or empty set raises nothing in the sweep", async () => {
+  const cases: Array<[Partial<World>, string]> = [
+    [{ fail: "people_account_codes" }, "people_accounts_unreadable"],
+    [{ people: [] }, "people_accounts_empty"],
+  ];
+  for (const [over, code] of cases) {
+    const w = world({ lines: { c1: [unallocated()] }, notes: { c1: note() }, ...over });
+    const out = await creditSweep(fake(w));
+    assertEquals([out.error, w.rpcs.length, (w.upserts ?? []).length], [code, 0, 0], code);
   }
 });

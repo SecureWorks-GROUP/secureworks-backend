@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   deliveryAddressClue,
   divisionTagNarrower,
@@ -10,6 +10,8 @@ import {
   orderNumberClue,
   overheadAccountClue,
 } from "./doc_clues.ts";
+import { LABOUR } from "../../_shared/people_accounts_test_support.ts";
+import { labourAccounts } from "../../_shared/people_accounts.ts";
 
 const job: MatchJob = {
   id: "J1",
@@ -40,7 +42,7 @@ const doc = (over: Partial<MatchDocument> = {}): MatchDocument => ({
   ...over,
 });
 const codes = (d: MatchDocument, jobs = [job]) =>
-  documentStops(d, jobs).map((s) => s.code);
+  documentStops(d, jobs, LABOUR).map((s) => s.code);
 
 Deno.test("document number is read as the Xero reference box", () => {
   const c = jobNumberClue(doc(), [job]);
@@ -186,4 +188,16 @@ Deno.test("division tags are only narrower evidence", () => {
     expected: "SW - FENCING",
     agrees: true,
   }]);
+});
+
+Deno.test("installer stop reads the labour flag: 306 and 301 stop, 475 does not (not labour), a padded code never did", () => {
+  const on = (code: string) => doc({ lines: [{ ...doc().lines[0], account_code: code }] });
+  assert(codes(on("306")).includes("installer_bill_outside_app"));
+  assert(codes(on("301")).includes("installer_bill_outside_app"));
+  assert(!codes(on("475")).includes("installer_bill_outside_app"));
+  assert(!codes(on(" 306")).includes("installer_bill_outside_app"));
+  // 475 stays an overhead account (main's list); in the matcher the hidden skip runs first.
+  assert(overheadAccountClue(on("475")) !== null);
+  // The flag decides, not code.
+  assert(documentStops(on("475"), [job], labourAccounts(["301", "306", "475"])).some((s) => s.code === "installer_bill_outside_app"));
 });
