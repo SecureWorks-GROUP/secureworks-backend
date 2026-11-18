@@ -4,6 +4,21 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
+-- Put the 20261118195100 body back only over a body we know: this
+-- migration's (md5 f621ae0baea131618a8e94d842bd210e) or the restored one
+-- (046d042bb6851f1b950f8372992c591e, a re-run). Any other body, or no twin,
+-- refuses before anything is changed.
+DO $guard$
+DECLARE h text;
+BEGIN
+  SELECT md5(p.prosrc) INTO h FROM pg_proc p
+   WHERE p.oid = to_regprocedure('public.job_cost_lines_backfill_bills(uuid,date,date,integer,date,text)');
+  IF h IS NULL OR h NOT IN ('f621ae0baea131618a8e94d842bd210e', '046d042bb6851f1b950f8372992c591e') THEN
+    RAISE EXCEPTION 'job_cost_lines_backfill_bills_body_changed';
+  END IF;
+END
+$guard$;
+
 CREATE OR REPLACE FUNCTION public.job_cost_lines_backfill_bills(
   p_org_id uuid, p_from date, p_to date, p_limit integer DEFAULT 200,
   p_before_date date DEFAULT NULL, p_before_id text DEFAULT NULL)

@@ -33,6 +33,21 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
+-- Replace the twin only over a body we know: the live body from
+-- 20261118195100 (md5 046d042bb6851f1b950f8372992c591e) or this migration's
+-- own (f621ae0baea131618a8e94d842bd210e, a re-apply). Any other body, or no
+-- twin at all, refuses before anything is written.
+DO $guard$
+DECLARE h text;
+BEGIN
+  SELECT md5(p.prosrc) INTO h FROM pg_proc p
+   WHERE p.oid = to_regprocedure('public.job_cost_lines_backfill_bills(uuid,date,date,integer,date,text)');
+  IF h IS NULL OR h NOT IN ('046d042bb6851f1b950f8372992c591e', 'f621ae0baea131618a8e94d842bd210e') THEN
+    RAISE EXCEPTION 'job_cost_lines_backfill_bills_body_changed';
+  END IF;
+END
+$guard$;
+
 CREATE INDEX IF NOT EXISTS trade_invoices_xero_bill_key_idx
   ON public.trade_invoices (lower(btrim(xero_bill_id)))
   WHERE xero_bill_id IS NOT NULL;
