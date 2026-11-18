@@ -1324,4 +1324,4 @@ ops-api|supabase/migrations/20261118195200_reconcile_list_page.sql|function|reco
 # Follow-up 66 mirror rule: the sync and the edge bills backfill ask the one
 # rule through this function before writing a bill's cost lines, so xero-sync
 # must not deploy ahead of the migration.
-xero-sync|supabase/migrations/20261119999900_trade_invoice_bill_mirror_rule.sql|function|trade_invoice_bill_mirror_verdicts
+xero-sync|supabase/migrations/20261118195500_trade_invoice_bill_mirror_rule.sql|function|trade_invoice_bill_mirror_verdicts

@@ -1,6 +1,6 @@
 -- Follow-up 66, mirror rule cutover check. Count only: how many supplier bill
 -- cost lines already written are for a bill a trade invoice holds, by how the
--- old and new rules read it. Run before and after 20261119999900 (placeholder,
+-- old and new rules read it. Run before and after 20261118195500 (placeholder,
 -- the keeper stamps it) and before any clean-up of those lines; the migration
 -- leaves them where they are.
 -- Read only: SELECTs on job_cost_lines and trade_invoices. Writes nothing.
