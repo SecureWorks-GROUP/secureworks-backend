@@ -96,7 +96,7 @@ Deno.test("ZZTEST reimbursement checks skip only the receipt in the required ord
       receipt({ xero_bill_id: "ZZTEST-bill" }),
       {},
       [],
-      "reimbursement_already_claimed",
+      "expense_already_billed",
     ],
   ];
   for (const [row, options, claims, code] of cases) {
