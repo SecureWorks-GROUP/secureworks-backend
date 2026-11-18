@@ -2,7 +2,7 @@
 BEGIN;
 SET LOCAL statement_timeout = '120s';
 -- Re-apply: this migration's own bodies stay as they are.
-\ir ../../../migrations/20261119999930_reconcile_decide_switch_in_database.sql
+\ir ../../../migrations/20261118196000_reconcile_decide_switch_in_database.sql
 
 CREATE TEMP TABLE switch_checks(label text);
 CREATE FUNCTION pg_temp.check_it(ok boolean, label text) RETURNS void LANGUAGE plpgsql AS $$
@@ -174,16 +174,16 @@ DECLARE
 END $on$;
 
 -- Rollback, re-run of the rollback, and apply again.
-\ir ../../../rollbacks/20261119999930_reconcile_decide_switch_in_database_down.sql
+\ir ../../../rollbacks/20261118196000_reconcile_decide_switch_in_database_down.sql
 SELECT pg_temp.check_it(
   pg_temp.md5_of('public.reconcile_decide(uuid,text,text,jsonb,text,boolean,uuid)') = '5eb8d0b43f1a2b8339d3f739a6d05433'
   AND pg_temp.md5_of('public.reconcile_undo(bigint,uuid)') = '8d34d85b018204c72d7db66ea915dcda',
   'rollback returns main''s bodies');
-\ir ../../../rollbacks/20261119999930_reconcile_decide_switch_in_database_down.sql
+\ir ../../../rollbacks/20261118196000_reconcile_decide_switch_in_database_down.sql
 SELECT pg_temp.check_it(
   pg_temp.md5_of('public.reconcile_decide(uuid,text,text,jsonb,text,boolean,uuid)') = '5eb8d0b43f1a2b8339d3f739a6d05433',
   'rollback re-run leaves main''s bodies');
-\ir ../../../migrations/20261119999930_reconcile_decide_switch_in_database.sql
+\ir ../../../migrations/20261118196000_reconcile_decide_switch_in_database.sql
 SELECT pg_temp.check_it(
   pg_temp.md5_of('public.reconcile_decide(uuid,text,text,jsonb,text,boolean,uuid)') = '95d788204b6dbbc1817d48a254989130'
   AND pg_temp.md5_of('public.reconcile_undo(bigint,uuid)') = '7c7cf1647abd300405165d017cd35338'
