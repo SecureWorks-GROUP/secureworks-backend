@@ -1,7 +1,8 @@
 -- Rollback of 20261119999910_reconcile_people_accounts (PLACEHOLDER version): puts back
 -- 20261118195400's bodies of reconcile_list_page and reconcile_list_counts,
 -- byte for byte.
--- The table public.people_account_codes is LEFT in place: it
+-- The table public.people_account_codes is LEFT in place, with its labour hold
+-- (the CHECK and the people_account_codes_labour_exact trigger and function): it
 -- holds the owner's answer, and the deployed edge code reads it (xero-sync's
 -- cost lines, materials ingest, bill prematch, matcher and credit step, and
 -- ops-api's manual landing lane; each stops, writing nothing, when it is
@@ -24,9 +25,9 @@ BEGIN
   LOOP
     IF (f.sig, f.body) NOT IN (
       ('reconcile_list_page(uuid,text[],integer,jsonb)', '8c9e154df84031b3ae8620953c67c841'),
-      ('reconcile_list_page(uuid,text[],integer,jsonb)', 'bbf31b21435de5495b193e5ca011fefd'),
+      ('reconcile_list_page(uuid,text[],integer,jsonb)', '21429cddb4dcbda92d5f36083fdf453a'),
       ('reconcile_list_counts(uuid)', '377ee4c6d4f4d5ae66b070dc31748f44'),
-      ('reconcile_list_counts(uuid)', '74302b4ce77f0ca64780a95a77032a4a')) THEN
+      ('reconcile_list_counts(uuid)', '40f09ca674d5313c3500100114400280')) THEN
       RAISE EXCEPTION 'reconcile_people_accounts down: % body changed', f.sig;
     END IF;
   END LOOP;

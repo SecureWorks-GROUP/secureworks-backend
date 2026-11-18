@@ -20,7 +20,6 @@ import { emailJobsByBill, runBillPrematch } from "./bill_prematch_run.ts";
 import { assignReconRow } from "../ops-api/materials_recon.ts";
 import { baseSeed, makeFakeClient, ORG } from "../ops-api/materials_recon_test_support.ts";
 import { LABOUR } from "../_shared/people_accounts_test_support.ts";
-import { labourAccounts } from "../_shared/people_accounts.ts";
 
 const JOBS: PrematchJob[] = [
   { id: "j1", job_number: "SWF-26535", status: "complete", created_at: "2026-05-01", site_address: "12 Banksia Street, Wanneroo WA", holding: false },
@@ -127,11 +126,12 @@ Deno.test("overhead accounts and SW - GROUP lines are proposed not job related",
   assertEquals(materials.kind, "none");
 });
 
-Deno.test("475: never an overhead proposal here (no hidden skip runs in pre-match), and its kind is unchanged: not labour", () => {
-  assert(!OVERHEAD_ACCOUNTS.has("475"), "475 is out of the overhead list");
-  // Alone: no proposal at all (it was 'not job related' before; a proposal places nothing).
-  assertEquals(decideBillPrematch(bill([["Internal subcontractor", "475", 900]]), ctx()).kind, "none");
-  // Not labour: a job number decides it as it did before (no installer_confirm).
+Deno.test("475 keeps main's pre-match exactly: still an overhead account, not labour (director 03:57: the matcher's hidden skip comes first)", () => {
+  assert(OVERHEAD_ACCOUNTS.has("475"), "OVERHEAD_ACCOUNTS is main's list");
+  // Alone: the same 'not job related' proposal as main.
+  const alone = decideBillPrematch(bill([["Internal subcontractor", "475", 900]]), ctx());
+  assertEquals([alone.kind, alone.rule], ["not_job_related", "overhead_account"]);
+  // Not labour: a job number decides it as on main (no installer_confirm).
   const d = decideBillPrematch(bill([["Internal subcontractor SWF-26535", "475", 900]]), ctx());
   assertEquals(d.kind === "job" && [d.confidence, d.rule], ["high", "job_number"]);
   // 306 is still labour, read from the labour flag; a padded " 306" never was and is not now.
@@ -139,9 +139,6 @@ Deno.test("475: never an overhead proposal here (no hidden skip runs in pre-matc
   assertEquals(l.kind === "job" && l.rule, "job_number+installer_confirm");
   const padded = decideBillPrematch(bill([["Install SWF-26535", " 306", 900]]), ctx());
   assertEquals(padded.kind === "job" && padded.rule, "job_number");
-  // The labour flag decides, not code: with 475 flagged labour the same bill waits for a person.
-  const flagged = decideBillPrematch(bill([["Internal subcontractor SWF-26535", "475", 900]]), { ...ctx(), labour: labourAccounts(["301", "306", "475"]) });
-  assertEquals(flagged.kind === "job" && flagged.rule, "job_number+installer_confirm");
 });
 
 Deno.test("an invoice email counts only when the file name carries the whole invoice number", () => {

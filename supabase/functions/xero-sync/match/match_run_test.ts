@@ -630,6 +630,22 @@ Deno.test("match_pending door: only a POST with the exact server key; nothing re
 const accountRows = (hidden: string[], labour = ["301", "306"]) =>
   hidden.map((account_code) => ({ account_code, labour: labour.includes(account_code), hidden_from_reconcile: true }));
 
+Deno.test("MUST NOT CHANGE: a document on no hidden account is proposed exactly as before (an overhead-only bill still reaches match_apply with its overhead clue)", async () => {
+  const on = (code: string) => {
+    const l: Record<string, any[]> = billLines();
+    l[BILL][0] = { ...l[BILL][0], description: "Fuel", account_code: code };
+    return l;
+  };
+  const w = world({ lines: on("485") });
+  const r = await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  assertEquals([r.skipped, applies(w).length], [{}, 1]);
+  assert(JSON.stringify(applies(w)[0].args).includes("overhead_account"), "the overhead clue is sent as before");
+  // The same bill on 475 (hidden) never reaches a clue or a write.
+  const h = world({ lines: on("475") });
+  const rh = await runMatchFor(fake(h), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  assertEquals([rh.skipped, h.rpcs.length], [{ hidden_account_bill: 1 }, 0]);
+});
+
 Deno.test("(1) hidden accounts: a bill with any line on 475 is skipped before any write, counted apart from labour; the flag is a database row", async () => {
   // Our cost line on 475 (a mixed bill: one supplies line, one on 475, stored padded).
   const ours: Record<string, any[]> = billLines();

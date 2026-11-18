@@ -19,9 +19,9 @@ DO $$ BEGIN
   PERFORM pg_temp.assert_ok((SELECT array_agg(account_code || ':' || labour || ':' || hidden_from_reconcile ORDER BY account_code) FROM public.people_account_codes)
     = ARRAY['301:true:true','306:true:true','475:false:true'], 'labour 301 and 306; hidden 301, 306 and 475');
   PERFORM pg_temp.assert_ok((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reconcile_list_page(uuid,text[],integer,jsonb)'::regprocedure)
-    = 'bbf31b21435de5495b193e5ca011fefd', 'page body is this migration''s');
+    = '21429cddb4dcbda92d5f36083fdf453a', 'page body is this migration''s');
   PERFORM pg_temp.assert_ok((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reconcile_list_counts(uuid)'::regprocedure)
-    = '74302b4ce77f0ca64780a95a77032a4a', 'counts body is this migration''s');
+    = '40f09ca674d5313c3500100114400280', 'counts body is this migration''s');
   PERFORM pg_temp.assert_ok(obj_description('public.reconcile_list_page(uuid,text[],integer,jsonb)'::regprocedure, 'pg_proc') LIKE 'Reconcile list (P2-03.6)%'
     AND obj_description('public.reconcile_list_counts(uuid)'::regprocedure, 'pg_proc') LIKE 'Reconcile list (P2-03.6)%',
     'comment prefix kept, so 20261118195200 still re-applies');
@@ -107,14 +107,52 @@ DO $$ BEGIN
 END $$;
 RESET ROLE;
 
--- The list reads only the hidden flag: 301 no longer labour (still hidden) changes nothing.
-UPDATE public.people_account_codes SET labour = false WHERE account_code = '301';
-SET LOCAL ROLE service_role;
+-- The labour hold (director 03:57): labour is exactly 301 and 306. Another code
+-- made labour, 301 or 306 made not labour, removed or renamed, or the table
+-- emptied: each is refused.
 DO $$ BEGIN
-  PERFORM pg_temp.assert_ok(pg_temp.listed() = ARRAY['f3','f6'], 'the labour flag moves nothing in the list: ' || pg_temp.listed()::text);
+  PERFORM pg_temp.assert_ok(EXISTS (SELECT FROM pg_constraint WHERE conrelid = 'public.people_account_codes'::regclass
+      AND conname = 'people_account_codes_labour_is_301_306')
+    AND EXISTS (SELECT FROM pg_trigger WHERE tgrelid = 'public.people_account_codes'::regclass
+      AND tgname = 'people_account_codes_labour_exact' AND NOT tgisinternal)
+    AND (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.people_account_codes_labour_exact()'::regprocedure) = '4bfc2a86430bb41e17769a71cc91d591'
+    AND NOT has_function_privilege('service_role', 'public.people_account_codes_labour_exact()', 'EXECUTE'),
+    'labour hold: CHECK, trigger and its own function body');
+  BEGIN
+    UPDATE public.people_account_codes SET labour = true WHERE account_code = '475';
+    RAISE EXCEPTION 'ZZTEST 475 was made labour';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO public.people_account_codes (account_code, labour, hidden_from_reconcile, note) VALUES ('300', true, true, 'x');
+    RAISE EXCEPTION 'ZZTEST a new labour code was stored';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    UPDATE public.people_account_codes SET labour = false WHERE account_code = '301';
+    RAISE EXCEPTION 'ZZTEST 301 was made not labour';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    UPDATE public.people_account_codes SET account_code = '302' WHERE account_code = '306';
+    RAISE EXCEPTION 'ZZTEST 306 was renamed';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    DELETE FROM public.people_account_codes WHERE account_code = '306';
+    RAISE EXCEPTION 'ZZTEST 306 was removed';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'people_account_codes_labour_fixed' THEN RAISE; END IF;
+  END;
+  BEGIN
+    TRUNCATE public.people_account_codes;
+    RAISE EXCEPTION 'ZZTEST the table was emptied';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'people_account_codes_labour_fixed' THEN RAISE; END IF;
+  END;
+  PERFORM pg_temp.assert_ok((SELECT array_agg(account_code || ':' || labour || ':' || hidden_from_reconcile ORDER BY account_code) FROM public.people_account_codes)
+    = ARRAY['301:true:true','306:true:true','475:false:true'], 'nothing changed by the refused writes');
 END $$;
-RESET ROLE;
-UPDATE public.people_account_codes SET labour = true WHERE account_code = '301';
 
 -- The owner's answer changes one flag, no code: 475 not hidden and the four come back.
 UPDATE public.people_account_codes SET hidden_from_reconcile = false WHERE account_code = '475';
@@ -133,6 +171,26 @@ DO $$ BEGIN
   PERFORM pg_temp.assert_ok(pg_temp.counted() = '{"bill":1,"credit":1}'::jsonb, 'counts with 300: ' || pg_temp.counted()::text);
 END $$;
 RESET ROLE;
+-- Fail closed (director 03:57): with no hidden row at all (reachable only past
+-- the labour hold, so the hold is lifted here inside this rolled-back test), a
+-- page lists nothing and counts give no kind, as the edge reader refuses.
+ALTER TABLE public.people_account_codes DISABLE TRIGGER people_account_codes_labour_exact;
+DELETE FROM public.people_account_codes;
+SET LOCAL ROLE service_role;
+DO $$ BEGIN
+  PERFORM pg_temp.assert_ok(pg_temp.listed() = '{}'::text[], 'no hidden row: nothing listed: ' || pg_temp.listed()::text);
+  PERFORM pg_temp.assert_ok(pg_temp.counted() = '{}'::jsonb, 'no hidden row: no count: ' || pg_temp.counted()::text);
+END $$;
+RESET ROLE;
+-- Rows present but none hidden: the same.
+INSERT INTO public.people_account_codes (account_code, labour, hidden_from_reconcile, note) VALUES ('475', false, false, 'ZZTEST');
+SET LOCAL ROLE service_role;
+DO $$ BEGIN
+  PERFORM pg_temp.assert_ok(pg_temp.listed() = '{}'::text[] AND pg_temp.counted() = '{}'::jsonb, 'rows but none hidden: nothing listed or counted');
+END $$;
+RESET ROLE;
+ALTER TABLE public.people_account_codes ENABLE TRIGGER people_account_codes_labour_exact;
+
 -- Hidden, never closed: no item was written.
 DO $$ BEGIN
   PERFORM pg_temp.assert_ok(NOT EXISTS (

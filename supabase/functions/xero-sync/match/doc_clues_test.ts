@@ -196,8 +196,8 @@ Deno.test("installer stop reads the labour flag: 306 and 301 stop, 475 does not 
   assert(codes(on("301")).includes("installer_bill_outside_app"));
   assert(!codes(on("475")).includes("installer_bill_outside_app"));
   assert(!codes(on(" 306")).includes("installer_bill_outside_app"));
-  // 475 is out of the overhead list; in the matcher the hidden skip runs first anyway.
-  assertEquals(overheadAccountClue(on("475")), null);
+  // 475 stays an overhead account (main's list); in the matcher the hidden skip runs first.
+  assert(overheadAccountClue(on("475")) !== null);
   // The flag decides, not code.
   assert(documentStops(on("475"), [job], labourAccounts(["301", "306", "475"])).some((s) => s.code === "installer_bill_outside_app"));
 });

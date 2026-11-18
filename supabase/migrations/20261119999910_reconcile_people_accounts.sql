@@ -15,7 +15,12 @@
 --                           on an account that is not labour, two bills live).
 --                           Read ONLY by the matcher's and credit step's skip
 --                           (before any write) and the two list functions below.
---    A labour account is always hidden (CHECK). 475 is hidden and NOT labour: its
+--    A labour account is always hidden (CHECK). Labour is held to EXACTLY 301
+--    and 306 (a row CHECK, and a statement trigger so neither row can be removed),
+--    because the cost-line twin and the Job Profit SQL still write 301 and 306 in
+--    their bodies: an edit here would otherwise move kinds at the edge only. That
+--    hold lifts in the PR that moves the twin and Job Profit onto this table
+--    (director 03:57). 475 is hidden and NOT labour: its
 --    kind and its Job Profit treatment are unchanged; it is only never proposed
 --    and never listed. The owner's answer changes a row, not code. Seeded only
 --    when this migration creates the table, so a re-apply never puts back a row
@@ -26,7 +31,9 @@
 --    document with a line on a hidden account is left out exactly as a document
 --    with a line of kind installer_bill is, and so is a credit that follows such
 --    a bill. An open item already raised for such a document is hidden by the
---    same rule; no item is closed or written.
+--    same rule; no item is closed or written. FAIL CLOSED like the edge reader:
+--    while the table holds no hidden row, a page lists nothing and counts give no
+--    kind (zero), so an emptied set never shows a hidden document.
 --
 -- Not changed: job_cost_lines_bill_document (20261118195100, the database twin
 -- of the cost-line writer) keeps 301 and 306 in its body until a later PR, so
@@ -53,12 +60,18 @@ BEGIN
   LOOP
     IF (f.sig, f.body) NOT IN (
       ('reconcile_list_page(uuid,text[],integer,jsonb)', '8c9e154df84031b3ae8620953c67c841'),
-      ('reconcile_list_page(uuid,text[],integer,jsonb)', 'bbf31b21435de5495b193e5ca011fefd'),
+      ('reconcile_list_page(uuid,text[],integer,jsonb)', '21429cddb4dcbda92d5f36083fdf453a'),
       ('reconcile_list_counts(uuid)', '377ee4c6d4f4d5ae66b070dc31748f44'),
-      ('reconcile_list_counts(uuid)', '74302b4ce77f0ca64780a95a77032a4a')) THEN
+      ('reconcile_list_counts(uuid)', '40f09ca674d5313c3500100114400280')) THEN
       RAISE EXCEPTION 'reconcile_people_accounts: % body changed', f.sig;
     END IF;
   END LOOP;
+  -- The labour hold is this migration's own function, or absent.
+  IF to_regprocedure('public.people_account_codes_labour_exact()') IS NOT NULL
+     AND (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('public.people_account_codes_labour_exact()'))
+       IS DISTINCT FROM '4bfc2a86430bb41e17769a71cc91d591' THEN
+    RAISE EXCEPTION 'reconcile_people_accounts: people_account_codes_labour_exact() body changed';
+  END IF;
   -- A table of this name that is not this one refuses rather than being read as the set.
   IF to_regclass('public.people_account_codes') IS NOT NULL AND (
        SELECT array_agg(attname::text ORDER BY attname::text) FROM pg_attribute
@@ -79,7 +92,9 @@ BEGIN
       hidden_from_reconcile boolean NOT NULL,
       note text NOT NULL CHECK (btrim(note) <> ''),
       added_at timestamptz NOT NULL DEFAULT now(),
-      CONSTRAINT people_account_codes_labour_is_hidden CHECK (NOT labour OR hidden_from_reconcile)
+      CONSTRAINT people_account_codes_labour_is_hidden CHECK (NOT labour OR hidden_from_reconcile),
+      -- Lifts when the cost-line twin and the Job Profit SQL read this table.
+      CONSTRAINT people_account_codes_labour_is_301_306 CHECK (labour = (account_code IN ('301', '306')))
     );
     -- Seeded only here, at creation: a re-apply never restores a removed row or flag.
     INSERT INTO public.people_account_codes (account_code, labour, hidden_from_reconcile, note) VALUES
@@ -90,11 +105,37 @@ BEGIN
 END
 $table$;
 
+-- The rest of the labour hold: 301 and 306 are always present, so the labour set
+-- is exactly 301 and 306 after every write (the row CHECK keeps any other code
+-- off it). Lifts with the CHECK above.
+CREATE OR REPLACE FUNCTION public.people_account_codes_labour_exact()
+RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $fn$
+BEGIN
+  IF (SELECT coalesce(array_agg(a.account_code ORDER BY a.account_code COLLATE "C"), '{}')
+      FROM public.people_account_codes a WHERE a.labour) IS DISTINCT FROM ARRAY['301', '306'] THEN
+    RAISE EXCEPTION 'people_account_codes_labour_fixed'
+      USING HINT = 'labour stays exactly 301 and 306 until the cost-line twin and Job Profit read this table';
+  END IF;
+  RETURN NULL;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.people_account_codes_labour_exact() FROM PUBLIC, anon, authenticated, service_role;
+DO $trg$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_trigger WHERE tgrelid = 'public.people_account_codes'::regclass
+                 AND tgname = 'people_account_codes_labour_exact' AND NOT tgisinternal) THEN
+    CREATE TRIGGER people_account_codes_labour_exact
+      AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON public.people_account_codes
+      FOR EACH STATEMENT EXECUTE FUNCTION public.people_account_codes_labour_exact();
+  END IF;
+END
+$trg$;
+
 ALTER TABLE public.people_account_codes ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.people_account_codes FROM PUBLIC, anon, authenticated, service_role;
 GRANT SELECT ON TABLE public.people_account_codes TO service_role;
 COMMENT ON TABLE public.people_account_codes IS
-  'People accounts. labour: a line on the code is a person''s labour (its kind and the labour stops; 301 and 306). hidden_from_reconcile: a document with a line on the code is never proposed by the matcher or credit step and never listed on Reconcile. A labour code is always hidden. One row per code; the owner''s answer changes a row, not code.';
+  'People accounts. labour: a line on the code is a person''s labour (its kind and the labour stops); held to exactly 301 and 306 until the cost-line twin and Job Profit read this table. hidden_from_reconcile: a document with a line on the code is never proposed by the matcher or credit step and never listed on Reconcile. A labour code is always hidden. One row per code; the owner''s answer changes a row, not code.';
 
 CREATE OR REPLACE FUNCTION public.reconcile_list_page(
   p_org uuid, p_kinds text[], p_limit integer, p_after jsonb DEFAULT NULL)
@@ -118,6 +159,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $fn$
     FROM public.reconcile_items t, cur
     WHERE t.org_id = p_org AND t.status = 'open' AND t.kind = ANY(p_kinds)
       AND t.reason <> 'installer_bill_outside_app'
+      AND EXISTS (SELECT FROM public.people_account_codes h WHERE h.hidden_from_reconcile)
       AND NOT EXISTS (SELECT FROM public.job_cost_lines l
         WHERE t.subject_table = 'cost_document' AND l.org_id = t.org_id
           AND l.document_kind = split_part(t.subject_id, ':', 1)
@@ -148,6 +190,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $fn$
     FROM public.reconcile_items t, cur
     WHERE t.org_id = p_org AND t.status = 'open' AND t.kind = ANY(p_kinds)
       AND t.reason <> 'installer_bill_outside_app'
+      AND EXISTS (SELECT FROM public.people_account_codes h WHERE h.hidden_from_reconcile)
       AND NOT EXISTS (SELECT FROM public.job_cost_lines l
         WHERE t.subject_table = 'cost_document' AND l.org_id = t.org_id
           AND l.document_kind = split_part(t.subject_id, ':', 1)
@@ -177,18 +220,20 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $fn$
 $fn$;
 
 COMMENT ON FUNCTION public.reconcile_list_page(uuid,text[],integer,jsonb) IS
-  'Reconcile list (P2-03.6): one page of an org''s open items, not snoozed first; a document with a person''s labour line or a line on a hidden account (people_account_codes.hidden_from_reconcile), and a credit that follows one, left out. Read only.';
+  'Reconcile list (P2-03.6): one page of an org''s open items, not snoozed first; a document with a person''s labour line or a line on a hidden account (people_account_codes.hidden_from_reconcile), and a credit that follows one, left out; nothing listed while no account is hidden (fail closed). Read only.';
 
 -- Open items per kind for one org: the tab counts. Same WHERE as a page
 -- without the kind and cursor filters, so a count never promises an item the
 -- list withholds (labour billed outside the Trade App, a document with a
--- labour line or a line on a people account, a credit that follows one).
+-- labour line or a line on a hidden account, a credit that follows one). No
+-- hidden row at all: no kind is counted (fail closed, as a page lists nothing).
 CREATE OR REPLACE FUNCTION public.reconcile_list_counts(p_org uuid)
 RETURNS TABLE (kind text, open bigint)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $fn$
   SELECT t.kind, count(*) FROM public.reconcile_items t
   WHERE t.org_id = p_org AND t.status = 'open'
     AND t.reason <> 'installer_bill_outside_app'
+    AND EXISTS (SELECT FROM public.people_account_codes h WHERE h.hidden_from_reconcile)
     AND NOT EXISTS (SELECT FROM public.job_cost_lines l
       WHERE t.subject_table = 'cost_document' AND l.org_id = t.org_id
         AND l.document_kind = split_part(t.subject_id, ':', 1)

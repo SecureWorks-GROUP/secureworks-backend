@@ -44,12 +44,9 @@ export const JOB_NUMBER_RE_GLOBAL = /(?<![A-Z0-9])SW(MS|[A-Z])(?:-(\d{4,6})|[ \t
 // meals, insurance, licences, motor vehicle, marketing, staff amenities, wages
 // and admin, subscriptions, GST and PAYG). Job-ish accounts (305 materials, 310
 // permits, 311 small tools, 407 engineering, 408 tip fees, 429 drawings, 612
-// verge bonds) are deliberately NOT here. 475 (internal subcontractors) left on
-// 19 Nov 2026 (director 03:36): labour billed outside the Trade App is never
-// proposed. It is hidden from Reconcile (people_account_codes), but this
-// pre-match runs no hidden skip, so here the list itself must leave it out.
+// verge bonds) are deliberately NOT here.
 export const OVERHEAD_ACCOUNTS = new Set([
-  "302", "400", "412", "413", "420", "433", "441", "449", "461", "474", "485", "820", "825",
+  "302", "400", "412", "413", "420", "433", "441", "449", "461", "474", "475", "485", "820", "825",
 ]);
 
 export const GROUP_BUSINESS_UNIT = "SW - GROUP";
