@@ -1,3 +1,6 @@
+import { validatePersistedTradeInvoiceMoney, reimbursementLinesTotalEx, TRADE_INVOICE_SUPER_EFFECTIVE_FROM } from './trade_invoice_money.ts'
+import { buildPayView } from './trade_pay_view.ts'
+
 // "My money" for the trade app (2026-09-08, Marnin): what a trade has invoiced,
 // what is paid, what is still owed, and how much of it was super and GST, by
 // month and for the financial year. Pure aggregation over presented
@@ -224,4 +227,125 @@ function monthsAgo(ym: string, now: string): number {
   const a = Number(ym.slice(0, 4)) * 12 + Number(ym.slice(5, 7))
   const b = Number(now.slice(0, 4)) * 12 + Number(now.slice(5, 7))
   return b - a
+}
+
+export type PayHistoryRate = { effective_from: string; hourly_rate: number }
+type HistoryOptions = {
+  years: number
+  priorSuper: number
+  taxPercent: number | null
+  rates: PayHistoryRate[]
+  paidRuns: ReadonlySet<string>
+}
+
+const emptyHistory = () => ({
+  total_inc_super: 0, paid_to_super: 0, paid_to_you: 0,
+  reimbursements: 0, paid_into_bank: 0, invoices: 0,
+})
+type HistoryTotals = ReturnType<typeof emptyHistory>
+type HistoryInvoice = Record<string, any>
+
+export function payHistoryStart(today: string, years: number) {
+  return (Number(fyStartFor(today).slice(0, 4)) - years + 1) + '-07-01'
+}
+
+function addHistory(t: HistoryTotals, invoice: HistoryTotals) {
+  for (const k of Object.keys(t) as (keyof HistoryTotals)[]) t[k] = r2(t[k] + invoice[k])
+}
+
+function addPeriod(periods: Map<string, HistoryTotals>, key: string, invoice: HistoryTotals) {
+  const totals = periods.get(key) ?? emptyHistory()
+  addHistory(totals, invoice)
+  periods.set(key, totals)
+}
+
+export function countedHistoryInvoice(row: HistoryInvoice) {
+  return !RELEASED.has(row.status) && !VOID_BILL.has(String(row.xero_bill_status ?? '').toUpperCase())
+}
+
+export function historyAmount(value: unknown) {
+  const amount = num(value)
+  if (amount === null) throw new Error('pay_history_unreadable')
+  return amount
+}
+
+function mondayOf(day: string) {
+  const date = new Date(day + 'T00:00:00Z')
+  date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7)
+  return date.toISOString().slice(0, 10)
+}
+
+export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, opts: HistoryOptions) {
+  const start = payHistoryStart(today, opts.years)
+  const thisFy = fyStartFor(today)
+  const lastFy = payHistoryStart(today, 2)
+  const priorYear = Number(today.slice(0, 4)) - 1
+  const anniversary = priorYear + today.slice(4)
+  const lastCutoff = today.endsWith('-02-29') ? priorYear + '-02-28' : anniversary
+  const weeks = new Map<string, HistoryTotals>()
+  const months = new Map<string, HistoryTotals>()
+  const years = new Map<string, HistoryTotals>()
+  const thisYear = emptyHistory()
+  const lastYear = emptyHistory()
+  const byInvoice: { invoice_id: string; invoice_number: string | null; week_start: string; amount: number; status: string }[] = []
+  let sinceStart = opts.priorSuper
+  let tax = 0
+
+  for (const row of rows) {
+    if (!countedHistoryInvoice(row)) continue
+    // Match My money's week-ending date, falling back to the creation date on older bills.
+    const day = row.week_end || row.created_at?.slice(0, 10)
+    if (!day) throw new Error('pay_history_unreadable')
+    if (day > today) continue
+    sinceStart = r2(sinceStart + historyAmount(row.super_amount))
+    const comparable = day >= lastFy && day <= lastCutoff
+    if (day < start && !comparable) continue
+
+    // The pricing validator knows statutory rates only from its effective date.
+    // For earlier legacy invoices sum their recorded split, without guessing a rate.
+    const earlierLegacy = !row.super_basis && day < TRADE_INVOICE_SUPER_EFFECTIVE_FROM
+    const money = earlierLegacy ? null : validatePersistedTradeInvoiceMoney(row)
+    const view = money && buildPayView(money, {
+      reimbursementsEx: r2(money.gross_earned - (money.super_base_ex ?? money.gross_earned)),
+      taxSetAsidePercent: opts.taxPercent, repayment: null,
+    })
+    if (!view && (!Array.isArray(row.reimbursements) ||
+        row.reimbursements.some((line: HistoryInvoice) => num(line.line_total_ex) === null))) {
+      throw new Error('pay_history_unreadable')
+    }
+    const paidToYou = view?.paid_to_you ?? historyAmount(row.net_pay)
+    const superAmount = historyAmount(row.super_amount)
+    if (superAmount < 0 || paidToYou < 0) throw new Error('pay_history_unreadable')
+    const totals = {
+      total_inc_super: view?.total_inc_super ?? r2(paidToYou + superAmount),
+      paid_to_super: superAmount, paid_to_you: paidToYou,
+      reimbursements: view?.reimbursements ?? reimbursementLinesTotalEx(row.reimbursements),
+      // The settled cash on the bill, including a partial payment or an office edit.
+      paid_into_bank: historyAmount(row.amount_paid), invoices: 1,
+    }
+    if (comparable) addHistory(lastYear, totals)
+    if (day < start) continue
+    if (day >= thisFy) {
+      addHistory(thisYear, totals)
+      if (opts.taxPercent !== null) tax = r2(tax + (view?.tax_set_aside?.amount ?? r2(paidToYou * opts.taxPercent / 100)))
+    }
+    const week = row.week_start || mondayOf(day)
+    addPeriod(weeks, week, totals)
+    addPeriod(months, day.slice(0, 7), totals)
+    addPeriod(years, fyLabelFor(day), totals)
+    byInvoice.push({ invoice_id: row.id, invoice_number: row.invoice_number, week_start: week,
+      amount: superAmount, status: opts.paidRuns.has(row.pay_run_id) ? 'paid_to_fund' : 'to_be_paid' })
+  }
+
+  const newest = (map: Map<string, HistoryTotals>) => [...map].sort(([a], [b]) => b.localeCompare(a))
+  return {
+    weeks: newest(weeks).slice(0, 26).map(([week_start, totals]) => ({ week_start, ...totals })),
+    months: newest(months).slice(0, 24).map(([month, totals]) => ({ month, label: monthLabel(month), ...totals })),
+    years: newest(years).map(([fy_label, totals]) => ({ fy_label, ...totals })),
+    this_year_vs_last: { this_fy: thisYear, last_fy_same_point: lastYear },
+    super: { this_fy: thisYear.paid_to_super, since_start: sinceStart,
+      by_invoice: byInvoice.sort((a, b) => b.week_start.localeCompare(a.week_start) || b.invoice_id.localeCompare(a.invoice_id)) },
+    tax_set_aside: opts.taxPercent === null ? null : { percent: opts.taxPercent, this_fy_amount: tax },
+    rate_history: opts.rates,
+  }
 }

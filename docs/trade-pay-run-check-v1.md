@@ -31,11 +31,13 @@ holds `as_of`. An invoice is in it when its pay week is, and its status is not
 none, so it counts in the Monday week (Perth) it was sent (`submitted_at`, else
 `created_at`). The answer's `week_start` is that pay week.
 
-**Who may call it:** staff only (admin, owner, ops_manager) or the server key.
-It is in no trade, routine, lead-installer or agent-read list, because it names
-trades and their pay. **Org:** always the caller's. A staff session reads its
-profile's org; a session with no org is a 403, never every org's invoices. The
-server key reads the server org.
+**Who may call it:** a signed-in pay run approver only
+(`trade_pay_settings.pay_run_approver_user_ids`, `pay_figures_approver.ts`),
+checked before any read; anyone else, the server key included, gets a 403 with
+no rows. It is in no trade, routine, lead-installer or agent-read list, because
+it names trades and their pay. **Org:** always the caller's. A staff session
+reads its profile's org; a session with no org is a 403, never every org's
+invoices.
 
 **Failure:** an answer that is missing, errored, or not this rule is a 503
 ("The pay-run check could not be read"). It is never shown as an empty list,
