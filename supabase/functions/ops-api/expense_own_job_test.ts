@@ -11,6 +11,7 @@ import {
 import { ExpenseCaptureError } from "./expense_capture_v2.ts";
 import {
   assertUnbookedApprovalConfirmed,
+  assertUnbookedMoveAllowed,
   expenseJobIdOf,
   expenseUnbookedJobMark,
 } from "./expense_own_job.ts";
@@ -275,6 +276,27 @@ Deno.test("resend: the job already on the receipt keeps its mark as it is, no re
   }
 });
 
+Deno.test("approved: a trade moving an approved receipt onto a job they are not booked on goes to the office", async () => {
+  const { client, read, state } = store({ row: { job_id: ownJob, status: "approved" } });
+  const before = read();
+  const err = await assertRejects(
+    () => updateExpense(client, { expense_id: expenseId, job_id: otherJob }, trade),
+    ExpenseCaptureError,
+  );
+  const body = err.body as Record<string, unknown>;
+  assertEquals([err.status, body.error, body.userMessage], [409, "expense_approved_move_needs_office", body.message]);
+  assertEquals([read(), state.writes], [before, 0]);
+});
+
+Deno.test("approved: moving an approved receipt onto an own job, or by the office, saves as on main", async () => {
+  const own = store({ row: { job_id: otherJob, status: "approved", unbooked_job_id: otherJob } });
+  await updateExpense(own.client, { expense_id: expenseId, job_id: ownJob }, trade);
+  assertEquals([own.read().job_id, own.read().unbooked_job_id], [ownJob, null]);
+  const byOffice = store({ row: { job_id: ownJob, status: "approved" }, bookings: [] });
+  await updateExpense(byOffice.client, { expense_id: expenseId, job_id: otherJob }, office);
+  assertEquals([byOffice.read().job_id, byOffice.read().unbooked_job_id], [otherJob, null]);
+});
+
 // ---- no job ----
 
 Deno.test("no job: general business saves unmarked without a booking read", async () => {
@@ -378,6 +400,8 @@ Deno.test("confirm rule and job id reading", () => {
   assertUnbookedApprovalConfirmed("approved", null, undefined);
   assertUnbookedApprovalConfirmed("queried", otherJob, undefined);
   assertUnbookedApprovalConfirmed("approved", otherJob, true);
+  assertUnbookedMoveAllowed("approved", null);
+  assertUnbookedMoveAllowed("pending", otherJob);
   assertEquals(
     [null, undefined, "", ownJob, ` ${ownJob}`].map(expenseJobIdOf),
     [null, null, null, ownJob, ` ${ownJob}`],

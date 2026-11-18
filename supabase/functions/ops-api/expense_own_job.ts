@@ -79,6 +79,20 @@ export function assertUnbookedApprovalConfirmed(
   );
 }
 
+/**
+ * An approved receipt moved onto a job its submitter is not booked on would
+ * carry the mark without the office ever confirming it. That one move is left
+ * to the office (409); every other move, and every move by the office, saves.
+ */
+export function assertUnbookedMoveAllowed(status: string, mark: string | null): void {
+  if (status !== "approved" || !mark) return;
+  throw new ExpenseOwnJobError(
+    "expense_approved_move_needs_office",
+    "This receipt is already approved. Ask the office to move it to that job.",
+    409,
+  );
+}
+
 // The app's general error reader shows userMessage before the code, so the
 // refusal carries its words there too (body: error, message, userMessage).
 class ExpenseOwnJobError extends ExpenseCaptureError {

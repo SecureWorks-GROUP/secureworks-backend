@@ -5,7 +5,7 @@ import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdWholeJob, isKep
 import { readJobAmountsLeft, type LineHoldFacts } from './trade_line_hold.ts'
 import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine, ownMoneyReimbursementItems, reimbursementSkipAnswer } from './trade_invoice_reimbursement.ts'
 import { ExpenseCaptureError, expenseCaptureFields, expenseNextStep, refuseBilledReimbursement } from './expense_capture_v2.ts'
-import { assertUnbookedApprovalConfirmed, expenseJobIdOf, expenseUnbookedJobMark } from './expense_own_job.ts'
+import { assertUnbookedApprovalConfirmed, assertUnbookedMoveAllowed, expenseJobIdOf, expenseUnbookedJobMark } from './expense_own_job.ts'
 import { listExpenseReceipts } from './expense_list.ts'
 import { factReadOn } from './fact_reader_switch.ts'
 import { rejectTradeInvoiceStorage } from './trade_invoice_rejection.ts'
@@ -65400,6 +65400,9 @@ export async function updateExpense(
         userId: authCtx?.mode === 'jwt' ? authCtx.user?.id : null,
         staff: authCtx?.mode !== 'jwt' || _opsApiStaffOperatorRole(authCtx?.user?.role),
       })
+      // An approved receipt cannot gain the mark after the office approved it
+      // without the confirm, so moving it onto such a job goes to the office.
+      assertUnbookedMoveAllowed(row.status, mark)
       if (mark !== (row.unbooked_job_id ?? null)) updates.unbooked_job_id = mark
     }
   }
