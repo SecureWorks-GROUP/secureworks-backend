@@ -744,6 +744,12 @@ Deno.test("proposeSupplierCredits: credit amount mismatch and line-only GST neve
         "mail/cn-5002.pdf",
         "2026-10-05T02:00:00.000Z",
       ),
+      makeAttachment(
+        "00000000-0000-4000-8000-0000000000e3",
+        "credit_then_orig_inv_CN-5003.pdf",
+        "mail/cn-5003.pdf",
+        "2026-10-05T03:00:00.000Z",
+      ),
     ],
     files: {
       "context-email-attachments/mail/cn-5001.pdf": [
@@ -765,6 +771,18 @@ Deno.test("proposeSupplierCredits: credit amount mismatch and line-only GST neve
         "Line 2 rail kit  GST $10.00",
         "Credit Total (inc GST) $220.00",
       ].join("\n"),
+      "context-email-attachments/mail/cn-5003.pdf": [
+        "ZZTEST Supplies",
+        "CREDIT NOTE CN-5003",
+        "Date: 5 October 2026",
+        "Subtotal (ex GST) $100.00",
+        "Total GST $10.00",
+        "Total $110.00",
+        "Original Invoice INV-5001",
+        "Subtotal (ex GST) $500.00",
+        "Total GST $50.00",
+        "Total $550.00",
+      ].join("\n"),
     },
     invoices: [
       {
@@ -785,7 +803,7 @@ Deno.test("proposeSupplierCredits: credit amount mismatch and line-only GST neve
     extractText: env.fakeTextReader,
   });
 
-  assertEquals(res, { read: 2, proposed: 2, duplicate: 0, not_credit: 0 });
+  assertEquals(res, { read: 3, proposed: 3, duplicate: 0, not_credit: 0 });
   // Mismatched ex + GST vs inc withholds all figures and sends to a person.
   assertEquals(env.drafts[0].amount_ex, null);
   assertEquals(env.drafts[0].amount_inc, null);
@@ -799,6 +817,16 @@ Deno.test("proposeSupplierCredits: credit amount mismatch and line-only GST neve
   // Earlier bare Total $550.00 and line-only GST $10.00 are ignored; Credit Total $220.00 wins with ex null.
   assertEquals(env.drafts[1].amount_inc, 220);
   assertEquals(env.drafts[1].amount_ex, null);
+
+  // Credit totalling 110 followed by Original Invoice block totalling 550 withholds figures and sets amounts_need_review.
+  assertEquals(env.drafts[2].amount_ex, null);
+  assertEquals(env.drafts[2].amount_inc, null);
+  assertEquals(env.raisedItems[2].evidence.amount_ex, null);
+  assertEquals(env.raisedItems[2].evidence.amounts_need_review, true);
+  assertEquals(
+    (env.raisedItems[2].evidence.summary as Record<string, unknown>).amount_inc,
+    null,
+  );
 });
 
 Deno.test("proposeSupplierCredits: bad paths with switch ON never throw, write nothing partial, and retry cleanly", async () => {
