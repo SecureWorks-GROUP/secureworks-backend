@@ -1,0 +1,1 @@
+-- The shared and standalone runners already provide the Supabase roles.
