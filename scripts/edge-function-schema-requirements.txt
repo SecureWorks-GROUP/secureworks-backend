@@ -1273,3 +1273,12 @@ ops-api|supabase/migrations/20261117010000_job_work_order_agent_approval.sql|fun
 ops-api|supabase/migrations/20261117020000_trade_pay_inclusive_super.sql|table|trade_pay_settings
 ops-api|supabase/migrations/20261117020000_trade_pay_inclusive_super.sql|column|trade_pay_settings.inclusive_super_from
 ops-api|supabase/migrations/20261117020000_trade_pay_inclusive_super.sql|function|trade_pay_rule_on
+# A trade's own savings goal (P1-07.4): my_savings_goal / set_my_savings_goal
+# read and write trade_savings_goals for the session trade only.
+ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|table|trade_savings_goals
+ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.user_id
+ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.label
+ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.target_amount
+ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.saved_amount
+ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.target_date
+ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.updated_at
