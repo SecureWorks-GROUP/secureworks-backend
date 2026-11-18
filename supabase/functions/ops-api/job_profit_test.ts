@@ -76,7 +76,7 @@ Deno.test("only the ops key or an admin, owner or office-staff session may read 
 });
 
 Deno.test("job_profit: needs a job, rejects malformed ids, 404 when absent", async () => {
-  const c = fakeClient({ v_job_profit: [], jobs: [] });
+  const c = fakeClient({ v_job_profit_read: [], jobs: [] });
   assertEquals((await jobProfitAction(c, new URLSearchParams(""))).status, 400);
   assertEquals(
     (await jobProfitAction(c, new URLSearchParams("job_id=nope"))).status,
@@ -101,14 +101,14 @@ Deno.test("job_profit: needs a job, rejects malformed ids, 404 when absent", asy
 Deno.test("job_profit: summary from the engine, trades rolled up, timeline built", async () => {
   const c = fakeClient({
     jobs: [{ id: JOB, job_number: "SWF-1" }],
-    v_job_profit: [{
+    v_job_profit_read: [{
       job_id: JOB,
       job_number: "SWF-1",
       invoiced_ex: 1000,
       actual_cost_ex: 570,
       profit_ex: 430,
     }],
-    v_job_cost_events: [
+    v_job_cost_events_read: [
       {
         job_id: JOB,
         source: "trade_line",
@@ -165,7 +165,7 @@ Deno.test("job_profit: summary from the engine, trades rolled up, timeline built
         paid_on: "2026-08-15",
       },
     ],
-    v_job_revenue_events: [
+    v_job_revenue_events_read: [
       {
         job_id: JOB,
         kind: "invoice_line",
@@ -228,12 +228,12 @@ Deno.test("job_profit: summary from the engine, trades rolled up, timeline built
 });
 
 Deno.test("job_profit: a read error is a 500, never an empty job", async () => {
-  const c = fakeClient({ v_job_profit: [{ job_id: JOB }] }, {
-    v_job_cost_events: "column x does not exist",
+  const c = fakeClient({ v_job_profit_read: [{ job_id: JOB }] }, {
+    v_job_cost_events_read: "column x does not exist",
   });
   const out = await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`));
   assertEquals(out.status, 500);
-  const c2 = fakeClient({}, { v_job_profit: "permission denied" });
+  const c2 = fakeClient({}, { v_job_profit_read: "permission denied" });
   assertEquals(
     (await jobProfitAction(c2, new URLSearchParams(`job_id=${JOB}`))).status,
     500,
@@ -262,7 +262,7 @@ Deno.test("job_profit: job-number lookup errors are visible", async () => {
 
 Deno.test("job_profit_list: filters reach the engine; bad filters are 400", async () => {
   const c = fakeClient({
-    v_job_profit: [{ job_id: "a", work_type: "fencing", status: "complete" }, {
+    v_job_profit_read: [{ job_id: "a", work_type: "fencing", status: "complete" }, {
       job_id: "b",
       work_type: "makesafe",
       status: "complete",
@@ -284,7 +284,7 @@ Deno.test("job_profit_list: filters reach the engine; bad filters are 400", asyn
     ),
   );
   assertEquals((out.body as any).has_more, false);
-  const perth = fakeClient({ v_job_profit: [] });
+  const perth = fakeClient({ v_job_profit_read: [] });
   await jobProfitListAction(
     perth,
     new URLSearchParams("from=2025-07-01&to=2026-06-30"),
@@ -306,7 +306,7 @@ Deno.test("job_profit_list: filters reach the engine; bad filters are 400", asyn
     (await jobProfitListAction(c, new URLSearchParams("limit=99999"))).status,
     400,
   );
-  const bad = fakeClient({}, { v_job_profit: "boom" });
+  const bad = fakeClient({}, { v_job_profit_read: "boom" });
   assertEquals(
     (await jobProfitListAction(bad, new URLSearchParams(""))).status,
     500,
@@ -321,7 +321,7 @@ Deno.test("job_profit_list: pages past the first, and says when another follows"
   const page = async (query: string) => {
     const out = await jobProfitListAction(
       fakeClient({
-        v_job_profit: [...jobs, { job_id: "m", work_type: "makesafe" }],
+        v_job_profit_read: [...jobs, { job_id: "m", work_type: "makesafe" }],
       }),
       new URLSearchParams(`type=fencing&${query}`),
     );
@@ -352,7 +352,7 @@ Deno.test("job_profit_list: the page's cost close is asked for its own jobs only
     waiting_on: [],
     ...extra,
   });
-  const c: any = fakeClient({ v_job_profit: jobs });
+  const c: any = fakeClient({ v_job_profit_read: jobs });
   const seen: unknown[] = [];
   c.rpc = (fn: string, args: unknown) => {
     seen.push([fn, args]);
@@ -378,14 +378,14 @@ Deno.test("job_profit_list: the page's cost close is asked for its own jobs only
   assertEquals(body.cost_close.by_job.b.cost_state, "open");
   assertEquals(body.has_more, true);
 
-  const bad: any = fakeClient({ v_job_profit: jobs });
+  const bad: any = fakeClient({ v_job_profit_read: jobs });
   bad.rpc = () => Promise.resolve({ data: null, error: { message: "timeout" } });
   const failed = await jobProfitListAction(bad, new URLSearchParams("limit=2"));
   assertEquals(failed.status, 200, "the figures still return when the cost close read fails");
   assertEquals((failed.body as any).jobs.length, 2);
   assertEquals((failed.body as any).cost_close, { ok: false, reason: "cost close read failed: timeout" });
 
-  const empty: any = fakeClient({ v_job_profit: [] });
+  const empty: any = fakeClient({ v_job_profit_read: [] });
   let asked = 0;
   empty.rpc = () => {
     asked++;
@@ -413,7 +413,7 @@ Deno.test("rollup: expected and quoted count only jobs the engine gave a quote f
     ...over,
   });
   const c = fakeClient({
-    v_job_profit: [
+    v_job_profit_read: [
       row({
         job_id: "won",
         invoiced_ex: 1500,
@@ -445,7 +445,7 @@ Deno.test("rollup: expected and quoted count only jobs the engine gave a quote f
   assertEquals(totals.actual_cost_ex, 950);
 
   const leadsOnly = fakeClient({
-    v_job_profit: [row({ job_id: "lead", status: "draft" })],
+    v_job_profit_read: [row({ job_id: "lead", status: "draft" })],
   });
   const none = (await jobProfitListAction(
     leadsOnly,
@@ -471,7 +471,7 @@ Deno.test("rollup: Xero Project expenses are in no total of cost or profit", asy
     revenue_verified_paid: false,
   };
   const c = fakeClient({
-    v_job_profit: [
+    v_job_profit_read: [
       // project expenses 5000 on record, trade labour 3000 not on the project
       {
         ...base,
@@ -523,7 +523,7 @@ Deno.test("rollup: expected vs actual counts only jobs whose actual cost is comp
   });
   const body = (await jobProfitListAction(
     fakeClient({
-      v_job_profit: [
+      v_job_profit_read: [
         // labour only so far: 3000 expected (labour, materials, commission)
         // against 900 of labour must not read as 2100 under expected
         row({
@@ -560,7 +560,7 @@ Deno.test("rollup: expected vs actual counts only jobs whose actual cost is comp
 
   const partialOnly = (await jobProfitListAction(
     fakeClient({
-      v_job_profit: [row({
+      v_job_profit_read: [row({
         job_id: "labour-only",
         expected_cost_ex: 3000,
         actual_cost_ex: 900,
@@ -593,7 +593,7 @@ Deno.test("rollup: an expected cost with a lane unknown is never compared (TP-13
   });
   const body = (await jobProfitListAction(
     fakeClient({
-      v_job_profit: [
+      v_job_profit_read: [
         // commission lane unknown at the quote: 1200 is labour plus materials only
         row({
           job_id: "lane-missing",
@@ -628,7 +628,7 @@ Deno.test("rollup: a group with no publishable job reads profit and margin as Un
   });
   const body = (await jobProfitListAction(
     fakeClient({
-      v_job_profit: [
+      v_job_profit_read: [
         row({
           job_id: "fence",
           work_type: "fencing",
@@ -679,7 +679,7 @@ Deno.test("rollup: a holding job is in no total, type or month, and is reported 
   });
   const body = (await jobProfitListAction(
     fakeClient({
-      v_job_profit: [
+      v_job_profit_read: [
         row({
           job_id: "bucket",
           invoiced_ex: 0,
@@ -782,7 +782,7 @@ Deno.test("employer super remains a separate unpaid obligation, not a supplier b
     completeness: ["materials_not_linked"],
   };
   const out = await jobProfitAction(
-    fakeClient({ v_job_profit: [summary], v_job_cost_events: events }),
+    fakeClient({ v_job_profit_read: [summary], v_job_cost_events_read: events }),
     new URLSearchParams(`job_id=${JOB}`),
   );
   assertEquals(out.status, 200);
@@ -822,9 +822,9 @@ Deno.test("employer super remains a separate unpaid obligation, not a supplier b
 Deno.test("job_profit: line evidence comes with the figures; a failed read is unknown, never verified", async () => {
   const tables = {
     jobs: [{ id: JOB, job_number: "SWF-1" }],
-    v_job_profit: [{ job_id: JOB, job_number: "SWF-1", invoiced_ex: 1000, actual_cost_ex: 570, profit_ex: 430 }],
-    v_job_cost_events: [],
-    v_job_revenue_events: [],
+    v_job_profit_read: [{ job_id: JOB, job_number: "SWF-1", invoiced_ex: 1000, actual_cost_ex: 570, profit_ex: 430 }],
+    v_job_cost_events_read: [],
+    v_job_revenue_events_read: [],
   };
   const ok: any = fakeClient(tables);
   const seen: unknown[] = [];
@@ -872,13 +872,13 @@ function tradeLineEvent(n: number, party: string, amount: number, over: Record<s
 function swf261099(dateErrors: Record<string, string> = {}) {
   return fakeClient({
     jobs: [{ id: JOB, job_number: "SWF-261099" }],
-    v_job_profit: [{ job_id: JOB, job_number: "SWF-261099", actual_labour_ex: 290, actual_cost_ex: 290 }],
-    v_job_cost_events: [
+    v_job_profit_read: [{ job_id: JOB, job_number: "SWF-261099", actual_labour_ex: 290, actual_cost_ex: 290 }],
+    v_job_cost_events_read: [
       tradeLineEvent(1, "b353f39a", 140),
       tradeLineEvent(2, "b353f39a", 80),
       tradeLineEvent(3, "f9a9e835", 70),
     ],
-    v_job_revenue_events: [],
+    v_job_revenue_events_read: [],
     trade_invoice_lines: [
       { id: TL(1), work_date: "2026-10-12", line_date: null, trade_invoices: { submitted_at: "2026-10-18T06:21:28.254+00:00" } },
       { id: TL(2), work_date: "2026-10-13", line_date: null, trade_invoices: { submitted_at: "2026-10-18T06:21:28.254+00:00" } },
@@ -931,14 +931,14 @@ Deno.test("job_profit: each trade's first and last charge are the days it submit
 Deno.test("job_profit: a job whose lines have no work date says so; a line's own day is kept apart; Perth days", async () => {
   const c = fakeClient({
     jobs: [{ id: JOB, job_number: "SWP-261183" }],
-    v_job_profit: [{ job_id: JOB, job_number: "SWP-261183" }],
-    v_job_cost_events: [
+    v_job_profit_read: [{ job_id: JOB, job_number: "SWP-261183" }],
+    v_job_cost_events_read: [
       tradeLineEvent(4, "p1", 80, { event_date: "2026-09-21" }),
       tradeLineEvent(5, "p2", 50, { event_date: "2026-09-18" }),
       // A draft line: not actual, never submitted.
       tradeLineEvent(6, "p2", 30, { event_date: "2026-09-21", is_actual: false, document_status: "draft" }),
     ],
-    v_job_revenue_events: [],
+    v_job_revenue_events_read: [],
     trade_invoice_lines: [
       // 16:30Z on 21 Sep is 00:30 on 22 Sep in Perth.
       { id: TL(4), work_date: null, line_date: null, trade_invoices: { submitted_at: "2026-09-21T16:30:00+00:00" } },
@@ -972,8 +972,20 @@ Deno.test("job_profit: a failed crew invoice dates read leaves every date out an
   assertEquals(body.cost_events.filter((e: any) => "submitted_on" in e).length, 0);
   assertEquals(body.timeline.filter((t: any) => t.kind === "trade_charge").map((t: any) => t.date), ["2026-10-12", "2026-10-12", "2026-10-12"]);
 
-  const none = fakeClient({ v_job_profit: [{ job_id: JOB }], v_job_cost_events: [], v_job_revenue_events: [] });
+  const none = fakeClient({ v_job_profit_read: [{ job_id: JOB }], v_job_cost_events_read: [], v_job_revenue_events_read: [] });
   const r2 = await jobProfitAction(none, new URLSearchParams(`job_id=${JOB}`));
   assertEquals((r2.body as any).trade_charge_dates, { status: "none" });
   assertEquals(none.calls.some((x) => x.table === "trade_invoice_lines"), false);
+});
+
+Deno.test("profit reads keep live API keys and publish a timestamp only for stored rows", async () => {
+  const job = { job_id: JOB, profit_ex: null };
+  for (const stamp of [null, "2026-11-01T01:00:00Z"]) {
+    const client = fakeClient({ v_job_profit_read: [{ ...job, computed_at: stamp }] });
+    const expected = stamp === null ? job : { ...job, computed_at: stamp };
+    const detail = await jobProfitAction(client, new URLSearchParams({ job_id: JOB }));
+    const list = await jobProfitListAction(client, new URLSearchParams());
+    assertEquals(detail.body.job, expected);
+    assertEquals(list.body.jobs, [expected]);
+  }
 });

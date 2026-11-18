@@ -38,12 +38,26 @@ DELETE FROM public.trade_pay_runs WHERE org_id = '$org';
 UPDATE public.trade_pay_settings SET pay_run_approver_user_ids = '$old_approvers'::uuid[] WHERE id = 1;
 DELETE FROM public.users WHERE id = '$actor';
 SQL
+ # cl-1622-fix: whatever happened above, leave the successor's body live if it was.
+ if [ "${successor_live:-f}" = t ] && [ "$(db -At -c "SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('public.approve_trade_pay_run(uuid,date,uuid,jsonb)')")" != dc17fd7b51c2916054ede4801eb8ead1 ]; then
+  db -q -1 -f "$successor"
+ fi
 }
 trap cleanup EXIT
 db -q <<SQL
 INSERT INTO public.users (id, org_id, name, role) VALUES ('$actor', '$org', 'ZZTEST approver', 'admin');
 UPDATE public.trade_pay_settings SET pay_run_approver_user_ids = ARRAY['$actor'::uuid] WHERE id = 1;
 SQL
+# cl-1622-fix: 20261118163000 replaces approve_trade_pay_run (it keeps the
+# status and refuses an empty week). These proofs are about P1-10.1's own
+# body and its rollback, so each session that approves puts P1-10.1's body
+# back first, and this migration is re-applied once ordering 1 is done.
+successor="$here/../../../migrations/20261118163000_trade_pay_run_holds_status.sql"
+successor_down="$here/../../../rollbacks/20261118163000_trade_pay_run_holds_status_down.sql"
+successor_live=$(db -At -c "SELECT coalesce((SELECT md5(prosrc) = 'dc17fd7b51c2916054ede4801eb8ead1' FROM pg_proc WHERE oid = to_regprocedure('public.approve_trade_pay_run(uuid,date,uuid,jsonb)')), false)")
+successor_first() {
+ if [ "$successor_live" = t ]; then printf "\\i '%s'\n" "$successor_down"; fi
+}
 approve_sql() {
  printf "SELECT public.approve_trade_pay_run('%s', '%s', '%s', '{\"check_rule\":\"v2\",\"invoices\":[]}');" "$org" "$1" "$actor"
 }
@@ -56,6 +70,7 @@ wait_for() {
 db -q > "$proof_dir/approve1.log" 2>&1 <<SQL &
 BEGIN;
 SET LOCAL statement_timeout = '10s';
+$(successor_first)
 $(approve_sql 2026-11-16)
 \! touch '$proof_dir/approve1.ready'
 SELECT pg_sleep(1.5);
@@ -84,11 +99,14 @@ DO \$c\$ BEGIN
 END \$c\$;
 DELETE FROM public.trade_pay_runs WHERE org_id = '$org';
 SQL
+if [ "$successor_live" = t ]; then db -q -1 -f "$successor"; fi # the trap does this too on an early exit
 echo 'PASS: ordering 1, the rollback waits for a running approval, sees its run and refuses'
 
 # ── 2. rollback first ──────────────────────────────────────────────────────
 db -q > "$proof_dir/down2.log" 2>&1 <<SQL &
 BEGIN;
+-- cl-1622-fix: P1-10.1's own body first (rolled back with the rest).
+$(successor_first)
 \i '$down'
 \! touch '$proof_dir/down2.ready'
 SELECT pg_sleep(1.5);

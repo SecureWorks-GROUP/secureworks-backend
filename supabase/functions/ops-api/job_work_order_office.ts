@@ -23,6 +23,7 @@ import {
   type OfficeWriteAction,
   xeroSyncRefusal,
 } from "./crew_invoice_job_work_order.ts";
+import { payRunHeldRefusalFor } from "./trade_pay_run_hold.ts";
 
 export class JobWorkOrderOfficeError extends Error {
   status: number;
@@ -361,7 +362,7 @@ export async function reviewCrewInvoiceLine(
   }
   const note = typeof body?.note === "string" ? body.note.trim().slice(0, 2000) : null;
   const { data: line, error: readErr } = await client.from("trade_invoice_lines")
-    .select("id, trade_invoice_id, office_review_status, trade_invoices:trade_invoice_id(id, status, user_id, xero_bill_id, query_note)")
+    .select("id, trade_invoice_id, office_review_status, trade_invoices:trade_invoice_id(id, status, user_id, xero_bill_id, query_note, pay_run_id)")
     .eq("id", lineId)
     .maybeSingle();
   if (readErr) {
@@ -385,6 +386,11 @@ export async function reviewCrewInvoiceLine(
       "invoice_already_in_xero",
       "This invoice is already in Xero. Its lines cannot be reviewed here.",
     );
+  }
+  // A pay run's invoice is reviewed in the run, not line by line.
+  const runHold = payRunHeldRefusalFor(invoice);
+  if (runHold) {
+    throw new JobWorkOrderOfficeError(runHold.status, runHold.code, runHold.message);
   }
   const { data: updated, error: updErr } = await client.from("trade_invoice_lines")
     .update({
@@ -426,6 +432,7 @@ export async function reviewCrewInvoiceLine(
       .eq("id", line.trade_invoice_id)
       .in("status", ["draft", "pending_acknowledgment", "approved", "acknowledged"])
       .is("xero_bill_id", null)
+      .is("pay_run_id", null)
       .select("id, status")
       .maybeSingle();
     if (statusErr) {
@@ -445,6 +452,7 @@ export async function reviewCrewInvoiceLine(
       .eq("id", line.trade_invoice_id)
       .eq("status", "pending_acknowledgment")
       .is("xero_bill_id", null)
+      .is("pay_run_id", null)
       .select("id, status")
       .maybeSingle();
     if (statusErr) {
