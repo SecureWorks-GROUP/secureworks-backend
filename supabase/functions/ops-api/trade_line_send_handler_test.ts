@@ -139,7 +139,7 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
     }
     if (url.pathname.startsWith("/rest/v1/rpc/")) {
       const name = url.pathname.slice("/rest/v1/rpc/".length);
-      if (name === "reconcile_item_raise") {
+      if (name === "reconcile_item_raise_named") {
         raises.push(typeof init?.body === "string" ? JSON.parse(init.body) : null);
         if (world.raiseFails) return fail();
         return Promise.resolve(Response.json("6c2f0a52-0000-4000-8000-0000000fd999"));
