@@ -139,6 +139,7 @@ function fakeClient(world: World = {}) {
       };
       const builder: any = {
         select: () => builder,
+        neq: () => builder,
         eq(col: string, val: unknown) {
           filters.push(["eq", col, val]);
           return builder;
@@ -341,7 +342,7 @@ Deno.test("job_ids: 1 to 50 uuids, deduplicated", () => {
 
 const WEEK_END = "2026-11-08";
 
-function hoursClient(world: { failJobs?: boolean } = {}) {
+function hoursClient(world: { failJobs?: boolean; lineHold?: boolean; billedOnFence?: number; failBilled?: boolean } = {}) {
   const card = (id: string, jobId: string, type: string) => ({
     id,
     scheduled_date: "2026-11-04",
@@ -368,12 +369,22 @@ function hoursClient(world: { failJobs?: boolean } = {}) {
     group_work_orders: [{ id: "group-1", ...GROUPS[0] }],
     work_orders: WORK_ORDERS,
     trade_rates: [{ hourly_rate: 50, effective_from: "2026-01-01" }],
+    // P1-05.8: the held-line rule and the pay rule for this week.
+    feature_flags: world.lineHold
+      ? [{ flag_name: "trade_line_hold_v1", enabled: true }, { flag_name: "trade_pay_inclusive_super_v1", enabled: true }]
+      : [],
+    trade_pay_settings: world.lineHold ? [{ id: 1, inclusive_super_from: "2026-01-05" }] : [],
+    trade_invoice_lines: world.billedOnFence
+      ? [{ id: "zz-billed", job_id: FENCE, line_type: "labour", line_total_ex: world.billedOnFence, override_amount: null, trade_invoices: { status: "pushed_to_xero", invoice_kind: "standard" } }]
+      : [],
   };
   return {
+    rpc: (name: string) => Promise.resolve(name === "trade_is_off_job_crew" ? { data: false, error: null } : { data: null, error: null }),
     from(table: string) {
       const filters: Array<[string, string, unknown]> = [];
       const result = () => {
         if (world.failJobs && table === "jobs") return { data: null, error: { message: "boom" } };
+        if (world.failBilled && table === "trade_invoice_lines") return { data: null, error: { message: "boom" } };
         const rows = (tables[table] || []).filter((row) =>
           filters.every(([op, col, val]) =>
             op === "eq"
@@ -385,6 +396,7 @@ function hoursClient(world: { failJobs?: boolean } = {}) {
       };
       const builder: any = {
         select: () => builder,
+        neq: () => builder,
         eq(col: string, val: unknown) {
           if (table !== "job_assignments") filters.push(["eq", col, val]);
           return builder;
@@ -398,6 +410,7 @@ function hoursClient(world: { failJobs?: boolean } = {}) {
         or: () => builder,
         not: () => builder,
         order: () => builder,
+        range: () => builder,
         limit: () => builder,
         maybeSingle() {
           const r = result();
@@ -450,6 +463,27 @@ Deno.test("my_hours: a failed mode read never fails the hours view and never gue
     assertEquals([a.work_order_agreed_ex, a.job_work_order_id], [null, null]);
   }
   assertEquals(out.total_hours, 8);
+});
+
+Deno.test("my_hours, held-line rule on: each card says what its job has left, and the answer says line_hold", async () => {
+  const out: any = await myHours(hoursClient({ lineHold: true, billedOnFence: 850.5 }), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  assertEquals(out.line_hold, true);
+  assert(!("job_left_unavailable" in out));
+  const cards = Object.fromEntries(out.assignments.map((a: any) => [a.id, a]));
+  assertEquals(cards["card-fence"].job_left_ex, 1000, "approved 1,850.50 less 850.50 billed");
+  assertEquals(cards["card-makesafe"].job_left_ex, null, "no approved amount");
+});
+
+Deno.test("my_hours, held-line rule on: an unreadable amount says so and never reads as no amount", async () => {
+  const out: any = await myHours(hoursClient({ lineHold: true, failBilled: true }), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  assertEquals([out.line_hold, out.job_left_unavailable], [true, true]);
+  assertEquals(out.total_hours, 8);
+});
+
+Deno.test("my_hours, held-line rule off: no line_hold and no job_left_ex", async () => {
+  const out: any = await myHours(hoursClient(), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  assert(!("line_hold" in out) && !("job_left_unavailable" in out));
+  for (const a of out.assignments) assert(!("job_left_ex" in a));
 });
 
 // ── 5. Through the real handler ─────────────────────────────────────────────

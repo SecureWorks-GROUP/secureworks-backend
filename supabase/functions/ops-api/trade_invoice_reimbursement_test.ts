@@ -217,10 +217,12 @@ Deno.test("ZZTEST standalone SQL fixture uses the exact existing persist functio
 
 Deno.test("ZZTEST receipt-bearing dated hourly submission uses atomic save; switch-off stays legacy", async () => {
   const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const start = source.indexOf("            const invoiceId = await retryReimbursementClaims(client, reimbursements,");
-  const end = source.indexOf("            const invoice = { id: invoiceId }", start);
+  // P1-05.8 wraps the save in saveStandard (the held-line send calls it too);
+  // switch off, the handler calls it once, exactly as before.
+  const start = source.indexOf("            const saveStandard = () => retryReimbursementClaims(client, reimbursements,");
+  const end = source.indexOf("            // ── P1-05.8: save the pay, then the office's part", start);
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-  const submit = new AsyncFunction("ctx", "with (ctx) {" + source.slice(start, end).replace(/: (any|number)\b/g, "") + "return invoiceId; }");
+  const submit = new AsyncFunction("ctx", "with (ctx) {" + source.slice(start, end).replace(/: (any|number)\b/g, "") + "const invoiceId = await saveStandard(); return invoiceId; }");
   for (const enabled of [false, true]) {
     const result = await resolve(receipt(), { flagOn: enabled });
     let atomic = 0, legacy = 0;
