@@ -55,8 +55,8 @@ function cmiBill(extra: Record<string, unknown> = {}) {
 function job(tables: Record<string, any[]>, errors: Record<string, string> = {}) {
   return fakeClient({
     jobs: [{ id: JOB, job_number: "SWP-261309" }],
-    v_job_profit: [{ job_id: JOB, job_number: "SWP-261309", invoiced_ex: 9000, actual_cost_ex: 4272.73, profit_ex: 4727.27 }],
-    v_job_revenue_events: [],
+    v_job_profit_read: [{ job_id: JOB, job_number: "SWP-261309", invoiced_ex: 9000, actual_cost_ex: 4272.73, profit_ex: 4727.27 }],
+    v_job_revenue_events_read: [],
     ...tables,
   }, errors);
 }
@@ -71,7 +71,7 @@ Deno.test("a job's Dispatch orders read ordered, billed and not billed, with the
   const body = await dispatchOrders(job({
     v_dispatch_orders: ORDERS,
     v_dispatch_order_bills: [cmiBill()],
-    v_job_cost_events: [{ job_id: JOB, source: "supplier_bill", document_id: "bill-cmi", is_actual: true, amount_ex: 1830 }],
+    v_job_cost_events_read: [{ job_id: JOB, source: "supplier_bill", document_id: "bill-cmi", is_actual: true, amount_ex: 1830 }],
   }));
   const d = body.dispatch_orders;
   assertEquals([d.status, d.ordered, d.billed, d.not_billed], ["ok", 2, 1, 1]);
@@ -91,7 +91,7 @@ Deno.test("a bill linked by our job number that Job Profit counts on another job
       ...cmiBill(), order_id: METROLL_ORDER, xero_invoice_id: "bill-placed", invoice_number: "1059100",
       bill_contact_name: "Metroll Pty Ltd", rule: "job_number", matched_ref: null, matched_job_number: "SWP-261309", bill_sub_total: 120,
     }],
-    v_job_cost_events: [
+    v_job_cost_events_read: [
       { job_id: OTHER_JOB, source: "materials_fact", document_id: "bill-placed", is_actual: true, amount_ex: 120 },
     ],
   }));
@@ -110,7 +110,7 @@ Deno.test("a bill that names two orders links neither: both read not billed and 
     v_dispatch_order_bills: [
       { ...cmiBill(), order_id: METROLL_ORDER, xero_invoice_id: "bill-two", invoice_number: "1060001", linked: false, not_linked_reason: "several_orders_on_job" },
     ],
-    v_job_cost_events: [],
+    v_job_cost_events_read: [],
   }));
   const d = body.dispatch_orders;
   assertEquals([d.billed, d.not_billed], [0, 2]);
@@ -121,7 +121,7 @@ Deno.test("a bill that names two orders links neither: both read not billed and 
 
 Deno.test("links that cannot be read are unknown, never not billed, and the rest of job_profit still answers", async () => {
   for (const failing of ["v_dispatch_order_bills", "v_dispatch_orders"]) {
-    const body = await dispatchOrders(job({ v_dispatch_orders: ORDERS, v_dispatch_order_bills: [cmiBill()], v_job_cost_events: [] }, {
+    const body = await dispatchOrders(job({ v_dispatch_orders: ORDERS, v_dispatch_order_bills: [cmiBill()], v_job_cost_events_read: [] }, {
       [failing]: "relation does not exist",
     }));
     const d = body.dispatch_orders;
@@ -141,7 +141,7 @@ Deno.test("a purchase order billed under our PO number on the supplier's PDF rea
       ...cmiBill(), order_id: PO, xero_invoice_id: "bill-rr", invoice_number: "INV-87293", bill_contact_name: "R&R FENCING",
       bill_sub_total: 1570.73, rule: "po_number", matched_ref: null, matched_po_number: "PO-302382", matched_in: "supplier_pdf",
     }],
-    v_job_cost_events: [{ job_id: JOB, source: "supplier_bill", document_id: "bill-rr", is_actual: true, amount_ex: 1570.73 }],
+    v_job_cost_events_read: [{ job_id: JOB, source: "supplier_bill", document_id: "bill-rr", is_actual: true, amount_ex: 1570.73 }],
   }));
   const d = body.dispatch_orders;
   assertEquals([d.ordered, d.billed, d.not_billed], [1, 1, 0]);
@@ -170,7 +170,7 @@ Deno.test("rules (e) and (f): a bill tied by our own records reads billed, with 
         matched_job_number: "SWP-261309", matched_in: "pdf_email",
       },
     ],
-    v_job_cost_events: [
+    v_job_cost_events_read: [
       { job_id: JOB, source: "supplier_bill", document_id: "bill-rr", is_actual: true, amount_ex: 1058 },
       { job_id: JOB, source: "supplier_bill", document_id: "bill-met", is_actual: true, amount_ex: 2442.73 },
     ],

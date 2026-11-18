@@ -249,7 +249,7 @@ export async function jobProfitRollupAction(
 
   try {
     for (let offset = 0;; offset += ROLLUP_PAGE_SIZE) {
-      let query = client.from("v_job_profit").select(ROLLUP_COLUMNS);
+      let query = client.from("v_job_profit_read").select(ROLLUP_COLUMNS);
       if (f.types.length) query = query.in("work_type", f.types);
       if (f.statuses.length) query = query.in("status", f.statuses);
       if (f.dateField === "invoiced") {
