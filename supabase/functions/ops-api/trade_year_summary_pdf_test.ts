@@ -165,7 +165,7 @@ Deno.test("an invoice with no Xero bill reads Not yet processed and the PDF tota
 
   // The same rows through pay history: one financial year, read on its last day.
   const history = summariseTradePayHistory(rows, "2027-06-30",
-    { years: 1, priorSuper: 0, taxPercent: null, rates: [], paidRuns: new Set() });
+    { years: 1, priorSuper: 0, taxPercent: null, rates: [], paidRuns: new Map() });
   assert.equal(history.years.length, 1);
   const year = history.years[0];
   const money = (value: number) => "$" + value.toFixed(2);
@@ -193,7 +193,7 @@ Deno.test("an invoice with no Xero bill reads Not yet processed and the PDF tota
   rows[3].gst = 0;
   const pushed = await contents(await read());
   const after = summariseTradePayHistory(rows, "2027-06-30",
-    { years: 1, priorSuper: 0, taxPercent: null, rates: [], paidRuns: new Set() });
+    { years: 1, priorSuper: 0, taxPercent: null, rates: [], paidRuns: new Map() });
   assert.equal(pushed[pushed.indexOf("Total (includes super)") + 1], money(after.years[0].total_inc_super));
   assert.equal(pushed[pushed.indexOf("Total (includes super)") + 1], "$669.36");
   assert.ok(pushed.includes("1 invoice not yet processed"));

@@ -8,6 +8,7 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  PAY_RUN_STAMP_STATUSES,
   approvePayRun,
   cleanIdsHash,
   defaultPayRunWeek,
@@ -98,7 +99,9 @@ type World = {
   standingStops?: Record<string, Array<{ code: string; words: string }>>;
   runBlocked?: boolean;
   run?: any;
-  runInvoices?: Array<{ invoice_id: string; pushed_at: string | null }>;
+  runInvoices?: Array<
+    { invoice_id: string; pushed_at: string | null; released_at?: string | null }
+  >;
   lines?: any[];
   held?: any[];
   approvers?: string[];
@@ -576,6 +579,43 @@ Deno.test("pay run: once recorded, the run reads its own invoices after Xero", a
   );
 });
 
+Deno.test("pay run: before a run, only the statuses the stamp takes can be clean", async () => {
+  const statuses = ["pending_ops_review", "queried", "pending_acknowledgment", "acknowledged", "approved", "pushed_to_xero"];
+  const out: any = await run({
+    rows: statuses.map((status, n) => invoice(n + 1, { status })),
+  }, APPROVER);
+  const verdicts = Object.fromEntries(out.invoices.map((i: any) => [
+    statuses[statuses.findIndex((_, n) => id(n + 1) === i.invoice_id)] ?? i.invoice_id,
+    [i.verdict, i.stops.map((x: any) => x.code)],
+  ]));
+  assertEquals(verdicts, {
+    pending_ops_review: ["clean", []],
+    queried: ["clean", []],
+    pending_acknowledgment: ["stopped", ["not_waiting_for_run"]],
+    acknowledged: ["stopped", ["not_waiting_for_run"]],
+    approved: ["stopped", ["not_waiting_for_run"]],
+    pushed_to_xero: ["stopped", ["not_waiting_for_run"]],
+  });
+});
+
+Deno.test("pay run: the read's stamp statuses are the newest migration's stamp statuses", async () => {
+  const dir = new URL("../../migrations/", import.meta.url);
+  const names: string[] = [];
+  for await (const e of Deno.readDir(dir)) if (e.name.endsWith(".sql")) names.push(e.name);
+  let stamp: string | null = null;
+  for (const name of names.sort().reverse()) {
+    const sql = await Deno.readTextFile(new URL(name, dir));
+    if (!sql.includes("FUNCTION public.approve_trade_pay_run(")) continue;
+    const m = sql.match(/UPDATE public\.trade_invoices i\s+SET[^;]*?i\.status IN \(([^)]*)\)/);
+    assert(m, `${name}: the stamp's status list`);
+    stamp = m[1];
+    break;
+  }
+  assert(stamp, "a migration defines approve_trade_pay_run");
+  const fromSql = stamp.split(",").map((x) => x.trim().replace(/^'|'$/g, "")).sort();
+  assertEquals(fromSql, [...PAY_RUN_STAMP_STATUSES].sort());
+});
+
 Deno.test("pay run: option A, after the run its own unpushed invoice is not stopped as 'not approved'", async () => {
   const notApproved = { code: "invoice_not_approved", words: "ZZTEST not approved" };
   const notInXero = { code: "not_in_xero", words: "ZZTEST no bill" };
@@ -785,6 +825,24 @@ async function installedColumns(): Promise<Map<string, Set<string>>> {
     }
     tables.set(m[1], cols);
   }
+  // Columns later pay run migrations add to the run rows (the push claim,
+  // cl-payrun-escape's release record), found by name like the one above.
+  for await (const e of Deno.readDir(dir)) {
+    if (
+      !e.name.endsWith("_trade_pay_run_holds_status.sql") &&
+      !e.name.endsWith("_trade_pay_run_release.sql")
+    ) continue;
+    const later = await Deno.readTextFile(new URL(e.name, dir));
+    for (
+      const m of later.matchAll(
+        /ALTER TABLE public\.(\w+)\s+((?:ADD COLUMN IF NOT EXISTS \w+[^,;]*,?\s*)+);/g,
+      )
+    ) {
+      for (const c of m[2].matchAll(/ADD COLUMN IF NOT EXISTS (\w+)/g)) {
+        tables.get(m[1])?.add(c[1]);
+      }
+    }
+  }
   return tables;
 }
 
@@ -869,6 +927,8 @@ Deno.test("pay run: the production reader reads a recorded week against the inst
   const schema = await installedColumns();
   assert(schema.get("trade_pay_run_invoices")?.has("run_id"));
   assert(!schema.get("trade_pay_run_invoices")?.has("pay_run_id"));
+  // cl-payrun-escape: the run read selects the release record.
+  assert(schema.get("trade_pay_run_invoices")?.has("released_at"));
   const RUN = "0a200000-0000-4000-8000-000000000501";
   const rows = [
     invoice(1, { pay_run_id: RUN, status: "approved" }),
@@ -1613,4 +1673,44 @@ Deno.test("approve pay run: the production dependencies call what the migrations
     );
   }
   assertEquals(selects.get("users"), ["id", "role"]);
+});
+
+Deno.test("pay run: an invoice released from the run is stopped there and out of its totals, even when the check reads it clean", async () => {
+  const rows = [
+    invoice(1, { pay_run_id: "run-1", status: "pushed_to_xero", xero_bill_id: "ZZTEST-BILL-1" }),
+    // Released (cl-payrun-escape): back to review, no run id, no bill.
+    invoice(2, { pay_run_id: null, status: "pending_ops_review" }),
+  ];
+  const out: any = await run({
+    rows,
+    run: { id: "run-1", week_start: WEEK },
+    runInvoices: [
+      { invoice_id: id(1), pushed_at: "2026-11-24T01:00:00Z" },
+      { invoice_id: id(2), pushed_at: null, released_at: "2026-11-24T02:00:00Z" },
+    ],
+  }, APPROVER);
+  const released = out.invoices.find((i: any) => i.invoice_id === id(2));
+  assertEquals(released.verdict, "stopped");
+  assertEquals(released.stops.map((x: any) => x.code), ["released_from_run"]);
+  assertEquals(released.pushed, false);
+  assertEquals(out.released_from_run, 1);
+  assertEquals(out.counts.clean, 1);
+  assertEquals(out.totals.super, 120);
+  assertEquals(out.super_by_person.map((p: any) => p.super_amount), [120]);
+});
+
+Deno.test("pay run: next week's read takes an invoice released from last week's run, clean", async () => {
+  // Released from the 2026-11-16 run: back to review, no run id, no bill.
+  const released = invoice(2, { pay_run_id: null, status: "pending_ops_review" });
+  const out: any = await readPayRun(reads({ rows: [released] }), {
+    orgId: ORG,
+    weekStart: "2026-11-23",
+    actorUserId: APPROVER,
+    now: new Date("2026-12-02T02:00:00Z"),
+  });
+  assertEquals(out.invoices.map((i: any) => [i.invoice_id, i.verdict, i.week_start]), [
+    [id(2), "clean", WEEK],
+  ]);
+  assertEquals(out.counts.clean, 1);
+  assertEquals(out.totals.super, 240);
 });
