@@ -72,3 +72,48 @@ psql -X -v ON_ERROR_STOP=1 \
 Migration sources are named in each SQL file. Future shapes follow the frozen
 17 Nov specs: pay 2.1, matching 2.2, agents P4-02.2/T1. Compare the prerequisite
 migrations with those specs before running; deployment has not been observed.
+
+## Switch preconditions (Follow-up 56)
+
+Two scripts answer one question each: is everything this switch needs in place
+before it goes on? They read only: each opens a `READ ONLY` transaction, rolls
+it back, calls no application function and never writes a switch or setting.
+Each prints one row per check (`ord|kind|check|result|evidence|source`) and an
+overall row. Evidence is object names, counts, codes and dates; no people, no pay.
+
+| File | Switch | Kinds of row |
+| --- | --- | --- |
+| `cap-switch-preconditions.sql` | `trade_line_hold_v1` (the cap and the held-line send) | C01-C14 required, F01-F02 fixture, N01-N03 not checked |
+| `pay-run-switch-preconditions.sql` | `trade_pay_run_v1` (the weekly pay run) | P01-P09 required, P15 follow-up, F01 fixture, N01-N06 not checked |
+
+- `required`: must PASS before the switch goes on.
+- `fixture`: the ZZTEST job is ready for the proof. A fixture FAIL is not a switch FAIL.
+- `follow_up`: a named follow-up, printed but not counted in the overall row.
+- `NOT CHECKED HERE`: SQL cannot see it (deployed commit, door wiring, wording,
+  rulings, the owner's word). An overall PASS never means safe to switch.
+
+A missing settings table or migration ledger prints a FAIL row instead of
+stopping psql. Two required rows fail on main by design until their work lands:
+C12 and C13 need migration PR A (`persist_trade_work_order_invoice_v2`,
+`decide_held_trade_line`), and C10/P06 and P08 are follow-up P1-10.3 items 1-2.
+C11 fails wherever `trade_invoice_lines` has no `org_id` (no repository migration
+adds one), so a held line's office item cannot resolve its organisation.
+
+Commands, from the repository root, one at a time (no credentials on the line;
+the read-only option makes any write fail):
+
+```sh
+PGOPTIONS='-c default_transaction_read_only=on' psql -X -v ON_ERROR_STOP=1 \
+  -v job_number="$ZZTEST_JOB_NUMBER" -f scripts/proof/cap-switch-preconditions.sql
+```
+
+```sh
+PGOPTIONS='-c default_transaction_read_only=on' psql -X -v ON_ERROR_STOP=1 \
+  -v job_number="$ZZTEST_JOB_NUMBER" -f scripts/proof/pay-run-switch-preconditions.sql
+```
+
+Tests: `switch_preconditions_test.ts` (static: read-only, no application
+function, every check listed; not in CI) and `switch-preconditions_test.sh`
+(disposable localhost Postgres only, same guard as the migration contracts:
+builds the registered stack, expects FAIL rows bare, fills each precondition
+with test-only stand-ins and expects PASS, then takes one away at a time).
