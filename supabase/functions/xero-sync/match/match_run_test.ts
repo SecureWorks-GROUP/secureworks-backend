@@ -497,27 +497,50 @@ Deno.test("sync, switch on: queued bills are taken off the queue and run in the 
 const at = (n: number) => `2026-11-1${n}T00:00:00.123456+00:00`;
 const waitingAt = (id: string, n: number, kind = "supplier_bill") => ({ document_kind: "xero_bill", document_id: id, created_at: at(n), kind });
 
-Deno.test("sync backlog: up to 25 oldest waiting bills with no open item and no labour line; the position moves and wraps", async () => {
-  // 30 bills written in one statement (one created_at), plus older ones.
-  const tied = Array.from({ length: 30 }, (_, i) => waitingAt(`t${String(i).padStart(2, "0")}`, 2));
+Deno.test("sync backlog: up to 50 oldest waiting BILLS (not lines) with no open item and no labour line; the position moves and wraps", async () => {
+  // 60 bills written in one statement (one created_at), each with three
+  // waiting lines, plus older bills with an open item or a labour line.
+  const tied = Array.from({ length: 60 }, (_, i) => `t${String(i).padStart(2, "0")}`);
   const waiting = [
     waitingAt("old-open", 1), waitingAt("old-labour", 1), waitingAt("old-labour", 1, "installer_bill"),
-    ...tied,
+    ...tied.flatMap((id) => [waitingAt(id, 2), waitingAt(id, 2), waitingAt(id, 2)]),
   ];
   const lines = Object.assign({}, ...waiting.map((r) => billLines(r.document_id)));
   const w = world({ waiting, openItems: ["xero_bill:old-open"], lines, backlogAt: null });
   const first = await syncMatchRun(fake(w), { on: true, changed: [] });
-  assertEquals(first.backlog, 25);
+  assertEquals([first.backlog, first.run, first.requeued], [50, 50, 0]);
   const ran = applies(w).map((a) => a.args.p_subject_id);
-  assertEquals(ran, tied.slice(0, 25).map((r) => `xero_bill:${r.document_id}`), "oldest first, ties by id; open-item and labour bills passed over");
-  assertEquals(w.backlogAt, { cursor_at: at(2), note: "t24" }, "kept exactly as read");
+  assertEquals(ran, tied.slice(0, 50).map((id) => `xero_bill:${id}`), "oldest first, ties by id, each bill once; open-item and labour bills passed over");
+  assertEquals(w.backlogAt, { cursor_at: at(2), note: "t49" }, "kept exactly as read");
 
-  // The next run starts after t24 on the same instant, then reaches the end.
+  // The next run starts after t49 on the same instant, then reaches the end.
   const w2 = world({ waiting, openItems: ["xero_bill:old-open"], lines, backlogAt: w.backlogAt });
   const second = await syncMatchRun(fake(w2), { on: true, changed: [] });
-  assertEquals(applies(w2).map((a) => a.args.p_subject_id), tied.slice(25).map((r) => `xero_bill:${r.document_id}`));
-  assertEquals(second.backlog, 5);
+  assertEquals(applies(w2).map((a) => a.args.p_subject_id), tied.slice(50).map((id) => `xero_bill:${id}`));
+  assertEquals(second.backlog, 10);
   assertEquals(w2.backlogAt, { cursor_at: null, note: null }, "the end: start again from the oldest");
+});
+
+Deno.test("sync backlog: the budget ends mid-backlog: it stops cleanly, requeues no backlog bill, and the next run starts at the first bill not reached", async () => {
+  const ids = Array.from({ length: 10 }, (_, i) => `b${i}`);
+  const waiting = ids.map((id, i) => waitingAt(id, i < 5 ? 1 : 2));
+  const lines = Object.assign({}, ...ids.map((id) => billLines(id)));
+  let t = 0;
+  // Each clock read costs 10 ms; the budget lets three bills run.
+  const w = world({ waiting, lines, backlogAt: null });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 45, now: () => (t += 10) });
+  assertEquals([out.run, out.backlog, out.requeued], [3, 3, 0]);
+  assertEquals(requeues(w).length, 0, "a backlog bill not reached is not put on the queue");
+  assertEquals(w.backlogAt, { cursor_at: at(1), note: "b2" }, "the position stops at the last bill run");
+  const w2 = world({ waiting, lines, backlogAt: w.backlogAt });
+  await syncMatchRun(fake(w2), { on: true, changed: [] });
+  assertEquals(applies(w2)[0].args.p_subject_id, "xero_bill:b3");
+  // Nothing reached at all: the position does not move.
+  const w3 = world({ waiting, lines, backlogAt: { cursor_at: at(1), note: "b2" } });
+  let t3 = 0;
+  const none = await syncMatchRun(fake(w3), { on: true, changed: [], budgetMs: 15, now: () => (t3 += 10) });
+  assertEquals([none.run, none.backlog], [0, 0]);
+  assertEquals(w3.backlogAt, { cursor_at: at(1), note: "b2" });
 });
 
 Deno.test("sync backlog: a bill already run this sync is passed over; a failed open-item or position read takes nothing and keeps the position", async () => {
