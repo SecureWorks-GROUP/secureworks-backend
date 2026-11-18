@@ -490,7 +490,18 @@ Deno.test("my_hours, held-line rule off: no line_hold and no job_left_ex", async
 
 async function call(
   action: string,
-  init: { method?: string; query?: Record<string, string>; body?: unknown; role?: string } = {},
+  init: {
+    method?: string;
+    query?: Record<string, string>;
+    body?: unknown;
+    role?: string;
+    /** Jobs the trade is allocated to (job_assignments rows). */
+    assignedJobs?: string[];
+    /** users.trade_sees_all_jobs: the office (see-everything) tier. */
+    seesAll?: boolean;
+    /** The job_assignments read fails. */
+    assignmentsFail?: boolean;
+  } = {},
 ): Promise<{ status: number; body: any; tables: string[] }> {
   const tables: string[] = [];
   const originalFetch = globalThis.fetch;
@@ -525,7 +536,7 @@ async function call(
         role: init.role ?? "lead_installer",
         name: "Fixture Trade",
         managed_verticals: [],
-        trade_sees_all_jobs: false,
+        trade_sees_all_jobs: init.seesAll === true,
         invoice_type: "hourly",
         trade_details: {},
         invoice_any_job: null,
@@ -541,6 +552,16 @@ async function call(
     if (table === "group_work_orders") {
       const jobs = values("job_id");
       return reply(GROUPS.filter((row) => !jobs || jobs.includes(row.job_id)));
+    }
+    if (table === "job_assignments" && init.assignmentsFail) {
+      return Promise.resolve(Response.json({ code: "57014", message: "timeout" }, { status: 500 }));
+    }
+    if (table === "job_assignments") {
+      const jobs = values("job_id");
+      const users = values("user_id");
+      return reply((init.assignedJobs ?? [])
+        .map((jobId) => ({ id: `a-${jobId}`, job_id: jobId, user_id: TRADE, status: "scheduled" }))
+        .filter((row) => (!jobs || jobs.includes(row.job_id)) && (!users || users.includes(row.user_id))));
     }
     if (table === "work_orders") {
       const jobs = values("job_id");
@@ -583,6 +604,7 @@ handlerTest("trade_invoice_job_modes: a plain trade gets each job's mode; anothe
   for (const role of ["lead_installer", "installer"]) {
     const out = await call("trade_invoice_job_modes", {
       role,
+      assignedJobs: [FENCE],
       query: { job_ids: [FENCE, PATIO, CREATED_MAKESAFE, FOREIGN].join(",") },
     });
     assertEquals(out.status, 200, JSON.stringify(out.body));
@@ -618,6 +640,47 @@ handlerTest("trade_invoice_job_modes: a plain trade gets each job's mode; anothe
     ]);
     assertEquals(out.body.not_found, [FOREIGN]);
   }
+});
+
+handlerTest("trade_invoice_job_modes: a trade not on the job gets no agreed labour anywhere; the mode is unchanged", async () => {
+  const out = await call("trade_invoice_job_modes", {
+    role: "installer",
+    assignedJobs: [],
+    query: { job_ids: [FENCE, PATIO].join(",") },
+  });
+  assertEquals(out.status, 200, JSON.stringify(out.body));
+  const fence = out.body.jobs.find((j: any) => j.job_id === FENCE);
+  assertEquals(fence.invoice_mode, "work_order");
+  assertEquals(fence.invoice_mode_reason, "fencing_job");
+  assertEquals(fence.work_order_agreed_ex, null);
+  assertEquals(fence.job_work_order_id, null);
+  // No figure and no work order id anywhere in the answer.
+  assert(!JSON.stringify(out.body).includes("1850"), JSON.stringify(out.body));
+  assert(!JSON.stringify(out.body).includes(WO_FENCE), JSON.stringify(out.body));
+  assert(out.tables.includes("job_assignments"));
+});
+
+handlerTest("trade_invoice_job_modes: a failed assignment read refuses 503, never keeps or drops the figure by guess", async () => {
+  const out = await call("trade_invoice_job_modes", {
+    role: "installer",
+    assignmentsFail: true,
+    query: { job_ids: FENCE },
+  });
+  assertEquals(out.status, 503, JSON.stringify(out.body));
+  assertEquals(out.body.code, "invoice_mode_unavailable");
+  assert(!JSON.stringify(out.body).includes("1850"));
+});
+
+handlerTest("trade_invoice_job_modes: office (see-everything) keeps the agreed labour on a job it is not allocated to", async () => {
+  const out = await call("trade_invoice_job_modes", {
+    role: "admin",
+    seesAll: true,
+    assignedJobs: [],
+    query: { job_ids: FENCE },
+  });
+  assertEquals(out.status, 200, JSON.stringify(out.body));
+  assertEquals(out.body.jobs[0].work_order_agreed_ex, 1850.5);
+  assertEquals(out.body.jobs[0].job_work_order_id, WO_FENCE);
 });
 
 handlerTest("trade_invoice_job_modes: bad job_ids answer 400 before any job is read; GET only", async () => {
