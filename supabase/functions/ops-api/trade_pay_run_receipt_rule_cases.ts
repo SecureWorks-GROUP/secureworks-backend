@@ -1,12 +1,14 @@
 // ════════════════════════════════════════════════════════════
 // The pay-back receipt rule's one case table (part of SEC-465). The rule lives
 // twice: the pay run check's reimbursement stops in SQL (trade_pay_run_check_v2,
-// 20261118194800, about line 357) and the push's payBackReceiptAllowed and its
-// two refusals before it (trade_pay_run.ts). Each half is proved against a
+// 20261118194800, about lines 325 to 357) and the push's ordered refusals,
+// PAY_BACK_RECEIPT_REFUSALS (trade_pay_run.ts). Each half is proved against a
 // table: the push test runs these cases through the real push, and the SQL
-// contract runs its zz_matrix through the real check. This file is the table;
+// contract runs its zz_matrix (status) and zz_image_matrix (receipt image)
+// through the real check. This file is the tables;
 // trade_pay_run_receipt_rule_parity_test.ts fails when the newest contract's
-// zz_matrix stops matching it row for row, so neither half can change alone.
+// matrices stop matching them row for row in any column, so neither half can
+// change alone.
 // Ruling B (director 18 Nov 23:46): one office approval is enough to pay a
 // trade back. Test data only: nothing here is read at run time.
 // ════════════════════════════════════════════════════════════
@@ -115,10 +117,46 @@ export type ContractMatrixRow = [string | null, boolean, boolean, string[]];
  * NULL, true and false, and '{a,b}' text arrays; anything else throws, so a
  * reshaped table never reads as empty. */
 export function parseContractMatrix(sql: string): ContractMatrixRow[] {
-  const start = sql.indexOf("INSERT INTO zz_matrix VALUES");
-  if (start < 0) throw new Error("no INSERT INTO zz_matrix VALUES");
-  const src = sql.slice(start + "INSERT INTO zz_matrix VALUES".length);
-  const rows: ContractMatrixRow[] = [];
+  return parseContractValues(sql, "zz_matrix", 4).map((row) => {
+    const [status, marked, line, want] = row;
+    if (typeof marked !== "boolean" || typeof line !== "boolean") {
+      throw new Error("marked and line_approved must be true or false");
+    }
+    return [textOrNull(status, "status"), marked, line, textArray(want)];
+  });
+}
+
+/** The rows of `INSERT INTO zz_image_matrix VALUES ...;`: stored path, photo
+ * link, want. Read as parseContractMatrix reads, and throws the same way. */
+export function parseContractImageMatrix(sql: string): ContractImageMatrixRow[] {
+  return parseContractValues(sql, "zz_image_matrix", 3).map((row) => [
+    textOrNull(row[0], "receipt_storage_path"),
+    textOrNull(row[1], "receipt_photo_url"),
+    textArray(row[2]),
+  ]);
+}
+
+function textOrNull(v: unknown, name: string): string | null {
+  if (v !== null && typeof v !== "string") throw new Error(`${name} must be text or NULL`);
+  return v;
+}
+
+function textArray(want: unknown): string[] {
+  if (typeof want !== "string" || !/^\{.*\}$/.test(want)) {
+    throw new Error(`want is not a text array: ${String(want)}`);
+  }
+  const inner = want.slice(1, -1).trim();
+  return inner === "" ? [] : inner.split(",").map((s) => s.trim());
+}
+
+/** The raw rows of `INSERT INTO <table> VALUES ...;`, each with exactly
+ * `width` values: strings, E'' strings, NULL, true and false. */
+function parseContractValues(sql: string, table: string, width: number): unknown[][] {
+  const head = `INSERT INTO ${table} VALUES`;
+  const start = sql.indexOf(head);
+  if (start < 0) throw new Error(`no ${head}`);
+  const src = sql.slice(start + head.length);
+  const rows: unknown[][] = [];
   let i = 0;
   let row: unknown[] | null = null;
   const skip = () => {
@@ -134,7 +172,7 @@ export function parseContractMatrix(sql: string): ContractMatrixRow[] {
   for (;;) {
     skip();
     const ch = src[i];
-    if (ch === undefined) throw new Error("zz_matrix VALUES has no end");
+    if (ch === undefined) throw new Error(`${table} VALUES has no end`);
     if (row === null) {
       if (ch === "(") {
         row = [];
@@ -150,21 +188,8 @@ export function parseContractMatrix(sql: string): ContractMatrixRow[] {
     }
     if (ch === ")") {
       i++;
-      if (row.length !== 4) throw new Error(`a row has ${row.length} values`);
-      const [status, marked, line, want] = row;
-      if (typeof marked !== "boolean" || typeof line !== "boolean") {
-        throw new Error("marked and line_approved must be true or false");
-      }
-      if (typeof want !== "string" || !/^\{.*\}$/.test(want)) {
-        throw new Error(`want is not a text array: ${String(want)}`);
-      }
-      const inner = want.slice(1, -1).trim();
-      rows.push([
-        status as string | null,
-        marked,
-        line,
-        inner === "" ? [] : inner.split(",").map((s) => s.trim()),
-      ]);
+      if (row.length !== width) throw new Error(`a row has ${row.length} values`);
+      rows.push(row);
       row = null;
       continue;
     }
@@ -226,6 +251,69 @@ export function caseTableDifferences(
     if (show(want) !== show(got)) {
       out.push(`row ${k + 1}: cases ${show(want)}, contract ${show(got)}`);
     }
+  }
+  return out;
+}
+
+/** One image case: [receipt_storage_path, receipt_photo_url, the check's
+ * stops, the push's refusal], on an approved, unmarked receipt. A receipt has
+ * an image when either column is set; blank is NULL, empty or spaces only
+ * (Postgres btrim trims spaces only, so a tab or newline is a value on both
+ * sides). The check's twin is the reimbursement_no_receipt stop. */
+export type PayBackReceiptImageCase = readonly [
+  string | null,
+  string | null,
+  readonly string[],
+  string | null,
+];
+
+const LINK = "https://zztest.invalid/receipt.png";
+const IMAGE = [[], null] as const;
+const NO_IMAGE = [["reimbursement_no_receipt"], "pay_run_receipt_no_image"] as const;
+
+export const PAY_BACK_RECEIPT_IMAGE_CASES: readonly PayBackReceiptImageCase[] = [
+  // Passes: either column set.
+  ["ZZTEST/receipt.png", null, ...IMAGE],
+  [null, LINK, ...IMAGE],
+  ["ZZTEST/receipt.png", LINK, ...IMAGE],
+  ["", LINK, ...IMAGE],
+  ["   ", LINK, ...IMAGE],
+  ["ZZTEST/receipt.png", "", ...IMAGE],
+  ["ZZTEST/receipt.png", "   ", ...IMAGE],
+  ["\t", null, ...IMAGE],
+  [null, "\n", ...IMAGE],
+  // Stops: both blank.
+  [null, null, ...NO_IMAGE],
+  ["", "", ...NO_IMAGE],
+  ["   ", null, ...NO_IMAGE],
+  [null, "   ", ...NO_IMAGE],
+  [" ", " ", ...NO_IMAGE],
+  ["", null, ...NO_IMAGE],
+];
+
+/** A contract's zz_image_matrix row: stored path, photo link, want. */
+export type ContractImageMatrixRow = [string | null, string | null, string[]];
+
+/** The push refusal the check's image stops imply, on an approved receipt. */
+export function pushRefusalForImageStops(stops: readonly string[]): string | null {
+  if (stops.length === 0) return null;
+  if (stops.length === 1 && stops[0] === "reimbursement_no_receipt") return "pay_run_receipt_no_image";
+  throw new Error(`unexpected image stops ${stops.join(",")}`);
+}
+
+/** Every way the contract's image rows differ from the image cases, in every
+ * column, row for row; empty when they match. */
+export function imageCaseTableDifferences(
+  cases: readonly PayBackReceiptImageCase[],
+  rows: readonly ContractImageMatrixRow[],
+): string[] {
+  const out: string[] = [];
+  const show = (r: unknown) => JSON.stringify(r);
+  const n = Math.max(cases.length, rows.length);
+  for (let k = 0; k < n; k++) {
+    const want = cases[k] ? [...cases[k]] : undefined;
+    const got = rows[k] ? [...rows[k], pushRefusalForImageStops(rows[k][2])] : undefined;
+    if (show(want) !== show(got)) out.push(`image row ${k + 1}: cases ${show(want)}, contract ${show(got)}`);
   }
   return out;
 }

@@ -187,6 +187,44 @@ DO $$ DECLARE m record; got text[]; BEGIN
       AND (pg_temp.inv('ZZTEST-NB-2')->>'verdict') = 'clean', 'the other invoice stays clean');
   END LOOP;
 END $$;
+-- The image matrix: a receipt has an image when its stored path or its photo link is set
+-- (blank is NULL, empty or spaces only; btrim keeps a tab or newline). Its rows are
+-- PAY_BACK_RECEIPT_IMAGE_CASES in trade_pay_run_receipt_rule_cases.ts, held to this table in
+-- every column by trade_pay_run_receipt_rule_parity_test.ts; the push test runs the same cases
+-- through the push. The receipt is approved and unmarked, so only the image can stop it.
+CREATE TEMP TABLE zz_image_matrix(storage_path text, photo_url text, want text[]) ON COMMIT DROP;
+INSERT INTO zz_image_matrix VALUES
+ -- passes: either column set
+ ('ZZTEST/receipt.png',NULL,'{}'),
+ (NULL,'https://zztest.invalid/receipt.png','{}'),
+ ('ZZTEST/receipt.png','https://zztest.invalid/receipt.png','{}'),
+ ('','https://zztest.invalid/receipt.png','{}'),
+ ('   ','https://zztest.invalid/receipt.png','{}'),
+ ('ZZTEST/receipt.png','','{}'),
+ ('ZZTEST/receipt.png','   ','{}'),
+ (E'\t',NULL,'{}'),
+ (NULL,E'\n','{}'),
+ -- stops: both blank
+ (NULL,NULL,'{reimbursement_no_receipt}'),
+ ('','','{reimbursement_no_receipt}'),
+ ('   ',NULL,'{reimbursement_no_receipt}'),
+ (NULL,'   ','{reimbursement_no_receipt}'),
+ (' ',' ','{reimbursement_no_receipt}'),
+ ('',NULL,'{reimbursement_no_receipt}');
+DO $$ DECLARE m record; got text[]; BEGIN
+  UPDATE public.expense_receipts SET status = 'approved', unbooked_job_id = NULL WHERE id = md5('ZZTEST nb receipt 1')::uuid;
+  UPDATE public.trade_invoice_lines SET office_review_status = NULL WHERE id = md5('ZZTEST nb pay back 1')::uuid;
+  FOR m IN SELECT * FROM zz_image_matrix LOOP
+    UPDATE public.expense_receipts SET receipt_storage_path = m.storage_path, receipt_photo_url = m.photo_url
+     WHERE id = md5('ZZTEST nb receipt 1')::uuid;
+    got := pg_temp.receipt_stops('ZZTEST-NB-1');
+    PERFORM pg_temp.zz_assert(got = m.want AND (pg_temp.inv('ZZTEST-NB-1')->>'verdict')
+      = CASE WHEN cardinality(m.want) = 0 THEN 'clean' ELSE 'stopped' END,
+      format('path %L link %L: want %s, got %s', m.storage_path, m.photo_url, m.want, got));
+  END LOOP;
+  UPDATE public.expense_receipts SET receipt_storage_path = 'ZZTEST/receipt.png', receipt_photo_url = NULL
+   WHERE id = md5('ZZTEST nb receipt 1')::uuid;
+END $$;
 -- Only the office's approval of the line passes a pending receipt: a line still
 -- awaiting review, queried or rejected does not (and keeps its own line stop).
 DO $$ DECLARE r text; BEGIN
