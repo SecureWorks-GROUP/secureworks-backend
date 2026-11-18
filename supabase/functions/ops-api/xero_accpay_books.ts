@@ -6,6 +6,15 @@
 // Books can only change a DRAFT it is explicitly asked to update.
 
 import {
+  accountRuleFor,
+  DIVISION_CATEGORY_NAME,
+  type DraftStandard,
+  draftJobDivisionCandidate,
+  loadDraftStandard,
+  withJobPrefix,
+} from "../_shared/xero_draft_standard.ts";
+import { readSwitch } from "../_shared/switch_cache.ts";
+import {
   attachPdfBase64ToXeroInvoice,
   hasXeroPdfBase64Payload,
   XeroPdfAttachError,
@@ -159,7 +168,24 @@ function trackingFromLine(line: any): any[] | undefined {
   return options.length > 0 ? options : undefined;
 }
 
-export function buildAccpayLineItems(rawLines: unknown): any[] {
+type SupplierSource = "supplier_bill" | "supplier_credit";
+type SupplierStandard = DraftStandard & {
+  source?: SupplierSource;
+  bodyJobNumber?: string;
+  jobTypeByNumber?: Record<string, string>;
+};
+
+function lineJobNumber(line: any, bodyJobNumber: string): string {
+  return String(line?.job_number || "").trim() || bodyJobNumber;
+}
+
+type TrackingEntry = { Name: string; Option: string };
+
+function isDivision(entry: TrackingEntry): boolean {
+  return entry.Name.toLowerCase() === DIVISION_CATEGORY_NAME.toLowerCase();
+}
+
+export function buildAccpayLineItems(rawLines: unknown, std?: SupplierStandard): any[] {
   if (!Array.isArray(rawLines) || rawLines.length === 0) {
     throw new SupplierBillError(
       "line_items required",
@@ -175,8 +201,8 @@ export function buildAccpayLineItems(rawLines: unknown): any[] {
     const unitAmount = Number(
       line?.unit_price ?? line?.unit_amount ?? line?.UnitAmount ?? 0,
     );
-    const accountCode = String(
-      line?.account_code || line?.AccountCode || ACCPAY_ACCOUNT_DEFAULT,
+    let accountCode = String(
+      line?.account_code || line?.AccountCode || (std ? "" : ACCPAY_ACCOUNT_DEFAULT),
     ).trim();
     const taxType = String(line?.tax_type || line?.TaxType || "NONE").trim() ||
       "NONE";
@@ -198,18 +224,73 @@ export function buildAccpayLineItems(rawLines: unknown): any[] {
         400,
       );
     }
+    let tracking = trackingFromLine(line);
+    const jobNumber = std ? lineJobNumber(line, std.bodyJobNumber ?? "") : "";
+    if (std) {
+      if (!accountCode) {
+        const rule = accountRuleFor(std.rules, std.source ?? "supplier_bill", "default");
+        accountCode = rule?.account_code?.trim() || "";
+        if (!accountCode) {
+          throw new SupplierBillError("No default supplier account rule", 409, "ACCOUNT_RULE_MISSING");
+        }
+      }
+      for (const entry of tracking || []) {
+        if (!isDivision(entry)) continue;
+        if (!std.optionsLoaded) {
+          throw new SupplierBillError("Division options unavailable", 409, "TRACKING_OPTIONS_UNAVAILABLE");
+        }
+        if (!std.activeOptions.has(entry.Option)) {
+          throw new SupplierBillError(`Division option is not active: ${entry.Option}`, 422, "TRACKING_OPTION_NOT_ACTIVE");
+        }
+      }
+      const jobType = std.jobTypeByNumber?.[jobNumber];
+      if (typeof jobType === "string" && jobType && !tracking) {
+        const option = draftJobDivisionCandidate(jobNumber, jobType);
+        if (option && std.activeOptions.has(option)) tracking = [{ Name: DIVISION_CATEGORY_NAME, Option: option }];
+      }
+    }
     const item: Record<string, unknown> = {
-      Description: description,
+      Description: std ? withJobPrefix(jobNumber, description) : description,
       Quantity: quantity,
       UnitAmount: round2(unitAmount),
       AccountCode: accountCode,
       TaxType: taxType,
     };
-    const tracking = trackingFromLine(line);
     if (tracking) item.Tracking = tracking;
     return item;
   });
   return lines;
+}
+
+async function supplierDraftLines(client: any, body: any, source: SupplierSource) {
+  const rawLines = body?.line_items || body?.lines;
+  if (!await readSwitch(client, "xero_draft_standard_v1")) {
+    return { lineItems: buildAccpayLineItems(rawLines), diagnostics: {} };
+  }
+
+  const bodyJobNumber = String(body?.job_number || "").trim();
+  const jobNumbers = new Set<string>();
+  for (const line of Array.isArray(rawLines) ? rawLines : []) {
+    const number = lineJobNumber(line, bodyJobNumber);
+    if (number && !trackingFromLine(line)) jobNumbers.add(number);
+  }
+
+  const jobTypeByNumber: Record<string, string> = Object.create(null);
+  let standard: DraftStandard;
+  try {
+    standard = await loadDraftStandard(client, DEFAULT_ORG_ID, true);
+    if (jobNumbers.size) {
+      const { data, error } = await client.from("jobs").select("job_number, type")
+        .eq("org_id", DEFAULT_ORG_ID).in("job_number", [...jobNumbers]);
+      if (error || !Array.isArray(data)) throw new Error("JOB_TYPES_UNAVAILABLE");
+      for (const job of data) jobTypeByNumber[job.job_number] = job.type;
+    }
+  } catch {
+    throw new SupplierBillError("Supplier draft data unavailable", 503, "DRAFT_STANDARD_UNAVAILABLE");
+  }
+  const lineItems = buildAccpayLineItems(rawLines, { ...standard, source, bodyJobNumber, jobTypeByNumber });
+  const missing = lineItems.flatMap((item, i) => item.Tracking?.some(isDivision) ? [] : [i + 1]);
+  return { lineItems, diagnostics: { division_missing_lines: missing } };
 }
 
 function accpayCacheRow(inv: any): Record<string, unknown> {
@@ -565,7 +646,7 @@ export async function createSupplierBill(
   },
 ) {
   requireDraftStatus(body?.status || body?.xero_status, "create_supplier_bill");
-  const lineItems = buildAccpayLineItems(body?.line_items || body?.lines);
+  const { lineItems, diagnostics } = await supplierDraftLines(client, body, "supplier_bill");
   const { accessToken, tenantId } = await deps.getToken(client);
   const contactId = await resolveSupplierContactId(
     body,
@@ -630,6 +711,7 @@ export async function createSupplierBill(
     status: "DRAFT",
     bill: presentBill(inv),
     pdf,
+    ...diagnostics,
   };
 }
 
@@ -645,7 +727,7 @@ export async function updateSupplierBill(
     throw new SupplierBillError("xero_invoice_id required", 400);
   }
   requireDraftStatus(body?.status || body?.xero_status || "DRAFT", "update_supplier_bill");
-  const lineItems = buildAccpayLineItems(body?.line_items || body?.lines);
+  const { lineItems, diagnostics } = await supplierDraftLines(client, body, "supplier_bill");
   const { accessToken, tenantId } = await deps.getToken(client);
   const existing = await loadAccpayFromXero(
     deps.xeroGet,
@@ -691,7 +773,7 @@ export async function updateSupplierBill(
   }
   requireDraftStatus(inv.Status, "updated supplier bill");
   await cacheAccpay(client, inv);
-  return { ok: true, status: "DRAFT", bill: presentBill(inv) };
+  return { ok: true, status: "DRAFT", bill: presentBill(inv), ...diagnostics };
 }
 
 export async function attachSupplierBillPdf(
@@ -753,7 +835,7 @@ export async function createSupplierCreditNote(
     body?.status || body?.xero_status,
     "create_supplier_credit_note",
   );
-  const lineItems = buildAccpayLineItems(body?.line_items || body?.lines);
+  const { lineItems, diagnostics } = await supplierDraftLines(client, body, "supplier_credit");
   const { accessToken, tenantId } = await deps.getToken(client);
   const contactId = await resolveSupplierContactId(
     body,
@@ -791,5 +873,5 @@ export async function createSupplierCreditNote(
     );
   }
   requireDraftStatus(note.Status, "created supplier credit note");
-  return { ok: true, status: "DRAFT", credit_note: presentCreditNote(note) };
+  return { ok: true, status: "DRAFT", credit_note: presentCreditNote(note), ...diagnostics };
 }
