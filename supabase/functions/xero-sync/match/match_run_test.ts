@@ -1,6 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 // P2-02.7: the matcher runner. Fake client only; made-up amounts and ids.
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { syncMatchStep } from "./credit_run.ts";
 import {
   MATCH_BACKLOG_STATE_KEY,
   matchPending,
@@ -937,4 +938,36 @@ Deno.test("parking: a failed park read or write loses no bill", async () => {
   const o2 = await runMatchFor(fake(wf), ["xero_bill:a"], { ruleVersion: "v1", budgetMs: 120 });
   assertEquals([o2.parked, o2.failed.slow_bill_write_failed], [0, 1]);
   assertEquals(requeues(wf)[0].rows.map((x: any) => [x.subject_id, x.reason]), [["xero_bill:a", "over_run_time"]]);
+});
+
+Deno.test("parking through the sync step (what xero-sync calls): a slow backlog bill is cut, cut again off the queue and parked; the third sync passes over it and the bills behind it run", async () => {
+  const w = world({
+    lines: Object.assign({}, billLines("a"), billLines("b"), billLines("c")),
+    waiting: [waitingAt("a", 1), waitingAt("b", 2), waitingAt("c", 3)],
+    backlogAt: null,
+    slow: { target: "context_job_evidence_for_bills", ms: 60_000, mode: "abort", only: "a" },
+  });
+  const sync = async () => {
+    w.upserts = [];
+    const out = await syncMatchStep(fake(w), { on: true, changed: [], budgetMs: 120 });
+    // What the sync put back on the queue is what the next sync reads first.
+    w.queue = requeues(w).flatMap((u: any) => u.rows).map((r: any) => ({ subject_kind: "cost_document", subject_id: r.subject_id }));
+    return out;
+  };
+  const one = await sync();
+  assertEquals([one.failed, one.parked, w.queue.map((q: any) => q.subject_id)], [{ over_run_time: 1 }, 0, ["xero_bill:a"]]);
+  assertEquals(w.slowBills?.map((b) => [b.cuts, b.reason]), [[1, "slow_bill_cut"]]);
+  assertEquals(applies(w).length, 0, "the cut took the budget: b and c wait");
+  const two = await sync();
+  assertEquals([two.queued, two.parked, w.queue.length], [1, 1, 0], "off the queue first, cut again, parked, not requeued");
+  assertEquals(w.slowBills?.map((b) => [b.cuts, b.reason]), [[2, "parked_slow_bill"]]);
+  const three = await sync();
+  assertEquals([three.backlog, three.skipped, three.failed], [2, {}, {}]);
+  assertEquals(applies(w).map((x) => x.args.p_subject_id), ["xero_bill:b", "xero_bill:c"], "the backlog behind it runs");
+  // The backlog wraps and reaches the parked bill again: passed over, counted, the rest run.
+  w.rpcs = [];
+  const four = await sync();
+  assertEquals([four.skipped, four.parked, four.failed], [{ parked_slow_bill: 1 }, 0, {}]);
+  assertEquals(applies(w).map((x) => x.args.p_subject_id), ["xero_bill:b", "xero_bill:c"]);
+  assertEquals(w.slowBills?.length, 1, "still parked until its lines change");
 });
