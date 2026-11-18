@@ -388,3 +388,64 @@ Deno.test("reconcile list: any read that comes back with 1000 rows refuses (Post
   const err = await assertRejects(() => reconcileList(c, new URLSearchParams("tab=bills"), STAFF, NOW), ReconcileListError);
   assertEquals([err.code, err.status], ["reconcile_list_too_many_lines", 422]);
 });
+
+Deno.test("reconcile list: a bill carries the credits that follow it, each shown as a credit", async () => {
+  const reads: string[] = [];
+  const c = fakeClient((t, f) => {
+    if (t === "feature_flags") return flagOn;
+    if (t === "reconcile_item_kinds") return { data: KINDS, error: null };
+    if (t === "job_cost_lines" && val(f, "follows_document_kind") === "xero_bill") {
+      reads.push("by_document");
+      assertEquals([val(f, "follows_document_id"), val(f, "limit")], [["BB"], READ_CAP]);
+      return { data: [
+        line("F1", "xero_credit_note", "NA", -30, { follows_document_kind: "xero_bill", follows_document_id: "BB", line_no: 1 }),
+        line("F2", "xero_credit_note", "NA", -12.5, { follows_document_kind: "xero_bill", follows_document_id: "BB", line_no: 2 }),
+        line("F3", "xero_credit_note", "NC", 0, { state: null, not_counted_reason: "line_removed",
+          follows_document_kind: "xero_bill", follows_document_id: "BB" }),
+      ], error: null };
+    }
+    if (t === "job_cost_lines" && val(f, "follows_line_id")) {
+      reads.push("by_line");
+      assertEquals([val(f, "follows_line_id"), val(f, "limit")], [["B1", "B2"], READ_CAP]);
+      return { data: [line("G1", "xero_credit_note", "NB", null, { follows_line_id: "B2" })], error: null };
+    }
+    if (t === "job_cost_lines") return { data: [line("B1", "xero_bill", "BB", 400), line("B2", "xero_bill", "BB", 100)], error: null };
+    throw new Error(`unexpected read ${t}`);
+  }, {
+    reconcile_list_page: () => ({ data: [item("c0000000-0000-4000-8000-0000000000b9", "bill", "xero_bill:BB", 500)], error: null }),
+    reconcile_list_counts: () => ({ data: [], error: null }),
+  });
+  const out: any = await reconcileList(c, new URLSearchParams("tab=bills"), STAFF, NOW);
+  assertEquals(reads.sort(), ["by_document", "by_line"]);
+  assertEquals(out.items[0].credits, [
+    { document_id: "NA", document_number: "ZZ-NA", is_credit: true, amount_ex: 42.5, lines: [
+      { line_id: "F1", description: "ZZTEST line", amount_ex: 30, state: "needs_person" },
+      { line_id: "F2", description: "ZZTEST line", amount_ex: 12.5, state: "needs_person" },
+    ] },
+    { document_id: "NB", document_number: "ZZ-NB", is_credit: true, amount_ex: null, lines: [
+      { line_id: "G1", description: "ZZTEST line", amount_ex: null, state: "needs_person" },
+    ] },
+  ], "removed credit lines dropped; amounts are how much each credit takes off; an unknown amount stays null");
+});
+
+Deno.test("reconcile list: a bill with no credits carries an empty list, and too many followers refuse", async () => {
+  const run = (followers: number) => reconcileList(fakeClient((t, f) => {
+    if (t === "feature_flags") return flagOn;
+    if (t === "reconcile_item_kinds") return { data: KINDS, error: null };
+    if (t === "job_cost_lines" && val(f, "follows_document_kind")) {
+      return { data: Array.from({ length: followers }, (_, i) =>
+        line(`F${i}`, "xero_credit_note", `N${i}`, -1, { follows_document_kind: "xero_bill", follows_document_id: "BB" })), error: null };
+    }
+    if (t === "job_cost_lines" && val(f, "follows_line_id")) return { data: [], error: null };
+    if (t === "job_cost_lines") return { data: [line("B1", "xero_bill", "BB", 10)], error: null };
+    throw new Error(`unexpected read ${t}`);
+  }, {
+    reconcile_list_page: () => ({ data: [item("c0000000-0000-4000-8000-0000000000ba", "bill", "xero_bill:BB", 10)], error: null }),
+    reconcile_list_counts: () => ({ data: [], error: null }),
+  }), new URLSearchParams("tab=bills"), STAFF, NOW);
+  assertEquals(((await run(0)) as any).items[0].credits, []);
+  for (const n of [READ_CAP, READ_CAP - 1]) {
+    const err = await assertRejects(() => run(n), ReconcileListError);
+    assertEquals(err.code, "reconcile_list_too_many_lines", `${n} followers plus the bill's line reach the cap`);
+  }
+});

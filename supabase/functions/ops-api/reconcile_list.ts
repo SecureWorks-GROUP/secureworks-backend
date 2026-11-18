@@ -329,6 +329,50 @@ export async function reconcileList(
     return { job_id: id, job_number: j?.job_number ?? null, job_site: j ? [j.site_address, j.site_suburb].filter(Boolean).join(", ") || null : null };
   };
 
+  // The credits that follow each bill item on the page: credit lines naming the
+  // bill (job_cost_lines_follows_document_idx) or one of its lines
+  // (job_cost_lines_follows_line_idx). Removed credit lines follow nothing.
+  const pageBillIds = [...new Set(docs.filter((d) => d.kind === "xero_bill").map((d) => d.id))];
+  const pageBillLineIds = lines.filter((l) => l.document_kind === "xero_bill" && pageBillIds.includes(l.document_id))
+    .map((l) => l.id as string);
+  const followByDoc = pageBillIds.length === 0 ? [] : await inChunks(pageBillIds, (chunk, cap) =>
+    client.from("job_cost_lines").select(LINE_COLUMNS).eq("org_id", caller.orgId)
+      .eq("follows_document_kind", "xero_bill").in("follows_document_id", chunk).limit(cap));
+  const followByLine = pageBillLineIds.length === 0 ? [] : await inChunks(pageBillLineIds, (chunk, cap) =>
+    client.from("job_cost_lines").select(LINE_COLUMNS).eq("org_id", caller.orgId)
+      .in("follows_line_id", chunk).limit(cap));
+  const followers = new Map<string, any>();
+  for (const l of [...followByDoc, ...followByLine]) {
+    if (l.document_kind === "xero_credit_note" && l.not_counted_reason !== "line_removed") followers.set(l.id, l);
+  }
+  if (followers.size + lines.length >= READ_CAP) throw reconcileListRefusal("reconcile_list_too_many_lines");
+  const billOfFollower = (l: any): string | null => {
+    if (l.follows_document_kind === "xero_bill" && typeof l.follows_document_id === "string") return l.follows_document_id;
+    const parent = lines.find((x) => x.id === l.follows_line_id);
+    return parent && parent.document_kind === "xero_bill" ? parent.document_id : null;
+  };
+  /** A credit is shown as a credit: amount_ex is how much it takes off, never a bare minus. */
+  const creditsOf = (billId: string) => {
+    const mine = [...followers.values()].filter((l) => billOfFollower(l) === billId)
+      .sort((x, y) => String(x.document_id).localeCompare(String(y.document_id)) || (Number(x.line_no) || 0) - (Number(y.line_no) || 0));
+    const byDoc = new Map<string, any[]>();
+    for (const l of mine) byDoc.set(l.document_id, [...(byDoc.get(l.document_id) ?? []), l]);
+    return [...byDoc.entries()].map(([documentId, ls]) => {
+      const amounts = ls.map((l) => money(l.amount_ex));
+      const total = amounts.some((a) => a === null) ? null : Math.round(Math.abs(amounts.reduce((t, a) => t! + a!, 0)!) * 100) / 100;
+      return {
+        document_id: documentId,
+        document_number: ls[0]?.document_number ?? null,
+        is_credit: true,
+        amount_ex: total,
+        lines: ls.map((l) => {
+          const a = money(l.amount_ex);
+          return { line_id: l.id, description: l.description ?? null, amount_ex: a === null ? null : Math.abs(a), state: l.state ?? null };
+        }),
+      };
+    });
+  };
+
   // A document with a line of a person's labour (kind installer_bill) is never
   // listed, even when its item's kind or reason says supplier bill (a mixed
   // bill); nor is a credit that follows such a bill.
@@ -370,6 +414,7 @@ export async function reconcileList(
         .sort((x, y) => (Number(x.line_no) || 0) - (Number(y.line_no) || 0))
         .map((l) => ({ line_id: l.id, description: l.description ?? null, amount_ex: money(l.amount_ex), account_code: l.account_code ?? null, state: l.state ?? null })),
     };
+    if (doc?.kind === "xero_bill") out.credits = creditsOf(doc.id);
     if (doc?.kind === "xero_credit_note") {
       const ids = [...new Set(own.filter((l) => l.not_counted_reason !== "line_removed").map(billOfLine)
         .filter((v): v is string => v !== null))];
