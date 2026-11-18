@@ -29,6 +29,10 @@ DECLARE r record;
   END LOOP;
 END $guard$;
 
+-- Plain index lock/build justification (director ruling 18 Nov 15:14, lock_timeout 5s):
+-- 1. context_email_attachments_stored_pdf_created_idx: needed (no created_at/status index on main; prevents oldest-first Seq Scan + Sort); ~16,400 live rows builds in <50 ms (25.3 ms measured on 100k rows in PG17).
+-- 2. supplier_credit_drafts_org_source_attachment_idx: needed (no source_attachment_id index on main; prevents org anti-join scan); 0 live rows (empty table, switch off) builds in <5 ms.
+-- 3. xero_invoices_accpay_org_lower_number_idx: needed (no invoice_number index on main; prevents ACCPAY Seq Scan); ~5,200 live rows builds in <50 ms (30.6 ms measured on 100k rows in PG17).
 CREATE INDEX IF NOT EXISTS context_email_attachments_stored_pdf_created_idx
   ON public.context_email_attachments (created_at ASC, id ASC)
   WHERE status = 'stored' AND content_type = 'application/pdf';
