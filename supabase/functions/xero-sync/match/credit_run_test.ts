@@ -17,6 +17,9 @@ type World = {
   openItems?: string[];
   tradeUsers?: string[];
   people?: Array<Record<string, unknown>>; // people_account_codes rows (default: as migrated)
+  billLines?: Record<string, any[]>; // bill id -> its cost lines (a credit's followed bills)
+  bills?: Record<string, any[]>; // bill id -> Xero's own line_items (xero_invoices)
+  lineDocs?: Record<string, { document_kind: string; document_id: string }>; // line id -> its document
   fail?: string;
   applyError?: Record<string, unknown>;
   switchOn?: boolean | "fail";
@@ -51,6 +54,12 @@ function fake(w: World) {
           case "people_account_codes":
             return { data: w.people ?? peopleRows(), error: null };
           case "job_cost_lines": {
+            if (filters["in:document_id"] !== undefined) {
+              return { data: (filters["in:document_id"] as string[]).flatMap((id) => w.billLines?.[id] ?? []), error: null };
+            }
+            if (filters["in:id"] !== undefined) {
+              return { data: (filters["in:id"] as string[]).flatMap((id) => w.lineDocs?.[id] ? [w.lineDocs[id]] : []), error: null };
+            }
             if (filters.document_id !== undefined) {
               return { data: w.lines?.[String(filters.document_id)] ?? [], error: null };
             }
@@ -66,6 +75,12 @@ function fake(w: World) {
               .slice(0, Number(filters.limit ?? 1e9));
             return { data: rows, error: null };
           }
+          case "xero_invoices":
+            return {
+              data: ((filters["in:xero_invoice_id"] as string[]) ?? []).filter((id) => w.bills?.[id])
+                .map((id) => ({ line_items: w.bills![id] })),
+              error: null,
+            };
           case "xero_supplier_credit_notes":
             return { data: w.notes?.[String(filters.xero_credit_note_id)] ?? null, error: null };
           case "reconcile_items": {
@@ -365,5 +380,84 @@ Deno.test("people accounts: an unreadable or empty set raises nothing in the swe
     const w = world({ lines: { c1: [unallocated()] }, notes: { c1: note() }, ...over });
     const out = await creditSweep(fake(w));
     assertEquals([out.error, w.rpcs.length, (w.upserts ?? []).length], [code, 0, 0], code);
+  }
+});
+
+// Carbon (director 04:21): a credit that follows a bill the matcher never
+// proposes is never proposed either. The allocation line here is not counted
+// (state null), so has_allocations does not catch it.
+const follows = (bill: string, over: Record<string, unknown> = {}) => ({
+  org_id: ORG,
+  line_key: "alloc:1",
+  amount_ex: -20,
+  state: null,
+  needs_reason: null,
+  not_counted_reason: "duplicate_document",
+  follows_document_kind: "xero_bill",
+  follows_document_id: bill,
+  ...over,
+});
+const followingCredit = (over: Partial<World> = {}) =>
+  world({ lines: { c1: [unallocated(), follows("b1")] }, notes: { c1: note() }, ...over });
+
+Deno.test("(a) a credit following a bill with a hidden line, ours or Xero's zero line, is never raised", async () => {
+  const cases: Array<[Partial<World>, string]> = [
+    [{ billLines: { b1: [{ kind: "supplier_bill", account_code: "475" }] } }, "hidden_account_credit"],
+    [{ billLines: { b1: [{ kind: "supplier_bill", account_code: " 475 " }] } }, "hidden_account_credit"],
+    // The bill's only 475 line is Xero's own zero line: not a cost line.
+    [{ billLines: { b1: [{ kind: "supplier_bill", account_code: "485" }] }, bills: { b1: [{ AccountCode: "485" }, { AccountCode: "475", LineAmount: 0 }] } }, "hidden_account_credit"],
+    [{ billLines: { b1: [{ kind: "supplier_bill", account_code: "306" }] } }, "labour_credit"],
+    [{ billLines: { b1: [{ kind: "installer_bill", account_code: "485" }] } }, "labour_credit"],
+  ];
+  for (const [over, code] of cases) {
+    const w = followingCredit(over);
+    const out = await creditSweep(fake(w));
+    assertEquals([applies(w).length, out.skipped], [0, { [code]: 1 }], JSON.stringify(over));
+    assertEquals(w.queries.filter((q) => q.table === "job_cost_lines" && q.filters["in:document_id"]).map((q) => q.filters.org_id), [ORG]);
+  }
+});
+
+Deno.test("(a) MUST NOT CHANGE: a credit following a bill whose super line is on no hidden account is raised as before", async () => {
+  // A super line takes its parent's account; only installer_bill and the hidden set skip.
+  for (const code of ["485", null]) {
+    const w = followingCredit({ billLines: { b1: [{ kind: "supplier_bill", account_code: "485" }, { kind: "employer_super", account_code: code }] } });
+    const out = await creditSweep(fake(w));
+    assertEquals([applies(w).length, out.skipped], [1, {}], String(code));
+  }
+});
+
+Deno.test("(a) a bill reached through a followed line counts too; a removed line follows nothing", async () => {
+  const byLine = world({
+    lines: { c1: [unallocated(), follows("x", { follows_document_kind: null, follows_document_id: null, follows_line_id: "L1" })] },
+    notes: { c1: note() },
+    lineDocs: { L1: { document_kind: "xero_bill", document_id: "b1" } },
+    billLines: { b1: [{ kind: "supplier_bill", account_code: "475" }] },
+  });
+  assertEquals((await creditSweep(fake(byLine))).skipped, { hidden_account_credit: 1 });
+  assertEquals(applies(byLine).length, 0);
+  const removed = followingCredit({
+    lines: { c1: [unallocated(), follows("b1", { not_counted_reason: "line_removed" })] },
+    billLines: { b1: [{ kind: "supplier_bill", account_code: "475" }] },
+  });
+  await creditSweep(fake(removed));
+  assertEquals(applies(removed).length, 1);
+});
+
+Deno.test("(a) MUST NOT CHANGE: a credit following a bill on no hidden account, or following nothing, is raised as before", async () => {
+  const plain = followingCredit({ billLines: { b1: [{ kind: "supplier_bill", account_code: "485" }] }, bills: { b1: [{ AccountCode: "485" }] } });
+  const baseline = world({ lines: { c1: [unallocated()] }, notes: { c1: note() } });
+  await creditSweep(fake(plain));
+  await creditSweep(fake(baseline));
+  assertEquals([applies(plain).length, applies(baseline).length], [1, 1]);
+  assertEquals(applies(plain)[0].args, { ...applies(baseline)[0].args, p_run_id: applies(plain)[0].args.p_run_id });
+  // Following nothing: no extra read at all.
+  assert(!baseline.queries.some((q) => q.table === "xero_invoices" || q.filters["in:document_id"] || q.filters["in:id"]));
+});
+
+Deno.test("(a) a failed read of the followed bill is counted, not raised", async () => {
+  for (const table of ["xero_invoices"]) {
+    const w = followingCredit({ billLines: { b1: [{ kind: "supplier_bill", account_code: "485" }] }, fail: table });
+    const out = await creditSweep(fake(w));
+    assertEquals([applies(w).length, out.failed], [0, { read_followed_bill: 1 }], table);
   }
 });

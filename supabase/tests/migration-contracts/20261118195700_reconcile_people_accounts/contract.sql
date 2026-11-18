@@ -6,6 +6,8 @@ CREATE FUNCTION pg_temp.assert_ok(ok boolean, label text) RETURNS void LANGUAGE 
 END $$;
 
 -- Seeded at creation only: a re-apply never puts back a row the owner removed.
+-- 20261118195900 replaces these bodies; stand them back first.
+\ir ../../../rollbacks/20261118195900_reconcile_hidden_xero_lines_down.sql
 DELETE FROM public.people_account_codes WHERE account_code = '475';
 \ir ../../../migrations/20261118195700_reconcile_people_accounts.sql
 DO $$ BEGIN
