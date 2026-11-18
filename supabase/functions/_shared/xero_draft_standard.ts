@@ -70,6 +70,14 @@ export type DraftDivisionInput = {
   stock_division?: string | null
 }
 
+// For switch-on writers. A candidate must still be checked against stored ACTIVE options.
+export function draftJobDivisionCandidate(jobNumber: string, jobType?: string | null): string {
+  const type = String(jobType || '').trim().toLowerCase()
+  if (type === 'granny_flat') return 'SecureBuild'
+  if (type === 'misc' || type === 'miscellaneous' || type === 'general') return 'Private Renovations'
+  return divisionTrackingOption(jobNumber, jobType)
+}
+
 // Opt-in entry for NEW draft writers only. Missing, false or unreadable switch
 // returns exactly the legacy answer, without reading options or applying stock.
 export async function draftDivisionTrackingOption(
@@ -85,9 +93,8 @@ export async function draftDivisionTrackingOption(
   const stockOption = STOCK_DIVISION_OPTIONS[stock.toLowerCase()]
   if (stockOption) return stockOption
 
-  const type = String(input.job_type || '').trim().toLowerCase()
-  if (type === 'granny_flat') return 'SecureBuild'
-  if (type === 'misc' || type === 'miscellaneous' || type === 'general') {
+  const option = draftJobDivisionCandidate(input.job_number || '', input.job_type)
+  if (option === 'Private Renovations') {
     // Only this org's stored ACTIVE option authorises the exact name.
     // No caller-supplied option list and no Xero option creation.
     try {
@@ -102,7 +109,7 @@ export async function draftDivisionTrackingOption(
       return ''
     }
   }
-  return legacy()
+  return option
 }
 
 // ── Account rules (xero_account_rules) ──
@@ -145,7 +152,7 @@ type SupabaseLike = { from: (table: string) => any }
 // Two reads: the org's account rules, and its ACTIVE division options.
 // optionsLoaded is false when the options read failed or found no row, so a
 // draft is never called correctly tagged against an empty list.
-export async function loadDraftStandard(client: SupabaseLike, orgId: string): Promise<DraftStandard> {
+export async function loadDraftStandard(client: SupabaseLike, orgId: string, requireReadable = false): Promise<DraftStandard> {
   const [rulesRes, optionsRes] = await Promise.all([
     client.from('xero_account_rules')
       .select('org_id, source_kind, line_kind, account_code, tax_type, note, confirmed_by, confirmed_at')
@@ -155,6 +162,10 @@ export async function loadDraftStandard(client: SupabaseLike, orgId: string): Pr
       .eq('org_id', orgId)
       .eq('status', 'ACTIVE'),
   ])
+  if (requireReadable && (rulesRes?.error || optionsRes?.error ||
+      !Array.isArray(rulesRes?.data) || !Array.isArray(optionsRes?.data))) {
+    throw new Error('DRAFT_STANDARD_UNAVAILABLE')
+  }
   if (rulesRes?.error) console.error('[xero_draft_standard] account rules not read:', rulesRes.error.message)
   if (optionsRes?.error) console.error('[xero_draft_standard] division options not read:', optionsRes.error.message)
   const rules: XeroAccountRule[] = rulesRes?.error ? [] : (rulesRes?.data || [])
