@@ -25,6 +25,8 @@ import {
 const ROOT = new URL("../../", import.meta.url);
 const TABLES = "migrations/20261023230000_dispatch_v2_replies_tables.sql";
 const SCHEDULE = "migrations/20261023230100_dispatch_v2_replies_schedule.sql";
+// Items 17 and 5 (18 Nov 2026): the dismissed columns on the supplier emails.
+const DISMISS = "migrations/20261118153000_dispatch_v2_reply_dismiss.sql";
 
 function read(path: string): string {
   return Deno.readTextFileSync(new URL(path, ROOT));
@@ -43,6 +45,13 @@ function columnsOf(sql: string, table: string): string[] {
     .map((l) => l.split(" ")[0]);
 }
 
+/** Column names a later migration adds (ADD COLUMN IF NOT EXISTS name). */
+function addedColumnsOf(sql: string): string[] {
+  return [...sql.matchAll(/ADD COLUMN IF NOT EXISTS ([a-z_]+) /g)].map((m) =>
+    m[1]
+  );
+}
+
 function selectList(select: string): string[] {
   return select.split(",").map((c) => c.trim());
 }
@@ -56,6 +65,9 @@ Deno.test("migration: the store reads only columns the tables have", () => {
   ];
   for (const [table, select] of pairs) {
     const cols = columnsOf(sql, table);
+    if (table === "dispatch_v2_supplier_emails") {
+      cols.push(...addedColumnsOf(read(DISMISS)));
+    }
     for (const c of selectList(select)) {
       assert(cols.includes(c), `${table}.${c}`);
     }

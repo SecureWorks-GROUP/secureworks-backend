@@ -581,6 +581,15 @@ jobs:
             supabase/functions/ops-api/trade_invoice_pdf_test.ts \
             supabase/functions/ops-api/trade_money_test.ts
 
+      # Weekly pay run read, approval and push (P1-10.2, P1-10.3, P1-10.5).
+      # Every database call is a stub and the Xero push is stubbed or refused
+      # before Xero; no switch is turned on anywhere.
+      - name: Test weekly pay run
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/trade_pay_run_test.ts \
+            supabase/functions/ops-api/trade_pay_run_push_test.ts
+
       # One super rule (P1-01): every amount includes super, chosen by pay week
       # behind trade_pay_inclusive_super_v1. Drives the real
       # generate_trade_invoice handler with every database call answered by a
@@ -590,6 +599,14 @@ jobs:
           deno test --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/trade_pay_rule_test.ts \
             supabase/functions/ops-api/trade_pay_rule_handler_test.ts
+
+      # With the weekly pay run on, a sent invoice waits for the run (P1-10.4):
+      # drives the real generate_trade_invoice handler with every database call
+      # answered by a fetch stub and fails on any call outside it (Xero).
+      - name: Test pay run wait on send
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/trade_pay_run_wait_test.ts
 
       # Automated money messages are off (captain, 30 Sep 2026). Drives the
       # real ops-api and daily-digest request handlers with every database,
@@ -975,6 +992,7 @@ jobs:
       - name: Test group work orders and completion-pack email
         run: |
           deno test --allow-read --allow-env \
+            supabase/functions/ops-api/group_claim_test.ts \
             supabase/functions/ops-api/group_work_order_test.ts \
           supabase/functions/ops-api/trade_owner_preview_test.ts \
             supabase/functions/ops-api/trade_client_signoff_test.ts \

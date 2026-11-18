@@ -647,3 +647,87 @@ export function buildWeeklyWorkOrderInvoice(input: {
 
   return calculateWeeklyInvoiceBreakdown(lines);
 }
+
+/**
+ * P1-05.8: the week's invoice made again from the lines a held-line send keeps
+ * (backed lines and deductions, in their original order). A work order's
+ * deductions travel with its pay: a block left with no pay line, or whose pay
+ * no longer covers its own deductions, is left out of this send whole, and its
+ * lines come back on the next send (nothing is claimed). Trade-typed final
+ * deductions that would take the total to zero or below are refused exactly as
+ * buildWeeklyWorkOrderInvoice refuses them. Returns null when nothing is left.
+ */
+export function rebuildWeeklyInvoiceForHold(
+  kept: readonly WeeklyInvoiceLine[],
+): { invoice: WeeklyWorkOrderInvoice | null; left_out: WeeklyInvoiceLine[] } {
+  const blocks = new Map<string, WeeklyInvoiceJobBlock>();
+  const finalDeductions: WeeklyInvoiceLine[] = [];
+  for (const line of kept) {
+    if (line.line_type === "final_payout_deduction") {
+      finalDeductions.push(line);
+      continue;
+    }
+    const key = String(line.source_work_order_id || "");
+    let block = blocks.get(key);
+    if (!block) {
+      block = {
+        source_work_order_id: key,
+        job_id: String(line.job_id || ""),
+        job_number: String(line.job_number || ""),
+        client_name: line.client_name,
+        site_address: line.site_address,
+        line_date: line.line_date,
+        subtotal: 0,
+        lines: [],
+      };
+      blocks.set(key, block);
+    }
+    block.lines.push(line);
+    block.subtotal = roundMoney(block.subtotal + line.line_total_ex);
+  }
+  const left_out: WeeklyInvoiceLine[] = [];
+  const jobBlocks: WeeklyInvoiceJobBlock[] = [];
+  for (const block of blocks.values()) {
+    if (block.subtotal <= 0 || !block.lines.some((l) => l.line_total_ex > 0)) {
+      left_out.push(...block.lines);
+    } else {
+      jobBlocks.push(block);
+    }
+  }
+  const keptLines = kept.filter((line) => !left_out.includes(line));
+  const lineSum = roundMoney(keptLines.reduce((s, l) => s + l.line_total_ex, 0));
+  if (jobBlocks.length === 0) {
+    // No pay line is left: a trade-typed final deduction is never dropped, so
+    // it is refused as main refuses a deduction larger than the week.
+    if (finalDeductions.length > 0) {
+      throw new WeeklyInvoiceError(
+        "final deductions cannot reduce the weekly invoice to zero or below",
+      );
+    }
+    return { invoice: null, left_out };
+  }
+  const grandTotal = roundMoney(jobBlocks.reduce((s, b) => s + b.subtotal, 0));
+  const finalDeductionsTotal = roundMoney(
+    -finalDeductions.reduce((s, l) => s + l.line_total_ex, 0),
+  );
+  const toBePaid = roundMoney(grandTotal - finalDeductionsTotal);
+  if (toBePaid <= 0) {
+    throw new WeeklyInvoiceError(
+      "final deductions cannot reduce the weekly invoice to zero or below",
+    );
+  }
+  if (Math.abs(lineSum - toBePaid) > 0.01) {
+    throw new WeeklyInvoiceError("weekly invoice lines do not equal TO BE PAID");
+  }
+  return {
+    invoice: {
+      lines: keptLines,
+      job_blocks: jobBlocks,
+      final_deductions: finalDeductions,
+      grand_total: grandTotal,
+      final_deductions_total: finalDeductionsTotal,
+      to_be_paid: toBePaid,
+    },
+    left_out,
+  };
+}

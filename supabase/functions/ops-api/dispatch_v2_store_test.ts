@@ -272,6 +272,12 @@ const SCHEMA: Record<string, string[]> = {
     "snippet",
     "delivery_date",
     "provider_message_id",
+    // Items 17 and 5: the Supplier replied tags and the reply that stops
+    // Follow up.
+    "supplier_key",
+    "supplier_name",
+    "sender_via",
+    "dismissed_at",
   ],
   // Which replies carry a PDF (dispatch_board.ts markDispatchV2ReplyPdfs).
   context_email_attachments: [

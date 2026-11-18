@@ -6,7 +6,13 @@ SELECT to_regclass('public.reconcile_items') IS NULL AS decide_contract_needs_ta
 \ir ../20261118060051_reconcile_tables/main_lines_reader.sql
 \ir ../../../migrations/20261118060051_reconcile_tables.sql
 \endif
+SELECT to_regprocedure('public.reconcile_item_raise(text,text,text,uuid[],jsonb,jsonb,text)') IS NULL
+   OR to_regprocedure('public.reconcile_item_org(text,text,uuid[])') IS NULL
+   OR to_regprocedure('public.reconcile_item_withdraw(text,text,text,text)') IS NULL
+   AS decide_contract_needs_raise \gset
+\if :decide_contract_needs_raise
 \ir ../../../migrations/20261118073218_reconcile_item_raise.sql
+\endif
 \ir ../../../migrations/20261118073318_reconcile_decide.sql
 SET LOCAL statement_timeout = '120s';
 
