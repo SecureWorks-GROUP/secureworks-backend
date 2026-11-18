@@ -13648,7 +13648,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 jobVertical: _jobVertical,
                 normaliseManagedVerticals: _normalizeManagedVerticals,
               })
-              return json({ ok: true, jobs: modes.jobs, not_found: modes.not_found })
+              const jobs = await withAgreedLabourForAllocatedJobsOnly(client, modes.jobs, tradeUser.id, isDispatcher, tradeJobAccess)
+              return json({ ok: true, jobs, not_found: modes.not_found })
             } catch (error) {
               if (error instanceof TradeInvoiceModeReadError) {
                 console.error('[ops-api] trade_invoice_job_modes: unreadable:', error.message)
@@ -59768,6 +59769,41 @@ async function tradeLabourBudget(
   }
 }
 export const _tradeLabourBudgetForTest = tradeLabourBudget
+
+// trade_invoice_job_modes answers any job in the caller's company, but a job
+// work order's agreed labour is that job's labour money. It stays on a job
+// only when the caller passes the same tier rule as trade_labour_budget
+// (office, division manager of the job's vertical, or allocated to the job);
+// on any other job both work-order fields read null, the action's existing
+// "no figure" shape. The mode itself is unchanged. Only jobs that carry a
+// figure are checked. A failed assignment read refuses the whole answer,
+// never drops or keeps the figure by guess.
+async function withAgreedLabourForAllocatedJobsOnly(
+  client: any,
+  jobs: TradeInvoiceJobMode[],
+  userId: string,
+  isOffice: boolean,
+  access: TradeJobAccessContext,
+): Promise<TradeInvoiceJobMode[]> {
+  const out: TradeInvoiceJobMode[] = []
+  for (const job of jobs) {
+    if (job.work_order_agreed_ex === null && job.job_work_order_id === null) {
+      out.push(job)
+      continue
+    }
+    let tier: TradeJobAccessTier
+    try {
+      tier = (await resolveTradeJobAccessTier(client, job.job_id, userId, { isOffice, access })).tier
+    } catch {
+      throw new TradeInvoiceModeReadError('your jobs')
+    }
+    out.push(tier === 'office' || tier === 'division_manager' || tier === 'allocated'
+      ? job
+      : { ...job, work_order_agreed_ex: null, job_work_order_id: null })
+  }
+  return out
+}
+export const _withAgreedLabourForAllocatedJobsOnlyForTest = withAgreedLabourForAllocatedJobsOnly
 
 // ════════════════════════════════════════════════════════════
 // JOB COMPLETION PACKAGE
