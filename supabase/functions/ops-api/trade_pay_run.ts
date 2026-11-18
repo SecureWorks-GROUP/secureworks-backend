@@ -2142,7 +2142,7 @@ export const PAY_RUN_RELEASE_REFUSALS: Record<
     code: "pay_run_push_claim_lapsed",
     status: 409,
     words:
-      "An earlier push of this invoice did not finish and may have reached Xero. Check Xero for a bill for this invoice, then press again saying Xero was checked.",
+      "An earlier push of this invoice did not finish and may have reached Xero. Look in Xero for a bill for this invoice. If there is none, press again saying Xero was checked. If there is one, do not release it: the run already paid it.",
   },
   pay_run_invoice_billed: {
     code: "pay_run_invoice_billed",

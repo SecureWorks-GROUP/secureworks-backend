@@ -1659,3 +1659,19 @@ Deno.test("pay run: an invoice released from the run is stopped there and out of
   assertEquals(out.totals.super, 120);
   assertEquals(out.super_by_person.map((p: any) => p.super_amount), [120]);
 });
+
+Deno.test("pay run: next week's read takes an invoice released from last week's run, clean", async () => {
+  // Released from the 2026-11-16 run: back to review, no run id, no bill.
+  const released = invoice(2, { pay_run_id: null, status: "pending_ops_review" });
+  const out: any = await readPayRun(reads({ rows: [released] }), {
+    orgId: ORG,
+    weekStart: "2026-11-23",
+    actorUserId: APPROVER,
+    now: new Date("2026-12-02T02:00:00Z"),
+  });
+  assertEquals(out.invoices.map((i: any) => [i.invoice_id, i.verdict, i.week_start]), [
+    [id(2), "clean", WEEK],
+  ]);
+  assertEquals(out.counts.clean, 1);
+  assertEquals(out.totals.super, 240);
+});

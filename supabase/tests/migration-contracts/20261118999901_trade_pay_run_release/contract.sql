@@ -113,6 +113,21 @@ INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, job_number, jo
   SELECT ('0a170000-0000-4000-8000-0000000003' || (10 + n))::uuid, ('0a170000-0000-4000-8000-0000000001' || (10 + n))::uuid,
     'ZZTEST-ESC-' || n, ('0a170000-0000-4000-8000-0000000002' || (10 + n))::uuid, 'labour', n * 112, 'ZZTEST labour'
   FROM generate_series(1, 4) n;
+-- Invoice 2 repays 30 of a 50 balance; a pushed invoice of an earlier week
+-- already took 30, so only 20 is left (the save lock is not installed yet).
+INSERT INTO public.trade_recurring_deductions (id, user_id, label, amount, first_week_start, kind, balance_total, xero_account_code)
+  VALUES ('0a170000-0000-4000-8000-000000000601', '0a170000-0000-4000-8000-000000000012', 'ZZTEST repayment', 30,
+    '2026-11-09', 'repayment', 50, 'ZZTEST-account');
+UPDATE public.trade_invoices SET recurring_deduction_id = '0a170000-0000-4000-8000-000000000601',
+    recurring_deduction_label = 'ZZTEST repayment', recurring_deduction_amount = 30
+  WHERE id = '0a170000-0000-4000-8000-000000000312';
+INSERT INTO public.trade_invoices (id, org_id, user_id, invoice_number, week_start, status, invoice_kind,
+    submitted_at, subtotal_ex, gross_earned, gst, total_inc, gst_on, super_rate, super_amount, net_pay, super_basis,
+    xero_bill_id, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount)
+  VALUES ('0a170000-0000-4000-8000-000000000399', '00000000-0000-0000-0000-000000000001',
+    '0a170000-0000-4000-8000-000000000012', 'ZZTEST-ESC-PRIOR', '2026-11-09', 'approved', 'standard',
+    '2026-11-13 01:00Z', 112, 112, 0, 112, false, .12, 12, 100, 'inclusive_12_112_v1', 'ZZTEST-BILL-PRIOR',
+    '0a170000-0000-4000-8000-000000000601', 'ZZTEST repayment', 30);
 SET LOCAL session_replication_role = origin;
 
 -- The run, all four clean.
@@ -120,13 +135,13 @@ SELECT pg_temp.zz_assert(pg_temp.zz_error(format('SELECT public.approve_trade_pa
   '00000000-0000-0000-0000-000000000001', '2026-11-16', '0a170000-0000-4000-8000-000000000001',
   (SELECT jsonb_build_object('check_rule', 'v2', 'invoices', jsonb_agg(jsonb_build_object(
     'invoice_id', i.id, 'verdict', 'clean', 'stops', '[]'::jsonb,
-    'pays', i.net_pay, 'super_amount', i.super_amount) ORDER BY i.invoice_number))
+    'pays', i.net_pay - coalesce(i.recurring_deduction_amount, 0), 'super_amount', i.super_amount) ORDER BY i.invoice_number))
    FROM public.trade_invoices i WHERE i.invoice_number LIKE 'ZZTEST-ESC-INV-%'))) IS NULL,
   'the run must be approved: ' || coalesce(pg_temp.zz_error(format('SELECT public.approve_trade_pay_run(%L, %L, %L, %L)',
   '00000000-0000-0000-0000-000000000001', '2026-11-16', '0a170000-0000-4000-8000-000000000001',
   (SELECT jsonb_build_object('check_rule', 'v2', 'invoices', jsonb_agg(jsonb_build_object(
     'invoice_id', i.id, 'verdict', 'clean', 'stops', '[]'::jsonb,
-    'pays', i.net_pay, 'super_amount', i.super_amount) ORDER BY i.invoice_number))
+    'pays', i.net_pay - coalesce(i.recurring_deduction_amount, 0), 'super_amount', i.super_amount) ORDER BY i.invoice_number))
    FROM public.trade_invoices i WHERE i.invoice_number LIKE 'ZZTEST-ESC-INV-%'))), ''));
 SELECT id AS zz_run FROM public.trade_pay_runs WHERE week_start = '2026-11-16' \gset
 \set inv1 '0a170000-0000-4000-8000-000000000311'
@@ -157,8 +172,15 @@ CREATE TEMP TABLE zz_cost_before ON COMMIT DROP AS
 CREATE TEMP TABLE zz_profit_before ON COMMIT DROP AS
   SELECT md5(coalesce(jsonb_agg(to_jsonb(v) ORDER BY v.job_id)::text, '')) AS h
   FROM public.v_job_profit v WHERE v.job_id IN (SELECT id FROM public.jobs WHERE job_number LIKE 'ZZTEST-ESC-%');
--- The stuck state: the push moved invoice 2 to approved, then refused.
+-- The stuck state: the push moved invoice 2 to approved, the repayment save
+-- lock took the instalment down to what is left (30 to 20), so its pay no
+-- longer matched the run and the push refused.
+SELECT public.install_trade_repayment_save_lock();
+UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'trade_repayments_v1';
 UPDATE public.trade_invoices SET status = 'approved' WHERE id = :'inv2';
+SELECT pg_temp.zz_assert((SELECT recurring_deduction_amount FROM public.trade_invoices WHERE id = :'inv2') = 20
+  AND (SELECT pays FROM public.trade_pay_run_invoices WHERE invoice_id = :'inv2') = 170,
+  'the stuck state: the move lowered the repayment, so the run''s pay no longer matches');
 UPDATE zz_inv_before SET h = (SELECT md5(coalesce(jsonb_agg(to_jsonb(i) ORDER BY i.id)::text, '')) FROM public.trade_invoices i
   WHERE i.invoice_number LIKE 'ZZTEST-ESC-INV-%');
 
@@ -218,6 +240,10 @@ SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', '  ZZTEST the 
 SELECT pg_temp.zz_assert((SELECT i.status = 'pending_ops_review' AND i.pay_run_id IS NULL
     AND i.reviewed_at IS NULL AND i.reviewed_by IS NULL AND i.xero_bill_id IS NULL
   FROM public.trade_invoices i WHERE i.id = :'inv2'), 'the invoice is back in review with no run');
+-- The release's own status write passes the save lock again and changes
+-- nothing: the lock only ever lowers, and 20 is what is left.
+SELECT pg_temp.zz_assert((SELECT recurring_deduction_amount FROM public.trade_invoices WHERE id = :'inv2') = 20,
+  'the release keeps the lowered repayment');
 SELECT pg_temp.zz_assert((SELECT md5(coalesce(jsonb_agg(to_jsonb(c) ORDER BY c.id)::text, '')) FROM public.job_cost_lines c)
   = (SELECT h FROM zz_cost_before), 'the release did not bring job cost back to the run''s state');
 SELECT pg_temp.zz_assert((SELECT md5(coalesce(jsonb_agg(to_jsonb(v) ORDER BY v.job_id)::text, ''))
@@ -225,14 +251,14 @@ SELECT pg_temp.zz_assert((SELECT md5(coalesce(jsonb_agg(to_jsonb(v) ORDER BY v.j
   = (SELECT h FROM zz_profit_before), 'the release did not bring Job Profit back to the run''s state');
 SELECT pg_temp.zz_assert((SELECT r.verdict = 'stopped' AND r.released_by = :'approver'::uuid AND r.released_at IS NOT NULL
     AND r.release_reason = 'ZZTEST the deduction changed' AND r.push_claimed_at IS NULL AND r.push_claimed_by IS NULL
-    AND r.stops @> '[{"code":"released_from_run","xero_checked_after_lapsed_claim":true}]' AND r.pays = 200 AND r.super_amount = 24
+    AND r.stops @> '[{"code":"released_from_run","xero_checked_after_lapsed_claim":true}]' AND r.pays = 170 AND r.super_amount = 24
   FROM public.trade_pay_run_invoices r WHERE r.run_id = :'zz_run' AND r.invoice_id = :'inv2'),
   'the run row records who, when and why, and keeps the figures it was approved with');
 SELECT pg_temp.zz_assert(NOT EXISTS (SELECT 1 FROM public.trade_pay_run_invoices WHERE invoice_id = :'inv2' AND verdict = 'clean'),
   'the invoice holds no clean row');
 SELECT pg_temp.zz_assert(public.claim_trade_pay_run_push(:'zz_run', :'inv2', :'approver') IS NULL,
   'a push claim after the release gets nothing');
-SELECT pg_temp.zz_assert((SELECT status = 'approved' AND invoice_count = 4 AND total_pays = 1000 AND super_total = 120
+SELECT pg_temp.zz_assert((SELECT status = 'approved' AND invoice_count = 4 AND total_pays = 970 AND super_total = 120
   FROM public.trade_pay_runs WHERE id = :'zz_run'), 'the run record (its approved snapshot) is not rewritten');
 -- A later run takes it: the real approval for the next week stamps it
 -- (its own guard refuses an invoice that still holds a clean row).
@@ -248,6 +274,13 @@ SELECT pg_temp.zz_assert(:'zz_next' = ''
   AND (SELECT i.pay_run_id = r.id AND i.status = 'pending_ops_review'
        FROM public.trade_invoices i JOIN public.trade_pay_runs r ON r.week_start = '2026-11-23' WHERE i.id = :'inv2'),
   'the next week''s run must take the released invoice: ' || :'zz_next');
+-- Next week's push moves it to approved: the save lock leaves it alone, so
+-- its pay still matches the new run and that push is not refused again.
+UPDATE public.trade_invoices SET status = 'approved' WHERE id = :'inv2';
+SELECT pg_temp.zz_assert((SELECT i.recurring_deduction_amount = 20 AND r.pays = i.net_pay - 20
+  FROM public.trade_invoices i JOIN public.trade_pay_run_invoices r ON r.invoice_id = i.id
+  JOIN public.trade_pay_runs pr ON pr.id = r.run_id AND pr.week_start = '2026-11-23'
+  WHERE i.id = :'inv2'), 'next week''s move leaves the pay as the new run recorded it');
 ROLLBACK TO SAVEPOINT zz_next_week;
 \echo 'PASS: cl-payrun-escape release: back to review, recorded, claim cleared, slot freed, run snapshot kept.'
 
