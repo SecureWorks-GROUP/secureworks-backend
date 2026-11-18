@@ -134,6 +134,7 @@ Deno.test("reconcile list: a page of bills carries lines, a cursor, counts per t
         line("L3", "xero_bill", "B1", 0, { state: null, not_counted_reason: "line_removed" })], error: null };
     }
     if (t === "jobs") return { data: [{ id: JOB, job_number: "SWF-990001", site_address: "1 Test St", site_suburb: "Testville" }], error: null };
+    if (t === "match_clues") return { data: [], error: null };
     throw new Error(`unexpected read ${t}`);
   }, {
     reconcile_list_page: (a) => {
@@ -195,6 +196,7 @@ Deno.test("reconcile list: each credit carries its bill id and that bill's state
       return { data: [{ id: "c0000000-0000-4000-8000-0000000000b2", subject_id: "xero_bill:BW" }], error: null };
     }
     if (t === "jobs") return { data: [{ id: JOB, job_number: "SWF-990002", site_address: "2 Test St", site_suburb: null }], error: null };
+    if (t === "match_clues") return { data: [], error: null };
     throw new Error(`unexpected read ${t}`);
   }, {
     reconcile_list_page: () => ({ data: page, error: null }),
@@ -226,7 +228,17 @@ Deno.test("reconcile list: a bill's state: removed lines, undecided lines, parts
   assertEquals(billStateOf([], []).state, "not_loaded");
   assertEquals(billStateOf([L("a", null, 10, "line_removed")], []).state, "not_loaded", "only removed lines");
   assertEquals(billStateOf([L("a", "on_job"), L("b", "needs_person")], []).state, "waiting");
-  assertEquals(billStateOf([L("a", null, 10, "document_not_live")], []).state, "waiting", "not counted reads undecided");
+  // Not counted for another reason: reads not_counted with its reasons, never waiting.
+  for (const why of ["duplicate_document", "duplicate_of_trade_invoice", "counted_by_bank_line", "counted_by_trade_invoice", "document_not_live"]) {
+    assertEquals(billStateOf([L("a", null, 10, why)], []), { state: "not_counted", job_id: null, division: null, not_counted_reasons: [why] }, why);
+  }
+  assertEquals(billStateOf([L("a", null, 10, "duplicate_document"), L("b", null, 10, "counted_by_bank_line"), L("c", null, 0, "line_removed")], []),
+    { state: "not_counted", job_id: null, division: null, not_counted_reasons: ["counted_by_bank_line", "duplicate_document"] }, "several reasons, removed lines ignored");
+  // A not-counted line beside counted ones: the counted lines decide.
+  assertEquals(billStateOf([L("a", null, 10, "duplicate_document"), L("b", "on_job")],
+    [{ line_id: "b", target: "job", job_id: "00000000-0000-4000-8000-000000000033", division: null }]),
+    { state: "placed", job_id: "00000000-0000-4000-8000-000000000033", division: null }, "the counted line decides");
+  assertEquals(billStateOf([L("a", null, 10, "duplicate_document"), L("b", "needs_person")], []).state, "waiting", "the counted line still waits");
   assertEquals(billStateOf([L("a", "on_job", null)], []).state, "waiting", "no amount");
   const J = "00000000-0000-4000-8000-000000000021";
   assertEquals(billStateOf([L("a", "on_job")], [{ line_id: "a", target: "job", job_id: J, division: null }]), { state: "placed", job_id: J, division: null });
@@ -256,6 +268,7 @@ Deno.test("reconcile list: labour billed outside the Trade App is never listed o
     if (t === "feature_flags") return flagOn;
     if (t === "reconcile_item_kinds") return { data: KINDS, error: null };
     if (t === "job_cost_lines") return { data: [line("L9", "xero_bill", "B9", 100)], error: null };
+    if (t === "match_clues") return { data: [], error: null };
     throw new Error(`unexpected read ${t}`);
   }, {
     // The database leaves it out; this read drops one that ever came back.
@@ -338,6 +351,7 @@ Deno.test("reconcile list: a removed credit line follows no bill", async () => {
       ], error: null };
     }
     if (t === "job_cost_line_parts" || t === "reconcile_items") return { data: [], error: null };
+    if (t === "match_clues") return { data: [], error: null };
     throw new Error(`unexpected read ${t}`);
   }, {
     reconcile_list_page: () => ({ data: [item("c0000000-0000-4000-8000-0000000000f7", "credit", "xero_credit_note:N7", -5)], error: null }),
@@ -364,6 +378,7 @@ Deno.test("reconcile list: a document with a person's labour line is never liste
       ], error: null };
     }
     if (t === "job_cost_line_parts" || t === "reconcile_items") return { data: [], error: null };
+    if (t === "match_clues") return { data: [], error: null };
     throw new Error(`unexpected read ${t}`);
   }, {
     reconcile_list_page: () => ({ data: [
@@ -383,6 +398,7 @@ Deno.test("reconcile list: any read that comes back with 1000 rows refuses (Post
   const c = fakeClient((t) => {
     if (t === "feature_flags") return flagOn;
     if (t === "reconcile_item_kinds") return { data: Array.from({ length: READ_CAP }, () => KINDS[0]), error: null };
+    if (t === "match_clues") return { data: [], error: null };
     throw new Error(`unexpected read ${t}`);
   });
   const err = await assertRejects(() => reconcileList(c, new URLSearchParams("tab=bills"), STAFF, NOW), ReconcileListError);
@@ -410,6 +426,7 @@ Deno.test("reconcile list: a bill carries the credits that follow it, each shown
       return { data: [line("G1", "xero_credit_note", "NB", null, { follows_line_id: "B2" })], error: null };
     }
     if (t === "job_cost_lines") return { data: [line("B1", "xero_bill", "BB", 400), line("B2", "xero_bill", "BB", 100)], error: null };
+    if (t === "match_clues") return { data: [], error: null };
     throw new Error(`unexpected read ${t}`);
   }, {
     reconcile_list_page: () => ({ data: [item("c0000000-0000-4000-8000-0000000000b9", "bill", "xero_bill:BB", 500)], error: null }),
@@ -438,6 +455,7 @@ Deno.test("reconcile list: a bill with no credits carries an empty list, and too
     }
     if (t === "job_cost_lines" && val(f, "follows_line_id")) return { data: [], error: null };
     if (t === "job_cost_lines") return { data: [line("B1", "xero_bill", "BB", 10)], error: null };
+    if (t === "match_clues") return { data: [], error: null };
     throw new Error(`unexpected read ${t}`);
   }, {
     reconcile_list_page: () => ({ data: [item("c0000000-0000-4000-8000-0000000000ba", "bill", "xero_bill:BB", 10)], error: null }),
@@ -447,5 +465,92 @@ Deno.test("reconcile list: a bill with no credits carries an empty list, and too
   for (const n of [READ_CAP, READ_CAP - 1]) {
     const err = await assertRejects(() => run(n), ReconcileListError);
     assertEquals(err.code, "reconcile_list_too_many_lines", `${n} followers plus the bill's line reach the cap`);
+  }
+});
+
+Deno.test("reconcile list: a credit whose bill is not counted says so, with the reasons", async () => {
+  const c = fakeClient((t, f) => {
+    if (t === "feature_flags") return flagOn;
+    if (t === "reconcile_item_kinds") return { data: KINDS, error: null };
+    if (t === "job_cost_lines" && val(f, "document_kind") === "xero_bill") {
+      return { data: [line("N1", "xero_bill", "BN", 10, { state: null, not_counted_reason: "duplicate_document" })], error: null };
+    }
+    if (t === "job_cost_lines") {
+      return { data: [line("R1", "xero_credit_note", "NN", -5, { follows_document_kind: "xero_bill", follows_document_id: "BN" })], error: null };
+    }
+    if (t === "job_cost_line_parts" || t === "reconcile_items" || t === "match_clues") return { data: [], error: null };
+    throw new Error(`unexpected read ${t}`);
+  }, {
+    reconcile_list_page: () => ({ data: [item("c0000000-0000-4000-8000-0000000000c1", "credit", "xero_credit_note:NN", -5)], error: null }),
+    reconcile_list_counts: () => ({ data: [], error: null }),
+  });
+  const out: any = await reconcileList(c, new URLSearchParams("tab=bills"), STAFF, NOW);
+  assertEquals([out.items[0].bill.state, out.items[0].bill.not_counted_reasons], ["not_counted", ["duplicate_document"]]);
+});
+
+Deno.test("reconcile list: each item carries the matcher's clues and, as against, its stops' words", async () => {
+  const J = "00000000-0000-4000-8000-000000000041";
+  const reads: string[] = [];
+  const c = fakeClient((t, f) => {
+    if (t === "feature_flags") return flagOn;
+    if (t === "reconcile_item_kinds") return { data: KINDS, error: null };
+    if (t === "match_clues") {
+      reads.push(t);
+      assertEquals([val(f, "org_id"), val(f, "subject_kind"), val(f, "current"), val(f, "subject_id"), val(f, "limit")],
+        [ORG, "cost_document", true, ["xero_bill:BC", "xero_bill:BD"], READ_CAP]);
+      return { data: [
+        { id: 12, subject_id: "xero_bill:BC", clue_code: "delivery_address", outcome: "job", job_id: J, division: null, names_one: true, seen_where: "delivery address", seen_value: "ZZTEST site" },
+        { id: 11, subject_id: "xero_bill:BC", clue_code: "job_number", outcome: "job", job_id: J, division: null, names_one: true, seen_where: "reference", seen_value: "SWF-ZZ1" },
+        { id: 13, subject_id: "xero_bill:BC", clue_code: "division_tag", outcome: "division_stock", job_id: null, division: "fencing", names_one: true, seen_where: null, seen_value: null },
+      ], error: null };
+    }
+    if (t === "match_clue_types") {
+      reads.push(t);
+      return { data: [
+        { code: "job_number", class: "key", mode: "counts", words: "Our job number is written on the document" },
+        { code: "delivery_address", class: "clue", mode: "suggest_only", words: "The delivery address is this job's site" },
+        { code: "division_tag", class: "narrower", mode: "off", words: "The Xero tag" },
+      ], error: null };
+    }
+    if (t === "jobs") return { data: [{ id: J, job_number: "SWF-ZZ1", site_address: null, site_suburb: null }], error: null };
+    if (t === "job_cost_lines") return { data: [], error: null };
+    throw new Error(`unexpected read ${t}`);
+  }, {
+    reconcile_list_page: () => ({ data: [
+      item("c0000000-0000-4000-8000-0000000000d1", "bill", "xero_bill:BC", 90, {
+        reason: "one_clue", suggestion: { outcome: "job", job_id: J, clue_ids: [11] },
+        evidence: { stops: [{ code: "digit_twin", words: "Two jobs share these digits" }, { code: "x", words: "" }, "junk"] },
+      }),
+      item("c0000000-0000-4000-8000-0000000000d2", "bill", "xero_bill:BD", 80),
+    ], error: null }),
+    reconcile_list_counts: () => ({ data: [], error: null }),
+  });
+  const out: any = await reconcileList(c, new URLSearchParams("tab=bills"), STAFF, NOW);
+  assertEquals(reads, ["match_clues", "match_clue_types"]);
+  assertEquals(out.items[0].clues, [
+    { clue_id: 11, code: "job_number", words: "Our job number is written on the document", counts: true, outcome: "job",
+      job_id: J, job_number: "SWF-ZZ1", job_site: null, division: null, names_one: true, seen_where: "reference", seen_value: "SWF-ZZ1", in_suggestion: true },
+    { clue_id: 12, code: "delivery_address", words: "The delivery address is this job's site", counts: false, outcome: "job",
+      job_id: J, job_number: "SWF-ZZ1", job_site: null, division: null, names_one: true, seen_where: "delivery address", seen_value: "ZZTEST site", in_suggestion: false },
+  ], "oldest first; a switched-off clue type is not shown; a suggest-only clue does not count");
+  assertEquals(out.items[0].against, ["Two jobs share these digits"]);
+  assertEquals([out.items[1].clues, out.items[1].against], [[], []], "no clues, no stops");
+});
+
+Deno.test("reconcile list: a failed clue read refuses, never a list without its reasons", async () => {
+  for (const broken of ["match_clues", "match_clue_types"]) {
+    const c = fakeClient((t) => {
+      if (t === "feature_flags") return flagOn;
+      if (t === "reconcile_item_kinds") return { data: KINDS, error: null };
+      if (t === broken) return { data: null, error: { message: "down" } };
+      if (t === "match_clues") return { data: [{ id: 1, subject_id: "xero_bill:BC", clue_code: "job_number", outcome: "job", job_id: null, division: null, names_one: true }], error: null };
+      if (t === "job_cost_lines") return { data: [], error: null };
+      throw new Error(`unexpected read ${t}`);
+    }, {
+      reconcile_list_page: () => ({ data: [item("c0000000-0000-4000-8000-0000000000d3", "bill", "xero_bill:BC", 90)], error: null }),
+      reconcile_list_counts: () => ({ data: [], error: null }),
+    });
+    const err = await assertRejects(() => reconcileList(c, new URLSearchParams("tab=bills"), STAFF, NOW), ReconcileListError);
+    assertEquals(err.code, "reconcile_list_unreadable", broken);
   }
 });

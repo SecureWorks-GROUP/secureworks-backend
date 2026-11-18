@@ -27,8 +27,10 @@
 // functions leave it out of the page and the counts, and this read drops one
 // that ever came back. A document with any line of kind installer_bill (a
 // mixed bill: the item's kind and reason miss it) is not listed either, nor a
-// credit that follows one; the tab counts still include those, so a count can
-// be above what the list shows. Every read is capped at READ_CAP (1000, the
+// credit that follows one: the database functions leave them out of the page
+// and the counts (20261119000000), and this read drops one that ever came back.
+// Each item carries the matcher's current clues (match_clues) and, as
+// `against`, the words of the stops it stored. Every read is capped at READ_CAP (1000, the
 // PostgREST row limit): a read, or the lines and parts of one answer, reaching
 // it refuses the whole list, never a short one. Logs carry codes and ids only.
 
@@ -197,22 +199,29 @@ export function costDocumentOf(item: { subject_table?: unknown; subject_id?: unk
   return COST_DOCUMENT_KINDS.has(kind) ? { kind, id: item.subject_id.slice(cut + 1) } : null;
 }
 
-export type BillState = "not_loaded" | "waiting" | "placed" | "split" | "overhead" | "division_stock";
+export type BillState = "not_loaded" | "not_counted" | "waiting" | "placed" | "split" | "overhead" | "division_stock";
 
 /**
  * Pure. A bill's state for a credit that follows it. The bill's lines other than
- * removed ones; none is not_loaded; any not counted, needing a person, with no
- * amount or with no part is waiting. Else its parts, grouped by where they go
- * (target, job, division): one place says placed (a job), overhead or
- * division_stock, so several lines all on one job read placed; more than one
- * place says split.
+ * removed ones; none is not_loaded. Lines not counted for another reason
+ * (duplicate, counted by a bank line or a trade invoice, document not live) are
+ * set aside: when every line is one, the bill is not_counted, with the reasons.
+ * Of the counted lines, any needing a person, with no amount or with no part is
+ * waiting. Else their parts, grouped by where they go (target, job, division):
+ * one place says placed (a job), overhead or division_stock, so several lines all
+ * on one job read placed; more than one place says split.
  */
 export function billStateOf(
   lines: Array<{ id: string; state: string | null; amount_ex: number | null; not_counted_reason: string | null }>,
   parts: Array<{ line_id: string; target: string; job_id: string | null; division: string | null }>,
-): { state: BillState; job_id: string | null; division: string | null } {
-  const counted = lines.filter((l) => l.not_counted_reason !== "line_removed");
-  if (counted.length === 0) return { state: "not_loaded", job_id: null, division: null };
+): { state: BillState; job_id: string | null; division: string | null; not_counted_reasons?: string[] } {
+  const present = lines.filter((l) => l.not_counted_reason !== "line_removed");
+  if (present.length === 0) return { state: "not_loaded", job_id: null, division: null };
+  const counted = present.filter((l) => l.not_counted_reason === null || l.not_counted_reason === undefined);
+  if (counted.length === 0) {
+    const reasons = [...new Set(present.map((l) => String(l.not_counted_reason)))].sort();
+    return { state: "not_counted", job_id: null, division: null, not_counted_reasons: reasons };
+  }
   if (counted.some((l) => l.state === null || l.state === "needs_person" || l.amount_ex === null)) {
     return { state: "waiting", job_id: null, division: null };
   }
@@ -225,6 +234,16 @@ export function billStateOf(
   if (p.target === "job") return { state: "placed", job_id: p.job_id, division: null };
   if (p.target === "division_stock") return { state: "division_stock", job_id: null, division: p.division };
   return { state: "overhead", job_id: null, division: null };
+}
+
+const CLUE_COLUMNS = "id, subject_id, clue_code, outcome, job_id, division, names_one, seen_where, seen_value";
+
+/** Why the matcher would not place it on its own: the stored stops' words. */
+export function againstOf(evidence: unknown): string[] {
+  const stops = evidence && typeof evidence === "object" ? (evidence as { stops?: unknown }).stops : null;
+  if (!Array.isArray(stops)) return [];
+  return [...new Set(stops.map((s) => (s && typeof s === "object" ? (s as { words?: unknown }).words : null))
+    .filter((w): w is string => typeof w === "string" && w.trim() !== ""))];
 }
 
 const LINE_COLUMNS = "id, document_kind, document_id, line_key, line_no, kind, description, account_code, " +
@@ -313,7 +332,21 @@ export async function reconcileList(
     client.from("reconcile_items").select("id, subject_id").eq("org_id", caller.orgId)
       .eq("subject_table", "cost_document").eq("status", "open").in("subject_id", chunk).limit(cap));
 
-  // Jobs named by a suggestion or a placed bill (jobs primary key).
+  // The matcher's current clues for the page's documents
+  // (match_clues_current_subject_idx) and the clue words (match_clue_types
+  // primary key). A clue whose type is switched off is not shown.
+  const subjectIds = [...new Set(page.filter((it) => costDocumentOf(it)).map((it) => String(it.subject_id)))];
+  const clueRows = subjectIds.length === 0 ? [] : await inChunks(subjectIds, (chunk, cap) =>
+    client.from("match_clues").select(CLUE_COLUMNS).eq("org_id", caller.orgId)
+      .eq("subject_kind", "cost_document").eq("current", true).in("subject_id", chunk).limit(cap));
+  const clueTypes = clueRows.length === 0 ? [] : await safe(() =>
+    client.from("match_clue_types").select("code, class, mode, words").limit(READ_CAP)) as Array<
+      { code: string; class: string; mode: string; words: string }
+    >;
+  const typeOf = new Map(clueTypes.map((t) => [t.code, t]));
+  const shownClues = clueRows.filter((c) => typeOf.get(c.clue_code)?.mode !== "off");
+
+  // Jobs named by a suggestion, a placed bill or a clue (jobs primary key).
   const bills = new Map(billIds.map((id) => {
     const own = billLines.filter((l) => l.document_id === id);
     return [id, { own, ...billStateOf(own, billParts) }];
@@ -321,6 +354,7 @@ export async function reconcileList(
   const jobIds = [...new Set([
     ...page.map((it) => it?.suggestion?.job_id).filter((v): v is string => typeof v === "string" && UUID.test(v)),
     ...[...bills.values()].map((b) => b.job_id).filter((v): v is string => typeof v === "string"),
+    ...shownClues.map((c) => c.job_id).filter((v): v is string => typeof v === "string" && UUID.test(v)),
   ])];
   const jobs = jobIds.length === 0 ? [] : await inChunks(jobIds, (chunk, cap) =>
     client.from("jobs").select("id, job_number, site_address, site_suburb").eq("org_id", caller.orgId).in("id", chunk).limit(cap));
@@ -373,6 +407,29 @@ export async function reconcileList(
     });
   };
 
+  /** The matcher's reasons, oldest clue first; `counts` false is a suggestion only. */
+  const cluesOf = (subjectId: string, suggestion: any) => {
+    const picked = new Set(Array.isArray(suggestion?.clue_ids) ? suggestion.clue_ids.map(String) : []);
+    return shownClues.filter((c) => c.subject_id === subjectId)
+      .sort((x, y) => Number(x.id) - Number(y.id))
+      .map((c) => {
+        const t = typeOf.get(c.clue_code);
+        return {
+          clue_id: Number(c.id),
+          code: c.clue_code,
+          words: t?.words ?? null,
+          counts: t?.mode === "counts" && (t.class === "key" || t.class === "clue"),
+          outcome: c.outcome ?? null,
+          ...jobOf(typeof c.job_id === "string" ? c.job_id : null),
+          division: c.division ?? null,
+          names_one: c.names_one === true,
+          seen_where: c.seen_where ?? null,
+          seen_value: c.seen_value ?? null,
+          in_suggestion: picked.has(String(c.id)),
+        };
+      });
+  };
+
   // A document with a line of a person's labour (kind installer_bill) is never
   // listed, even when its item's kind or reason says supplier bill (a mixed
   // bill); nor is a credit that follows such a bill.
@@ -409,6 +466,8 @@ export async function reconcileList(
       suggestion: s
         ? { outcome: s.outcome ?? null, ...jobOf(typeof s.job_id === "string" ? s.job_id : null), division: s.division ?? null }
         : null,
+      clues: cluesOf(String(it.subject_id), s),
+      against: againstOf(it.evidence),
       lines: own
         .filter((l) => l.not_counted_reason !== "line_removed")
         .sort((x, y) => (Number(x.line_no) || 0) - (Number(y.line_no) || 0))
@@ -427,6 +486,7 @@ export async function reconcileList(
           state: b.state,
           ...jobOf(b.job_id),
           division: b.division,
+          ...(b.not_counted_reasons ? { not_counted_reasons: b.not_counted_reasons } : {}),
         };
       });
       // One bill: the screen's `bill`. None: not against a bill. Several: say so.
