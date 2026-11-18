@@ -234,6 +234,7 @@ type HistoryOptions = {
   years: number
   priorSuper: number
   priorSuperNotRecorded?: number
+  priorNotInXero?: number
   taxPercent: number | null
   rates: PayHistoryRate[]
   paidRuns: ReadonlySet<string>
@@ -262,6 +263,14 @@ function addPeriod(periods: Map<string, HistoryTotals>, key: string, invoice: Hi
 
 export function countedHistoryInvoice(row: HistoryInvoice) {
   return !RELEASED.has(row.status) && !VOID_BILL.has(String(row.xero_bill_status ?? '').toUpperCase())
+}
+
+// An invoice with no Xero bill has not been paid and its super has not been
+// remitted, so it is listed but kept out of every paid and super total. The
+// column must be read: an absent field refuses rather than counting as billed.
+export function historyInvoiceInXero(row: HistoryInvoice) {
+  if (!('xero_bill_id' in row)) throw new Error('pay_history_unreadable')
+  return Boolean(row.xero_bill_id)
 }
 
 export function historyAmount(value: unknown) {
@@ -298,6 +307,7 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
   const byInvoice: { invoice_id: string; invoice_number: string | null; week_start: string; amount: number; status: string }[] = []
   let sinceStart = opts.priorSuper
   let superNotRecorded = opts.priorSuperNotRecorded ?? 0
+  let notInXero = opts.priorNotInXero ?? 0
   let tax = 0
 
   for (const row of rows) {
@@ -306,6 +316,14 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
     const day = row.week_end || row.created_at?.slice(0, 10)
     if (!day) throw new Error('pay_history_unreadable')
     if (day > today) continue
+    if (!historyInvoiceInXero(row)) {
+      notInXero++
+      if (day >= start) {
+        byInvoice.push({ invoice_id: row.id, invoice_number: row.invoice_number,
+          week_start: row.week_start || mondayOf(day), amount: 0, status: 'not_in_xero' })
+      }
+      continue
+    }
     const recordedSuper = recordedHistorySuper(row)
     if (recordedSuper === null) superNotRecorded++
     const superAmount = recordedSuper ?? 0
@@ -356,6 +374,7 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
     years: newest(years).map(([fy_label, totals]) => ({ fy_label, ...totals })),
     this_year_vs_last: { this_fy: thisYear, last_fy_same_point: lastYear },
     super: { this_fy: thisYear.paid_to_super, since_start: sinceStart, not_recorded_count: superNotRecorded,
+      not_in_xero_count: notInXero,
       by_invoice: byInvoice.sort((a, b) => b.week_start.localeCompare(a.week_start) || b.invoice_id.localeCompare(a.invoice_id)) },
     tax_set_aside: opts.taxPercent === null ? null : { percent: opts.taxPercent, this_fy_amount: tax },
     rate_history: opts.rates,
