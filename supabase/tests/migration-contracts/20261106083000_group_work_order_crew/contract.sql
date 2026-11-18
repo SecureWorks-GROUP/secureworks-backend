@@ -1,4 +1,8 @@
 BEGIN;
+-- P1-13.2 (20261118082253): the sign-off gate refuses only while the sign-off
+-- switch is on, so the switch is on here.
+INSERT INTO public.feature_flags(flag_name, enabled) VALUES ('trade_invoice_requires_client_signoff_v1', true)
+  ON CONFLICT (flag_name) DO UPDATE SET enabled = true;
 -- Only the crew read may change. Money, locks, sign-off and freeze remain
 -- byte-identical to the installed predecessor, including any later amendment.
 DO $check$
@@ -8,6 +12,8 @@ BEGIN
  SELECT b.body INTO previous FROM public.migration_contract_group_crew_before b;
  -- Later amendments to this writer are undone first, newest first, so this
  -- check still pins only this migration's own change.
+ -- 20261118082253 (P1-13.2): the sign-off check reads the switch-aware gate.
+ body := replace(body, $later$public.group_client_signoff_gate_passes($later$, $was$public.group_client_signoff_counts($was$);
  -- 20261117173202: amount-change eligibility keeps the original gate when off.
  body := replace(body, $later$AND CASE WHEN EXISTS (SELECT 1 FROM public.feature_flags WHERE flag_name='work_order_amount_change_v1' AND enabled)
       THEN COALESCE((SELECT g.approved_budget_ex FROM public.group_work_orders g WHERE g.id=p_group_id),wo.agreed_labour_ex + public.work_order_amount_change_total(wo.id)) > 0

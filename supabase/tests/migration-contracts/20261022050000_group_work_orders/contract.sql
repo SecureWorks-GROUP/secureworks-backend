@@ -5,6 +5,11 @@
 
 BEGIN;
 
+-- P1-13.2 (20261118082253): the group sign-off rule applies only while the
+-- sign-off switch is on. These cases prove that rule, so the switch is on here.
+INSERT INTO public.feature_flags(flag_name, enabled) VALUES ('trade_invoice_requires_client_signoff_v1', true)
+  ON CONFLICT (flag_name) DO UPDATE SET enabled = true;
+
 -- Later policy: reopening invalidates client approval even with unchanged
 -- hours. These invoice-recalculation fixtures explicitly reconfirm the work.
 CREATE FUNCTION pg_temp.group_fixture_client_reconfirms(j uuid) RETURNS void LANGUAGE plpgsql AS $$
