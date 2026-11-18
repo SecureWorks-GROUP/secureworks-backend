@@ -603,6 +603,21 @@ const OLDER_THAN_WINDOW: Stop = {
   code: "older_than_run_window",
   words: "This invoice is for a week more than 8 weeks ago. Check it by hand.",
 };
+/**
+ * The statuses the run's stamp takes (approve_trade_pay_run, newest
+ * migration). Before a run exists the read stops every other status, so an
+ * invoice the read shows as clean is one the stamp will take, and the press
+ * is never refused for a status the read did not show. A test pins this list
+ * to the migration's.
+ */
+export const PAY_RUN_STAMP_STATUSES: readonly string[] = [
+  "pending_ops_review",
+  "queried",
+];
+const NOT_WAITING_FOR_RUN: Stop = {
+  code: "not_waiting_for_run",
+  words: "This invoice is not waiting for the pay run yet (the trade or the office still has it). Check it by hand.",
+};
 // cl-1622-crew-in-run, ruling (1): an all-in crew bill (employer super) is
 // released and pushed with its whole crew, never by the run.
 const CREW_RELEASE_PATH: Stop = {
@@ -767,6 +782,9 @@ export async function readPayRun(
     } else {
       // Inside the window and missing from the check: never shown as clean.
       throw unreadable("pay-run check v2 left out an invoice of this week");
+    }
+    if (!run && !PAY_RUN_STAMP_STATUSES.includes(String(row.status ?? ""))) {
+      stops.push(NOT_WAITING_FOR_RUN);
     }
     // Option A: an invoice this run approved keeps its press status until the
     // run pushes it, so the check's "not approved yet" is not a stop for it.

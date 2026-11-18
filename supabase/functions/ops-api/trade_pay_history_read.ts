@@ -57,14 +57,14 @@ export async function readTradePayHistory(client: any, userId: string, today: st
     if (taxPercent === null && setting.tax_set_aside_percent !== null) throw new Error('pay_history_unreadable')
 
     const runIds = [...new Set(rows.filter(row => countedHistoryInvoice(row) && historyInvoiceInXero(row)).map(row => row.pay_run_id).filter(Boolean))]
-    const paidRuns = new Set<string>()
+    const paidRuns = new Map<string, string>()
     for (let i = 0; i < runIds.length; i += 50) {
       const ids = runIds.slice(i, i + 50)
       const runs = checkedRows(await client.from('trade_pay_runs').select('id,super_marked_paid_at').in('id', ids))
       if (runs.length !== ids.length) throw new Error('pay_history_unreadable')
       for (const run of runs) {
         if (!('super_marked_paid_at' in run)) throw new Error('pay_history_unreadable')
-        if (run.super_marked_paid_at) paidRuns.add(run.id)
+        if (run.super_marked_paid_at) paidRuns.set(run.id, String(run.super_marked_paid_at))
       }
     }
     let priorSuperCents = 0
