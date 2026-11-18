@@ -36,11 +36,12 @@ function fake(invoiceStatus: string | null, enabled = false) {
           return this;
         },
         maybeSingle() {
+          if (table === "expense_receipts") return this.single();
           return Promise.resolve({ data: { enabled } });
         },
         single() {
           return Promise.resolve({
-            data: { id: "ZZTEST-receipt", status: "approved" },
+            data: { id: "ZZTEST-receipt", status: "approved", payment_method: "cash" },
           });
         },
         then(resolve: any) {
@@ -70,6 +71,7 @@ Deno.test("ZZTEST expense push is unchanged switch-off and any claim stops Xero 
         "buildXeroExpenseBillBody",
         "xeroPost",
         "logBusinessEvent",
+        "requestFetch",
         pushBody,
       );
       const run = () =>
@@ -323,7 +325,7 @@ Deno.test("ZZTEST missing receipt evidence and office edits are reflected on eac
     [{ receipt_storage_path: null }, "reimbursement_receipt_required"],
     [{ payment_method: "company_card" }, "reimbursement_not_personal_spend"],
     [{ status: "rejected" }, "reimbursement_rejected"],
-    [{ xero_bill_id: "ZZTEST-bill" }, "reimbursement_already_claimed"],
+    [{ xero_bill_id: "ZZTEST-bill" }, "expense_already_billed"],
   ] as const;
   for (const [edit, reason] of cases) {
     const rows = [receipt("ZZTEST-own")], fake = listFake(rows, true);
