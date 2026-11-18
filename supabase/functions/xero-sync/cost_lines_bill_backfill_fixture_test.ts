@@ -5,6 +5,7 @@
 // and amounts.
 import { assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { billCostDocument } from "./cost_lines.ts";
+import { LABOUR } from "../_shared/people_accounts_test_support.ts";
 
 const FIXTURE = new URL("./cost_lines_bill_backfill_fixture.json", import.meta.url);
 const CONTRACT = new URL(
@@ -19,6 +20,7 @@ Deno.test("the edge billCostDocument gives the fixture's expected documents", as
       orgId: fixture.org_id,
       mirrorBillIds: new Set(),
       employerSuperOn: fixture.employer_super,
+      labour: LABOUR,
     });
     // Text, not structure: the writer's source hash reads the line's text.
     assertEquals(JSON.stringify(doc), JSON.stringify(fixture.expected[i]), `bill ${i}`);

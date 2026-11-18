@@ -1,7 +1,7 @@
 // Bill pre-match: the owner's rules on bills shaped like the live Bills to place
 // list (JP-06, 15 Oct 2026). Each case is a business outcome: which bills the agent
 // may place on its own, which wait for a staff press, and which it never touches.
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildAddressIndex,
   buildDocumentIndex,
@@ -10,6 +10,7 @@ import {
   documentKey,
   documentKeys,
   duplicateDocumentsOf,
+  OVERHEAD_ACCOUNTS,
   supplierKey,
   type PrematchBill,
   type PrematchJob,
@@ -18,6 +19,7 @@ import {
 import { emailJobsByBill, runBillPrematch } from "./bill_prematch_run.ts";
 import { assignReconRow } from "../ops-api/materials_recon.ts";
 import { baseSeed, makeFakeClient, ORG } from "../ops-api/materials_recon_test_support.ts";
+import { LABOUR } from "../_shared/people_accounts_test_support.ts";
 
 const JOBS: PrematchJob[] = [
   { id: "j1", job_number: "SWF-26535", status: "complete", created_at: "2026-05-01", site_address: "12 Banksia Street, Wanneroo WA", holding: false },
@@ -27,12 +29,14 @@ const JOBS: PrematchJob[] = [
   { id: "j5", job_number: "SWP-261283", status: "in_progress", created_at: "2026-08-20", site_address: "40 Marri Crescent, Ellenbrook WA", holding: false },
 ];
 
+
 function ctx(over: { emailJobIds?: string[]; pos?: PrematchPO[] } = {}) {
   return {
     ...buildJobMaps(JOBS),
     addressIndex: buildAddressIndex(JOBS),
     pos: over.pos ?? [],
     emailJobIds: over.emailJobIds ?? [],
+    labour: LABOUR,
   };
 }
 
@@ -122,6 +126,21 @@ Deno.test("overhead accounts and SW - GROUP lines are proposed not job related",
   assertEquals(materials.kind, "none");
 });
 
+Deno.test("475 keeps main's pre-match exactly: still an overhead account, not labour (director 03:57: the matcher's hidden skip comes first)", () => {
+  assert(OVERHEAD_ACCOUNTS.has("475"), "OVERHEAD_ACCOUNTS is main's list");
+  // Alone: the same 'not job related' proposal as main.
+  const alone = decideBillPrematch(bill([["Internal subcontractor", "475", 900]]), ctx());
+  assertEquals([alone.kind, alone.rule], ["not_job_related", "overhead_account"]);
+  // Not labour: a job number decides it as on main (no installer_confirm).
+  const d = decideBillPrematch(bill([["Internal subcontractor SWF-26535", "475", 900]]), ctx());
+  assertEquals(d.kind === "job" && [d.confidence, d.rule], ["high", "job_number"]);
+  // 306 is still labour, read from the labour flag; a padded " 306" never was and is not now.
+  const l = decideBillPrematch(bill([["Install SWF-26535", "306", 900]]), ctx());
+  assertEquals(l.kind === "job" && l.rule, "job_number+installer_confirm");
+  const padded = decideBillPrematch(bill([["Install SWF-26535", " 306", 900]]), ctx());
+  assertEquals(padded.kind === "job" && padded.rule, "job_number");
+});
+
 Deno.test("an invoice email counts only when the file name carries the whole invoice number", () => {
   const bills = [bill([], { xero_invoice_id: "x-1", invoice_number: "1459061" }), bill([], { xero_invoice_id: "x-2", invoice_number: "INV-79502" })];
   const got = emailJobsByBill(bills, [
@@ -139,7 +158,7 @@ Deno.test("a bill placed through the PO it names is matched to that PO, and a PO
   const place = (poFactBills?: Map<string, string[]>, linked: string | null = null) =>
     decideBillPrematch(
       bill([["Your order PO-302382", "305", 1000]], { xero_invoice_id: "xinv-001", invoice_date: "2026-07-02", xero_contact_id: "c-9" }),
-      { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [{ ...po, xero_bill_id: linked }], emailJobIds: [], poFactBills },
+      { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [{ ...po, xero_bill_id: linked }], emailJobIds: [], poFactBills, labour: LABOUR },
     );
 
   const d = place();
@@ -226,7 +245,7 @@ Deno.test("a longer job number never names the shorter one (SWF-261009 is not SW
 
 Deno.test("a bill naming a job that was never won goes to a person, not onto the job", () => {
   const jobs: PrematchJob[] = [...JOBS, { id: "j6", job_number: "SWF-26958", status: "draft", created_at: "2026-07-01", site_address: null, holding: false }];
-  const d = decideBillPrematch(bill([["SWF26958 caps", "305", 40.91]]), { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [] });
+  const d = decideBillPrematch(bill([["SWF26958 caps", "305", 40.91]]), { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [], labour: LABOUR });
   assertEquals([d.kind, d.rule], ["review", "job_number_not_live"]);
 });
 
@@ -236,7 +255,7 @@ Deno.test("the same digits on two prefixes go to a person (SWF-26328 and SWP-263
     { id: "j7", job_number: "SWF-26328", status: "archived", created_at: "2026-04-01", site_address: null, holding: false },
     { id: "j8", job_number: "SWP-26328", status: "in_progress", created_at: "2026-05-01", site_address: null, holding: false },
   ];
-  const d = decideBillPrematch(bill([["Metroll order SWP-26328", "305", 355.54]]), { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [] });
+  const d = decideBillPrematch(bill([["Metroll order SWP-26328", "305", 355.54]]), { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [], labour: LABOUR });
   assertEquals(d.kind, "review");
 });
 
@@ -294,7 +313,7 @@ Deno.test("an open queue bill that is a trade-invoice mirror is never given a ma
 
 Deno.test("a bill naming a live job and a numbered holding job is never placed whole on the live job", () => {
   const jobs = [...JOBS, { id: "j6", job_number: "SWF-260001", status: "accepted", created_at: "2026-01-01", site_address: null, holding: true }];
-  const c = { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [] };
+  const c = { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [], labour: LABOUR };
   const d = decideBillPrematch(bill([["SWF-26535 posts", "305", 300], ["SWF-260001 rails", "305", 200]]), c);
   assertEquals(d.kind === "job", false);
 });
@@ -337,7 +356,7 @@ Deno.test("the supplier document key is the longest run of five or more digits",
 Deno.test("one supplier document under two contacts of one supplier is held for a person, never placed", () => {
   const index = buildDocumentIndex(METECNO);
   const jobs: PrematchJob[] = [...JOBS, { id: "j9", job_number: "SWP-25029", status: "in_progress", created_at: "2026-03-17", site_address: null, holding: false }];
-  const c = { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [] };
+  const c = { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [], emailJobIds: [], labour: LABOUR };
   // Even naming a live job outright, each of the three goes to a person.
   for (const m of METECNO) {
     const b = bill([["SpanPlus For SWP-25029", "305", 1902.7, "SW - PATIOS"]], { ...m, lines: undefined as never });

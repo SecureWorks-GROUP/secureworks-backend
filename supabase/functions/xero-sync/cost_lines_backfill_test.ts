@@ -4,6 +4,7 @@ import {
   handleCostLinesBackfill,
   MAX_TRADE_RPCS,
 } from "./cost_lines_backfill.ts";
+import { peopleRows } from "../_shared/people_accounts_test_support.ts";
 
 const org = "10000000-0000-4000-8000-000000000001";
 function fake(kind = "bills") {
@@ -23,6 +24,7 @@ function fake(kind = "bills") {
     trade_invoices: kind === "bills"
       ? [{ id: "m", org_id: org, xero_bill_id: "b" }]
       : [{ id: "a", org_id: org }, { id: "b", org_id: org }],
+    people_account_codes: peopleRows(),
     xero_supplier_credit_notes: [{ org_id: org, xero_credit_note_id: "a" }, {
       org_id: org,
       xero_credit_note_id: "b",

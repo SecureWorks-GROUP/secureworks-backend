@@ -45,6 +45,7 @@ import { syncSupplierCreditNotes } from './supplier_credit_notes.ts'
 import { checkDraftsApproved } from './draft_approval_check.ts'
 import { billCostDocument, collectBillCostDocument } from './cost_lines.ts'
 import { readBillMirrorVerdicts } from './trade_bill_mirror_rule.ts'
+import { type LabourAccounts, labourAccounts, readPeopleAccounts } from '../_shared/people_accounts.ts'
 import { handleCostLinesBackfill } from './cost_lines_backfill.ts'
 import { syncCustomerAllocations } from './customer_allocations.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
@@ -807,6 +808,8 @@ async function syncInvoices(sb: any) {
   const costLinesErrors: string[] = []
   let costLinesOn = false
   let costEmployerSuperOn = false
+  // The labour accounts (people_account_codes): unreadable or empty writes no cost lines this run.
+  let costLabour: LabourAccounts = labourAccounts([])
   // Bills not written because only a trade invoice with no organisation holds them.
   let costMirrorStops = 0
   try {
@@ -819,6 +822,7 @@ async function syncInvoices(sb: any) {
         .eq('flag_name', 'job_cost_employer_super_v1').maybeSingle()
       if (superError) throw superError
       costEmployerSuperOn = superFlag?.enabled === true
+      costLabour = (await readPeopleAccounts(sb)).labour
     }
   } catch (e) {
     costLinesOn = false
@@ -1229,7 +1233,7 @@ async function syncInvoices(sb: any) {
           for (const record of costBills) {
             if (verdicts.stopped.has(record.xero_invoice_id)) { costMirrorStops++; continue }
             collectBillCostDocument(record, {
-              orgId: DEFAULT_ORG_ID, mirrorBillIds: verdicts.mirrors, employerSuperOn: costEmployerSuperOn,
+              orgId: DEFAULT_ORG_ID, mirrorBillIds: verdicts.mirrors, employerSuperOn: costEmployerSuperOn, labour: costLabour,
             }, costDocuments, costLinesErrors)
           }
         } catch (e) {
@@ -1883,6 +1887,9 @@ async function ingestMaterialsActuals(
   }
 
   try {
+    // 0. The labour accounts (people_account_codes): unreadable or empty stops
+    //    the step before any write (an installer bill is never read as materials).
+    const labour = (await readPeopleAccounts(sb)).labour
     // 1. Mirror set — the hard exclusion key. Any ACCPAY bill whose id is a
     //    trade-invoice mirror can never be a materials fact.
     const mirrorSet = new Set<string>()
@@ -2079,7 +2086,7 @@ async function ingestMaterialsActuals(
       }
 
       const existingQueueStatus = queueStatusById.get(bill.xero_invoice_id)
-      const installer = isInstallerBill(b.line_items)
+      const installer = isInstallerBill(b.line_items, labour)
       // Agent-placed whole-bill facts keep their job. Their amount follows the
       // bill, the same step this path's own facts take on 'keep' (finish line
       // A2: a fact can sit behind an amended bill). A missing amount is not
