@@ -563,3 +563,43 @@ Deno.test("patio pay only through the group: a failed read of the group switch r
   assertEquals(caught.code, "group_work_order_unreadable");
   assertEquals(caught.message, "Could not check whether group work orders are on.");
 });
+
+// P1-13.4: a group the sweep opens while the one super rule applies is
+// written on the inclusive basis; rule off keeps all_in_12_v2; an unreadable
+// rule opens no group and says so per job, and the top-ups still run.
+function payRuleOn(fake: Fake) {
+  fake.rows("feature_flags").push({ flag_name: "trade_pay_inclusive_super_v1", enabled: true });
+  fake.rows("trade_pay_settings").push({ id: 1, inclusive_super_from: "2026-01-05", tax_set_aside_percent: null });
+}
+
+Deno.test("P1-13.4 sweep: rule on opens inclusive groups, rule off keeps all_in_12_v2", async () => {
+  const on = patioWorld();
+  payRuleOn(on);
+  const opened = await autoGroupPatioJobs(on.client());
+  assertEquals(opened.created, 2);
+  assertEquals(on.rows("group_work_orders").map((g) => g.pay_basis), ["inclusive_12_112_v1", "inclusive_12_112_v1"]);
+
+  const off = patioWorld();
+  await autoGroupPatioJobs(off.client());
+  assertEquals(off.rows("group_work_orders").map((g) => g.pay_basis), ["all_in_12_v2", "all_in_12_v2"]);
+});
+
+Deno.test("P1-13.4 sweep: an unreadable pay rule opens no group, names the reason, and top-ups still run", async () => {
+  const fake = patioWorld();
+  payRuleOn(fake);
+  // An existing group on a: its crew top-up must not depend on the rule.
+  fake.rows("group_work_orders").push({ id: "g-a", job_id: "a", work_order_id: "wo-a", status: "open", pay_basis: "all_in_12_v2" });
+  const base = fake.client();
+  const client = { ...base, from: (t: string) => {
+    if (t !== "trade_pay_settings") return base.from(t);
+    const q: any = { select: () => q, eq: () => q, limit: () => q,
+      then: (resolve: any) => resolve({ data: null, error: { message: "down" } }) };
+    return q;
+  } };
+  const out = await autoGroupPatioJobs(client);
+  const by = Object.fromEntries(out.results.map((r) => [r.job_id, r]));
+  assertEquals(by.b.reason, "pay_rule_unreadable");
+  assertEquals(by.b.code, "pay_rule_unreadable");
+  assertEquals(by.a.reason, "crew_added");
+  assertEquals(fake.rows("group_work_orders").map((g) => g.id), ["g-a"]);
+});

@@ -135,7 +135,10 @@ and is not the authority.
   and neither writes share rows.
 - My-share keys are `{ pot_total, my_share, needs_hours, client_signed,
   group_id, awaiting }`. `awaiting` is `needs_hours`, `awaiting_signoff`,
-  `awaiting_others`, `awaiting_rate`, `ready`, or `frozen`. `pot_total`
+  `awaiting_others`, `awaiting_rate`, `ready`, or `frozen`
+  (`awaiting_signoff` only while `trade_invoice_requires_client_signoff_v1`
+  is on or unreadable; off, the state goes on to the next one and
+  `client_signed` still says whether the client signed, P1-13.4). `pot_total`
   is null only while `awaiting` is `needs_hours`. `my_share` is set only
   when `awaiting` is `frozen`. A share read never freezes and never calls
   `project_group_work_order_split`. `project_group_work_order_split` quotes
