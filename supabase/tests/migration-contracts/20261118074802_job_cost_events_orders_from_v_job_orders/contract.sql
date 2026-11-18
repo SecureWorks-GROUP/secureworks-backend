@@ -271,7 +271,7 @@ END $removed$;
 SAVEPOINT plan_fixture;
 INSERT INTO public.reconcile_items(org_id,kind,subject_table,subject_id,reason,evidence_hash,raised_by,status)
 SELECT '00000000-0000-0000-0000-000000000001',CASE WHEN n%2=0 THEN 'bill' ELSE 'message' END,'cost_document',
- 'xero_bill:ZZTEST-HIST-'||n,'new','fixture','migration',CASE WHEN n%2=0 THEN 'decided' ELSE 'open' END
+ 'xero_bill:ZZTEST-HIST-'||n,'new','fixture','migration',CASE WHEN n%1000=1 THEN 'open' ELSE 'decided' END
 FROM generate_series(1,12000) n;
 INSERT INTO public.job_cost_lines(org_id,kind,document_kind,document_id,line_key,lane,amount_ex,state,source_hash,party_id,party_name,order_kind,order_id)
 SELECT '00000000-0000-0000-0000-000000000001','supplier_bill','xero_bill','ZZTEST-HIST-'||n,'1','materials',10,'needs_person','ZZTEST',
