@@ -1590,7 +1590,7 @@ import { readXeroDrafts, XeroDraftsError } from './xero_drafts_read.ts'
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { EffortStatsUnreadable, readPayEffortStats } from './pay_effort_stats.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
-import { TradePayRunError, TradePayRunRefusal, PAY_RUN_SWITCH, approvePayRun, markPayRunSuperPaid, payRunApproveDepsFromClient, payRunPushDepsFromClient, payRunReadsFromClient, pushPayRunInvoice, readPayRun } from './trade_pay_run.ts'
+import { TradePayRunError, TradePayRunRefusal, PAY_RUN_SWITCH, approvePayRun, markPayRunSuperPaid, payRunApproveDepsFromClient, payRunPushDepsFromClient, payRunReadsFromClient, payRunReleaseDepsFromClient, pushPayRunInvoice, readPayRun, releasePayRunInvoice } from './trade_pay_run.ts'
 // Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
 import { PAY_FIGURES_APPROVER_ACTIONS, payFiguresApproverRefusal } from './pay_figures_approver.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
@@ -10255,6 +10255,36 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json(action === 'push_pay_run_invoice'
             ? await pushPayRunInvoice(pushDeps, { ...pressOpts, invoiceId: body?.invoice_id })
             : await markPayRunSuperPaid(pushDeps, pressOpts))
+        } catch (err) {
+          if (err instanceof TradePayRunError) {
+            return json({ ok: false, error: err.code, message: err.message }, err.status)
+          }
+          throw err
+        }
+      }
+
+      // Take one invoice back out of an approved run (cl-payrun-escape).
+      // POST { run_id, invoice_id, reason, xero_check? }: a run's invoice the push could
+      // not send (for example its repayment changed at the push) goes back to
+      // review, recorded with who, when and why, and a later run can take it.
+      // Behind trade_pay_run_v1 (409 while off); a signed-in approver only.
+      // Calls no Xero and sends nothing.
+      case 'release_pay_run_invoice': {
+        if (req.method !== 'POST') {
+          return json({ ok: false, error: 'method_not_allowed', message: `${action} requires POST` }, 405)
+        }
+        try {
+          return json(await releasePayRunInvoice(
+            payRunReleaseDepsFromClient(client, () => readFlag(client, PAY_RUN_SWITCH)),
+            {
+              orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
+              runId: body?.run_id,
+              invoiceId: body?.invoice_id,
+              reason: body?.reason,
+              xeroCheck: body?.xero_check,
+              actorUserId: requestActor.source === 'jwt' && authMode === 'jwt' ? (authUser?.id || null) : null,
+            },
+          ))
         } catch (err) {
           if (err instanceof TradePayRunError) {
             return json({ ok: false, error: err.code, message: err.message }, err.status)
