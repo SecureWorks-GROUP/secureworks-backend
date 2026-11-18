@@ -631,10 +631,15 @@ const MONEY_UNREADABLE: Stop = {
   words: "This invoice's pay figures do not add up. Check it by hand.",
 };
 
+/** What a released row says, on the run and in the release's answer
+ * (cl-payrun-xero-lookup (b)). True for every status the release leaves:
+ * approved goes back to pending_ops_review, and a queried invoice stays
+ * queried. */
+export const RELEASED_FROM_RUN_WORDS =
+  "An approver took this invoice back out of the run. It went back to the office for review (a queried invoice stays queried) and waits for a later run.";
 const RELEASED_FROM_RUN: Stop = {
   code: "released_from_run",
-  words:
-    "An approver took this invoice back out of the run. It went back to review and waits for a later run.",
+  words: RELEASED_FROM_RUN_WORDS,
 };
 
 /** Invoices counted per note code, whatever their verdict, codes in name
@@ -2088,12 +2093,15 @@ export function payRunPushDepsFromClient(
 // database call (release_trade_pay_run_invoice) locks the run, the run row
 // and the invoice, refuses a pushed row, a live push claim or any Xero
 // identity, and records who, when and why. A claim left by a press that may
-// have reached Xero (lapsed, never given back) is released only with a
-// recorded Xero check (xero_check: {in_xero: false, checked_by, checked_at};
-// director ruling 18 Nov): it must say the invoice is not in Xero, name the
-// pay run approver who checked, and be dated after the claim lapsed. The
-// database enforces all three and keeps the check. It calls no Xero and
-// sends nothing. A second press answers already_released and writes nothing.
+// have reached Xero (lapsed, never given back) is released only after this
+// server searches Xero itself, at the press (cl-payrun-xero-lookup, director
+// 18 Nov): the database refuses the first call (pay_run_push_claim_lapsed),
+// the server looks for a live bill with the invoice's number (as the bill
+// number or inside a bill reference, the search the office's stuck-invoice
+// release uses), and only when it finds none calls again with what it found.
+// A bill found, an invoice with no number or a search that fails releases
+// nothing. A check sent in the request is never read. The only Xero call is
+// that read; it pushes nothing and sends nothing. A second press answers already_released and writes nothing.
 // ════════════════════════════════════════════════════════════
 
 export const PAY_RUN_RELEASE_REASON_MIN = 5;
@@ -2108,10 +2116,29 @@ export type PayRunReleaseDeps =
       invoiceId: string,
       actor: string,
       reason: string,
-      /** The recorded Xero check, passed as sent; the database judges it. */
-      xeroCheck: Record<string, unknown> | null,
+      /** This server's own Xero search result, or null (no search made). */
+      xeroCheck: PayRunReleaseXeroCheck | null,
     ): Promise<Record<string, unknown>>;
+    /** The number the push gives the invoice's bill; null when it has none. */
+    invoiceNumber(invoiceId: string): Promise<string | null>;
+    /**
+     * Live Xero bills carrying this number (bill number or reference). Throws
+     * when Xero cannot be searched: a failed search is never "none found".
+     */
+    searchXero(number: string): Promise<Array<Record<string, unknown>>>;
+    /** The time of the search, ISO. */
+    now(): string;
   };
+
+/** What this server found in Xero, as the database stores it. */
+export type PayRunReleaseXeroCheck = {
+  in_xero: false;
+  checked_by: string;
+  checked_at: string;
+  source: "ops_api_xero_lookup";
+  searched_number: string;
+  bills_found: 0;
+};
 
 /** The database refusals, by the code it raises, with what the office reads. */
 export const PAY_RUN_RELEASE_REFUSALS: Record<
@@ -2164,13 +2191,31 @@ export const PAY_RUN_RELEASE_REFUSALS: Record<
     code: "pay_run_push_claim_lapsed",
     status: 409,
     words:
-      "An earlier push of this invoice did not finish and may have reached Xero. Look in Xero for a bill for this invoice now. If there is none, record that check (not in Xero, who checked, when) and press again. If there is one, do not release it: the run already paid it.",
+      "An earlier push of this invoice did not finish and may have reached Xero, and Xero was not checked. Nothing was released. Press again.",
   },
   pay_run_xero_check_found_in_xero: {
     code: "pay_run_xero_check_found_in_xero",
     status: 409,
     words:
-      "The Xero check found this invoice in Xero, so it stays in the run: pushing it again would pay the trade twice. Ask for the bill to be matched to the invoice by hand.",
+      "Xero already has a bill for this invoice, so it stays in the run: pushing it again would pay the trade twice. Ask for the bill to be matched to the invoice by hand.",
+  },
+  pay_run_xero_check_not_server: {
+    code: "pay_run_xero_check_not_server",
+    status: 409,
+    words:
+      "Xero was not searched at this press, so nothing was released. Press again.",
+  },
+  pay_run_xero_lookup_failed: {
+    code: "pay_run_xero_lookup_failed",
+    status: 503,
+    words:
+      "Xero could not be searched for a bill for this invoice, so nothing was released. Try again shortly.",
+  },
+  pay_run_xero_lookup_no_number: {
+    code: "pay_run_xero_lookup_no_number",
+    status: 409,
+    words:
+      "This invoice has no number to look for in Xero, so it cannot be taken out of the run. Ask for it to be checked by hand.",
   },
   pay_run_xero_check_unnamed: {
     code: "pay_run_xero_check_unnamed",
@@ -2222,8 +2267,6 @@ export async function releasePayRunInvoice(
     runId: unknown;
     invoiceId: unknown;
     reason: unknown;
-    /** The recorded Xero check; anything but a plain object is no check. */
-    xeroCheck?: unknown;
   },
 ): Promise<Record<string, unknown>> {
   const { actor, run } = await payRunPressGate(deps, opts);
@@ -2246,17 +2289,19 @@ export async function releasePayRunInvoice(
     throw new TradePayRunError(r.code, r.words, r.status);
   }
   let result: Record<string, unknown>;
+  let searched: { bills_found: number } | null = null;
   try {
-    result = await deps.release(
-      run.id,
-      invoiceId,
-      actor,
-      reason,
-      opts.xeroCheck !== null && typeof opts.xeroCheck === "object" &&
-        !Array.isArray(opts.xeroCheck)
-        ? opts.xeroCheck as Record<string, unknown>
-        : null,
-    );
+    try {
+      // No Xero call unless the database says the row's push claim lapsed.
+      result = await deps.release(run.id, invoiceId, actor, reason, null);
+    } catch (e) {
+      if ((e as { code?: unknown })?.code !== "pay_run_push_claim_lapsed") {
+        throw e;
+      }
+      const check = await searchXeroForRelease(deps, invoiceId, actor);
+      searched = { bills_found: 0 };
+      result = await deps.release(run.id, invoiceId, actor, reason, check);
+    }
   } catch (e) {
     deps.log({
       at: "release_pay_run_invoice",
@@ -2275,14 +2320,68 @@ export async function releasePayRunInvoice(
     invoice_id: invoiceId,
     actor,
     run_status: result.run_status ?? null,
+    xero_searched: searched !== null,
   });
-  return { ok: true, ...result };
+  return {
+    ok: true,
+    ...result,
+    ...(result.already_released === true
+      ? {}
+      : { words: RELEASED_FROM_RUN_WORDS }),
+  };
+}
+
+/** The server's own Xero search for a run row whose push claim lapsed.
+ * Every outcome but "no live bill" refuses; nothing is released on a guess. */
+async function searchXeroForRelease(
+  deps: PayRunReleaseDeps,
+  invoiceId: string,
+  actor: string,
+): Promise<PayRunReleaseXeroCheck> {
+  const refuse = (key: keyof typeof PAY_RUN_RELEASE_REFUSALS) => {
+    const r = PAY_RUN_RELEASE_REFUSALS[key];
+    return new TradePayRunError(r.code, r.words, r.status);
+  };
+  let number: string | null;
+  try {
+    number = await deps.invoiceNumber(invoiceId);
+  } catch {
+    throw refuse("pay_run_xero_lookup_failed");
+  }
+  number = typeof number === "string" ? number.trim() : "";
+  if (!number) throw refuse("pay_run_xero_lookup_no_number");
+  let bills: Array<Record<string, unknown>>;
+  try {
+    bills = await deps.searchXero(number);
+  } catch {
+    throw refuse("pay_run_xero_lookup_failed");
+  }
+  if (!Array.isArray(bills)) throw refuse("pay_run_xero_lookup_failed");
+  if (bills.length > 0) {
+    // Ids only: the office finds them in Xero.
+    deps.log({
+      at: "release_pay_run_invoice",
+      outcome: "found_in_xero",
+      invoice_id: invoiceId,
+      xero_bill_ids: bills.map((b) => String(b?.InvoiceID ?? "")),
+    });
+    throw refuse("pay_run_xero_check_found_in_xero");
+  }
+  return {
+    in_xero: false,
+    checked_by: actor,
+    checked_at: deps.now(),
+    source: "ops_api_xero_lookup",
+    searched_number: number,
+    bills_found: 0,
+  };
 }
 
 /** The real call, through the service client. */
 export function payRunReleaseDepsFromClient(
   client: any,
   switchOn: () => Promise<boolean>,
+  searchXero: (number: string) => Promise<Array<Record<string, unknown>>>,
 ): PayRunReleaseDeps {
   const push = payRunPushDepsFromClient(client, switchOn, () => {
     throw new TradePayRunError(
@@ -2296,6 +2395,15 @@ export function payRunReleaseDepsFromClient(
     approvers: push.approvers,
     runById: push.runById,
     log: push.log,
+    searchXero,
+    now: () => new Date().toISOString(),
+    async invoiceNumber(invoiceId) {
+      // trade_invoices_pkey.
+      const { data, error } = await client.from("trade_invoices")
+        .select("invoice_number").eq("id", invoiceId).maybeSingle();
+      if (error) throw new Error("trade_invoices read failed");
+      return data?.invoice_number ?? null;
+    },
     async release(runId, invoiceId, actor, reason, xeroCheck) {
       const { data, error } = await client.rpc(
         "release_trade_pay_run_invoice",

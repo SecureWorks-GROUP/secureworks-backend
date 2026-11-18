@@ -6,6 +6,14 @@
 -- still finish; a later run can take it.
 BEGIN;
 SET LOCAL statement_timeout = '120s';
+-- A later body (20261118999902, the server's own Xero search) is rolled back
+-- first, inside this transaction, so this contract proves this file's body.
+SELECT (SELECT md5(prosrc) FROM pg_proc
+  WHERE oid = to_regprocedure('public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,jsonb)'))
+  = '62293ef4dd638c21ab9a25c86669d9f4' AS zz_successor_live \gset
+\if :zz_successor_live
+\ir ../../../rollbacks/20261118999902_trade_pay_run_release_server_xero_down.sql
+\endif
 -- Rule 17: re-apply what this contract asserts on.
 \ir ../../../migrations/20261118170500_trade_pay_run_release.sql
 \ir ../../../migrations/20261118170500_trade_pay_run_release.sql

@@ -10264,24 +10264,33 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       }
 
       // Take one invoice back out of an approved run (cl-payrun-escape).
-      // POST { run_id, invoice_id, reason, xero_check? }: a run's invoice the push could
+      // POST { run_id, invoice_id, reason }: a run's invoice the push could
       // not send (for example its repayment changed at the push) goes back to
       // review, recorded with who, when and why, and a later run can take it.
       // Behind trade_pay_run_v1 (409 while off); a signed-in approver only.
-      // Calls no Xero and sends nothing.
+      // Reads Xero only when the row's push claim lapsed (one search, by the
+      // invoice's number); pushes nothing and sends nothing.
       case 'release_pay_run_invoice': {
         if (req.method !== 'POST') {
           return json({ ok: false, error: 'method_not_allowed', message: `${action} requires POST` }, 405)
         }
         try {
           return json(await releasePayRunInvoice(
-            payRunReleaseDepsFromClient(client, () => readFlag(client, PAY_RUN_SWITCH)),
+            payRunReleaseDepsFromClient(
+              client,
+              () => readFlag(client, PAY_RUN_SWITCH),
+              // A lapsed push claim: this server searches Xero itself (read
+              // only), the stuck-invoice release's search. Never the body.
+              async (invoiceNumber: string) => {
+                const auth = await getToken(client)
+                return await findLiveTradeBillsByNumber(xeroGet, auth, invoiceNumber)
+              },
+            ),
             {
               orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
               runId: body?.run_id,
               invoiceId: body?.invoice_id,
               reason: body?.reason,
-              xeroCheck: body?.xero_check,
               actorUserId: requestActor.source === 'jwt' && authMode === 'jwt' ? (authUser?.id || null) : null,
             },
           ))
