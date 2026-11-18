@@ -1739,7 +1739,7 @@ Deno.test("pay run: a Xero bill a release press found shows on that run row, and
   assertEquals(by(2).verdict, "stopped");
   assertEquals(
     stop.words,
-    "Xero already has a bill for this invoice: ZZTEST-INV-2 (draft), found when an approver tried to take it out of the run on 24 Nov. It stays in the run: match the bill to the invoice by hand.",
+    "Xero has a bill with this number or reference: ZZTEST-INV-2 (draft). Check it before releasing.",
   );
   assertEquals(by(1).stops.some((x: any) => x.code === "xero_bill_found_at_release"), false);
   assertEquals(by(3).stops.map((x: any) => x.code), ["released_from_run"]);
@@ -1793,7 +1793,7 @@ Deno.test("pay run: the found-bill words name each bill by number, else its Xero
       checked_at: "not a time",
       bills: [{ number: "ZZTEST-A", status: "PAID" }, { xero_bill_id: "ZZTEST-ID-B" }],
     })?.words,
-    "Xero already has bills for this invoice: ZZTEST-A (paid), ZZTEST-ID-B, found when an approver tried to take it out of the run. It stays in the run: match the bill to the invoice by hand.",
+    "Xero has a bill with this number or reference: ZZTEST-A (paid), ZZTEST-ID-B. Check it before releasing.",
   );
 });
 
