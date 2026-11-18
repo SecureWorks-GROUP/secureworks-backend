@@ -8,6 +8,7 @@ import {
   type LineHoldFacts,
   LineHoldFactsUnreadable,
   readJobAmountsLeft,
+  readJobAmountsState,
   readLineHoldFacts,
 } from "./trade_line_hold.ts";
 import type { JobCommissionRecord } from "./job_commission.ts";
@@ -352,6 +353,20 @@ function billedRpc(rows: Record<string, any>, fault = "") {
     });
   };
 }
+// FU49-9b: every job the fakes are asked about is under the cap unless a test
+// says otherwise, so the P1-05.8 cases keep the rule they were written for.
+const inScope = (args: any, out: readonly string[] = []) =>
+  Promise.resolve({
+    data: [...new Set<string>(args?.p_job_ids ?? [])].map((job_id) => ({
+      job_id,
+      in_scope: !out.includes(job_id),
+    })),
+    error: null,
+  });
+// Crew answers from a test's own fake; the cap scope answered as in scope.
+const crewRpc = (crew: (name: string, args: any) => Promise<any>) =>
+(name: string, args: any) =>
+  name === "work_order_cap_scope" ? inScope(args) : crew(name, args);
 
 // A tiny PostgREST fake supplies rows, not business verdicts. No network or writes.
 function client(rows: Record<string, any>, fault = "", throws = false) {
@@ -386,7 +401,7 @@ function client(rows: Record<string, any>, fault = "", throws = false) {
       };
       return q;
     },
-    rpc: billedRpc(rows, fault) as (name: string, args: any) => Promise<any>,
+    rpc: crewRpc(billedRpc(rows, fault) as (name: string, args: any) => Promise<any>),
   };
 }
 const readRows = (): Record<string, any> => ({
@@ -501,7 +516,7 @@ Deno.test("billed facts include cap changes and crew holds spend nothing across 
   ];
   const db = client(rows);
   const answer = billedRpc(rows);
-  db.rpc = (name, args) => answer(name, args, args.p_week_start === "2026-11-16");
+  db.rpc = crewRpc((name, args) => answer(name, args, args.p_week_start === "2026-11-16"));
   const f = await readLineHoldFacts(db, "ZZTEST-TRADE", l);
   assertEquals(f.jobs["ZZTEST-JOB"].allowed_ex, 1150);
   assertEquals(f.jobs["ZZTEST-JOB"].backed_billed_ex, 1000);
@@ -516,10 +531,10 @@ Deno.test("P1-05.8: an undated counted line is held not_on_crew with its fallbac
   let rpcCalls = 0;
   const db = client(rows);
   const answer = billedRpc(rows);
-  db.rpc = (name: string, args: any) => {
+  db.rpc = crewRpc((name: string, args: any) => {
     if (name === "trade_is_off_job_crew") rpcCalls++;
     return answer(name, args);
-  };
+  });
   const undated = line({ week_start: undefined, work_date: undefined });
   const f = await readLineHoldFacts(db, "ZZTEST-TRADE", [undated]);
   assertEquals(rpcCalls, 0);
@@ -617,7 +632,7 @@ function recordingClient(rows: Record<string, any>) {
       };
       return q;
     },
-    rpc: billedRpc(rows) as (name: string, args: any) => Promise<any>,
+    rpc: crewRpc(billedRpc(rows) as (name: string, args: any) => Promise<any>),
   };
 }
 const FIGURES = ["expected_amount_ex_gst", "claimed_ex_gst", "remaining_ex_gst", "salesperson_user_id"];
@@ -764,4 +779,106 @@ Deno.test("FU49 item 8: only jobs read are asked, and an answer missing a job re
       ? Promise.resolve({ data: [{ job_id: "ZZTEST-JOB", billed_ex: null }], error: null })
       : answer(name, args);
   await assertRejects(() => readLineHoldFacts(unknown, "ZZTEST-TRADE", [line()]), LineHoldFactsUnreadable);
+});
+
+// FU49-9b: the cap reaches only jobs whose job work order was approved on or after the
+// start date in work_order_cap_settings (work_order_cap_scope; null start: no job).
+const scopeClient = (rows: Record<string, any[]>, answer: (ids: string[]) => any) => {
+  const db = recordingClient(rows);
+  const base = db.rpc;
+  db.rpc = (name: string, args: any) =>
+    name === "work_order_cap_scope" ? Promise.resolve(answer(args.p_job_ids)) : base(name, args);
+  return db;
+};
+const outOf = (ids: string[]) => ({ data: ids.map((job_id) => ({ job_id, in_scope: false })), error: null });
+
+Deno.test("cap start date: an out-of-scope job holds no work order reason, other holds stay", () => {
+  const changes: Array<[string, (f: LineHoldFacts) => void, boolean]> = [
+    ["no_work_order", (f) => { f.jobs["ZZTEST-JOB"].workOrder = null; }, false],
+    ["no_amount", (f) => { f.jobs["ZZTEST-JOB"].workOrder!.status = "draft"; }, false],
+    ["over_amount", (f) => { f.jobs["ZZTEST-JOB"].backed_billed_ex = 1120; }, false],
+    ["hourly_no_maximum", (f) => { f.jobs["ZZTEST-JOB"].workOrder = null; f.jobs["ZZTEST-JOB"].hourly = true; }, true],
+  ];
+  for (const [reason, change, hourly] of changes) {
+    const f = facts();
+    change(f);
+    const l = line(hourly ? { line_type: "labour", total_hours: 1 } : { line_total_ex: 500, rate: 500 });
+    assertEquals(classifyLines([l], f).held[0]?.hold_reason, reason);
+    f.jobs["ZZTEST-JOB"].cap_in_scope = false;
+    const out = classifyLines([l], f);
+    assertEquals(out.held, [], reason);
+    assertEquals(out.backed[0].sent_amount_ex, l.line_total_ex);
+    // Off the crew still holds, with no work order fallback.
+    f.jobs["ZZTEST-JOB"].off_crew = true;
+    const held = classifyLines([l], f).held[0];
+    assertEquals(held.hold_reason, "not_on_crew");
+    assertEquals(held.hold_detail?.fallback_reason, null);
+  }
+  // A job missing from the facts is still held.
+  const f = facts();
+  f.jobs["ZZTEST-JOB"].cap_in_scope = false;
+  assertEquals(classifyLines([line({ job_id: "ZZTEST-OTHER" })], f).held.length, 1);
+});
+
+Deno.test("cap start date: the send's facts carry the scope, and a failed or short scope read refuses", async () => {
+  const inScope = await readLineHoldFacts(recordingClient(readRows()), "ZZTEST-TRADE", [line()]);
+  assertEquals(inScope.jobs["ZZTEST-JOB"].cap_in_scope, true);
+  const out = await readLineHoldFacts(scopeClient(readRows(), outOf), "ZZTEST-TRADE", [line()]);
+  assertEquals(out.jobs["ZZTEST-JOB"].cap_in_scope, false);
+  for (
+    const bad of [
+      () => ({ data: null, error: { message: "ZZTEST" } }),
+      () => ({ data: [], error: null }),
+      () => ({ data: [{ job_id: "ZZTEST-ELSE", in_scope: true }], error: null }),
+      () => ({ data: [{ job_id: "ZZTEST-JOB", in_scope: null }], error: null }),
+      () => ({ data: [{ job_id: "ZZTEST-JOB", in_scope: true }, { job_id: "ZZTEST-JOB", in_scope: true }], error: null }),
+      () => { throw new Error("ZZTEST transport"); },
+    ]
+  ) {
+    await assertRejects(
+      () => readLineHoldFacts(scopeClient(readRows(), bad), "ZZTEST-TRADE", [line()]),
+      LineHoldFactsUnreadable,
+    );
+  }
+});
+
+Deno.test("cap start date: my_hours' balance is null and capped false outside the scope; a failed scope read refuses", async () => {
+  assertEquals(await readJobAmountsState(recordingClient(readRows()), "ZZTEST-TRADE", ["ZZTEST-JOB"]), {
+    left: { "ZZTEST-JOB": 120 },
+    capped: { "ZZTEST-JOB": true },
+  });
+  assertEquals(await readJobAmountsState(scopeClient(readRows(), outOf), "ZZTEST-TRADE", ["ZZTEST-JOB"]), {
+    left: { "ZZTEST-JOB": null },
+    capped: { "ZZTEST-JOB": false },
+  });
+  assertEquals(await readJobAmountsLeft(scopeClient(readRows(), outOf), "ZZTEST-TRADE", ["ZZTEST-JOB"]), { "ZZTEST-JOB": null });
+  await assertRejects(
+    () => readJobAmountsLeft(scopeClient(readRows(), () => ({ data: null, error: { message: "ZZTEST" } })), "ZZTEST-TRADE", ["ZZTEST-JOB"]),
+    LineHoldFactsUnreadable,
+  );
+});
+
+Deno.test("cap start date: the scope is read 25 jobs a call", async () => {
+  const ids = Array.from({ length: 30 }, (_, i) => `ZZTEST-J${i}`);
+  const calls: string[][] = [];
+  const { readWorkOrderCapScope } = await import("./work_order_cap_scope.ts");
+  const scope = await readWorkOrderCapScope({
+    rpc: (_n: string, a: any) => {
+      calls.push(a.p_job_ids);
+      return Promise.resolve({ data: a.p_job_ids.map((job_id: string) => ({ job_id, in_scope: job_id === "ZZTEST-J29" })), error: null });
+    },
+  }, [...ids, ids[0], ""]);
+  assertEquals(calls.map((c) => c.length), [25, 5]);
+  assertEquals(scope.size, 30);
+  assertEquals([...scope].filter(([, v]) => v).map(([k]) => k), ["ZZTEST-J29"]);
+});
+
+Deno.test("cap start date: an hourly job over its sealed maximum but outside the scope is paid on a send", () => {
+  const f = facts();
+  f.jobs["ZZTEST-JOB"].hourly = true;
+  f.jobs["ZZTEST-JOB"].backed_billed_ex = 1120;
+  const l = line({ line_type: "labour", total_hours: 2, rate: 60, line_total_ex: 120 });
+  assertEquals(classifyLines([l], f).held[0]?.hold_reason, "over_amount");
+  f.jobs["ZZTEST-JOB"].cap_in_scope = false;
+  assertEquals(classifyLines([l], f).held, []);
 });

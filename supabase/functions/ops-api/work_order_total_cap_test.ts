@@ -803,3 +803,66 @@ Deno.test("P1-05.8: the cap reader ignores a holding invoice's lines; standard a
   );
   assertEquals(billed.get(JOB), 350);
 });
+
+// FU49-9b: with the held-line switch on, the office list says whether each job is under the
+// cap at all (work_order_cap_scope). Off, the answer is exactly as before, with no scope read.
+Deno.test("list: in_cap_scope only with the hold switch on; off reads no scope; a failed scope read fails the cap column", async () => {
+  const OTHER = "00000000-0000-4000-8000-0000000000c2";
+  const listing = () => ({
+    work_orders: [
+      { id: WO, job_id: JOB, status: "approved", agreed_labour_ex: 1000 },
+      { id: "wo-2", job_id: OTHER, status: "approved", agreed_labour_ex: 500 },
+    ],
+  });
+  const lines = [line("1", "paid", "work order", 100)];
+  const lanes = [{ line_id: "1", cost_lane: "labour" }];
+  const withSwitch = (on: boolean, scope: (ids: string[]) => any, calls: string[][]) => {
+    const base = fakeClient({ lines, lanes });
+    return {
+      from(table: string) {
+        if (table !== "feature_flags") return base.from(table);
+        return { select: () => ({ eq: () => Promise.resolve({ data: [{ enabled: on }], error: null }) }) };
+      },
+      rpc(name: string, args: any) {
+        if (name === "work_order_cap_scope") {
+          calls.push(args.p_job_ids);
+          return Promise.resolve(scope(args.p_job_ids));
+        }
+        if (name === "work_order_backed_billed") {
+          return Promise.resolve({ data: args.p_job_ids.map((job_id: string) => ({ job_id, billed_ex: job_id === JOB ? 100 : 0 })), error: null });
+        }
+        throw new Error(`ZZTEST unexpected rpc ${name}`);
+      },
+    };
+  };
+  const answer = (ids: string[]) => ({ data: ids.map((job_id) => ({ job_id, in_scope: job_id === JOB })), error: null });
+
+  const offCalls: string[][] = [];
+  const off = await withWorkOrderCaps(withSwitch(false, answer, offCalls), listing());
+  const before = await withWorkOrderCaps(fakeClient({ lines, lanes }), listing());
+  assertEquals(offCalls, []);
+  assertEquals(off, before);
+  assertEquals(off.work_orders.map((w: any) => "in_cap_scope" in w.cap), [false, false]);
+
+  const onCalls: string[][] = [];
+  const on = await withWorkOrderCaps(withSwitch(true, answer, onCalls), listing());
+  assertEquals(on.cap_read, "ok");
+  assertEquals(onCalls.length, 1);
+  assertEquals(on.work_orders.map((w: any) => w.cap.in_cap_scope), [true, false]);
+  // The figures themselves are unchanged; only the marker is added.
+  assertEquals(on.work_orders.map((w: any) => w.cap.allowed_ex), [1000, 500]);
+
+  for (const bad of [() => ({ data: null, error: { message: "ZZTEST" } }), () => ({ data: [], error: null })]) {
+    const failed = await withWorkOrderCaps(withSwitch(true, bad, []), listing());
+    assertEquals(failed.cap_read, "failed");
+    assertEquals(failed.work_orders.map((w: any) => w.cap), [null, null]);
+  }
+  const flagFails = {
+    ...withSwitch(true, answer, []),
+    from(table: string) {
+      if (table !== "feature_flags") return fakeClient({ lines, lanes }).from(table);
+      return { select: () => ({ eq: () => Promise.resolve({ data: null, error: { message: "ZZTEST" } }) }) };
+    },
+  };
+  assertEquals((await withWorkOrderCaps(flagFails, listing())).cap_read, "failed");
+});
