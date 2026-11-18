@@ -232,6 +232,8 @@ Deno.test("model route: the answer carries no revision id, product code, price, 
     "The house and surroundings are indicative.")
   assertEquals((customerSafeModel({ ...modelOf("x"), contextNote: "The house and surroundings are indicative. Wall fixing shown in cutaway; anchor heads, washers and order lengths are to confirm." }) as Row).contextNote,
     "The house and surroundings are indicative. Wall fixing shown in cutaway; anchor heads, washers and order lengths are to confirm.")
+  assertEquals((customerSafeModel({ ...modelOf("x"), contextNote: "The house and surroundings are indicative. Wall fixing shown in cutaway; exact fixings are finalised on site." }) as Row).contextNote,
+    "The house and surroundings are indicative. Wall fixing shown in cutaway; exact fixings are finalised on site.")
   // Labels are rebuilt from the key, never read from the bytes.
   assertEquals((customerSafeModel(modelOf("someone@example.com")) as Row).start, { key: "start", label: "Your patio", eye: [1, 2, 3], at: [0, 0, 0], fov: 40 })
   assertEquals((customerSafeModel({ ...modelOf("x"), what: "fence" }) as Row).start.label, "Your fence")
