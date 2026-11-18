@@ -71,6 +71,7 @@ function makeAccessClient(job: any) {
         select: () => builder,
         eq: () => builder,
         neq: () => builder,
+        or: () => builder,
         limit: () => builder,
         maybeSingle: async () => {
           if (table === "job_assignments") return { data: null, error: null };

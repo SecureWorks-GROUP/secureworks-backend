@@ -273,7 +273,11 @@ Deno.test("Ops rate panel with no future rows returns the same open rate as main
       s.client,
       new URLSearchParams(),
     );
-    assertEquals(out.rates, [oldRate()]);
+    assertEquals(out.rates, [{
+      ...oldRate(),
+      set_by_kind: "not_recorded",
+      set_by_name: null,
+    }]);
   }));
 
 function attendance(day: string) {
