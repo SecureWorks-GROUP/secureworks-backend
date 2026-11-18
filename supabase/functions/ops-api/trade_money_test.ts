@@ -81,7 +81,7 @@ function invoice(id: string, week: string, end: string, overrides: TestRow = {})
     id, invoice_number: id, user_id: "trade-a", week_start: week, week_end: end,
     status: "approved", gst_on: false, gst: 0, super_rate: 0.12, super_basis: "inclusive_12_112_v1",
     gross_earned: 112.01, subtotal_ex: 112.01, total_inc: 112.01, super_amount: 12,
-    net_pay: 100.01, amount_paid: 0, pay_run_id: null, reimbursements: [], ...overrides,
+    net_pay: 100.01, amount_paid: 0, pay_run_id: null, xero_bill_id: "bill-" + id, reimbursements: [], ...overrides,
   };
 }
 
@@ -217,6 +217,61 @@ Deno.test("history uses the legacy invoice total and counts unrecorded super acr
   legacy.net_pay = 1;
   assertEquals(await read(), { status, body });
   legacy.total_inc = null;
+  assertEquals((await read()).status, 503);
+});
+
+Deno.test("an invoice with no Xero bill is listed as not_in_xero and left out of every paid and super total", async () => {
+  const { tables, client } = historyStore();
+  const legacySplit = { super_amount: null, super_basis: null, super_rate: null, net_pay: null,
+    total_inc: 22.11, gst: 2.01, amount_paid: 7.07 };
+  const read = (years: string | null = "1") => readTradePayHistory(client, "trade-a", historyToday, years);
+  tables.trade_invoices.push(invoice("legacy", "2026-08-31", "2026-09-06", legacySplit));
+  const baseline = await read();
+  assert("super" in baseline.body);
+  assertEquals(baseline.body.super.not_in_xero_count, 0);
+
+  tables.trade_invoices.push(
+    // Recent, recorded super, never pushed: on paid and super totals it would add 12 super and 100.01 paid.
+    invoice("unbilled", "2026-08-31", "2026-09-06", { xero_bill_id: null, amount_paid: 5, pay_run_id: "closed" }),
+    // Recent legacy split with no bill: not_in_xero wins over not_recorded.
+    invoice("unbilled-legacy", "2026-08-24", "2026-08-30", { ...legacySplit, xero_bill_id: "" }),
+    // Older than the read window: kept out of lifetime super.
+    invoice("unbilled-old", "2024-01-01", "2024-01-07", { xero_bill_id: null }),
+    // A voided bill stays out entirely, as on main.
+    invoice("void-unbilled", "2026-08-31", "2026-09-06", { xero_bill_id: null, xero_bill_status: "VOIDED" }),
+    // Another trade's unbilled invoice never reaches this trade.
+    invoice("other-unbilled", "2026-08-31", "2026-09-06", { user_id: "trade-b", xero_bill_id: null }),
+  );
+  const { status, body } = await read();
+  assertEquals(status, 200);
+  assert("super" in body && "super" in baseline.body);
+  assertEquals(body.weeks, baseline.body.weeks);
+  assertEquals(body.months, baseline.body.months);
+  assertEquals(body.years, baseline.body.years);
+  assertEquals(body.this_year_vs_last, baseline.body.this_year_vs_last);
+  assertEquals(body.tax_set_aside, baseline.body.tax_set_aside);
+  assertEquals(body.super.this_fy, baseline.body.super.this_fy);
+  assertEquals(body.super.since_start, baseline.body.super.since_start);
+  assertEquals(body.super.not_recorded_count, baseline.body.super.not_recorded_count);
+  assertEquals(body.super.not_recorded_count, 1);
+  assertEquals(body.super.not_in_xero_count, 3);
+  assertEquals(body.super.by_invoice.filter(i => i.status === "not_in_xero"), [
+    { invoice_id: "unbilled", invoice_number: "unbilled", week_start: "2026-08-31", amount: 0, status: "not_in_xero" },
+    { invoice_id: "unbilled-legacy", invoice_number: "unbilled-legacy", week_start: "2026-08-24", amount: 0, status: "not_in_xero" },
+  ]);
+  assertEquals(body.super.by_invoice.find(i => i.invoice_id === "a1")?.status, "paid_to_fund");
+  assertEquals(body.super.by_invoice.find(i => i.invoice_id === "legacy")?.status, "not_recorded");
+
+  // The office pushes the bill: a retry counts it like any other invoice.
+  tables.trade_invoices.find(i => i.id === "unbilled")!.xero_bill_id = "bill-pushed";
+  const pushed = await read();
+  assert("super" in pushed.body);
+  assertEquals(pushed.body.super.not_in_xero_count, 2);
+  assertEquals(pushed.body.super.since_start, baseline.body.super.since_start + 12);
+  assertEquals(pushed.body.super.by_invoice.find(i => i.invoice_id === "unbilled")?.status, "paid_to_fund");
+
+  // A row returned without the bill column refuses rather than counting as billed or unbilled.
+  delete tables.trade_invoices.find(i => i.id === "a2")!.xero_bill_id;
   assertEquals((await read()).status, 503);
 });
 

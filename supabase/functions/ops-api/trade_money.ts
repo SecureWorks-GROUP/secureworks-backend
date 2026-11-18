@@ -234,6 +234,7 @@ type HistoryOptions = {
   years: number
   priorSuper: number
   priorSuperNotRecorded?: number
+  priorNotInXero?: number
   taxPercent: number | null
   rates: PayHistoryRate[]
   paidRuns: ReadonlySet<string>
@@ -264,6 +265,14 @@ export function countedHistoryInvoice(row: HistoryInvoice) {
   return !RELEASED.has(row.status) && !VOID_BILL.has(String(row.xero_bill_status ?? '').toUpperCase())
 }
 
+// An invoice with no Xero bill has not been paid and its super has not been
+// remitted, so it is listed but kept out of every paid and super total. The
+// column must be read: an absent field refuses rather than counting as billed.
+export function historyInvoiceInXero(row: HistoryInvoice) {
+  if (!('xero_bill_id' in row)) throw new Error('pay_history_unreadable')
+  return Boolean(row.xero_bill_id)
+}
+
 export function historyAmount(value: unknown) {
   const amount = num(value)
   if (amount === null) throw new Error('pay_history_unreadable')
@@ -283,7 +292,14 @@ export function mondayOf(day: string) {
   return date.toISOString().slice(0, 10)
 }
 
-export function historyInvoiceTotals(row: HistoryInvoice, day: string, taxPercent: number | null = null, recordedSuper = recordedHistorySuper(row)) {
+// The one place an invoice becomes pay figures: pay history and the year PDF
+// both add up what this returns and nothing else. An invoice with no Xero bill
+// is not yet processed, so it answers zero on every figure (and counts as no
+// invoice) with notInXero true; neither reader can then total it by mistake.
+export function historyInvoiceTotals(row: HistoryInvoice, day: string, taxPercent: number | null = null,
+  recordedSuper: number | null | undefined = undefined) {
+  if (!historyInvoiceInXero(row)) return { totals: emptyHistory(), taxSetAside: 0, notInXero: true }
+  if (recordedSuper === undefined) recordedSuper = recordedHistorySuper(row)
   // The pricing validator knows statutory rates only from its effective date.
   // For earlier legacy invoices sum their recorded split, without guessing a rate.
   const earlierLegacy = !row.super_basis && day < TRADE_INVOICE_SUPER_EFFECTIVE_FROM
@@ -306,7 +322,7 @@ export function historyInvoiceTotals(row: HistoryInvoice, day: string, taxPercen
     // The settled cash on the bill, including a partial payment or an office edit.
     paid_into_bank: historyAmount(row.amount_paid), invoices: 1,
   }
-  return { totals, taxSetAside: view?.tax_set_aside?.amount }
+  return { totals, taxSetAside: view?.tax_set_aside?.amount, notInXero: false }
 }
 
 export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, opts: HistoryOptions) {
@@ -324,6 +340,7 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
   const byInvoice: { invoice_id: string; invoice_number: string | null; week_start: string; amount: number; status: string }[] = []
   let sinceStart = opts.priorSuper
   let superNotRecorded = opts.priorSuperNotRecorded ?? 0
+  let notInXero = opts.priorNotInXero ?? 0
   let tax = 0
 
   for (const row of rows) {
@@ -332,17 +349,27 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
     const day = row.week_end || row.created_at?.slice(0, 10)
     if (!day) throw new Error('pay_history_unreadable')
     if (day > today) continue
-    const recordedSuper = recordedHistorySuper(row)
-    if (recordedSuper === null) superNotRecorded++
+    // Lifetime counts only: which invoices are in Xero, and their recorded super.
+    const inXero = historyInvoiceInXero(row)
+    const recordedSuper = inXero ? recordedHistorySuper(row) : null
+    if (!inXero) notInXero++
+    else if (recordedSuper === null) superNotRecorded++
     const superAmount = recordedSuper ?? 0
     sinceStart = r2(sinceStart + superAmount)
     const comparable = day >= lastFy && day <= lastCutoff
     if (day < start && !comparable) continue
 
-    const { totals, taxSetAside } = historyInvoiceTotals(row, day, opts.taxPercent, recordedSuper)
+    // Every period total comes from the shared function, which answers zero
+    // for an invoice not in Xero. Such an invoice is listed and makes no period row.
+    const { totals, taxSetAside, notInXero: unbilled } = historyInvoiceTotals(row, day, opts.taxPercent, recordedSuper)
     const paidToYou = totals.paid_to_you
     if (comparable) addHistory(lastYear, totals)
     if (day < start) continue
+    if (unbilled) {
+      byInvoice.push({ invoice_id: row.id, invoice_number: row.invoice_number,
+        week_start: row.week_start || mondayOf(day), amount: 0, status: 'not_in_xero' })
+      continue
+    }
     if (day >= thisFy) {
       addHistory(thisYear, totals)
       if (opts.taxPercent !== null) tax = r2(tax + (taxSetAside ?? r2(paidToYou * opts.taxPercent / 100)))
@@ -363,6 +390,7 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
     years: newest(years).map(([fy_label, totals]) => ({ fy_label, ...totals })),
     this_year_vs_last: { this_fy: thisYear, last_fy_same_point: lastYear },
     super: { this_fy: thisYear.paid_to_super, since_start: sinceStart, not_recorded_count: superNotRecorded,
+      not_in_xero_count: notInXero,
       by_invoice: byInvoice.sort((a, b) => b.week_start.localeCompare(a.week_start) || b.invoice_id.localeCompare(a.invoice_id)) },
     tax_set_aside: opts.taxPercent === null ? null : { percent: opts.taxPercent, this_fy_amount: tax },
     rate_history: opts.rates,
