@@ -396,8 +396,8 @@ async function matchOne(
   }
 
   const result = proposalOnly(decideMatch(all, types, stops));
-  // Never start the write once the bill's time is up.
-  if (signal.aborted) throw new ReadFailed(APPLY_OVER_TIME);
+  // Never start the write once the bill's time is up (no write started: plain over time).
+  if (signal.aborted) throw new ReadFailed(OVER_TIME);
   let applied: { data: unknown; error: unknown };
   try {
     applied = await sb.rpc("match_apply", {
