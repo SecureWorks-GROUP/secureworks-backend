@@ -4,7 +4,9 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   classifyLines,
+  HOLD_WORDS,
   type HoldLine,
+  LEFT_HIDDEN_WORDS,
   type LineHoldFacts,
   LineHoldFactsUnreadable,
   readJobAmountsLeft,
@@ -692,7 +694,9 @@ Deno.test("hold 1590: my_hours' balance read fetches no commission, salesperson,
   assertEquals(left, { "ZZTEST-JOB": 120 });
   assertEquals(
     [...new Set(db.reads.map((r) => r.table))].sort(),
-    ["jobs", "users", "work_order_amount_changes", "work_order_customer_variations", "work_orders"],
+    // trade_invoice_lines: only whose lines are billed (#1667's owner rule),
+    // never returned and never summed here.
+    ["jobs", "trade_invoice_lines", "users", "work_order_amount_changes", "work_order_customer_variations", "work_orders"],
   );
   for (const r of db.reads) {
     for (const c of FIGURES) assertEquals(r.columns.split(",").includes(c), false, `${r.table} reads ${c}`);
@@ -723,9 +727,9 @@ Deno.test("FU49 item 8: awaiting and rejected lines count the same in the send, 
     // added all three (1,000 + 200 + 300); the database counts the approved
     // one only, and its answer is the only figure any side may use.
     trade_invoice_lines: [
-      { id: "ZZTEST-A", job_id: "ZZTEST-JOB", line_type: "labour", line_total_ex: 1000, office_review_status: "approved", trade_invoices: { status: "approved", invoice_kind: "standard" } },
-      { id: "ZZTEST-W", job_id: "ZZTEST-JOB", line_type: "labour", line_total_ex: 200, office_review_status: "awaiting", trade_invoices: { status: "approved", invoice_kind: "standard" } },
-      { id: "ZZTEST-R", job_id: "ZZTEST-JOB", line_type: "labour", line_total_ex: 300, office_review_status: "rejected", trade_invoices: { status: "approved", invoice_kind: "standard" } },
+      { id: "ZZTEST-A", job_id: "ZZTEST-JOB", line_type: "labour", line_total_ex: 1000, office_review_status: "approved", trade_invoices: { user_id: "ZZTEST-TRADE", status: "approved", invoice_kind: "standard" } },
+      { id: "ZZTEST-W", job_id: "ZZTEST-JOB", line_type: "labour", line_total_ex: 200, office_review_status: "awaiting", trade_invoices: { user_id: "ZZTEST-TRADE", status: "approved", invoice_kind: "standard" } },
+      { id: "ZZTEST-R", job_id: "ZZTEST-JOB", line_type: "labour", line_total_ex: 300, office_review_status: "rejected", trade_invoices: { user_id: "ZZTEST-TRADE", status: "approved", invoice_kind: "standard" } },
     ],
     backed_billed: { "ZZTEST-JOB": 1000 },
   };
@@ -747,8 +751,9 @@ Deno.test("FU49 item 8: awaiting and rejected lines count the same in the send, 
   const sorted = classifyLines([line()], facts);
   assertEquals(sorted.held, []);
   assertEquals(sorted.backed[0].sent_amount_ex, 120);
-  // No side reads lines to make its own sum.
-  assertEquals(db.reads.filter((r) => r.table === "trade_invoice_lines"), []);
+  // No side reads lines to make its own sum: the two line reads are the
+  // send's and my_hours' owner check (#1667's rule), and the cap reads none.
+  assertEquals(db.reads.filter((r) => r.table === "trade_invoice_lines").length, 2);
   const billedCalls = calls.filter((c) => c.name === "work_order_backed_billed");
   assertEquals(billedCalls.length, 3);
   for (const c of billedCalls) assertEquals(c.args.p_job_ids, ["ZZTEST-JOB"]);
@@ -846,10 +851,12 @@ Deno.test("cap start date: my_hours' balance is null and capped false outside th
   assertEquals(await readJobAmountsState(recordingClient(readRows()), "ZZTEST-TRADE", ["ZZTEST-JOB"]), {
     left: { "ZZTEST-JOB": 120 },
     capped: { "ZZTEST-JOB": true },
+    hidden: { "ZZTEST-JOB": false },
   });
   assertEquals(await readJobAmountsState(scopeClient(readRows(), outOf), "ZZTEST-TRADE", ["ZZTEST-JOB"]), {
     left: { "ZZTEST-JOB": null },
     capped: { "ZZTEST-JOB": false },
+    hidden: { "ZZTEST-JOB": false },
   });
   assertEquals(await readJobAmountsLeft(scopeClient(readRows(), outOf), "ZZTEST-TRADE", ["ZZTEST-JOB"]), { "ZZTEST-JOB": null });
   await assertRejects(
@@ -881,4 +888,70 @@ Deno.test("cap start date: an hourly job over its sealed maximum but outside the
   assertEquals(classifyLines([l], f).held[0]?.hold_reason, "over_amount");
   f.jobs["ZZTEST-JOB"].cap_in_scope = false;
   assertEquals(classifyLines([l], f).held, []);
+});
+
+// Cap left (director ruling 18 Nov 2026, as #1667): the amount left is the
+// agreed amount less every trade's billing, so a trade sees it only on a job
+// where every billed line is their own. Made-up amounts, roles only.
+const billedLine = (id: string, userId: string, status = "approved") => ({
+  id, trade_invoice_id: `inv-${id}`, job_id: "ZZTEST-JOB", line_type: "labour", line_total_ex: 100,
+  trade_invoices: { id: `inv-${id}`, user_id: userId, status, invoice_kind: "standard" },
+});
+
+Deno.test("cap left: the send's hold words carry the amount left only when every billed line on the job is the trade's own", async () => {
+  const over = line({ line_total_ex: 200, rate: 200 });
+  // Trade A billed alone: the words name what was left.
+  const alone = await readLineHoldFacts(recordingClient({ ...readRows(), trade_invoice_lines: [billedLine("a1", "ZZTEST-TRADE")] }), "ZZTEST-TRADE", [over]);
+  assertEquals(alone.jobs["ZZTEST-JOB"].left_shown, true);
+  const shown = classifyLines([over], alone).held[0];
+  assertEquals(shown.words, "With the office: this job's amount is used up. $120.00 was left, so $80.00 is waiting.");
+  assertEquals([shown.hold_detail?.left_ex, shown.hold_detail?.left_hidden], [120, undefined]);
+  // Trade B billed on the same job: A's words carry no amount left.
+  const shared = await readLineHoldFacts(recordingClient({ ...readRows(), trade_invoice_lines: [billedLine("a1", "ZZTEST-TRADE"), billedLine("b1", "ZZTEST-TRADE-B")] }), "ZZTEST-TRADE", [over]);
+  assertEquals(shared.jobs["ZZTEST-JOB"].left_shown, false);
+  const hidden = classifyLines([over], shared).held[0];
+  assertEquals(hidden.hold_reason, "over_amount");
+  assertEquals(hidden.words, "With the office: this line is more than this job's work order has left, so $80.00 is waiting.");
+  assertEquals([hidden.hold_detail?.left_ex, hidden.hold_detail?.left_hidden], [null, true]);
+  // Neither the agreed amount nor the remainder is saved on a hidden line:
+  // agreed beside asked and held would give the remainder back.
+  assertEquals(hidden.hold_detail?.allowed_ex, null, "no agreed amount saved when hidden");
+  assertEquals(Object.values(hidden.hold_detail ?? {}).includes(120), false, "no remainder in the detail");
+  assertEquals(Object.values(hidden.hold_detail ?? {}).includes(1120), false, "no agreed amount in the detail");
+  // Shown job: both figures saved as before.
+  assertEquals([shown.hold_detail?.allowed_ex, shown.hold_detail?.left_ex], [1120, 120]);
+  // The cap itself is unchanged: the same split, only the words differ.
+  assertEquals(classifyLines([over], shared).backed.map((l) => l.sent_amount_ex), classifyLines([over], alone).backed.map((l) => l.sent_amount_ex));
+  // Another trade's draft invoice hides nothing.
+  const draft = await readLineHoldFacts(recordingClient({ ...readRows(), trade_invoice_lines: [billedLine("b1", "ZZTEST-TRADE-B", "draft")] }), "ZZTEST-TRADE", [over]);
+  assertEquals(draft.jobs["ZZTEST-JOB"].left_shown, true);
+});
+
+Deno.test("cap left: my_hours' balance read withholds the amount on a job another trade billed on", async () => {
+  const alone = await readJobAmountsState(recordingClient({ ...readRows(), trade_invoice_lines: [billedLine("a1", "ZZTEST-TRADE")] }), "ZZTEST-TRADE", ["ZZTEST-JOB"]);
+  assertEquals([alone.left["ZZTEST-JOB"], alone.hidden["ZZTEST-JOB"]], [120, false]);
+  const shared = await readJobAmountsState(recordingClient({ ...readRows(), trade_invoice_lines: [billedLine("a1", "ZZTEST-TRADE"), billedLine("b1", "ZZTEST-TRADE-B")] }), "ZZTEST-TRADE", ["ZZTEST-JOB"]);
+  assertEquals([shared.left["ZZTEST-JOB"], shared.capped["ZZTEST-JOB"], shared.hidden["ZZTEST-JOB"]], [null, true, true]);
+  assertEquals(await readJobAmountsLeft(recordingClient({ ...readRows(), trade_invoice_lines: [billedLine("b1", "ZZTEST-TRADE-B")] }), "ZZTEST-TRADE", ["ZZTEST-JOB"]), { "ZZTEST-JOB": null });
+});
+
+Deno.test("cap left: an unreadable owner read hides the amount in both places, never shows it on a guess", async () => {
+  for (const throws of [false, true]) {
+    const state = await readJobAmountsState(client(readRows(), "trade_invoice_lines", throws), "ZZTEST-TRADE", ["ZZTEST-JOB"]);
+    assertEquals([state.left["ZZTEST-JOB"], state.hidden["ZZTEST-JOB"]], [null, true]);
+    const f = await readLineHoldFacts(client(readRows(), "trade_invoice_lines", throws), "ZZTEST-TRADE", [line({ line_total_ex: 200, rate: 200 })]);
+    assertEquals(f.jobs["ZZTEST-JOB"].left_shown, false);
+    assertEquals(classifyLines([line({ line_total_ex: 200, rate: 200 })], f).held[0].hold_detail?.left_ex, null);
+  }
+});
+
+Deno.test("cap left: the label table has no amount left, no codes and no em dashes; other hold words are unchanged", () => {
+  for (const words of Object.values(LEFT_HIDDEN_WORDS)) {
+    assertEquals(words.includes("<left>") || words.includes("$"), false, words);
+    assertEquals(/[\u2014]|_/.test(words), false, words);
+  }
+  const f = facts();
+  f.jobs["ZZTEST-JOB"].left_shown = false;
+  f.jobs["ZZTEST-JOB"].workOrder = null;
+  assertEquals(classifyLines([line()], f).held[0].words, HOLD_WORDS.no_work_order);
 });

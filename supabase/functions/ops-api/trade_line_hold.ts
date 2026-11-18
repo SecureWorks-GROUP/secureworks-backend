@@ -7,6 +7,7 @@ import {
 } from "./job_commission.ts";
 import {
   countsAgainstWorkOrder,
+  readJobsBilledOnlyBy,
   readWorkOrderBackedBilled,
 } from "./work_order_total_cap.ts";
 import { decideTradeInvoiceMode } from "./trade_invoice_mode.ts";
@@ -49,6 +50,18 @@ export const HOLD_WORDS: Record<HoldReason, string> = {
   rate_above_rule: "With the office: this amount is above the usual rate.",
 };
 
+/** Director ruling (18 Nov 2026, as #1667): the amount left on a job's work
+ * order is the agreed amount less what EVERY trade billed, so it is shown to a
+ * trade only when every billed line on that job is their own
+ * (readJobsBilledOnlyBy). Otherwise these words, with no amount. */
+export const LEFT_HIDDEN_WORDS = {
+  /** The send's hold, in place of HOLD_WORDS.over_amount. */
+  over_amount:
+    "With the office: this line is more than this job's work order has left, so <held> is waiting.",
+  /** my_hours, beside a job whose job_left_ex is not shown. */
+  my_hours: "The amount left on this job's work order is not shown. Ask the office.",
+} as const;
+
 /** Lines are already server-normalised and priced, as for today's cap. In
  * particular rate_source is server-owned, not a claim accepted from the wire. */
 export type HoldLine = {
@@ -82,6 +95,10 @@ export type JobHoldFacts = {
   /** Reader keys crew decisions by week so a different week's rejection
    * never holds this week's work. off_crew is the single-week shorthand. */
   off_crew_by_week?: Record<string, boolean>;
+  /** False unless every billed line on the job is this trade's own
+   * (readJobsBilledOnlyBy): the hold then says no amount left. The reader
+   * always sets it; absent keeps the earlier words. */
+  left_shown?: boolean;
 };
 export type LineHoldFacts = {
   userId: string;
@@ -104,6 +121,9 @@ export type ClassifiedLine = HoldLine & {
     job_number: string | null;
     allowed_ex: number | null;
     left_ex: number | null;
+    /** True when left_ex and allowed_ex are withheld (another trade billed
+     * on the job). */
+    left_hidden?: boolean;
     asked_ex: number;
     expected: unknown;
     fallback_reason?: HoldReason | null;
@@ -203,21 +223,27 @@ export function classifyLines(
       reason: HoldReason,
       fallback?: HoldReason | null,
     ) => {
+      const leftHidden = job?.left_shown === false;
       held.push({
         ...part,
         hold_reason: reason,
         office_review_status: "awaiting",
         hold_detail: {
           job_number: job?.job_number ?? null,
-          allowed_ex: job?.allowed_ex ?? null,
-          left_ex: job ? Math.max(0, left) / 100 : null,
+          // Hidden: neither figure is saved, since the agreed amount beside
+          // the asked and held amounts gives the remainder back.
+          allowed_ex: leftHidden ? null : job?.allowed_ex ?? null,
+          left_ex: job && !leftHidden ? Math.max(0, left) / 100 : null,
+          ...(leftHidden ? { left_hidden: true } : {}),
           asked_ex: key(line.line_type) === "commission"
             ? 0
             : line.line_total_ex,
           expected: line.suggested ?? null,
           ...(fallback !== undefined ? { fallback_reason: fallback } : {}),
         },
-        words: HOLD_WORDS[reason].replace(
+        words: (leftHidden && reason === "over_amount"
+          ? LEFT_HIDDEN_WORDS.over_amount
+          : HOLD_WORDS[reason]).replace(
           "<left>",
           dollars(Math.max(0, left) / 100),
         )
@@ -633,6 +659,9 @@ export async function readLineHoldFacts(
       ),
       readWorkOrderBackedBilled(client, ownJobs.map((row) => row.id)),
     ]);
+    // Whose lines are billed on each job (#1667's one rule); a failed read
+    // answers no job, so every amount left is withheld.
+    const allMine = await readJobsBilledOnlyBy(client, ownJobs.map((row) => row.id), userId);
     for (const row of ownJobs) {
       const wo = orders.find((o) =>
         o.job_id === row.id && o.status === "approved"
@@ -670,6 +699,7 @@ export async function readLineHoldFacts(
         hourly: mode.invoice_mode === "hourly",
         cap_in_scope: capScope.get(row.id) === true,
         off_crew_by_week: {},
+        left_shown: allMine.has(row.id),
       };
     }
     for (const r of receipts) {
@@ -762,7 +792,9 @@ export async function readJobAmountsLeft(
 }
 
 /** readJobAmountsLeft plus, per job, whether it is under the cap
- * (work_order_cap_scope). A job outside it has left null and capped false. */
+ * (work_order_cap_scope). A job outside it has left null and capped false.
+ * hidden: an amount exists but another trade billed on the job (or whose
+ * lines they are could not be read), so left is null for it. */
 export async function readJobAmountsState(
   client: any,
   userId: string,
@@ -770,12 +802,14 @@ export async function readJobAmountsState(
 ): Promise<{
   left: Record<string, number | null>;
   capped: Record<string, boolean>;
+  hidden: Record<string, boolean>;
 }> {
   try {
     const ids = [...new Set(jobIds.filter((id) => !!id))];
     const out: Record<string, number | null> = {};
     const capped: Record<string, boolean> = {};
-    if (ids.length === 0) return { left: out, capped };
+    const hidden: Record<string, boolean> = {};
+    if (ids.length === 0) return { left: out, capped, hidden };
     // users_pkey; jobs_pkey; uq_work_orders_job_current;
     // idx_work_order_customer_variations_job.
     const [users, jobs, orders, variations, scope] = await Promise.all([
@@ -814,17 +848,23 @@ export async function readJobAmountsState(
       ),
       readWorkOrderBackedBilled(client, ownJobs.map((row) => row.id)),
     ]);
+    // Whose lines are billed on each job (#1667's one rule); a failed read
+    // answers no job, so every figure is withheld.
+    const allMine = await readJobsBilledOnlyBy(client, ownJobs.map((row) => row.id), userId);
     for (const row of ownJobs) {
       const wo = orders.find((o) =>
         o.job_id === row.id && o.status === "approved"
       );
       const balance = workOrderBalanceCents(row.id, wo, variations, changes, billed);
       capped[row.id] = scope.get(row.id) === true;
-      out[row.id] = !capped[row.id] || !wo || balance.agreed === null
+      const figure = !capped[row.id] || !wo || balance.agreed === null
         ? null
         : (balance.allowedCents - balance.billedCents) / 100;
+      // The all-trades remainder never leaves here for a shared job.
+      hidden[row.id] = figure !== null && !allMine.has(row.id);
+      out[row.id] = hidden[row.id] ? null : figure;
     }
-    return { left: out, capped };
+    return { left: out, capped, hidden };
   } catch {
     throw new LineHoldFactsUnreadable();
   }
