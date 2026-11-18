@@ -146,6 +146,7 @@ function fakeClient(
       const q: any = {
         select: () => q,
         in: () => q,
+        eq: () => q,
         not: () => q,
         order: () => q,
         range: () =>
@@ -743,6 +744,43 @@ Deno.test("ZZTEST changed work order: cap follows the change to the cent and rea
   assertEquals((await check(224.01))?.jobs[0].most_this_invoice_ex, 224);
   await assertRejects(() => readWorkOrderCapFacts(fakeClient({ fail: "work_order_amount_changes" }),
     [{ jobId: JOB, ref: "ZZTEST-P2", agreedEx: 1120, workOrderId: WO }]), WorkOrderTotalCapReadError);
+});
+
+Deno.test("hold switch uses the database guard's billed total and excludes an edited line", async () => {
+  const replaced = "00000000-0000-4000-8000-0000000000b1";
+  const client = {
+    from(table: string) {
+      if (table !== "feature_flags") return fakeClient({}).from(table);
+      return { select: () => ({ eq: (key: string, value: string) => {
+        assertEquals([key, value], ["flag_name", "trade_line_hold_v1"]);
+        return { data: [{ enabled: true }] };
+      } }) };
+    },
+    rpc(name: string, args: unknown) {
+      assertEquals(name, "work_order_backed_billed");
+      assertEquals(args, { p_job_ids: [JOB], p_exclude_line_ids: [replaced] });
+      return { data: [{ job_id: JOB, billed_ex: 3.25 }] };
+    },
+  };
+  const check = (amount: number) => checkWorkOrderTotalCap(client, {
+    loadModes: async () => [{ ...MODE, work_order_agreed_ex: 5 }],
+    jobRefs: refs,
+    lines: [{ job_id: JOB, line_type: "labour", line_total_ex: amount }],
+    excludeLineIds: [replaced],
+  });
+  assertEquals(await check(1.75), null);
+  assertEquals((await check(1.76))?.code, "work_order_total_over_agreed");
+
+  for (const result of [
+    { data: [] }, { data: [{ job_id: JOB, billed_ex: null }] },
+    { data: [{ job_id: WO, billed_ex: 0 }] }, { data: null, error: { code: "XX000" } },
+  ]) {
+    await assertRejects(() => readBilledOnJobs({ ...client, rpc: () => result }, [JOB]),
+      WorkOrderTotalCapReadError);
+  }
+  await assertRejects(() => readBilledOnJobs({
+    from: () => ({ select: () => ({ eq: () => ({ error: { code: "XX000" } }) }) }),
+  }, [JOB]), WorkOrderTotalCapReadError);
 });
 
 Deno.test("P1-05.8: the cap reader ignores a holding invoice's lines; standard and follow_on count", async () => {
