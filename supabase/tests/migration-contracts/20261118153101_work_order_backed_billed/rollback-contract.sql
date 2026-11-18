@@ -7,6 +7,6 @@ DO $$ BEGIN
 END $$;
 -- The forward pre-image check verifies every restored body.
 BEGIN;
-\ir ../../../migrations/20261118130751_work_order_backed_billed.sql
+\ir ../../../migrations/20261118153101_work_order_backed_billed.sql
 ROLLBACK;
 SELECT 'P1-05.9 shared billed room rollback passed' AS result;
