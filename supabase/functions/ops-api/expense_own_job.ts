@@ -67,7 +67,7 @@ export async function expenseUnbookedJobMark(
  * approval (the confirm is the only way to approved; pushed_to_xero needs
  * approved). The SQL twins are the `held` term in job_cost_lines_sync_receipt
  * (cost-exclusion migration) and the reimbursement_not_booked_unconfirmed stop
- * in trade_pay_run_check_v2 (20261118999912); the pay run push re-checks with
+ * in trade_pay_run_check_v2 (20261118194500); the pay run push re-checks with
  * this function. Change all three together.
  */
 export function expenseHeldNotBooked(

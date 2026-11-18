@@ -4,8 +4,8 @@
 BEGIN;
 SET LOCAL statement_timeout = '120s';
 -- Rule 17: re-apply what this contract asserts on (twice: the guard takes its own body).
-\ir ../../../migrations/20261118999912_trade_pay_run_receipt_not_booked.sql
-\ir ../../../migrations/20261118999912_trade_pay_run_receipt_not_booked.sql
+\ir ../../../migrations/20261118194500_trade_pay_run_receipt_not_booked.sql
+\ir ../../../migrations/20261118194500_trade_pay_run_receipt_not_booked.sql
 
 CREATE FUNCTION pg_temp.zz_assert(ok boolean, words text) RETURNS void
 LANGUAGE plpgsql AS $$ BEGIN
@@ -29,13 +29,13 @@ SELECT pg_temp.zz_assert(NOT EXISTS (SELECT 1 FROM public.feature_flags WHERE fl
 SAVEPOINT zz_collide;
 CREATE OR REPLACE FUNCTION public.trade_pay_run_check_v2(p_as_of date, p_weeks integer, p_org_id uuid, p_stage text DEFAULT 'after_xero')
 RETURNS jsonb LANGUAGE sql STABLE AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
-\ir ../../../migrations/20261118999912_trade_pay_run_receipt_not_booked.sql
+\ir ../../../migrations/20261118194500_trade_pay_run_receipt_not_booked.sql
 ROLLBACK TO SAVEPOINT zz_collide;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_apply \gset
 SAVEPOINT zz_collide;
 CREATE OR REPLACE FUNCTION public.trade_pay_run_check_v2(p_as_of date, p_weeks integer, p_org_id uuid, p_stage text DEFAULT 'after_xero')
 RETURNS jsonb LANGUAGE sql STABLE AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
-\ir ../../../rollbacks/20261118999912_trade_pay_run_receipt_not_booked_down.sql
+\ir ../../../rollbacks/20261118194500_trade_pay_run_receipt_not_booked_down.sql
 ROLLBACK TO SAVEPOINT zz_collide;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_down \gset
 \set ON_ERROR_ROLLBACK off
@@ -108,7 +108,7 @@ SELECT pg_temp.zz_assert((pg_temp.inv('ZZTEST-NB-1')->>'verdict') = 'clean'
   AND (pg_temp.inv('ZZTEST-NB-2')->>'verdict') = 'clean', 'unmarked fixtures must be clean: ' || pg_temp.result()::text);
 SELECT pg_temp.result()::text AS zz_answer \gset
 SAVEPOINT zz_main;
-\ir ../../../rollbacks/20261118999912_trade_pay_run_receipt_not_booked_down.sql
+\ir ../../../rollbacks/20261118194500_trade_pay_run_receipt_not_booked_down.sql
 SELECT pg_temp.result()::text AS zz_main_answer \gset
 UPDATE public.expense_receipts SET unbooked_job_id = md5('ZZTEST nb other job')::uuid, status = 'pending'
  WHERE id = md5('ZZTEST nb receipt 1')::uuid;
@@ -174,11 +174,11 @@ SELECT pg_temp.zz_assert(pg_temp.has_stop('ZZTEST-NB-1'), 'restored marked line 
 \echo 'PASS: cl-payrun-v1-followups the pay run check stops a pay-back line whose receipt is marked not booked and not confirmed; the confirm clears it; nothing else moves.'
 
 -- Round trip: the rollback gives back the earlier body, and a re-apply installs this one.
-\ir ../../../rollbacks/20261118999912_trade_pay_run_receipt_not_booked_down.sql
+\ir ../../../rollbacks/20261118194500_trade_pay_run_receipt_not_booked_down.sql
 SELECT pg_temp.zz_assert((SELECT md5(prosrc) FROM pg_proc
   WHERE oid = 'public.trade_pay_run_check_v2(date,integer,uuid,text)'::regprocedure) = '7bf3b7dbccc9c5ef8656b6c43e3e9a0b',
   'the rollback must give back 20261118163000''s body');
-\ir ../../../migrations/20261118999912_trade_pay_run_receipt_not_booked.sql
+\ir ../../../migrations/20261118194500_trade_pay_run_receipt_not_booked.sql
 SELECT pg_temp.zz_assert((SELECT md5(prosrc) FROM pg_proc
   WHERE oid = 'public.trade_pay_run_check_v2(date,integer,uuid,text)'::regprocedure) = 'c6c1f4da1fb43e2fb781b884502a7b5d',
   'the re-apply must install this body');
