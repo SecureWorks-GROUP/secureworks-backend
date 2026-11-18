@@ -12,7 +12,7 @@ ALTER TABLE public.trade_invoices ADD PRIMARY KEY(id);
 CREATE INDEX ON public.trade_invoice_lines(trade_invoice_id);
 CREATE INDEX ON public.job_assignments(job_id,user_id,scheduled_date);
 DROP FUNCTION IF EXISTS public.pay_effort_stats(uuid,integer);
-\ir ../../../migrations/20261118140053_pay_effort_stats.sql
+\ir ../../../migrations/20261118153104_pay_effort_stats.sql
 
 DO $proof$ DECLARE
   org uuid := gen_random_uuid(); trade uuid := gen_random_uuid(); job uuid := gen_random_uuid();
@@ -75,7 +75,7 @@ BEGIN
     IF plan::text LIKE '%Seq Scan%' OR plan::text NOT LIKE '%Index%Scan%' THEN RAISE EXCEPTION 'effort_index_plan'; END IF;
   END LOOP;
 END $proof$;
-\ir ../../../rollbacks/20261118140053_pay_effort_stats_down.sql
+\ir ../../../rollbacks/20261118153104_pay_effort_stats_down.sql
 DO $$ BEGIN
   IF to_regprocedure('public.pay_effort_stats(uuid,integer)') IS NOT NULL OR
     (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.reject_trade_invoice_v1(uuid,text,text)'::regprocedure)
