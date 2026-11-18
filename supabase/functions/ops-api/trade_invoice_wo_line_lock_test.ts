@@ -19,6 +19,7 @@
  * or production row counts. The migration contract covers the backfill SQL.
  */
 // deno-lint-ignore-file no-import-prefix
+import { CARD, JOB, TRADE, INVOICE, card, send } from "./trade_week_submission_test_harness.ts";
 import {
   assert,
   assertEquals,
@@ -312,18 +313,31 @@ Deno.test("the billed window comes from the job's own job-level lines' line_date
   assertEquals(jobWindowByJobId.j3, undefined);
 });
 
-Deno.test("index.ts reads WO job cards for the submitting trade only, before persisting", () => {
-  const readAt = INDEX.indexOf("const woLock = workOrderLockJobs(extraLineItems)");
-  assert(readAt > 0, "submit path must derive WO lock jobs from the extra lines");
-  const block = INDEX.slice(readAt, readAt + 3200);
-  assertStringIncludes(block, ".eq('user_id', tradeUser.id)");
-  assertStringIncludes(block, ".in('job_id', woLock.jobIds)");
-  assertStringIncludes(block, ".gte('scheduled_date', week_start).lte('scheduled_date', weekEnd)");
-  assertStringIncludes(block, "selectWorkOrderLineAssignmentIds({");
-  const includedAt = INDEX.indexOf("const includedAssignmentIds = [...new Set([");
-  const persistAt = INDEX.indexOf("? _persistWeeklyTradeInvoice(", includedAt);
-  assert(includedAt > readAt, "included ids must be built after the WO card read");
-  assert(persistAt > includedAt, "the stamp set must exist before the invoice is persisted");
+Deno.test({
+  name: "a work-order line locks only the submitter's cards in its week, and a failed card read saves nothing",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const cards = [
+      card({ status: "scheduled", hours_worked: null, clocked_on_at: null, clocked_off_at: null }),
+      card({ id: "ZZTEST-other-trade", user_id: "ZZTEST-other-trade", status: "scheduled" }),
+      card({ id: "ZZTEST-other-week", scheduled_date: "2026-11-10", status: "scheduled" }),
+      card({ id: "ZZTEST-other-job", job_id: "ZZTEST-other-job", status: "scheduled" }),
+    ];
+    const body = { manual_assignments: [], extra_items: [{ type: "Work Order", row_type: "work_order", job_id: JOB,
+      job_number: "ZZTEST-163", description: "ZZTEST work", quantity: 1, rate: 300, wo_allocated: 300, date: "2026-11-03" }] };
+    for (const on of [false, true]) {
+      const result = await send({ on, cards, body });
+      assertEquals(result.status, 200, JSON.stringify(result.response));
+      assertEquals(result.lines.length, 1);
+      assertEquals(result.cards.filter((row) => row.invoiced_in === INVOICE).map((row) => row.id), [CARD]);
+      assertEquals(result.cards.find((row) => row.id === CARD)?.user_id, TRADE);
+      const unreadable = await send({ on, cards, body, fail: "wo_cards" });
+      assertEquals(unreadable.status, 500);
+      assertEquals(unreadable.invoices.length, 0);
+      assertEquals(unreadable.cards.some((row) => row.invoiced_in != null), false);
+    }
+  },
 });
 
 Deno.test("index.ts folds WO line cards into the same Layer B stamp and prior-draft transfer", () => {
