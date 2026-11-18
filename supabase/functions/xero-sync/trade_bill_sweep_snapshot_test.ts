@@ -1,6 +1,6 @@
-// The trade bill PDF sweep stores status, raw_json, line_items, sub_total and
-// total from ONE Xero read, or nothing (director ruling 18 Nov). Made-up bills
-// only.
+// The trade bill PDF sweep stores status, raw_json, line_items, sub_total,
+// total, amount_due and amount_paid from ONE Xero read, or nothing (director
+// ruling 18 Nov). Made-up bills only.
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { tradeBillSweepSnapshotPatch } from "./trade_bill_status.ts";
 
@@ -13,6 +13,8 @@ const cachedRow = () => ({
   line_items: [{ LineItemID: "l-1", Description: "Labour week 1", LineAmount: 100 }],
   sub_total: 100,
   total: 100,
+  amount_due: 100,
+  amount_paid: 0,
   raw_json: { InvoiceID: "bill-1", Status: "DRAFT", HasAttachments: null },
   synced_at: "2026-11-01T00:00:00.000Z",
 });
@@ -29,6 +31,8 @@ const editedInXero = {
   ],
   SubTotal: 80,
   Total: 80,
+  AmountDue: 80,
+  AmountPaid: 0,
 };
 
 function apply(row: Record<string, unknown>, patch: Record<string, unknown> | null) {
@@ -46,6 +50,8 @@ Deno.test("an edited bill whose lines changed stores the new lines beside the ne
   assertEquals(raw.LineItems, stored.line_items);
   assertEquals(stored.sub_total, 80);
   assertEquals(stored.total, 80);
+  assertEquals(stored.amount_due, 80);
+  assertEquals(stored.amount_paid, 0);
   assertEquals(stored.synced_at, NOW);
 });
 
@@ -72,22 +78,50 @@ Deno.test("attach path: a 100 draft reduced to 80 in Xero stores 80, not 100", (
     LineItems: [{ LineItemID: "l-1", Description: "Labour week 1", LineAmount: 80 }],
     SubTotal: 80,
     Total: 80,
+    AmountDue: 80,
+    AmountPaid: 0,
   };
   const stored = apply(cachedRow(), tradeBillSweepSnapshotPatch(read, NOW, { ...read, HasAttachments: true }));
   assertEquals(stored.status, "AUTHORISED");
   assertEquals(stored.line_items, read.LineItems);
   assertEquals(stored.sub_total, 80);
   assertEquals(stored.total, 80);
+  // Both balances from the same read: 80 unpaid, never the draft's 100.
+  assertEquals(stored.amount_due, 80);
+  assertEquals(stored.amount_paid, 0);
   assertEquals((stored.raw_json as any).SubTotal, stored.sub_total);
   assertEquals((stored.raw_json as any).Total, stored.total);
+  assertEquals((stored.raw_json as any).AmountDue, stored.amount_due);
+  assertEquals((stored.raw_json as any).AmountPaid, stored.amount_paid);
   assertEquals((stored.raw_json as any).HasAttachments, true);
 });
 
+Deno.test("attach path: the reduced bill paid in Xero stores 80 paid and 0 due, not 0 paid and 100 due", () => {
+  const read = {
+    InvoiceID: "bill-1",
+    Type: "ACCPAY",
+    Status: "PAID",
+    HasAttachments: false,
+    LineItems: [{ LineItemID: "l-1", Description: "Labour week 1", LineAmount: 80 }],
+    SubTotal: 80,
+    Total: 80,
+    AmountDue: 0,
+    AmountPaid: 80,
+  };
+  const stored = apply(cachedRow(), tradeBillSweepSnapshotPatch(read, NOW, { ...read, HasAttachments: true }));
+  assertEquals(stored.status, "PAID");
+  assertEquals(stored.total, 80);
+  assertEquals(stored.amount_due, 0);
+  assertEquals(stored.amount_paid, 80);
+});
+
 Deno.test("an explicit zero amount is stored as zero, not skipped", () => {
-  const read = { ...editedInXero, LineItems: [], SubTotal: 0, Total: 0 };
+  const read = { ...editedInXero, LineItems: [], SubTotal: 0, Total: 0, AmountDue: 0, AmountPaid: 0 };
   const stored = apply(cachedRow(), tradeBillSweepSnapshotPatch(read, NOW));
   assertEquals(stored.sub_total, 0);
   assertEquals(stored.total, 0);
+  assertEquals(stored.amount_due, 0);
+  assertEquals(stored.amount_paid, 0);
   assertEquals(stored.status, "AUTHORISED");
 });
 
@@ -102,8 +136,19 @@ Deno.test("a read missing SubTotal or Total writes nothing: the old amount is no
   assertEquals(apply(cachedRow(), tradeBillSweepSnapshotPatch(noSub, NOW)), cachedRow());
 });
 
+Deno.test("a read missing AmountDue or AmountPaid writes nothing: the draft balances are not kept beside a new status", () => {
+  const { AmountDue: _d, ...noDue } = editedInXero;
+  const { AmountPaid: _p, ...noPaid } = editedInXero;
+  assertEquals(tradeBillSweepSnapshotPatch(noDue, NOW), null);
+  assertEquals(tradeBillSweepSnapshotPatch(noPaid, NOW), null);
+  assertEquals(tradeBillSweepSnapshotPatch({ ...editedInXero, AmountDue: null }, NOW), null);
+  assertEquals(tradeBillSweepSnapshotPatch({ ...editedInXero, AmountPaid: "" }, NOW), null);
+  assertEquals(tradeBillSweepSnapshotPatch({ ...editedInXero, AmountPaid: "not a number" }, NOW), null);
+  assertEquals(apply(cachedRow(), tradeBillSweepSnapshotPatch(noDue, NOW)), cachedRow());
+});
+
 Deno.test("an edit that removed every line stores the empty list, not the old lines", () => {
-  const read = { ...editedInXero, LineItems: [], SubTotal: 0, Total: 0 };
+  const read = { ...editedInXero, LineItems: [], SubTotal: 0, Total: 0, AmountDue: 0, AmountPaid: 0 };
   const stored = apply(cachedRow(), tradeBillSweepSnapshotPatch(read, NOW));
   assertEquals(stored.line_items, []);
   assertEquals(stored.status, "AUTHORISED");

@@ -68,12 +68,13 @@ export function shouldBackfillTradeBillPdf(inv: any, current: TradeBillCurrent &
 }
 
 // The PDF sweep's cached-bill write (director ruling 18 Nov). status, raw_json,
-// line_items, sub_total and total are stored together from the ONE Xero read
-// the sweep made, so an office edit in Xero can never leave the new status
-// beside the earlier lines or the earlier amount (a draft reduced and approved
-// in Xero must not keep counting at its old figure). A read with no line list,
-// or without a SubTotal or Total figure, stores nothing: the row keeps its
-// earlier, self-consistent snapshot and the next sync or sweep reads it again.
+// line_items, sub_total, total, amount_due and amount_paid are stored together
+// from the ONE Xero read the sweep made, so an office edit in Xero can never
+// leave the new status beside the earlier lines, amount or balances (a draft
+// reduced and approved, or paid, in Xero must not keep counting at its old
+// figure). A read with no line list, or without any one of SubTotal, Total,
+// AmountDue or AmountPaid, stores nothing: the row keeps its earlier,
+// self-consistent snapshot and the next sync or sweep reads it again.
 // An explicit zero is a figure and is stored. `snapshot` lets the attach path
 // record HasAttachments on that same read.
 function xeroAmount(value: unknown): number | null {
@@ -92,18 +93,24 @@ export function tradeBillSweepSnapshotPatch(
   line_items: unknown[]
   sub_total: number
   total: number
+  amount_due: number
+  amount_paid: number
   synced_at: string
 } | null {
   if (!inv || !inv.InvoiceID || !Array.isArray(inv.LineItems)) return null
   const subTotal = xeroAmount(inv.SubTotal)
   const total = xeroAmount(inv.Total)
-  if (subTotal === null || total === null) return null
+  const amountDue = xeroAmount(inv.AmountDue)
+  const amountPaid = xeroAmount(inv.AmountPaid)
+  if (subTotal === null || total === null || amountDue === null || amountPaid === null) return null
   return {
     raw_json: snapshot,
     status: inv.Status,
     line_items: inv.LineItems,
     sub_total: subTotal,
     total,
+    amount_due: amountDue,
+    amount_paid: amountPaid,
     synced_at: nowIso,
   }
 }
