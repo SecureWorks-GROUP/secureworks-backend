@@ -2070,9 +2070,12 @@ export function payRunPushDepsFromClient(
 // database call (release_trade_pay_run_invoice) locks the run, the run row
 // and the invoice, refuses a pushed row, a live push claim or any Xero
 // identity, and records who, when and why. A claim left by a press that may
-// have reached Xero (lapsed, never given back) needs the approver to say they
-// checked Xero (xero_checked: true), recorded on the run row. It calls no
-// Xero and sends nothing. A second press answers already_released and writes nothing.
+// have reached Xero (lapsed, never given back) is released only with a
+// recorded Xero check (xero_check: {in_xero: false, checked_by, checked_at};
+// director ruling 18 Nov): it must say the invoice is not in Xero, name the
+// pay run approver who checked, and be dated after the claim lapsed. The
+// database enforces all three and keeps the check. It calls no Xero and
+// sends nothing. A second press answers already_released and writes nothing.
 // ════════════════════════════════════════════════════════════
 
 export const PAY_RUN_RELEASE_REASON_MIN = 5;
@@ -2087,7 +2090,8 @@ export type PayRunReleaseDeps =
       invoiceId: string,
       actor: string,
       reason: string,
-      xeroChecked: boolean,
+      /** The recorded Xero check, passed as sent; the database judges it. */
+      xeroCheck: Record<string, unknown> | null,
     ): Promise<Record<string, unknown>>;
   };
 
@@ -2142,7 +2146,35 @@ export const PAY_RUN_RELEASE_REFUSALS: Record<
     code: "pay_run_push_claim_lapsed",
     status: 409,
     words:
-      "An earlier push of this invoice did not finish and may have reached Xero. Look in Xero for a bill for this invoice. If there is none, press again saying Xero was checked. If there is one, do not release it: the run already paid it.",
+      "An earlier push of this invoice did not finish and may have reached Xero. Look in Xero for a bill for this invoice now. If there is none, record that check (not in Xero, who checked, when) and press again. If there is one, do not release it: the run already paid it.",
+  },
+  pay_run_xero_check_found_in_xero: {
+    code: "pay_run_xero_check_found_in_xero",
+    status: 409,
+    words:
+      "The Xero check found this invoice in Xero, so it stays in the run: pushing it again would pay the trade twice. Ask for the bill to be matched to the invoice by hand.",
+  },
+  pay_run_xero_check_unnamed: {
+    code: "pay_run_xero_check_unnamed",
+    status: 400,
+    words: "The Xero check must name the pay run approver who checked.",
+  },
+  pay_run_xero_check_not_approver: {
+    code: "pay_run_xero_check_not_approver",
+    status: 403,
+    words: "The Xero check must be by a pay run approver.",
+  },
+  pay_run_xero_check_stale: {
+    code: "pay_run_xero_check_stale",
+    status: 409,
+    words:
+      "The Xero check is older than the moment the earlier push lapsed. Look in Xero again now and record that check.",
+  },
+  pay_run_xero_check_invalid: {
+    code: "pay_run_xero_check_invalid",
+    status: 400,
+    words:
+      "The Xero check must say plainly that the invoice is not in Xero (in_xero: false) and carry the time it was checked, not in the future.",
   },
   pay_run_invoice_billed: {
     code: "pay_run_invoice_billed",
@@ -2172,8 +2204,8 @@ export async function releasePayRunInvoice(
     runId: unknown;
     invoiceId: unknown;
     reason: unknown;
-    /** Only true (never a string) says the approver checked Xero. */
-    xeroChecked?: unknown;
+    /** The recorded Xero check; anything but a plain object is no check. */
+    xeroCheck?: unknown;
   },
 ): Promise<Record<string, unknown>> {
   const { actor, run } = await payRunPressGate(deps, opts);
@@ -2202,7 +2234,10 @@ export async function releasePayRunInvoice(
       invoiceId,
       actor,
       reason,
-      opts.xeroChecked === true,
+      opts.xeroCheck !== null && typeof opts.xeroCheck === "object" &&
+        !Array.isArray(opts.xeroCheck)
+        ? opts.xeroCheck as Record<string, unknown>
+        : null,
     );
   } catch (e) {
     deps.log({
@@ -2243,7 +2278,7 @@ export function payRunReleaseDepsFromClient(
     approvers: push.approvers,
     runById: push.runById,
     log: push.log,
-    async release(runId, invoiceId, actor, reason, xeroChecked) {
+    async release(runId, invoiceId, actor, reason, xeroCheck) {
       const { data, error } = await client.rpc(
         "release_trade_pay_run_invoice",
         {
@@ -2251,7 +2286,7 @@ export function payRunReleaseDepsFromClient(
           p_invoice_id: invoiceId,
           p_actor: actor,
           p_reason: reason,
-          p_xero_checked: xeroChecked,
+          p_xero_check: xeroCheck,
         },
       );
       if (error) {

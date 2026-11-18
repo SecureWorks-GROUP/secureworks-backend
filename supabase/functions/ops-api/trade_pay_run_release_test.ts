@@ -209,17 +209,18 @@ Deno.test("release: switch off, server key, someone off the list, another org: r
   assertEquals(calls, 0);
 });
 
-Deno.test("release: only a true xero_checked says Xero was checked", async () => {
+Deno.test("release: the Xero check goes to the database as sent, and anything but a record is no check", async () => {
   const { releaseDeps } = makeWorld();
-  const seen: boolean[] = [];
+  const seen: unknown[] = [];
   const deps: PayRunReleaseDeps = {
     ...releaseDeps,
-    release: (r, i, a, reason, checked) => (seen.push(checked), releaseDeps.release(r, i, a, reason, checked)),
+    release: (r, i, a, reason, check) => (seen.push(check), releaseDeps.release(r, i, a, reason, check)),
   };
-  for (const xeroChecked of [undefined, "true", 1, false, true]) {
-    await press(deps, { xeroChecked });
+  const check = { in_xero: false, checked_by: APPROVER, checked_at: "2026-11-24T02:00:00Z" };
+  for (const xeroCheck of [undefined, null, true, "checked", [check], check]) {
+    await press(deps, { xeroCheck });
   }
-  assertEquals(seen, [false, false, false, false, true]);
+  assertEquals(seen, [null, null, null, null, null, check]);
 });
 
 Deno.test("release: the reason is trimmed, passed to the database and never logged", async () => {
@@ -261,13 +262,13 @@ function rpcClient(answer: { data?: unknown; error?: { message: string } | null 
 Deno.test("release: the database call and every refusal it can raise", async () => {
   const ok = rpcClient({ data: { already_released: false, run_status: "approved" } });
   const deps = payRunReleaseDepsFromClient(ok.client, () => Promise.resolve(true));
-  assertEquals(await deps.release(RUN, INV, APPROVER, REASON, false), {
+  assertEquals(await deps.release(RUN, INV, APPROVER, REASON, null), {
     already_released: false,
     run_status: "approved",
   });
   assertEquals(ok.calls, [{
     name: "release_trade_pay_run_invoice",
-    params: { p_run_id: RUN, p_invoice_id: INV, p_actor: APPROVER, p_reason: REASON, p_xero_checked: false },
+    params: { p_run_id: RUN, p_invoice_id: INV, p_actor: APPROVER, p_reason: REASON, p_xero_check: null },
   }]);
   const cases: Array<[string, string, number]> = [
     ["pay_run_not_approver", "pay_run_not_approver", 403],
@@ -279,6 +280,12 @@ Deno.test("release: the database call and every refusal it can raise", async () 
     ["pay_run_invoice_pushed", "pay_run_invoice_pushed", 409],
     ["pay_run_push_in_progress", "pay_run_push_in_progress", 409],
     ["pay_run_push_claim_lapsed", "pay_run_push_claim_lapsed", 409],
+    // Director ruling 18 Nov: the three conditions on a lapsed claim's check.
+    ["pay_run_xero_check_found_in_xero", "pay_run_xero_check_found_in_xero", 409],
+    ["pay_run_xero_check_unnamed", "pay_run_xero_check_unnamed", 400],
+    ["pay_run_xero_check_not_approver", "pay_run_xero_check_not_approver", 403],
+    ["pay_run_xero_check_stale", "pay_run_xero_check_stale", 409],
+    ["pay_run_xero_check_invalid", "pay_run_xero_check_invalid", 400],
     ["pay_run_invoice_billed", "pay_run_invoice_billed", 409],
     ["pay_run_invoice_status", "pay_run_invoice_status", 409],
     // The group release guard on trade_invoices (20261030133000).
@@ -289,14 +296,14 @@ Deno.test("release: the database call and every refusal it can raise", async () 
   for (const [message, code, status] of cases) {
     const c = rpcClient({ error: { message } });
     await refused(
-      payRunReleaseDepsFromClient(c.client, () => Promise.resolve(true)).release(RUN, INV, APPROVER, REASON, false),
+      payRunReleaseDepsFromClient(c.client, () => Promise.resolve(true)).release(RUN, INV, APPROVER, REASON, null),
       code,
       status,
     );
   }
   const empty = rpcClient({ data: null });
   await refused(
-    payRunReleaseDepsFromClient(empty.client, () => Promise.resolve(true)).release(RUN, INV, APPROVER, REASON, false),
+    payRunReleaseDepsFromClient(empty.client, () => Promise.resolve(true)).release(RUN, INV, APPROVER, REASON, null),
     "pay_run_write_failed",
     503,
   );
@@ -317,7 +324,7 @@ Deno.test("release: the door is staff only at the front door, POST only, a signe
   assert(body.includes("req.method !== 'POST'"));
   assert(body.includes("requestActor.source === 'jwt'"));
   assert(body.includes("releasePayRunInvoice("));
-  assert(body.includes("xeroChecked: body?.xero_checked"));
+  assert(body.includes("xeroCheck: body?.xero_check"));
   assert(body.includes("payRunReleaseDepsFromClient(client, () => readFlag(client, PAY_RUN_SWITCH))"));
   for (const banned of ["pushTradeInvoiceToXeroAction", "xeroPost", "getXero", "Xero(", "body?.actor", "body?.user_id"]) {
     assertEquals(body.includes(banned), false, banned);

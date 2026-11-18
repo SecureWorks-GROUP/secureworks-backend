@@ -10217,7 +10217,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       }
 
       // Take one invoice back out of an approved run (cl-payrun-escape).
-      // POST { run_id, invoice_id, reason, xero_checked? }: a run's invoice the push could
+      // POST { run_id, invoice_id, reason, xero_check? }: a run's invoice the push could
       // not send (for example its repayment changed at the push) goes back to
       // review, recorded with who, when and why, and a later run can take it.
       // Behind trade_pay_run_v1 (409 while off); a signed-in approver only.
@@ -10234,7 +10234,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               runId: body?.run_id,
               invoiceId: body?.invoice_id,
               reason: body?.reason,
-              xeroChecked: body?.xero_checked,
+              xeroCheck: body?.xero_check,
               actorUserId: requestActor.source === 'jwt' && authMode === 'jwt' ? (authUser?.id || null) : null,
             },
           ))

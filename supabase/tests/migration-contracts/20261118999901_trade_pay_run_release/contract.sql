@@ -21,11 +21,11 @@ EXCEPTION WHEN OTHERS THEN RETURN SQLERRM;
 END $$;
 
 SELECT pg_temp.zz_assert((SELECT md5(prosrc) FROM pg_proc
-  WHERE oid = 'public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,boolean)'::regprocedure) = '4fd4374d1e8b365dc16bf206ceec1e78',
+  WHERE oid = 'public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,jsonb)'::regprocedure) = '152edcbbc1ddff5f29d91e8f8af71860',
   'own body installed after two runs');
-SELECT pg_temp.zz_assert(has_function_privilege('service_role', 'public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,boolean)', 'EXECUTE')
-  AND NOT has_function_privilege('anon', 'public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,boolean)', 'EXECUTE')
-  AND NOT has_function_privilege('authenticated', 'public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,boolean)', 'EXECUTE'),
+SELECT pg_temp.zz_assert(has_function_privilege('service_role', 'public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,jsonb)', 'EXECUTE')
+  AND NOT has_function_privilege('anon', 'public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,jsonb)', 'EXECUTE')
+  AND NOT has_function_privilege('authenticated', 'public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,jsonb)', 'EXECUTE'),
   'service role only');
 SELECT pg_temp.zz_assert((SELECT enabled = false FROM public.feature_flags WHERE flag_name = 'trade_pay_run_v1'),
   'switch stays off');
@@ -36,13 +36,13 @@ SELECT pg_temp.zz_assert(NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'p
 \set ON_ERROR_STOP off
 \set ON_ERROR_ROLLBACK on
 SAVEPOINT zz_collide;
-CREATE OR REPLACE FUNCTION public.release_trade_pay_run_invoice(p_run_id uuid, p_invoice_id uuid, p_actor uuid, p_reason text, p_xero_checked boolean DEFAULT false)
+CREATE OR REPLACE FUNCTION public.release_trade_pay_run_invoice(p_run_id uuid, p_invoice_id uuid, p_actor uuid, p_reason text, p_xero_check jsonb DEFAULT NULL)
 RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
 \ir ../../../migrations/20261118999901_trade_pay_run_release.sql
 ROLLBACK TO SAVEPOINT zz_collide;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_apply_error \gset
 SAVEPOINT zz_collide;
-CREATE OR REPLACE FUNCTION public.release_trade_pay_run_invoice(p_run_id uuid, p_invoice_id uuid, p_actor uuid, p_reason text, p_xero_checked boolean DEFAULT false)
+CREATE OR REPLACE FUNCTION public.release_trade_pay_run_invoice(p_run_id uuid, p_invoice_id uuid, p_actor uuid, p_reason text, p_xero_check jsonb DEFAULT NULL)
 RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
 \ir ../../../rollbacks/20261118999901_trade_pay_run_release_down.sql
 ROLLBACK TO SAVEPOINT zz_collide;
@@ -68,7 +68,7 @@ SELECT pg_temp.zz_assert(:'collide_col_error' LIKE '%columns release_reason exis
 -- The rollback, then a re-apply, round-trip to this body.
 SAVEPOINT zz_round;
 \ir ../../../rollbacks/20261118999901_trade_pay_run_release_down.sql
-SELECT pg_temp.zz_assert(to_regprocedure('public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,boolean)') IS NULL,
+SELECT pg_temp.zz_assert(to_regprocedure('public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,jsonb)') IS NULL,
   'the rollback drops the function');
 \ir ../../../migrations/20261118999901_trade_pay_run_release.sql
 RELEASE SAVEPOINT zz_round;
@@ -150,9 +150,9 @@ SELECT id AS zz_run FROM public.trade_pay_runs WHERE week_start = '2026-11-16' \
 \set inv4 '0a170000-0000-4000-8000-000000000314'
 \set approver '0a170000-0000-4000-8000-000000000001'
 \set other '0a170000-0000-4000-8000-000000000002'
-CREATE FUNCTION pg_temp.zz_release(p_inv uuid, p_actor uuid, p_reason text, p_checked boolean DEFAULT false) RETURNS text LANGUAGE sql AS $$
+CREATE FUNCTION pg_temp.zz_release(p_inv uuid, p_actor uuid, p_reason text, p_check jsonb DEFAULT NULL) RETURNS text LANGUAGE sql AS $$
   SELECT pg_temp.zz_error(format('SELECT public.release_trade_pay_run_invoice(%L, %L, %L, %L, %L)',
-    (SELECT id FROM public.trade_pay_runs WHERE week_start = '2026-11-16'), p_inv, p_actor, p_reason, p_checked))
+    (SELECT id FROM public.trade_pay_runs WHERE week_start = '2026-11-16'), p_inv, p_actor, p_reason, p_check))
 $$;
 CREATE TEMP TABLE zz_rows_before ON COMMIT DROP AS
   SELECT md5(coalesce(jsonb_agg(to_jsonb(r) ORDER BY r.invoice_id)::text, '')) AS h FROM public.trade_pay_run_invoices r;
@@ -204,19 +204,62 @@ SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the de
   'a live claim is refused');
 UPDATE public.trade_pay_run_invoices SET push_claimed_at = clock_timestamp() - interval '11 minutes'
  WHERE run_id = :'zz_run' AND invoice_id = :'inv2';
--- A lapsed claim was never given back, so that press may have reached Xero:
--- refused until the approver says Xero was checked.
+-- A lapsed claim was never given back, so that press may have reached Xero.
+-- Director ruling 18 Nov: released only with a recorded Xero check that says
+-- the invoice is not in Xero, names the approver who checked, and is dated
+-- after the claim lapsed.
 SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed') LIKE '%pay_run_push_claim_lapsed%',
   'a lapsed claim without a Xero check is refused');
+SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed', '"checked"') LIKE '%pay_run_push_claim_lapsed%',
+  'a Xero check that is not a record is refused');
+SELECT jsonb_build_object('in_xero', false, 'checked_by', :'approver', 'checked_at', clock_timestamp())::text AS zz_good_check,
+       (push_claimed_at + interval '10 minutes')::text AS zz_lapsed_at
+  FROM public.trade_pay_run_invoices WHERE run_id = :'zz_run' AND invoice_id = :'inv2' \gset
+-- Found in Xero: never released.
+SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed',
+    (:'zz_good_check'::jsonb) || '{"in_xero": true}') LIKE '%pay_run_xero_check_found_in_xero%',
+  'a check that found the invoice in Xero is refused');
+SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed',
+    (:'zz_good_check'::jsonb) - 'in_xero') LIKE '%pay_run_xero_check_invalid%'
+  AND pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed',
+    (:'zz_good_check'::jsonb) || '{"in_xero": "false"}') LIKE '%pay_run_xero_check_invalid%',
+  'a check that does not say plainly the invoice is not in Xero is refused');
+-- Unnamed checker, or someone off the approver list.
+SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed',
+    (:'zz_good_check'::jsonb) - 'checked_by') LIKE '%pay_run_xero_check_unnamed%'
+  AND pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed',
+    (:'zz_good_check'::jsonb) || '{"checked_by": "  "}') LIKE '%pay_run_xero_check_unnamed%'
+  AND pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed',
+    (:'zz_good_check'::jsonb) || '{"checked_by": "ZZTEST office"}') LIKE '%pay_run_xero_check_unnamed%'
+  AND pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed',
+    (:'zz_good_check'::jsonb) || '{"checked_by": null}') LIKE '%pay_run_xero_check_unnamed%',
+  'a check that names no approver is refused');
+SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed',
+    (:'zz_good_check'::jsonb) || jsonb_build_object('checked_by', :'other')) LIKE '%pay_run_xero_check_not_approver%',
+  'a check by someone off the approver list is refused');
+-- Stale: dated before, or exactly at, the lapse.
+SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed',
+    (:'zz_good_check'::jsonb) || jsonb_build_object('checked_at', :'zz_lapsed_at'::timestamptz - interval '1 minute')) LIKE '%pay_run_xero_check_stale%'
+  AND pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed',
+    (:'zz_good_check'::jsonb) || jsonb_build_object('checked_at', :'zz_lapsed_at'::timestamptz)) LIKE '%pay_run_xero_check_stale%',
+  'a check dated before the claim lapsed is refused');
+-- Undated, unreadable or in the future.
+SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed',
+    (:'zz_good_check'::jsonb) - 'checked_at') LIKE '%pay_run_xero_check_invalid%'
+  AND pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed',
+    (:'zz_good_check'::jsonb) || '{"checked_at": "ZZTEST yesterday"}') LIKE '%pay_run_xero_check_invalid%'
+  AND pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed',
+    (:'zz_good_check'::jsonb) || jsonb_build_object('checked_at', clock_timestamp() + interval '1 hour')) LIKE '%pay_run_xero_check_invalid%',
+  'a check with no readable date, or dated in the future, is refused');
 -- Any Xero identity on the invoice.
 UPDATE public.trade_invoices SET xero_pushed_at = now() WHERE id = :'inv2';
-SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed', true) LIKE '%pay_run_invoice_billed%',
+SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed', :'zz_good_check') LIKE '%pay_run_invoice_billed%',
   'an invoice with a Xero push stamp is refused');
 UPDATE public.trade_invoices SET xero_pushed_at = NULL, xero_bill_id = 'ZZTEST-BILL' WHERE id = :'inv2';
-SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed', true) LIKE '%pay_run_invoice_billed%',
+SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed', :'zz_good_check') LIKE '%pay_run_invoice_billed%',
   'an invoice with a Xero bill is refused');
 UPDATE public.trade_invoices SET xero_bill_id = NULL, status = 'acknowledged' WHERE id = :'inv2';
-SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed', true) LIKE '%pay_run_invoice_status%',
+SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', 'ZZTEST the deduction changed', :'zz_good_check') LIKE '%pay_run_invoice_status%',
   'a status outside approved, pending_ops_review and queried is refused');
 UPDATE public.trade_invoices SET status = 'approved' WHERE id = :'inv2';
 -- A pushed row and a stopped row.
@@ -233,10 +276,11 @@ SELECT pg_temp.zz_assert((SELECT md5(coalesce(jsonb_agg(to_jsonb(i) ORDER BY i.i
   WHERE i.invoice_number LIKE 'ZZTEST-ESC-INV-%') = (SELECT h FROM zz_inv_before), 'a refusal changed an invoice');
 SELECT pg_temp.zz_assert(NOT EXISTS (SELECT 1 FROM public.trade_pay_run_invoices WHERE released_at IS NOT NULL),
   'a refusal recorded a release');
-\echo 'PASS: cl-payrun-escape refusals: approver only, reason, live claim, lapsed claim unchecked, Xero identity, status, pushed and stopped rows; nothing written.'
+\echo 'PASS: cl-payrun-escape refusals: approver only, reason, live claim, lapsed claim with no Xero check, found in Xero, unnamed or non-approver checker, stale, undated or future check, Xero identity, status, pushed and stopped rows; nothing written.'
 
 -- The release: back to review, recorded, the clean slot freed, the lapsed claim cleared.
-SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', '  ZZTEST the deduction changed  ', true) IS NULL, 'the release');
+SELECT pg_temp.zz_assert(pg_temp.zz_release(:'inv2', :'approver', '  ZZTEST the deduction changed  ', :'zz_good_check') IS NULL,
+  'the release, with a Xero check that says not in Xero, names an approver and is dated after the lapse');
 SELECT pg_temp.zz_assert((SELECT i.status = 'pending_ops_review' AND i.pay_run_id IS NULL
     AND i.reviewed_at IS NULL AND i.reviewed_by IS NULL AND i.xero_bill_id IS NULL
   FROM public.trade_invoices i WHERE i.id = :'inv2'), 'the invoice is back in review with no run');
@@ -251,7 +295,11 @@ SELECT pg_temp.zz_assert((SELECT md5(coalesce(jsonb_agg(to_jsonb(v) ORDER BY v.j
   = (SELECT h FROM zz_profit_before), 'the release did not bring Job Profit back to the run''s state');
 SELECT pg_temp.zz_assert((SELECT r.verdict = 'stopped' AND r.released_by = :'approver'::uuid AND r.released_at IS NOT NULL
     AND r.release_reason = 'ZZTEST the deduction changed' AND r.push_claimed_at IS NULL AND r.push_claimed_by IS NULL
-    AND r.stops @> '[{"code":"released_from_run","xero_checked_after_lapsed_claim":true}]' AND r.pays = 170 AND r.super_amount = 24
+    AND r.stops @> '[{"code":"released_from_run","xero_check":{"in_xero":false}}]' AND r.pays = 170 AND r.super_amount = 24
+    AND r.release_xero_check->'in_xero' = 'false'::jsonb
+    AND (r.release_xero_check->>'checked_by')::uuid = :'approver'::uuid
+    AND (r.release_xero_check->>'checked_at')::timestamptz = (:'zz_good_check'::jsonb->>'checked_at')::timestamptz
+    AND (r.release_xero_check->>'claim_lapsed_at')::timestamptz = :'zz_lapsed_at'::timestamptz
   FROM public.trade_pay_run_invoices r WHERE r.run_id = :'zz_run' AND r.invoice_id = :'inv2'),
   'the run row records who, when and why, and keeps the figures it was approved with');
 SELECT pg_temp.zz_assert(NOT EXISTS (SELECT 1 FROM public.trade_pay_run_invoices WHERE invoice_id = :'inv2' AND verdict = 'clean'),
@@ -299,8 +347,9 @@ SELECT pg_temp.zz_assert((SELECT md5(coalesce(jsonb_agg(to_jsonb(r) ORDER BY r.i
 -- A held invoice still in pending_ops_review or queried keeps its status.
 SELECT coalesce(pg_temp.zz_release(:'inv4', :'approver', 'ZZTEST office wants it back'), '') AS zz_q4 \gset
 SELECT pg_temp.zz_assert(:'zz_q4' = ''
-  AND (SELECT status = 'queried' AND pay_run_id IS NULL FROM public.trade_invoices WHERE id = :'inv4'),
-  'a queried invoice is released and stays queried: ' || :'zz_q4');
+  AND (SELECT status = 'queried' AND pay_run_id IS NULL FROM public.trade_invoices WHERE id = :'inv4')
+  AND (SELECT release_xero_check IS NULL FROM public.trade_pay_run_invoices WHERE invoice_id = :'inv4'),
+  'a queried invoice with no push claim is released with no Xero check needed, and stays queried: ' || :'zz_q4');
 
 -- The run can finish: once its last clean unpushed row is released, it is pushed.
 UPDATE public.trade_pay_run_invoices SET pushed_at = now(), xero_bill_id = 'ZZTEST-BILL-1'

@@ -21,12 +21,21 @@
 --     pushed, as the push does, so super can still be marked paid.
 -- It refuses, writing nothing, when the invoice is not the run's, the row is
 -- not clean, it was pushed, a push claim is live (a press may be calling
--- Xero), a lapsed claim is set and the approver did not say they checked
--- Xero (that press may have reached it), the invoice has any Xero identity (bill id or pushed stamp), or its
+-- Xero), the invoice has any Xero identity (bill id or pushed stamp), or its
 -- status is not approved, pending_ops_review or queried. A second press on a
 -- released row answers already_released and writes nothing.
 --
--- Creates one function and three nullable columns. Creates no table, index,
+-- A lapsed push claim (set, never given back, older than its ten-minute
+-- lease) means that press may have reached Xero; a release followed by a
+-- second push would then bill the trade twice. Director ruling 18 Nov: such
+-- a row is released only with a recorded Xero check that (1) says the
+-- invoice is NOT in Xero (in_xero false), (2) names the pay run approver who
+-- checked (checked_by), and (3) is dated after the claim lapsed (checked_at
+-- later than push_claimed_at plus ten minutes, and not in the future). An
+-- older check, one that found the invoice in Xero, or one with no named
+-- approver releases nothing. The check is kept in release_xero_check.
+--
+-- Creates one function and four nullable columns. Creates no table, index,
 -- trigger or schedule and writes no row. Locks one table on apply:
 -- trade_pay_run_invoices (ACCESS EXCLUSIVE for the ADD COLUMN; no default, no
 -- rewrite; the table holds only runs, none while trade_pay_run_v1 is off).
@@ -56,7 +65,7 @@ DECLARE
   SELECT string_agg(a.attname, ', ' ORDER BY a.attname) INTO v_bad
   FROM pg_attribute a
   WHERE a.attrelid = 'public.trade_pay_run_invoices'::regclass AND a.attnum > 0 AND NOT a.attisdropped
-    AND a.attname IN ('released_at', 'released_by', 'release_reason')
+    AND a.attname IN ('released_at', 'released_by', 'release_reason', 'release_xero_check')
     AND coalesce(col_description(a.attrelid, a.attnum), '') NOT LIKE 'cl-payrun-escape:%';
   IF v_bad IS NOT NULL THEN
     RAISE EXCEPTION 'trade_pay_run_invoices: columns % exist and are not this migration''s; refusing', v_bad;
@@ -67,28 +76,31 @@ $cols$;
 ALTER TABLE public.trade_pay_run_invoices
   ADD COLUMN IF NOT EXISTS released_at timestamptz,
   ADD COLUMN IF NOT EXISTS released_by uuid,
-  ADD COLUMN IF NOT EXISTS release_reason text;
+  ADD COLUMN IF NOT EXISTS release_reason text,
+  ADD COLUMN IF NOT EXISTS release_xero_check jsonb;
 COMMENT ON COLUMN public.trade_pay_run_invoices.released_at IS
   'cl-payrun-escape: when a pay run approver released this invoice from the run (release_trade_pay_run_invoice). Null: never released.';
 COMMENT ON COLUMN public.trade_pay_run_invoices.released_by IS
   'cl-payrun-escape: the approver who released this invoice from the run.';
 COMMENT ON COLUMN public.trade_pay_run_invoices.release_reason IS
   'cl-payrun-escape: why it was released, as the approver wrote it (5 to 500 characters).';
+COMMENT ON COLUMN public.trade_pay_run_invoices.release_xero_check IS
+  'cl-payrun-escape: the Xero check a release after a lapsed push claim needs: {in_xero: false, checked_by, checked_at}. Null: no lapsed claim, none needed.';
 
 -- Rule 15: create, or replace only this file's own body.
 DO $guard$
 /* block */ BEGIN
-  IF to_regprocedure('public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,boolean)') IS NOT NULL
+  IF to_regprocedure('public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,jsonb)') IS NOT NULL
      AND (SELECT md5(p.prosrc) FROM pg_proc p
-          WHERE p.oid = to_regprocedure('public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,boolean)'))
-         IS DISTINCT FROM '4fd4374d1e8b365dc16bf206ceec1e78' THEN
+          WHERE p.oid = to_regprocedure('public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,jsonb)'))
+         IS DISTINCT FROM '152edcbbc1ddff5f29d91e8f8af71860' THEN
     RAISE EXCEPTION 'release_trade_pay_run_invoice: Rule 15, another body is installed; refusing to replace it';
   END IF;
 END;
 $guard$;
 
 CREATE OR REPLACE FUNCTION public.release_trade_pay_run_invoice(
-  p_run_id uuid, p_invoice_id uuid, p_actor uuid, p_reason text, p_xero_checked boolean DEFAULT false
+  p_run_id uuid, p_invoice_id uuid, p_actor uuid, p_reason text, p_xero_check jsonb DEFAULT NULL
 ) RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -103,6 +115,10 @@ DECLARE
   v_status text;
   v_run_status text;
   v_at timestamptz;
+  v_lapsed_at timestamptz;
+  v_checked_by uuid;
+  v_checked_at timestamptz;
+  v_check jsonb;
 BEGIN
   IF p_run_id IS NULL OR p_invoice_id IS NULL OR p_actor IS NULL THEN
     RAISE EXCEPTION 'pay_run_release_invalid';
@@ -149,10 +165,51 @@ BEGIN
     RAISE EXCEPTION 'pay_run_push_in_progress';
   END IF;
   -- A lapsed claim was never given back: that press may have reached Xero
-  -- (a refusal before Xero gives its claim back). Only an approver who says
-  -- they checked Xero for a bill may release it, and that is recorded.
-  IF v_row.push_claimed_at IS NOT NULL AND p_xero_checked IS DISTINCT FROM true THEN
-    RAISE EXCEPTION 'pay_run_push_claim_lapsed';
+  -- (a refusal before Xero gives its claim back). Director ruling 18 Nov: it
+  -- is released only with a recorded Xero check that says the invoice is not
+  -- in Xero, names the approver who checked, and is dated after the lapse.
+  IF v_row.push_claimed_at IS NOT NULL THEN
+    IF p_xero_check IS NULL OR jsonb_typeof(p_xero_check) IS DISTINCT FROM 'object' THEN
+      RAISE EXCEPTION 'pay_run_push_claim_lapsed';
+    END IF;
+    -- (1) Not in Xero: only an explicit false releases.
+    IF p_xero_check->'in_xero' = 'true'::jsonb THEN
+      RAISE EXCEPTION 'pay_run_xero_check_found_in_xero';
+    END IF;
+    IF p_xero_check->'in_xero' IS DISTINCT FROM 'false'::jsonb THEN
+      RAISE EXCEPTION 'pay_run_xero_check_invalid';
+    END IF;
+    -- (2) A named pay run approver checked.
+    IF jsonb_typeof(p_xero_check->'checked_by') IS DISTINCT FROM 'string'
+       OR btrim(p_xero_check->>'checked_by') = '' THEN
+      RAISE EXCEPTION 'pay_run_xero_check_unnamed';
+    END IF;
+    IF btrim(p_xero_check->>'checked_by') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+      RAISE EXCEPTION 'pay_run_xero_check_unnamed';
+    END IF;
+    v_checked_by := btrim(p_xero_check->>'checked_by')::uuid;
+    IF NOT (v_checked_by = ANY(v_approvers)) THEN
+      RAISE EXCEPTION 'pay_run_xero_check_not_approver';
+    END IF;
+    -- (3) Dated after the claim lapsed, and not in the future (five minutes
+    -- of clock difference between the page and the database is allowed).
+    IF jsonb_typeof(p_xero_check->'checked_at') IS DISTINCT FROM 'string' THEN
+      RAISE EXCEPTION 'pay_run_xero_check_invalid';
+    END IF;
+    BEGIN
+      v_checked_at := (p_xero_check->>'checked_at')::timestamptz;
+    EXCEPTION WHEN others THEN
+      RAISE EXCEPTION 'pay_run_xero_check_invalid';
+    END;
+    IF v_checked_at IS NULL OR v_checked_at > clock_timestamp() + interval '5 minutes' THEN
+      RAISE EXCEPTION 'pay_run_xero_check_invalid';
+    END IF;
+    v_lapsed_at := v_row.push_claimed_at + interval '10 minutes';
+    IF v_checked_at <= v_lapsed_at THEN
+      RAISE EXCEPTION 'pay_run_xero_check_stale';
+    END IF;
+    v_check := jsonb_build_object('in_xero', false, 'checked_by', v_checked_by,
+      'checked_at', v_checked_at, 'claim_lapsed_at', v_lapsed_at);
   END IF;
   -- trade_invoices_pkey.
   SELECT i.status, i.pay_run_id, i.xero_bill_id, i.xero_pushed_at INTO v_inv
@@ -190,8 +247,9 @@ BEGIN
          stops = coalesce(ri.stops, '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
            'code', 'released_from_run',
            'words', 'An approver took this invoice back out of the run. It went back to review.',
-           'xero_checked_after_lapsed_claim', v_row.push_claimed_at IS NOT NULL)),
+           'xero_check', v_check)),
          released_at = v_at, released_by = p_actor, release_reason = v_reason,
+         release_xero_check = v_check,
          push_claimed_at = NULL, push_claimed_by = NULL
    WHERE ri.run_id = p_run_id AND ri.invoice_id = p_invoice_id;
 
@@ -207,21 +265,20 @@ BEGIN
 
   RETURN jsonb_build_object('run_id', p_run_id, 'invoice_id', p_invoice_id,
     'already_released', false, 'released_at', v_at, 'released_by', p_actor,
-    'status', v_status, 'run_status', v_run_status,
-    'xero_checked_after_lapsed_claim', v_row.push_claimed_at IS NOT NULL);
+    'status', v_status, 'run_status', v_run_status, 'xero_check', v_check);
 END;
 $fn$;
-REVOKE ALL ON FUNCTION public.release_trade_pay_run_invoice(uuid, uuid, uuid, text, boolean) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.release_trade_pay_run_invoice(uuid, uuid, uuid, text, boolean) TO service_role;
-COMMENT ON FUNCTION public.release_trade_pay_run_invoice(uuid, uuid, uuid, text, boolean) IS
+REVOKE ALL ON FUNCTION public.release_trade_pay_run_invoice(uuid, uuid, uuid, text, jsonb) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.release_trade_pay_run_invoice(uuid, uuid, uuid, text, jsonb) TO service_role;
+COMMENT ON FUNCTION public.release_trade_pay_run_invoice(uuid, uuid, uuid, text, jsonb) IS
   'cl-payrun-escape: a pay run approver takes one unpushed invoice back out of its run, to review, with a reason. Service role only.';
 
 -- The guard's md5 is this file's own body.
 DO $own$
 /* block */ BEGIN
   IF (SELECT md5(p.prosrc) FROM pg_proc p
-      WHERE p.oid = to_regprocedure('public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,boolean)'))
-     IS DISTINCT FROM '4fd4374d1e8b365dc16bf206ceec1e78' THEN
+      WHERE p.oid = to_regprocedure('public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,jsonb)'))
+     IS DISTINCT FROM '152edcbbc1ddff5f29d91e8f8af71860' THEN
     RAISE EXCEPTION 'release_trade_pay_run_invoice: Rule 15 guard md5 is not this migration''s body';
   END IF;
 END;
