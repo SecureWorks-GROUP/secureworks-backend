@@ -138,6 +138,43 @@ export async function readJobCommissionRecords(
   return out;
 }
 
+/**
+ * The records for these jobs when an earlier read of some jobs is reused (the
+ * offered-commission read). That read answers only for the jobs it read: any
+ * other job is read now, so a job missing from the reused map is never taken
+ * as "no record" while the database cap checks its current record. With no
+ * earlier read this is one readJobCommissionRecords, as before. Throws on a
+ * failed read, as readJobCommissionRecords does.
+ */
+export async function readJobCommissionRecordsReusing(
+  client: any,
+  jobIds: readonly string[],
+  earlier: {
+    records: ReadonlyMap<string, JobCommissionRecord>;
+    readJobIds: ReadonlySet<string>;
+  } | null,
+): Promise<Map<string, JobCommissionRecord>> {
+  if (!earlier) return readJobCommissionRecords(client, jobIds);
+  const unread = [...new Set(jobIds.map((id) => String(id || "").trim()).filter(Boolean))]
+    .filter((id) => !earlier.readJobIds.has(id));
+  const out = new Map(earlier.records);
+  if (unread.length === 0) return out;
+  for (const [jobId, record] of await readJobCommissionRecords(client, unread)) {
+    out.set(jobId, record);
+  }
+  return out;
+}
+
+// A screen line id is logged only in a shape the apps generate: a UUID, or
+// the Trade App's local line id (`il-<ms>-<base36>`). Anything else (an
+// email, a name, free text typed into the field) is logged as null, so a
+// warning never carries what a person typed.
+const LOGGABLE_LINE_ID = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|il-\d{10,16}-[0-9a-z]{1,8})$/i;
+
+export function loggableClientLineId(value: unknown): string | null {
+  return typeof value === "string" && LOGGABLE_LINE_ID.test(value) ? value : null;
+}
+
 function isMissingRelation(error: any): boolean {
   const code = String(error?.code ?? "");
   return code === "42P01" || code === "PGRST205" || code === "PGRST200";
