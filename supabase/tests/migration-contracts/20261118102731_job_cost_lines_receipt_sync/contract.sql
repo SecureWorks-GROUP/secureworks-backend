@@ -5,25 +5,31 @@ SET LOCAL statement_timeout = '120s';
 SELECT to_regprocedure('public.job_cost_lines_sync_receipt(uuid)') IS NULL
   OR to_regprocedure('public.job_cost_lines_install_receipt_trigger()') IS NULL AS zz_reapply \gset
 \if :zz_reapply
-\ir ../../../migrations/20261118073132_job_cost_lines_receipt_sync.sql
+\ir ../../../migrations/20261118102731_job_cost_lines_receipt_sync.sql
 \endif
 DO $$ BEGIN
- IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='job_cost_lines_receipt_sync') THEN
+ IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname LIKE 'job_cost_lines_receipt%') THEN
    RAISE EXCEPTION 'receipt sync: migration installed a business trigger'; END IF;
 END $$;
 SELECT public.job_cost_lines_install_receipt_trigger();
+DO $$ BEGIN
+ IF (SELECT count(*) FROM pg_trigger WHERE tgname IN ('job_cost_lines_receipt_sync',
+     'job_cost_lines_receipt_link_insert','job_cost_lines_receipt_link_update',
+     'job_cost_lines_receipt_link_delete','job_cost_lines_receipt_invoice_update'))<>5 THEN
+   RAISE EXCEPTION 'receipt sync: install missed a trigger'; END IF;
+END $$;
 SELECT public.job_cost_lines_remove_receipt_trigger();
 DO $$ BEGIN
- IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='job_cost_lines_receipt_sync') THEN
-   RAISE EXCEPTION 'receipt sync: remove left the trigger'; END IF;
+ IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname LIKE 'job_cost_lines_receipt%') THEN
+   RAISE EXCEPTION 'receipt sync: remove left a trigger'; END IF;
 END $$;
 SELECT public.job_cost_lines_install_receipt_trigger();
 -- Lift unrelated fixture guards only in this rolled-back transaction; keep the
--- receipt trigger under test and the cost line conservation triggers enabled.
+-- receipt triggers under test and the cost line conservation triggers enabled.
 DO $$ DECLARE t text; c record; BEGIN
   FOREACH t IN ARRAY ARRAY['expense_receipts','trade_invoices','trade_invoice_lines'] LOOP
     FOR c IN SELECT tgname FROM pg_trigger WHERE tgrelid=format('public.%I',t)::regclass
-      AND NOT tgisinternal AND tgname<>'job_cost_lines_receipt_sync' LOOP
+      AND NOT tgisinternal AND tgname NOT LIKE 'job_cost_lines_receipt%' LOOP
       EXECUTE format('ALTER TABLE public.%I DISABLE TRIGGER %I',t,c.tgname);
     END LOOP;
     FOR c IN SELECT conname FROM pg_constraint WHERE conrelid=format('public.%I',t)::regclass
@@ -79,6 +85,9 @@ DO $$ BEGIN
  IF (pg_temp.zz_line('60000000-0000-4000-8000-000000000003')).id IS NOT NULL
    OR pg_temp.zz_queued('60000000-0000-4000-8000-000000000003')<>0 THEN
    RAISE EXCEPTION 'receipt sync: failed shadow left partial writes'; END IF;
+ IF NOT EXISTS (SELECT 1 FROM public.job_cost_lines_receipt_retries
+     WHERE expense_receipt_id='60000000-0000-4000-8000-000000000003' AND last_sqlstate='23514') THEN
+   RAISE EXCEPTION 'receipt sync: failed shadow was not queued for retry'; END IF;
 END $$;
 ROLLBACK TO SAVEPOINT failing_write;
 
@@ -233,12 +242,35 @@ INSERT INTO public.trade_invoices(id,org_id,status) VALUES
   ('60000000-0000-4000-8000-000000000061','00000000-0000-0000-0000-000000000001','submitted');
 INSERT INTO public.trade_invoice_lines(id,trade_invoice_id,expense_receipt_id) VALUES
   ('60000000-0000-4000-8000-000000000062','60000000-0000-4000-8000-000000000061','60000000-0000-4000-8000-000000000060');
+-- The link alone stops it counting: no receipt save.
+DO $$ DECLARE l public.job_cost_lines; BEGIN
+ l := pg_temp.zz_line('60000000-0000-4000-8000-000000000060');
+ IF l.state IS NOT NULL OR l.not_counted_reason IS DISTINCT FROM 'counted_by_trade_invoice'
+   OR EXISTS (SELECT 1 FROM public.job_cost_line_parts WHERE line_id=l.id) THEN
+   RAISE EXCEPTION 'receipt sync: a newly linked company card receipt still counted %',to_jsonb(l); END IF;
+END $$;
 UPDATE public.expense_receipts SET vendor_name='ZZTEST Supplier' WHERE id='60000000-0000-4000-8000-000000000060';
 DO $$ DECLARE l public.job_cost_lines; BEGIN
  l := pg_temp.zz_line('60000000-0000-4000-8000-000000000060');
  IF l.state IS NOT NULL OR l.not_counted_reason IS DISTINCT FROM 'counted_by_trade_invoice'
    OR EXISTS (SELECT 1 FROM public.job_cost_line_parts WHERE line_id=l.id) THEN
    RAISE EXCEPTION 'receipt sync: a repaid company card receipt still counted %',to_jsonb(l); END IF;
+END $$;
+-- Removing the reimbursement line alone makes it count again: 22.00 less 2.00 GST.
+DELETE FROM public.trade_invoice_lines WHERE id='60000000-0000-4000-8000-000000000062';
+DO $$ DECLARE l public.job_cost_lines; BEGIN
+ l := pg_temp.zz_line('60000000-0000-4000-8000-000000000060');
+ IF l.state IS DISTINCT FROM 'needs_person' OR l.not_counted_reason IS NOT NULL OR l.amount_ex IS DISTINCT FROM 20.00 THEN
+   RAISE EXCEPTION 'receipt sync: an unlinked receipt stayed suppressed %',to_jsonb(l); END IF;
+END $$;
+-- An ops-reject of the invoice that paid an own-money receipt back, alone, makes the
+-- corrected company card receipt count: 110.00 less 10.00 GST, queued for the matcher.
+UPDATE public.trade_invoices SET status='ops-reject' WHERE id='60000000-0000-4000-8000-000000000051';
+DO $$ DECLARE l public.job_cost_lines; BEGIN
+ l := pg_temp.zz_line('60000000-0000-4000-8000-000000000050');
+ IF l.state IS DISTINCT FROM 'needs_person' OR l.amount_ex IS DISTINCT FROM 100.00
+   OR pg_temp.zz_queued('60000000-0000-4000-8000-000000000050')<>1 THEN
+   RAISE EXCEPTION 'receipt sync: an ops-rejected invoice kept the receipt suppressed %',to_jsonb(l); END IF;
 END $$;
 
 -- A VOIDED linked Xero bill pays nothing back: the corrected receipt counts.
@@ -255,14 +287,127 @@ DO $$ DECLARE l public.job_cost_lines; BEGIN
    OR pg_temp.zz_queued('60000000-0000-4000-8000-000000000070')<>1 THEN
    RAISE EXCEPTION 'receipt sync: a voided bill kept the receipt suppressed %',to_jsonb(l); END IF;
 END $$;
--- A DELETED bill (any case) releases a line it held: the earlier repaid receipt counts again.
+-- A DELETED bill (any case), with no receipt edit, releases a line it held: the
+-- earlier repaid receipt (33.00 less 3.00 GST) counts again at 30.00.
 UPDATE public.trade_invoices SET xero_bill_status='deleted' WHERE id='60000000-0000-4000-8000-000000000041';
-UPDATE public.expense_receipts SET vendor_name='ZZTEST Supplier' WHERE id='60000000-0000-4000-8000-000000000040';
 DO $$ DECLARE l public.job_cost_lines; BEGIN
  l := pg_temp.zz_line('60000000-0000-4000-8000-000000000040');
- IF l.state IS DISTINCT FROM 'needs_person' OR l.not_counted_reason IS NOT NULL THEN
+ IF l.state IS DISTINCT FROM 'needs_person' OR l.not_counted_reason IS NOT NULL
+   OR l.amount_ex IS DISTINCT FROM 30.00 OR pg_temp.zz_queued('60000000-0000-4000-8000-000000000040')<>1 THEN
    RAISE EXCEPTION 'receipt sync: a deleted bill kept the receipt suppressed %',to_jsonb(l); END IF;
 END $$;
+-- The same bill live again, alone, suppresses it again.
+UPDATE public.trade_invoices SET xero_bill_status='AUTHORISED' WHERE id='60000000-0000-4000-8000-000000000041';
+DO $$ DECLARE l public.job_cost_lines; BEGIN
+ l := pg_temp.zz_line('60000000-0000-4000-8000-000000000040');
+ IF l.state IS NOT NULL OR l.not_counted_reason IS DISTINCT FROM 'counted_by_trade_invoice' THEN
+   RAISE EXCEPTION 'receipt sync: a live bill again left the receipt counted %',to_jsonb(l); END IF;
+END $$;
+
+-- An allocated 100.00 receipt corrected to 60.00 while its cost line is locked: the
+-- receipt saves, the old allocation stays, the receipt is queued, and the drain alone
+-- brings the line and its one part to 60.00.
+INSERT INTO public.expense_receipts(id,receipt_photo_url,total_amount,gst_amount,payment_method)
+  VALUES('60000000-0000-4000-8000-000000000080','ZZTEST-locked',110,10,'company_card');
+SET CONSTRAINTS public.job_cost_lines_parts_conserve, public.job_cost_line_parts_conserve DEFERRED;
+SELECT public.job_cost_lines_write_state((pg_temp.zz_line('60000000-0000-4000-8000-000000000080')).id,
+  'overhead','[{"target":"overhead","amount_ex":100}]'::jsonb,'matcher',NULL,NULL);
+SET CONSTRAINTS public.job_cost_lines_parts_conserve, public.job_cost_line_parts_conserve IMMEDIATE;
+CREATE FUNCTION public.zztest_receipt_line_locked() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN
+  RAISE EXCEPTION USING ERRCODE='55P03', MESSAGE='zztest_line_locked';
+END $f$;
+CREATE TRIGGER zztest_receipt_line_locked BEFORE UPDATE ON public.job_cost_lines FOR EACH ROW
+  WHEN (OLD.document_id='60000000-0000-4000-8000-000000000080')
+  EXECUTE FUNCTION public.zztest_receipt_line_locked();
+DELETE FROM public.job_cost_lines_receipt_retries;
+UPDATE public.expense_receipts SET total_amount=66, gst_amount=6 WHERE id='60000000-0000-4000-8000-000000000080';
+DO $$ DECLARE l public.job_cost_lines; BEGIN
+ l := pg_temp.zz_line('60000000-0000-4000-8000-000000000080');
+ IF (SELECT total_amount FROM public.expense_receipts WHERE id='60000000-0000-4000-8000-000000000080') IS DISTINCT FROM 66.00
+   OR l.amount_ex IS DISTINCT FROM 100.00 OR l.state IS DISTINCT FROM 'overhead'
+   OR (SELECT sum(amount_ex) FROM public.job_cost_line_parts WHERE line_id=l.id) IS DISTINCT FROM 100.00 THEN
+   RAISE EXCEPTION 'receipt sync: locked line fixture wrong %',to_jsonb(l); END IF;
+ IF (SELECT count(*) FROM public.job_cost_lines_receipt_retries
+     WHERE expense_receipt_id='60000000-0000-4000-8000-000000000080' AND last_sqlstate='55P03')<>1
+   OR (SELECT count(*) FROM public.job_cost_lines_receipt_retries)<>1 THEN
+   RAISE EXCEPTION 'receipt sync: locked line write was not queued for retry'; END IF;
+END $$;
+DROP TRIGGER zztest_receipt_line_locked ON public.job_cost_lines;
+DO $$ DECLARE l public.job_cost_lines; result jsonb; BEGIN
+ result := public.job_cost_lines_retry_receipt_one();
+ l := pg_temp.zz_line('60000000-0000-4000-8000-000000000080');
+ IF result->>'success' IS DISTINCT FROM 'true' OR l.amount_ex IS DISTINCT FROM 60.00 OR l.gst IS DISTINCT FROM 6.00
+   OR l.state IS DISTINCT FROM 'overhead'
+   OR (SELECT count(*) FROM public.job_cost_line_parts WHERE line_id=l.id)<>1
+   OR (SELECT sum(amount_ex) FROM public.job_cost_line_parts WHERE line_id=l.id) IS DISTINCT FROM 60.00
+   OR EXISTS (SELECT 1 FROM public.job_cost_lines_receipt_retries) THEN
+   RAISE EXCEPTION 'receipt sync: retry did not bring the allocation to 60 % %',result,to_jsonb(l); END IF;
+ IF public.job_cost_lines_retry_receipt_one()->>'reason' IS DISTINCT FROM 'empty' THEN
+   RAISE EXCEPTION 'receipt sync: drain found work in an empty queue'; END IF;
+END $$;
+-- A failing drain backs off and keeps the request; switch off keeps it untouched.
+INSERT INTO public.job_cost_lines_receipt_retries(expense_receipt_id,last_sqlstate)
+  VALUES('60000000-0000-4000-8000-000000000080','55P03');
+CREATE TRIGGER zztest_receipt_line_locked BEFORE UPDATE ON public.job_cost_lines FOR EACH ROW
+  WHEN (OLD.document_id='60000000-0000-4000-8000-000000000080')
+  EXECUTE FUNCTION public.zztest_receipt_line_locked();
+UPDATE public.expense_receipts SET total_amount=55, gst_amount=5 WHERE id='60000000-0000-4000-8000-000000000080';
+DO $$ DECLARE result jsonb; BEGIN
+ UPDATE public.job_cost_lines_receipt_retries SET next_attempt_at=clock_timestamp()-interval '1 second';
+ result := public.job_cost_lines_retry_receipt_one();
+ IF result->>'success' IS DISTINCT FROM 'false'
+   OR NOT EXISTS (SELECT 1 FROM public.job_cost_lines_receipt_retries WHERE attempts=1 AND next_attempt_at>clock_timestamp()) THEN
+   RAISE EXCEPTION 'receipt sync: failed drain did not back off %',result; END IF;
+END $$;
+DROP TRIGGER zztest_receipt_line_locked ON public.job_cost_lines;
+UPDATE public.feature_flags SET enabled=false WHERE flag_name='job_cost_lines_sync_v1';
+DO $$ BEGIN
+ IF public.job_cost_lines_retry_receipt_one()->>'reason' IS DISTINCT FROM 'flag_off'
+   OR NOT EXISTS (SELECT 1 FROM public.job_cost_lines_receipt_retries) THEN
+   RAISE EXCEPTION 'receipt sync: switch-off drain lost a retry'; END IF;
+END $$;
+UPDATE public.feature_flags SET enabled=true WHERE flag_name='job_cost_lines_sync_v1';
+-- Older requests for the same receipt fold on a successful drain.
+UPDATE public.job_cost_lines_receipt_retries SET next_attempt_at=clock_timestamp()-interval '1 second';
+DO $$ DECLARE l public.job_cost_lines; result jsonb; BEGIN
+ result := public.job_cost_lines_retry_receipt_one();
+ l := pg_temp.zz_line('60000000-0000-4000-8000-000000000080');
+ IF result->>'success' IS DISTINCT FROM 'true' OR l.amount_ex IS DISTINCT FROM 50.00
+   OR EXISTS (SELECT 1 FROM public.job_cost_lines_receipt_retries) THEN
+   RAISE EXCEPTION 'receipt sync: retry did not converge and fold % %',result,to_jsonb(l); END IF;
+ IF has_table_privilege('authenticated','public.job_cost_lines_receipt_retries','SELECT')
+   OR has_table_privilege('anon','public.job_cost_lines_receipt_retries','INSERT')
+   OR has_function_privilege('authenticated','public.job_cost_lines_retry_receipt_one()','EXECUTE')
+   OR has_function_privilege('anon','public.job_cost_lines_try_receipt(uuid)','EXECUTE') THEN
+   RAISE EXCEPTION 'receipt sync: retry browser access'; END IF;
+END $$;
+
+-- Fake cron (a stand-in schema) proves the drain is scheduled only by the explicit
+-- install and removed by remove. All changes roll back.
+SAVEPOINT schedule_proof;
+CREATE SCHEMA IF NOT EXISTS cron;
+CREATE TABLE IF NOT EXISTS cron.job(jobid bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,jobname text UNIQUE,schedule text,command text);
+CREATE OR REPLACE FUNCTION cron.schedule(text,text,text) RETURNS bigint LANGUAGE sql AS $f$
+ INSERT INTO cron.job(jobname,schedule,command) VALUES($1,$2,$3)
+ ON CONFLICT(jobname) DO UPDATE SET schedule=excluded.schedule,command=excluded.command RETURNING jobid
+$f$;
+CREATE OR REPLACE FUNCTION cron.unschedule(bigint) RETURNS boolean LANGUAGE sql AS $f$
+ DELETE FROM cron.job WHERE jobid=$1 RETURNING true
+$f$;
+SELECT public.job_cost_lines_remove_receipt_trigger();
+DELETE FROM cron.job WHERE jobname='job-cost-lines-receipt-retry';
+SELECT public.job_cost_lines_install_receipt_trigger();
+DO $$ BEGIN
+ IF (SELECT count(*) FROM cron.job WHERE jobname='job-cost-lines-receipt-retry'
+   AND command='SELECT public.job_cost_lines_retry_receipt_one()')<>1 THEN
+   RAISE EXCEPTION 'receipt sync: install missed the retry schedule'; END IF;
+END $$;
+SELECT public.job_cost_lines_remove_receipt_trigger();
+DO $$ BEGIN
+ IF EXISTS (SELECT 1 FROM cron.job WHERE jobname='job-cost-lines-receipt-retry') THEN
+   RAISE EXCEPTION 'receipt sync: remove left the retry schedule'; END IF;
+END $$;
+ROLLBACK TO SAVEPOINT schedule_proof;
 
 SET CONSTRAINTS ALL IMMEDIATE;
 SELECT 'PASS: P2-06.2 receipts become cost lines by payment method' AS result;
