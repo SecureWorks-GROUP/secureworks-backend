@@ -38,9 +38,9 @@ INSERT INTO public.purchase_orders(id,job_id,po_number,supplier_name,status,subt
 CREATE TEMP TABLE main_off_rows AS SELECT to_jsonb(e) r FROM public.v_job_cost_events e;
 CREATE TEMP TABLE main_line_rows AS SELECT to_jsonb(e) r FROM public.v_job_cost_events_lines e;
 
-\ir ../../../migrations/20261118074802_job_cost_events_orders_from_v_job_orders.sql
+\ir ../../../migrations/20261118103815_job_cost_events_orders_from_v_job_orders.sql
 -- A re-apply is a no-op.
-\ir ../../../migrations/20261118074802_job_cost_events_orders_from_v_job_orders.sql
+\ir ../../../migrations/20261118103815_job_cost_events_orders_from_v_job_orders.sql
 DO $fnskip$ BEGIN
  IF (SELECT array_agg(md5(prosrc) ORDER BY proname) FROM pg_proc WHERE oid IN (
   'public.dispatch_order_commitment_trg()'::regprocedure,'public.dispatch_order_rematch_subjects(uuid,text,text)'::regprocedure,
@@ -59,7 +59,7 @@ CREATE OR REPLACE FUNCTION public.dispatch_order_rematch_subjects(p_org_id uuid,
 \set LAST_ERROR_MESSAGE ''
 \set ON_ERROR_STOP 0
 \set ON_ERROR_ROLLBACK on
-\ir ../../../migrations/20261118074802_job_cost_events_orders_from_v_job_orders.sql
+\ir ../../../migrations/20261118103815_job_cost_events_orders_from_v_job_orders.sql
 \set ON_ERROR_ROLLBACK off
 \set ON_ERROR_STOP 1
 SELECT :'LAST_ERROR_MESSAGE' AS drift_msg,(SELECT length(prosrc)<40 FROM pg_proc WHERE oid='public.dispatch_order_rematch_subjects(uuid,text,text)'::regprocedure) AS drift_kept \gset
@@ -70,7 +70,7 @@ CREATE OR REPLACE FUNCTION public.dispatch_order_commitment_trg() RETURNS trigge
 \set LAST_ERROR_MESSAGE ''
 \set ON_ERROR_STOP 0
 \set ON_ERROR_ROLLBACK on
-\ir ../../../migrations/20261118074802_job_cost_events_orders_from_v_job_orders.sql
+\ir ../../../migrations/20261118103815_job_cost_events_orders_from_v_job_orders.sql
 \set ON_ERROR_ROLLBACK off
 \set ON_ERROR_STOP 1
 SELECT :'LAST_ERROR_MESSAGE' AS drift_msg,(SELECT length(prosrc)<40 FROM pg_proc WHERE oid='public.dispatch_order_commitment_trg()'::regprocedure) AS drift_kept \gset
@@ -81,7 +81,7 @@ CREATE OR REPLACE FUNCTION public.install_dispatch_order_commitment() RETURNS vo
 \set LAST_ERROR_MESSAGE ''
 \set ON_ERROR_STOP 0
 \set ON_ERROR_ROLLBACK on
-\ir ../../../migrations/20261118074802_job_cost_events_orders_from_v_job_orders.sql
+\ir ../../../migrations/20261118103815_job_cost_events_orders_from_v_job_orders.sql
 \set ON_ERROR_ROLLBACK off
 \set ON_ERROR_STOP 1
 SELECT :'LAST_ERROR_MESSAGE' AS drift_msg,(SELECT length(prosrc)<40 FROM pg_proc WHERE oid='public.install_dispatch_order_commitment()'::regprocedure) AS drift_kept \gset
@@ -92,7 +92,7 @@ CREATE OR REPLACE FUNCTION public.remove_dispatch_order_commitment() RETURNS voi
 \set LAST_ERROR_MESSAGE ''
 \set ON_ERROR_STOP 0
 \set ON_ERROR_ROLLBACK on
-\ir ../../../migrations/20261118074802_job_cost_events_orders_from_v_job_orders.sql
+\ir ../../../migrations/20261118103815_job_cost_events_orders_from_v_job_orders.sql
 \set ON_ERROR_ROLLBACK off
 \set ON_ERROR_STOP 1
 SELECT :'LAST_ERROR_MESSAGE' AS drift_msg,(SELECT length(prosrc)<40 FROM pg_proc WHERE oid='public.remove_dispatch_order_commitment()'::regprocedure) AS drift_kept \gset
