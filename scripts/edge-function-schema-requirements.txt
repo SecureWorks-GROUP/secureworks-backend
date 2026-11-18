@@ -1282,3 +1282,7 @@ ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_
 ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.saved_amount
 ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.target_date
 ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.updated_at
+# Dispatch v2 item 16b (contract section 3j): the tray reads what the document
+# reader made of its files, and the reply scan asks for the reads.
+ops-api|supabase/migrations/20261118160000_dispatch_v2_tray_pdf_read.sql|function|dispatch_v2_tray_pdf_reads
+ops-api|supabase/migrations/20261118160000_dispatch_v2_tray_pdf_read.sql|function|dispatch_v2_tray_pdf_read_request
