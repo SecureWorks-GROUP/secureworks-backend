@@ -121,7 +121,8 @@
         "ops-api/xero_accpay_books.ts :: createSupplierBill :: PUT /Invoices",
         "ops-api/xero_accpay_books.ts :: updateSupplierBill :: POST /Invoices/{id}",
         "ops-api/xero_accpay_books.ts :: createSupplierCreditNote :: PUT /CreditNotes",
-        "ops-api/xero_attachment.ts :: attachPdfToXeroInvoice :: PUT /Invoices/{id}/Attachments/{id}"
+        "ops-api/xero_attachment.ts :: attachPdfToXeroInvoice :: PUT /Invoices/{id}/Attachments/{id}",
+        "ops-api/xero_attachment.ts :: attachFileToXeroDocument :: PUT /{id}/{id}/Attachments/{id}"
       ],
       "changes_books": "draft_only",
       "sends_outside": false

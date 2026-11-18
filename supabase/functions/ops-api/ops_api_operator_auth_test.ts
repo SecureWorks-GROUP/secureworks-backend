@@ -441,12 +441,14 @@ function makeAccessClient(job: {
         select: () => typeof builder;
         eq: () => typeof builder;
         neq: () => typeof builder;
+        or: () => typeof builder;
         limit: () => typeof builder;
         maybeSingle: () => Promise<{ data: unknown; error: null }>;
       } = {
         select: () => builder,
         eq: () => builder,
         neq: () => builder,
+        or: () => builder,
         limit: () => builder,
         maybeSingle: () => {
           if (table === "jobs") {
