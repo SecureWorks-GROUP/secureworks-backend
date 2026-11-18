@@ -1,4 +1,4 @@
--- Rollback of 20261119999920_reconcile_decide_switch_in_database (PLACEHOLDER
+-- Rollback of 20261119999930_reconcile_decide_switch_in_database (PLACEHOLDER
 -- version): takes the switch check back out of reconcile_decide and
 -- reconcile_undo, putting back main's bodies (20261118073318, 20261118195300)
 -- byte for byte; grants, comments and settings are kept. A body that is

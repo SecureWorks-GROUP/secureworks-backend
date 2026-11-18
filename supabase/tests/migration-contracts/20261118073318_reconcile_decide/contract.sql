@@ -13,8 +13,8 @@ SELECT to_regprocedure('public.reconcile_item_raise(text,text,text,uuid[],jsonb,
 \if :decide_contract_needs_raise
 \ir ../../../migrations/20261118073218_reconcile_item_raise.sql
 \endif
--- 20261119999920 patches this body; take its switch check out before re-applying.
-\ir ../../../rollbacks/20261119999920_reconcile_decide_switch_in_database_down.sql
+-- 20261119999930 patches this body; take its switch check out before re-applying.
+\ir ../../../rollbacks/20261119999930_reconcile_decide_switch_in_database_down.sql
 \ir ../../../migrations/20261118073318_reconcile_decide.sql
 SET LOCAL statement_timeout = '120s';
 

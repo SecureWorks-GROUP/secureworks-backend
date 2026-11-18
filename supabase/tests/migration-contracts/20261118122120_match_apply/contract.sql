@@ -2,8 +2,8 @@ BEGIN;
 -- Exercise this version and its guarded rollback inside the existing transaction.
 SELECT to_regprocedure('public.reconcile_undo(bigint,uuid)') IS NOT NULL AS undo_installed \gset
 \if :undo_installed
--- 20261119999920 patches this body; take its switch check out before re-applying.
-\ir ../../../rollbacks/20261119999920_reconcile_decide_switch_in_database_down.sql
+-- 20261119999930 patches this body; take its switch check out before re-applying.
+\ir ../../../rollbacks/20261119999930_reconcile_decide_switch_in_database_down.sql
 \ir ../../../rollbacks/20261118195300_reconcile_undo_down.sql
 \endif
 \ir ../../../migrations/20261118122120_match_apply.sql
