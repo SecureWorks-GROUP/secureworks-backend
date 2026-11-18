@@ -3,7 +3,7 @@
 // (work_order_cap_start.ts). The database decides who is an approver and
 // records the change; these cases pin what the doors send and refuse.
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { workOrderCapStartAction } from "./work_order_cap_start.ts";
+import { capStartChangeWords, workOrderCapStartAction } from "./work_order_cap_start.ts";
 
 const APPROVER = "44444444-4444-4444-8444-444444444444";
 const person = { staff: true, signedIn: true, userId: APPROVER, email: "approver@example.invalid" };
@@ -49,7 +49,10 @@ Deno.test("set: a signed-in person's ask goes to the database door as sent, reas
   const db = fakeClient();
   const out = await workOrderCapStartAction(db, "set_work_order_cap_start", "POST", ask, person);
   assertEquals(out.status, 200);
-  assertEquals(out.body, { ok: true, changed: true, cap_start_on: "2026-11-24", previous_start: null, authority: "owner" });
+  assertEquals(out.body, {
+    ok: true, effect: "set", words: capStartChangeWords(null, "2026-11-24").words,
+    changed: true, cap_start_on: "2026-11-24", previous_start: null, authority: "owner",
+  });
   assertEquals(db.calls, [{
     fn: "set_work_order_cap_start",
     args: { p_actor: APPROVER, p_actor_email: "approver@example.invalid", p_shown_start: null, p_start: "2026-11-24", p_reason: "start the cap" },
@@ -118,4 +121,34 @@ Deno.test("read: staff only; the date, its row and the record; a failed read is 
   }
   const post = await workOrderCapStartAction(fakeClient(), "work_order_cap_start", "POST", {}, person);
   assertEquals(post.status, 405);
+});
+
+Deno.test("words: moving the start back releases jobs; forward brings jobs in; clearing releases every job", () => {
+  const later = capStartChangeWords("2026-11-24", "2026-12-01");
+  assertEquals(later.effect, "later");
+  assertEquals(later.words.startsWith("Moving the start back from 2026-11-24 to 2026-12-01 releases jobs from the cap"), true, later.words);
+  const earlier = capStartChangeWords("2026-12-01", "2026-11-24");
+  assertEquals(earlier.effect, "earlier");
+  assertEquals(earlier.words.includes("brings jobs under the cap"), true);
+  assertEquals(capStartChangeWords("2026-11-24", null).effect, "cleared");
+  assertEquals(capStartChangeWords(null, "2026-11-24").effect, "set");
+  assertEquals(capStartChangeWords("2026-11-24", "2026-11-24").effect, "unchanged");
+  for (const [a, b] of [["2026-11-24", "2026-12-01"], ["2026-12-01", "2026-11-24"], ["2026-11-24", null], [null, "2026-11-24"]] as const) {
+    const w = capStartChangeWords(a, b).words;
+    assertEquals(w.includes("Hourly maximums still apply"), true, w);
+    assertEquals(/[\u2014]/.test(w), false, "no em dash");
+  }
+});
+
+Deno.test("preview: names the effect against the saved date and writes nothing; an unreadable date is 503", async () => {
+  const db = fakeClient({ settings: [{ cap_start_on: "2026-11-24" }] });
+  const out = await workOrderCapStartAction(db, "set_work_order_cap_start", "POST",
+    { shown_start: "2026-11-24", cap_start_on: "2026-12-01", reason: "move it back", preview: true }, person);
+  assertEquals([out.status, out.body.effect, out.body.shown_matches, out.body.preview], [200, "later", true, true]);
+  assertEquals(db.calls.length, 0);
+  const failed = await workOrderCapStartAction(fakeClient({ failTable: "work_order_cap_settings" }), "set_work_order_cap_start", "POST",
+    { ...ask, preview: true }, person);
+  assertEquals([failed.status, failed.body.code], [503, "cap_start_unreadable"]);
+  const key = await workOrderCapStartAction(fakeClient(), "set_work_order_cap_start", "POST", { ...ask, preview: true }, serverKey);
+  assertEquals([key.status, key.body.code], [403, "named_person_required"]);
 });

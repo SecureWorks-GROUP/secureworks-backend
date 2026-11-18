@@ -127,7 +127,10 @@ BEGIN
 END $$;
 
 -- Live runs as service_role (ops-api's door call and, once installed, a hand UPDATE through
--- the API): both are recorded, naming that role.
+-- the API): both are recorded, naming that role. A later migration takes the service role's
+-- UPDATE away (only the door writes); this transaction lends it back, so the trigger's
+-- naming of the role is still proved whichever state the shard is in.
+GRANT UPDATE ON TABLE public.work_order_cap_settings TO service_role;
 SET LOCAL ROLE service_role;
 SELECT public.set_work_order_cap_start('f1990800-0000-4000-8000-0000000000a1', NULL, DATE '2026-11-24', DATE '2026-11-25', 'ZZTEST as service role');
 UPDATE public.work_order_cap_settings SET cap_start_on = DATE '2026-11-24', updated_at = now() WHERE id = 1;

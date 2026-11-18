@@ -437,12 +437,15 @@ Deno.test("guard: ruling 18 B, an hourly patio with a crew removal: work order, 
 
 // ── Follow-up 49 item 9(b): the code cap reads the cap's scope ────────────────
 // With trade_line_hold_v1 off (no row, as seeded) the guard caps every job and
-// never asks for the scope. On, a job work_order_cap_scope leaves out of the
-// cap is not capped; one it keeps is capped exactly as before; a scope read
-// that fails, returned, thrown, short or malformed, is the guard's 503.
+// never asks for the scope. On, an approved job work order caps only a job
+// work_order_cap_scope keeps; one it leaves out is not capped by its order.
+// The hourly maximum is never scoped: a job paid hourly up to a maximum keeps
+// it whatever the start date. A scope read that fails, returned, thrown, short
+// or malformed, is the guard's 503.
 
 const holdOn = [...switchOn, { flag_name: "trade_line_hold_v1", enabled: true }];
 const limitState = { data: { state: "capped", unreadable_reason: null, cap_ex_gst: 900 }, error: null };
+const scopeAll = (inScope: boolean) => (a: any) => ({ data: a.p_job_ids.map((id: string) => ({ job_id: id, in_scope: inScope })), error: null });
 const scopeDb = (scope: (args: any) => { data: any; error: any }, flags = holdOn) => {
   const db = new Fake({ ...guardTables(), feature_flags: flags });
   db.rpcAnswer = (args: any) =>
@@ -454,35 +457,54 @@ const scopeDb = (scope: (args: any) => { data: any; error: any }, flags = holdOn
       : limitState;
   return db;
 };
+// A job with an approved job work order for 500, not paid hourly.
+const woDb = (scope: (args: any) => { data: any; error: any }, flags = holdOn) => {
+  const db = scopeDb(scope, flags);
+  db.tables.job_budgets = [];
+  db.tables.work_order_customer_variations = [];
+  db.tables.work_orders = [{ id: BUDGET, org_id: ORG, job_id: JOB_A, kind: "job", status: "approved", agreed_labour_ex: 500 }];
+  return db;
+};
 const isScopeCall = (args: any) => "p_job_ids" in args && !("p_exclude_line_ids" in args);
 const scopeRpcs = (db: Fake) => db.rpcs.filter((r) => r.fn === "work_order_cap_scope").length;
 
 Deno.test("guard, cap scope: switch off caps every job and never reads the scope", async () => {
-  const db = scopeDb(() => ({ data: [{ job_id: JOB_A, in_scope: false }], error: null }), switchOn);
-  const err: any = await assertRejects(() => guard(db, 900.01), ApiError);
+  const err: any = await assertRejects(() => guard(woDb(scopeAll(false), switchOn), 500.01), ApiError);
   assertEquals([err.status, err.body?.code], [409, "work_order_total_over_agreed"]);
-  assertEquals(scopeRpcs(db), 0);
+  const hourly = scopeDb(scopeAll(false), switchOn);
+  await assertRejects(() => guard(hourly, 900.01), ApiError);
+  assertEquals(scopeRpcs(hourly), 0);
 });
 
-Deno.test("guard, cap scope: switch on, a job outside the scope is not capped; one inside is capped as before", async () => {
-  const outside = scopeDb((a) => ({ data: a.p_job_ids.map((id: string) => ({ job_id: id, in_scope: false })), error: null }));
+Deno.test("guard, cap scope: switch on, an approved order caps a job inside the scope and not one outside it", async () => {
+  const err: any = await assertRejects(() => guard(woDb(scopeAll(true)), 500.01), ApiError);
+  assertEquals([err.status, err.body?.code], [409, "work_order_total_over_agreed"]);
+  await guard(woDb(scopeAll(true)), 500);
+  const outside = woDb(scopeAll(false));
   await guard(outside, 5000);
   assertEquals(scopeRpcs(outside), 1);
-  assertEquals(outside.rpcs.filter((r) => "p_job" in r.args).length, 0, "an uncapped job reads no limit");
-  const inside = scopeDb((a) => ({ data: a.p_job_ids.map((id: string) => ({ job_id: id, in_scope: true })), error: null }));
-  await guard(inside, 900);
-  const err: any = await assertRejects(() => guard(scopeDb((a) => ({ data: a.p_job_ids.map((id: string) => ({ job_id: id, in_scope: true })), error: null })), 900.01), ApiError);
+});
+
+Deno.test("guard, cap scope: switch on, an older hourly job outside the scope keeps its hourly maximum", async () => {
+  // The scope says out (approved or created before the start date); the
+  // hourly maximum still holds, and the scope is not even asked for it.
+  const older = scopeDb(scopeAll(false));
+  await guard(older, 900);
+  const err: any = await assertRejects(() => guard(scopeDb(scopeAll(false)), 900.01), ApiError);
   assertEquals([err.status, err.body?.code, err.body?.jobs?.[0]?.limit], [409, "work_order_total_over_agreed", "hourly_maximum"]);
+  assertEquals(scopeRpcs(older), 0);
+  // Inside the scope: the same maximum.
+  await assertRejects(() => guard(scopeDb(scopeAll(true)), 900.01), ApiError);
 });
 
 Deno.test("guard, cap scope: a failed scope read is 503 work_order_cap_unavailable, never capped or uncapped", async () => {
   const cases: Array<[string, Fake]> = [
-    ["returns an error", scopeDb(() => ({ data: null, error: { message: "boom" } }))],
-    ["short answer", scopeDb(() => ({ data: [], error: null }))],
-    ["not a boolean", scopeDb((a) => ({ data: a.p_job_ids.map((id: string) => ({ job_id: id, in_scope: "yes" })), error: null }))],
-    ["another job", scopeDb(() => ({ data: [{ job_id: JOB_B, in_scope: false }], error: null }))],
+    ["returns an error", woDb(() => ({ data: null, error: { message: "boom" } }))],
+    ["short answer", woDb(() => ({ data: [], error: null }))],
+    ["not a boolean", woDb((a) => ({ data: a.p_job_ids.map((id: string) => ({ job_id: id, in_scope: "yes" })), error: null }))],
+    ["another job", woDb(() => ({ data: [{ job_id: JOB_B, in_scope: false }], error: null }))],
   ];
-  const thrown = scopeDb(() => ({ data: [], error: null }));
+  const thrown = woDb(() => ({ data: [], error: null }));
   const rpc = thrown.rpc.bind(thrown);
   thrown.rpc = (fn: string, args: any) => (isScopeCall(args) ? Promise.reject(new TypeError("fetch failed")) : rpc(fn, args));
   cases.push(["throws", thrown]);
@@ -490,18 +512,4 @@ Deno.test("guard, cap scope: a failed scope read is 503 work_order_cap_unavailab
     const err: any = await assertRejects(() => guard(db, 1), ApiError, undefined, label);
     assertEquals([err.status, err.body?.code], [503, "work_order_cap_unavailable"], label);
   }
-});
-
-Deno.test("guard, cap scope: a job with an approved job work order is scoped the same way", async () => {
-  const woDb = (inScope: boolean) => {
-    const db = scopeDb((a) => ({ data: a.p_job_ids.map((id: string) => ({ job_id: id, in_scope: inScope })), error: null }));
-    db.tables.job_budgets = [];
-    db.tables.work_order_customer_variations = [];
-    db.tables.work_orders = [{ id: BUDGET, org_id: ORG, job_id: JOB_A, kind: "job", status: "approved", agreed_labour_ex: 500 }];
-    return db;
-  };
-  const err: any = await assertRejects(() => guard(woDb(true), 500.01), ApiError);
-  assertEquals([err.status, err.body?.code], [409, "work_order_total_over_agreed"]);
-  await guard(woDb(true), 500);
-  await guard(woDb(false), 5000);
 });

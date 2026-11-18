@@ -1,7 +1,8 @@
 // Follow-up 49 item 9(b), before the switch: the work order cap's start date
 // (work_order_cap_settings.cap_start_on). GET work_order_cap_start reads it and
 // its recent changes (office staff). POST set_work_order_cap_start sets it: a
-// signed-in approver only, never the server key; who may is the database's
+// signed-in approver only, never the server key (preview: true answers what
+// the change would do and writes nothing); who may is the database's
 // owner_approval_authority, checked by set_work_order_cap_start before it
 // reads anything. The door records its own change in work_order_cap_start_changes;
 // a hand change in SQL is recorded there once the director installs the record
@@ -19,6 +20,42 @@ function dayOrNull(value: unknown): string | null | undefined {
   return !Number.isNaN(at.getTime()) && at.toISOString().slice(0, 10) === value
     ? value
     : undefined;
+}
+
+/** What a change of the start date does, in the setter's screen words. The
+ * cap's rule (work_order_cap_scope): a job is under it when its job work order
+ * was approved on or after the start day, or, with no approved order, when it
+ * was created on or after it. So a later day (moved back) releases jobs, an
+ * earlier day brings jobs in, and no day releases every job. The hourly
+ * maximum is not part of this and stays on every hourly job. */
+export type CapStartEffect = "unchanged" | "set" | "earlier" | "later" | "cleared";
+export function capStartChangeWords(previous: string | null, next: string | null): { effect: CapStartEffect; words: string } {
+  const hourly = " Hourly maximums still apply to every hourly job.";
+  if (previous === next) {
+    return { effect: "unchanged", words: "No change: the start date is already this day." };
+  }
+  if (next === null) {
+    return {
+      effect: "cleared",
+      words: `No start date: every job is released from the work order cap. No job is held or capped by its work order.${hourly}`,
+    };
+  }
+  if (previous === null) {
+    return {
+      effect: "set",
+      words: `From ${next}: a job whose work order is approved on or after this day, or with no approved work order created on or after it, is capped by its work order. Older jobs are not.${hourly}`,
+    };
+  }
+  if (next > previous) {
+    return {
+      effect: "later",
+      words: `Moving the start back from ${previous} to ${next} releases jobs from the cap: a job approved, or with no approved work order created, from ${previous} up to ${next} is no longer capped by its work order.${hourly}`,
+    };
+  }
+  return {
+    effect: "earlier",
+    words: `Moving the start forward from ${previous} to ${next} brings jobs under the cap: a job approved, or with no approved work order created, from ${next} up to ${previous} is now capped by its work order.${hourly}`,
+  };
 }
 
 const SET_REFUSALS: Array<[string, number, string, string]> = [
@@ -82,6 +119,24 @@ export async function workOrderCapStartAction(
   if (reason.length < 3 || reason.length > 500) {
     return refuse(400, "reason_invalid", "Give a reason of 3 to 500 characters.");
   }
+  // A preview names what the change would do, for the screen to show before
+  // the approver confirms; it writes nothing.
+  if (body.preview === true) {
+    const read = await client.from("work_order_cap_settings").select("cap_start_on").eq("id", 1).limit(1);
+    if (read?.error || !Array.isArray(read?.data)) {
+      console.error("[ops-api] set_work_order_cap_start: preview_unreadable");
+      return refuse(503, "cap_start_unreadable", "The cap's start date could not be read. Try again in a minute.");
+    }
+    const current = read.data[0]?.cap_start_on ?? null;
+    const change = capStartChangeWords(current, start);
+    return {
+      status: 200,
+      body: {
+        ok: true, preview: true, cap_start_on: current, proposed_start: start,
+        shown_matches: current === shown, effect: change.effect, words: change.words,
+      },
+    };
+  }
   let result: any;
   try {
     result = await client.rpc("set_work_order_cap_start", {
@@ -108,10 +163,15 @@ export async function workOrderCapStartAction(
     console.error("[ops-api] set_work_order_cap_start: answer_malformed");
     return refuse(503, "cap_start_unwritable", "The start date could not be confirmed. Read it again before retrying.");
   }
+  const done = data.changed === true
+    ? capStartChangeWords(data.previous_start ?? null, data.cap_start_on ?? null)
+    : capStartChangeWords(start, start);
   return {
     status: 200,
     body: {
       ok: true,
+      effect: done.effect,
+      words: done.words,
       changed: data.changed,
       cap_start_on: data.cap_start_on ?? null,
       previous_start: data.previous_start ?? null,
