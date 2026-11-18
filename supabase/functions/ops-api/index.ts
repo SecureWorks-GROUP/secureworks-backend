@@ -43,7 +43,7 @@ import {
 } from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { divisionTrackingOption } from '../_shared/xero_draft_standard.ts'
-import { commissionCapCodeFromDbError, commissionCapRefusal, commissionLineState, readJobCommissionRecords, type JobCommissionRecord } from './job_commission.ts'
+import { commissionCapCodeFromDbError, commissionCapRefusal, commissionLineState, loggableClientLineId, readJobCommissionRecords, readJobCommissionRecordsReusing, type JobCommissionRecord } from './job_commission.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
@@ -1539,6 +1539,7 @@ import {
   sanitiseRoofPhotosMeta,
   buildRoofReportJob,
 } from './roof_report_template.ts'
+import { readTradePayHistory } from './trade_pay_history_read.ts'
 import { summariseTradeMoney, tradeMoneyRow } from './trade_money.ts'
 import {
   SES_OWN_ROOF_REPORT_SOURCE_KIND,
@@ -1568,6 +1569,8 @@ import {
 import { readXeroDrafts, XeroDraftsError } from './xero_drafts_read.ts'
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
+// Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
+import { PAY_FIGURES_APPROVER_ACTIONS, payFiguresApproverRefusal } from './pay_figures_approver.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
 import { jobTraceAction, jobTraceView } from './job_trace.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
@@ -5341,6 +5344,7 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'freeze_group_work_order',
   'group_work_order_preview_client_link',
   'my_money',
+  'my_pay_history',
   // A trade's own savings goal (trade_savings_goal.ts, P1-07.4): the session's
   // user only; never on the owner's preview reads.
   'my_savings_goal',
@@ -6304,6 +6308,23 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     const url = new URL(req.url)
     const action = url.searchParams.get('action')
     auditAction = action
+
+    // Named pay figures are approver-only (pay_figures_approver.ts): checked
+    // once, on the same resolved action the dispatch below switches on, after
+    // the front door and before the action reads anything. The server, routine
+    // and agent keys carry no person and are refused.
+    if (action && PAY_FIGURES_APPROVER_ACTIONS.has(action)) {
+      const payRefusal = await payFiguresApproverRefusal(sb(), {
+        authMode,
+        userId: authMode === 'jwt' ? authUser?.id ?? null : null,
+      })
+      if (payRefusal) {
+        console.log(opsApiDeniedLogLine(action, req.method, requestActor, payRefusal.status, payRefusal.code))
+        recordOpsApiActorMissing(sb, authMode, requestActor)
+        return json({ error: payRefusal.error, code: payRefusal.code }, payRefusal.status)
+      }
+    }
+
     console.log(opsApiRequestLogLine(action, req.method, requestActor))
     recordOpsApiActorMissing(sb, authMode, requestActor)
 
@@ -10043,8 +10064,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
       // Trade pay-run check (trade-pay-check-v1): every live trade invoice in
       // the pay weeks, clean or stopped with plain reasons, so the bookkeeper
-      // approves the clean bills in one batch. Read only; staff by the front
-      // door (not in any trade, routine or agent-read list). Contract:
+      // approves the clean bills in one batch. Read only; pay run approvers
+      // only (pay_figures_approver.ts, checked before dispatch). Contract:
       // docs/trade-pay-run-check-v1.md.
       case 'trade_pay_run_check': {
         try {
@@ -11612,6 +11633,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           staff: _opsApiCallerIsStaffOperator(authMode, authUser),
           userId: authMode === 'jwt' ? authUser?.id || null : null,
           orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+        })
+        return json(result.body, result.status)
+      }
+      case 'trade_pay_settings':
+      case 'set_trade_pay_setting': {
+        const { tradePaySettingsAction } = await import('./trade_pay_settings.ts')
+        const result = await tradePaySettingsAction(client, action, req.method, body, {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          userId: authMode === 'jwt' ? authUser?.id || null : null,
         })
         return json(result.body, result.status)
       }
@@ -13269,6 +13299,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'freeze_group_work_order':
       case 'group_work_order_preview_client_link':
       case 'my_money':
+      case 'my_pay_history':
       case 'my_savings_goal':
       case 'set_my_savings_goal':
       case 'unlock_makesafe_report':
@@ -13523,6 +13554,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             return await groupWorkOrderJson(previewGroupClientLink(client, groupCaller, groupPayload))
           }
           case 'my_money': return json(await myMoney(client, tradeUser, url.searchParams))
+          case 'my_pay_history': {
+            if (req.method !== 'GET') return json({ error: 'my_pay_history requires GET' }, 405)
+            const answer = await readTradePayHistory(client, tradeUser.id, getAWSTDate(), url.searchParams.get('years'))
+            return json(answer.body, answer.status)
+          }
           // P1-07.4: the goal is always the session trade's (tradeUser.id). A
           // user id in the body or query string is never read.
           case 'my_savings_goal': {
@@ -15224,6 +15260,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let extraSubtotal = 0
             let clientPricedExtraCount = 0
             let commissionRecordsForOffers: Map<string, JobCommissionRecord> | null = null
+            // The jobs that offer read covered; any other job is read before use.
+            let commissionOfferReadJobIds: ReadonlySet<string> = new Set()
             if (hasExtras) {
               // Client lines are trimmed once (type and job references) and
               // every step below reads those values. Weekly work-order lines
@@ -15329,6 +15367,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (!weeklyInvoice && commissionOfferJobIds.length > 0 && await readFlag(client, 'commission_from_job_only_v1')) {
                 try {
                   commissionRecordsForOffers = await readJobCommissionRecords(client, commissionOfferJobIds)
+                  commissionOfferReadJobIds = new Set(commissionOfferJobIds)
                 } catch {
                   throw new ApiError('Could not check the commission on this invoice. Nothing was saved. Please submit again.', 503, { saved: false, code: 'commission_unreadable' })
                 }
@@ -15361,9 +15400,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   },
                   lines: jobLines,
                   jobVertical: _jobVertical,
-                  readCommissionRecords: (jobIds) => commissionRecordsForOffers
-                    ? Promise.resolve(commissionRecordsForOffers)
-                    : readJobCommissionRecords(client, jobIds),
+                  readCommissionRecords: (jobIds) => readJobCommissionRecordsReusing(client, jobIds, commissionRecordsForOffers
+                    ? { records: commissionRecordsForOffers, readJobIds: commissionOfferReadJobIds }
+                    : null),
                 }).catch((error) => {
                   if (error instanceof ExtraJobBillingRefusal) {
                     throw new ApiError(error.message, 403, {
@@ -15500,7 +15539,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 const serverResolvedCommissionLine = serverCommissionAmount !== null
                 if (serverResolvedCommissionLine && ['rate', 'unit_rate', 'amount', 'commission_amount', 'line_total_ex'].some((key) => Object.hasOwn(rawItem, key))) {
                   const lineId = rawItem.line_id ?? rawItem.id
-                  console.warn('[ops-api] commission_client_amount_ignored', { line_id: typeof lineId === 'string' ? lineId : null })
+                  console.warn('[ops-api] commission_client_amount_ignored', { line_id: loggableClientLineId(lineId) })
                 }
                 const officeHourly = weekAutofill && !serverResolvedWeeklyLine && !isWorkOrderInvoiceItem(rawItem) && (rawItem.row_type === 'labour' || isTradeInvoiceTimeLineType(rawItem.type))
                 const item = serverResolvedCommissionLine
@@ -15689,7 +15728,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (commissionClaims.length > 0) {
                 let records
                 try {
-                  records = commissionRecordsForOffers ?? await readJobCommissionRecords(client, commissionClaims.map((c: any) => c.jobId))
+                  records = await readJobCommissionRecordsReusing(client, commissionClaims.map((c: any) => c.jobId), commissionRecordsForOffers
+                    ? { records: commissionRecordsForOffers, readJobIds: commissionOfferReadJobIds }
+                    : null)
                 } catch {
                   throw new ApiError('Could not check the commission on this invoice. Nothing was saved. Please submit again.', 503, { saved: false, code: 'commission_unreadable' })
                 }
