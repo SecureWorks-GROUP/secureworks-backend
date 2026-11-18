@@ -591,6 +591,14 @@ jobs:
             supabase/functions/ops-api/trade_pay_rule_test.ts \
             supabase/functions/ops-api/trade_pay_rule_handler_test.ts
 
+      # With the weekly pay run on, a sent invoice waits for the run (P1-10.4):
+      # drives the real generate_trade_invoice handler with every database call
+      # answered by a fetch stub and fails on any call outside it (Xero).
+      - name: Test pay run wait on send
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/trade_pay_run_wait_test.ts
+
       # Automated money messages are off (captain, 30 Sep 2026). Drives the
       # real ops-api and daily-digest request handlers with every database,
       # Xero and GHL call answered by a fetch spy. Same --no-check reason as
