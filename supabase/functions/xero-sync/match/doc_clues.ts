@@ -13,6 +13,7 @@ import {
   type PrematchJob,
 } from "../bill_prematch.ts";
 import type { Clue, Stop } from "./types.ts";
+import { onPeopleAccount, type PeopleAccounts } from "../../_shared/people_accounts.ts";
 
 export interface MatchDocument {
   subject_id: string;
@@ -189,7 +190,7 @@ export function deliveryAddressClue(
   };
 }
 
-export function documentStops(doc: MatchDocument, jobs: MatchJob[]): Stop[] {
+export function documentStops(doc: MatchDocument, jobs: MatchJob[], people: PeopleAccounts): Stop[] {
   const out: Stop[] = [];
   const stop = (code: string, words: string) => out.push({ code, words });
   const numbers = namedNumbers(doc);
@@ -245,7 +246,7 @@ export function documentStops(doc: MatchDocument, jobs: MatchJob[]): Stop[] {
     }
   }
   if (
-    doc.lines.some((l) => l.account_code === "306" || l.account_code === "301")
+    doc.lines.some((l) => onPeopleAccount(people, l.account_code))
   ) {
     stop(
       "installer_bill_outside_app",

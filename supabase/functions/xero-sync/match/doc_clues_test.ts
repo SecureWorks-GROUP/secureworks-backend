@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   deliveryAddressClue,
   divisionTagNarrower,
@@ -39,8 +39,9 @@ const doc = (over: Partial<MatchDocument> = {}): MatchDocument => ({
   }],
   ...over,
 });
+const PEOPLE = new Set(["301", "306", "475"]);
 const codes = (d: MatchDocument, jobs = [job]) =>
-  documentStops(d, jobs).map((s) => s.code);
+  documentStops(d, jobs, PEOPLE).map((s) => s.code);
 
 Deno.test("document number is read as the Xero reference box", () => {
   const c = jobNumberClue(doc(), [job]);
@@ -186,4 +187,12 @@ Deno.test("division tags are only narrower evidence", () => {
     expected: "SW - FENCING",
     agrees: true,
   }]);
+});
+
+Deno.test("people accounts: a 475 line gets no overhead clue and stops as a person's pay; the set decides", () => {
+  const d = doc({ lines: [{ ...doc().lines[0], account_code: "475" }] });
+  assertEquals(overheadAccountClue(d), null, "475 is not an overhead account");
+  assert(codes(d).includes("installer_bill_outside_app"));
+  // Taken out of the set: no stop, no code change.
+  assert(!documentStops(d, [job], new Set(["301", "306"])).some((s) => s.code === "installer_bill_outside_app"));
 });

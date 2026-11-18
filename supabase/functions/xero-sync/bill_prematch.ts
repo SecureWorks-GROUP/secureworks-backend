@@ -9,7 +9,7 @@
 // population, the purchase orders and the email attachments the context system
 // filed, and this file decides. One decision per bill, rules in this order:
 //
-//   0. Any money line on subcontractor labour (306, 301): an installer bill.
+//   0. Any money line on a people account (people_account_codes): an installer bill.
 //      Decided by the rules below like any bill, but a certain match is only
 //      ever a proposal a person confirms (JP-12, 20 Oct 2026). Trade-app
 //      mirrors never reach here (the caller excludes them).
@@ -30,6 +30,7 @@
 // list and dropped: amount near quoted materials and date window alone.
 // ════════════════════════════════════════════════════════════
 
+import { onPeopleAccount, type PeopleAccounts } from "../_shared/people_accounts.ts";
 import { amountWithinTolerance, DEFAULT_MATCH_CONFIG, type MatchConfig } from "./materials_ingest.ts";
 
 // The canonical job-number grammar (materials_ingest.ts JOB_NUMBER_RE), global,
@@ -39,16 +40,15 @@ import { amountWithinTolerance, DEFAULT_MATCH_CONFIG, type MatchConfig } from ".
 // as "SWF261009XL" is no job number. jobNumbersIn normalises.
 export const JOB_NUMBER_RE_GLOBAL = /(?<![A-Z0-9])SW(MS|[A-Z])(?:-(\d{4,6})|[ \t]?-?[ \t]?(\d{5,6}))(?![A-Z0-9])/gi;
 
-// Subcontractor labour: out of the agent for now (owner call, 15 Oct 2026).
-export const LABOUR_ACCOUNTS = new Set(["306", "301"]);
-
 // Overhead accounts: never a job's cost (fuel, advertising, accounting, training,
 // meals, insurance, licences, motor vehicle, marketing, staff amenities, wages
 // and admin, subscriptions, GST and PAYG). Job-ish accounts (305 materials, 310
 // permits, 311 small tools, 407 engineering, 408 tip fees, 429 drawings, 612
-// verge bonds) are deliberately NOT here.
+// verge bonds) are deliberately NOT here. 475 (internal subcontractors) left on
+// 19 Nov 2026: it is a people account (_shared/people_accounts.ts), a person's
+// pay, never an overhead proposal.
 export const OVERHEAD_ACCOUNTS = new Set([
-  "302", "400", "412", "413", "420", "433", "441", "449", "461", "474", "475", "485", "820", "825",
+  "302", "400", "412", "413", "420", "433", "441", "449", "461", "474", "485", "820", "825",
 ]);
 
 export const GROUP_BUSINESS_UNIT = "SW - GROUP";
@@ -108,6 +108,8 @@ export interface PrematchContext {
   poFactBills?: Map<string, string[]>; // PO id -> bills whose fact is already matched to it
   duplicateDocuments?: string[]; // other live bills that look like this same supplier document
   config?: MatchConfig;
+  /** The one set of people accounts (subcontractor labour; owner call, 15 Oct 2026). */
+  people: PeopleAccounts;
 }
 
 export type SignalName =
@@ -417,9 +419,9 @@ export function duplicateDocumentsOf(
   return out.sort();
 }
 
-// True when any money line is subcontractor labour (306, 301): an installer bill.
-export function isInstallerBill(bill: PrematchBill): boolean {
-  return moneyLines(bill).some((l) => LABOUR_ACCOUNTS.has(String(l.account_code || "")));
+// True when any money line is on a people account: an installer bill.
+export function isInstallerBill(bill: PrematchBill, people: PeopleAccounts): boolean {
+  return moneyLines(bill).some((l) => onPeopleAccount(people, l.account_code));
 }
 
 export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): PrematchDecision {
@@ -427,13 +429,13 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
   // 0. Installer bills (JP-12, owner 20 Oct 2026: "Include installer bills
   // with human confirmation for now"): the agent proposes, a person confirms
   // each. A certain match is never placed by the agent; it becomes a proposal.
-  if (!isInstallerBill(bill)) return d;
+  if (!isInstallerBill(bill, ctx.people)) return d;
   if (d.kind === "job" && d.confidence === "high") {
     return {
       ...d,
       confidence: "medium",
       rule: `${d.rule}+installer_confirm`,
-      reason: `Installer bill (account 306 or 301): a person confirms each placement (JP-12). ${d.reason}`,
+      reason: `Installer bill (a people account): a person confirms each placement (JP-12). ${d.reason}`,
     };
   }
   return d;

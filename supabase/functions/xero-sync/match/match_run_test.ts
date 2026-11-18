@@ -39,6 +39,8 @@ type World = {
   openItems?: string[]; // subject_ids with an open item
   switchOn?: boolean | "fail";
   tradeUsers?: string[]; // xero_contact_ids that are Trade App users
+  people?: string[]; // people_account_codes rows (default 301, 306, 475)
+  xeroLines?: Record<string, any[]>; // xero_invoices.line_items by bill id
   backlogAt?: { cursor_at: string | null; note: string | null } | null; // xero_sync_state row
   queries: Array<{ table: string; op: string }>;
   rpcs: Array<{ fn: string; args: any }>;
@@ -74,6 +76,8 @@ function fake(w: World) {
             };
           case "match_clue_types":
             return { data: CLUE_TYPES, error: null };
+          case "people_account_codes":
+            return { data: (w.people ?? ["301", "306", "475"]).map((account_code) => ({ account_code })), error: null };
           case "job_cost_lines":
             if (filters.document_number) return { data: [], error: null };
             if (filters["in:kind"]) {
@@ -119,6 +123,7 @@ function fake(w: World) {
                 xero_contact_id: "supplier-1",
                 contact_name: "Supplier",
                 invoice_date: "2026-11-10",
+                line_items: w.xeroLines?.[String(filters.xero_invoice_id)] ?? [],
               },
               error: null,
             };
@@ -618,4 +623,38 @@ Deno.test("match_pending door: only a POST with the exact server key; nothing re
     new Request(url, { method: "POST", headers: { authorization: "Bearer server-key" } }), fake(w), "server-key");
   assertEquals([ok.status, ok.body.matched], [200, 1]);
   assertEquals(MATCH_BACKLOG_STATE_KEY, "match_backlog");
+});
+
+Deno.test("(1) people accounts: a bill with any line on 475 is labour, skipped before any write; the set is read from the database", async () => {
+  // Our cost line on 475 (a mixed bill: one supplies line, one people line).
+  const ours: Record<string, any[]> = billLines();
+  ours[BILL].push({ ...ours[BILL][0], line_key: "n:2", line_no: 2, account_code: " 475 " });
+  const w1 = world({ lines: ours });
+  const r1 = await runMatchFor(fake(w1), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  assertEquals([r1.skipped, w1.rpcs.length, (w1.upserts ?? []).length], [{ labour_bill: 1 }, 0, 0]);
+  assert(w1.queries.some((q) => q.table === "people_account_codes"));
+  // Only Xero's own line is on 475 (a zero line is no cost line): still before any write.
+  const w2 = world({ lines: billLines(), xeroLines: { [BILL]: [{ AccountCode: "305", LineAmount: 90 }, { AccountCode: "475", LineAmount: 0 }] } });
+  const r2 = await runMatchFor(fake(w2), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  assertEquals([r2.skipped, w2.rpcs.length], [{ labour_bill: 1 }, 0]);
+  // The owner's answer is one row: with 475 out of the set, the same bill is matched, no code changed.
+  const w3 = world({ lines: ours, people: ["301", "306"] });
+  const r3 = await runMatchFor(fake(w3), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  assertEquals([r3.skipped, applies(w3).length], [{}, 1]);
+  // And a new code added to the set takes effect the same way.
+  const w4 = world({ lines: billLines(), people: ["301", "306", "475", "300"] });
+  assertEquals((await runMatchFor(fake(w4), [`xero_bill:${BILL}`], { ruleVersion: "v1" })).skipped, { labour_bill: 1 });
+});
+
+Deno.test("people accounts: an unreadable or empty set runs nothing, writes nothing and requeues every bill", async () => {
+  const cases: Array<[Partial<World>, string]> = [
+    [{ fail: "people_account_codes" }, "people_accounts_unreadable"],
+    [{ people: [] }, "people_accounts_empty"],
+  ];
+  for (const [over, code] of cases) {
+    const w = world({ lines: billLines(), ...over });
+    const r = await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+    assertEquals([r.failed, r.requeued, w.rpcs.length], [{ [code]: 1 }, 1, 0], code);
+    assert(!w.queries.some((q) => q.table === "xero_invoices" || q.table === "job_cost_lines"), code);
+  }
 });

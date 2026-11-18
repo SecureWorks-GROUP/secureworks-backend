@@ -23,6 +23,7 @@ function fake(kind = "bills") {
     trade_invoices: kind === "bills"
       ? [{ id: "m", org_id: org, xero_bill_id: "b" }]
       : [{ id: "a", org_id: org }, { id: "b", org_id: org }],
+    people_account_codes: [{ account_code: "301" }, { account_code: "306" }, { account_code: "475" }],
     xero_supplier_credit_notes: [{ org_id: org, xero_credit_note_id: "a" }, {
       org_id: org,
       xero_credit_note_id: "b",

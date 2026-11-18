@@ -3,6 +3,7 @@ import { billCostDocument, collectBillCostDocument } from "./cost_lines.ts";
 const ctx = {
   orgId: "10000000-0000-4000-8000-000000000001",
   mirrorBillIds: new Set<string>(),
+  people: new Set(["301", "306", "475"]),
 };
 const bill = {
   xero_invoice_id: "ZZTEST-bill",
@@ -204,4 +205,12 @@ Deno.test("bill costs: six-place rounding breaks negative ties away from zero", 
     d.lines.filter((l) => l.kind === "employer_super").map((l) => l.amount_ex),
     [-0.000001, 0.500001],
   );
+});
+
+Deno.test("people accounts: a line on 475 is an installer line in the labour lane; the set decides, not code", () => {
+  const b = { ...bill, line_items: [{ LineAmount: 500, AccountCode: " 475" }] };
+  const d = billCostDocument(b, ctx)!;
+  assertEquals([d.lines[0].kind, d.lines[0].lane], ["installer_bill", "labour"]);
+  const out = billCostDocument(b, { ...ctx, people: new Set(["301", "306"]) })!;
+  assertEquals([out.lines[0].kind, out.lines[0].lane], ["supplier_bill", "other"]);
 });

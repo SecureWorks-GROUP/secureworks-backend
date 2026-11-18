@@ -19,6 +19,7 @@ Deno.test("the edge billCostDocument gives the fixture's expected documents", as
       orgId: fixture.org_id,
       mirrorBillIds: new Set(),
       employerSuperOn: fixture.employer_super,
+      people: new Set(["301", "306", "475"]),
     });
     // Text, not structure: the writer's source hash reads the line's text.
     assertEquals(JSON.stringify(doc), JSON.stringify(fixture.expected[i]), `bill ${i}`);

@@ -15,6 +15,7 @@ type World = {
   notes?: Record<string, any>; // credit id -> xero_supplier_credit_notes row
   openItems?: string[];
   tradeUsers?: string[];
+  people?: string[]; // people_account_codes rows (default 301, 306, 475)
   fail?: string;
   applyError?: Record<string, unknown>;
   switchOn?: boolean | "fail";
@@ -46,6 +47,8 @@ function fake(w: World) {
             return { data: w.state?.[String(filters.key)] ?? null, error: null };
           case "match_clue_types":
             return { data: CLUE_TYPES, error: null };
+          case "people_account_codes":
+            return { data: (w.people ?? ["301", "306", "475"]).map((account_code) => ({ account_code })), error: null };
           case "job_cost_lines": {
             if (filters.document_id !== undefined) {
               return { data: w.lines?.[String(filters.document_id)] ?? [], error: null };
@@ -319,5 +322,28 @@ Deno.test("sync credits: a failed read takes nothing and keeps the position", as
     assertEquals([out.run, applies(w).length, out.errors.length], [0, 0, 1], fail);
     assertEquals(w.state?.[CREDIT_BACKLOG_STATE_KEY], { note: "a" }, fail);
     assertEquals((w.upserts ?? []).length, 0, fail);
+  }
+});
+
+Deno.test("(2) people accounts: a credit with a line on 475 is labour, never raised; the set is one database row each", async () => {
+  const xero = world({ lines: { c1: [unallocated()] }, notes: { c1: { ...note(), line_items: [{ Description: "Returned", AccountCode: "475" }] } } });
+  assertEquals([applies(xero).length, (await creditSweep(fake(xero))).skipped], [0, { labour_credit: 1 }]);
+  const ours = world({ lines: { c1: [unallocated({ account_code: "475" })] }, notes: { c1: note() } });
+  assertEquals([applies(ours).length, (await creditSweep(fake(ours))).skipped], [0, { labour_credit: 1 }]);
+  // 475 taken out of the set: the same credit is raised, with no code change.
+  const out = world({ lines: { c1: [unallocated({ account_code: "475" })] }, notes: { c1: note() }, people: ["301", "306"] });
+  await creditSweep(fake(out));
+  assertEquals(applies(out).length, 1);
+});
+
+Deno.test("people accounts: an unreadable or empty set raises nothing in the sweep", async () => {
+  const cases: Array<[Partial<World>, string]> = [
+    [{ fail: "people_account_codes" }, "people_accounts_unreadable"],
+    [{ people: [] }, "people_accounts_empty"],
+  ];
+  for (const [over, code] of cases) {
+    const w = world({ lines: { c1: [unallocated()] }, notes: { c1: note() }, ...over });
+    const out = await creditSweep(fake(w));
+    assertEquals([out.error, w.rpcs.length, (w.upserts ?? []).length], [code, 0, 0], code);
   }
 });

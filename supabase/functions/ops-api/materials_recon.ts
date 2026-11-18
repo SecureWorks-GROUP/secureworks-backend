@@ -31,6 +31,7 @@
 // CP1 Option A: facts are DERIVED rows keyed by xero_invoice_id, reversible by
 // delete; source tables (xero_invoices / trade_invoices) are NEVER mutated.
 // ════════════════════════════════════════════════════════════
+import { onPeopleAccount, type PeopleAccounts, readPeopleAccounts } from "../_shared/people_accounts.ts";
 import { amountIsKnown, HELD_QUEUE_REASONS } from "../xero-sync/materials_ingest.ts";
 
 // ─────────────────────────────────────────────────────────────
@@ -177,16 +178,15 @@ export function classifyAssign(
   return "conflict";
 }
 
-// The cost lane a whole bill lands in: labour when any money line is
-// subcontractor labour (306, 301: an installer bill), otherwise materials.
-// Before 20 Oct every manual landing was materials, so installer labour placed
-// by hand showed as materials.
+// The cost lane a whole bill lands in: labour when any money line is on a
+// people account (the one database set, _shared/people_accounts.ts: an
+// installer bill), otherwise materials. Before 20 Oct every manual landing was
+// materials, so installer labour placed by hand showed as materials.
 export type BillLane = "materials" | "labour" | "other";
-export const INSTALLER_ACCOUNTS = new Set(["306", "301"]);
-export function laneOfBillLines(lines: unknown): BillLane {
+export function laneOfBillLines(lines: unknown, people: PeopleAccounts): BillLane {
   if (!Array.isArray(lines)) return "materials";
   const money = lines.filter((l: any) => Number(l?.LineAmount ?? 0) !== 0);
-  return money.some((l: any) => INSTALLER_ACCOUNTS.has(String(l?.AccountCode ?? ""))) ? "labour" : "materials";
+  return money.some((l: any) => onPeopleAccount(people, l?.AccountCode)) ? "labour" : "materials";
 }
 
 // Parse the database refusal from allocate_bill_split into the person's words.
@@ -471,7 +471,7 @@ export async function assignReconRow(
   }
 
   // Installer bills (JP-12): labour lane, and only a person places them.
-  const lane = laneOfBillLines(await loadBillLines(client, queue.xero_invoice_id));
+  const lane = laneOfBillLines(await loadBillLines(client, queue.xero_invoice_id), await readPeopleAccounts(client));
   if (args.agent && lane === "labour") {
     throw new Error(`bill ${queue.xero_invoice_id} is an installer bill; a person confirms each placement (JP-12)`);
   }
@@ -699,10 +699,10 @@ export async function splitReconRow(
   if (!Array.isArray(args.parts) || args.parts.length === 0) {
     throw new Error("parts are required: one job and amount per part");
   }
-  // An installer bill (306/301) is labour on every part whatever the screen
+  // An installer bill (a people account) is labour on every part whatever the screen
   // sent (the database enforces the same); any other bill takes the person's
   // lane, materials when none was given.
-  const billLane = laneOfBillLines(await loadBillLines(client, args.xeroInvoiceId));
+  const billLane = laneOfBillLines(await loadBillLines(client, args.xeroInvoiceId), await readPeopleAccounts(client));
   const parts = args.parts.map((p: any) => {
     const asked = p?.lane == null || p.lane === "" ? "materials" : String(p.lane);
     if (!["materials", "labour", "other"].includes(asked)) {

@@ -619,11 +619,15 @@ Deno.test("an existing sync fact whose bill amount is now unknown goes to staff"
 });
 
 // ── JP-12: installer bills are never placed automatically ────
-Deno.test("isInstallerBill — a money line on 306 or 301", () => {
-  assert(isInstallerBill([{ AccountCode: "306", LineAmount: 500 }]));
-  assert(isInstallerBill([{ AccountCode: "310", LineAmount: 50 }, { AccountCode: "301", LineAmount: 400 }]));
-  assert(!isInstallerBill([{ AccountCode: "306", LineAmount: 0 }, { AccountCode: "310", LineAmount: 50 }]));
-  assert(!isInstallerBill(null));
+Deno.test("isInstallerBill — a money line on a people account", () => {
+  const people = new Set(["301", "306", "475"]);
+  assert(isInstallerBill([{ AccountCode: "306", LineAmount: 500 }], people));
+  assert(isInstallerBill([{ AccountCode: "310", LineAmount: 50 }, { AccountCode: "301", LineAmount: 400 }], people));
+  assert(isInstallerBill([{ AccountCode: " 475", LineAmount: 90 }], people));
+  assert(!isInstallerBill([{ AccountCode: "306", LineAmount: 0 }, { AccountCode: "310", LineAmount: 50 }], people));
+  assert(!isInstallerBill(null, people));
+  // The set is the answer: a code taken out of it is no longer labour, without code.
+  assert(!isInstallerBill([{ AccountCode: "475", LineAmount: 90 }], new Set(["301", "306"])));
 });
 
 Deno.test("matchBill — an installer bill with a job reference waits for a person", () => {

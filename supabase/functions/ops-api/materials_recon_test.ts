@@ -195,6 +195,38 @@ Deno.test("assign — the agent never confirms an installer bill, and a material
   );
 });
 
+Deno.test("people accounts: a bill on 475 lands as labour and the agent never places it; an unreadable set places nothing", async () => {
+  const on475 = () => {
+    const seed = installerSeed();
+    seed.xero_invoices[0].line_items = [{ Description: "Internal", AccountCode: "475", LineAmount: 1000 }];
+    return seed;
+  };
+  const agentSeed = on475();
+  agentSeed.materials_reconciliation_queue.find((r: any) => r.id === "q-open-noref")!.suggestion_reason = "no_ref_no_po";
+  const agent = makeFakeClient(agentSeed);
+  await assertRejects(
+    () => assignReconRow(agent.client, { queueId: "q-open-noref", jobNumber: "SWP-25029", actor: "agent", orgId: ORG, nowIso: NOW, agent: { matchReason: "x" } }),
+    Error, "installer bill",
+  );
+  const person = makeFakeClient(on475());
+  await assignReconRow(person.client, { queueId: "q-open-noref", useSuggestion: true, actor: "staff@x", orgId: ORG, nowIso: NOW });
+  assertEquals(person.store.job_materials_facts[0].lane, "labour");
+  // The owner's answer is one row: 475 out of the set and the same bill is materials.
+  const out = makeFakeClient({ ...on475(), people_account_codes: [{ account_code: "301" }, { account_code: "306" }] });
+  await assertRejects(
+    () => assignReconRow(out.client, { queueId: "q-open-noref", jobNumber: "SWF-25010", actor: "x", orgId: ORG, nowIso: NOW }),
+    Error, "already has a materials fact",
+  );
+  for (const people of [[], [{ account_code: "  " }]]) {
+    const m = makeFakeClient({ ...on475(), people_account_codes: people as any });
+    await assertRejects(
+      () => assignReconRow(m.client, { queueId: "q-open-noref", useSuggestion: true, actor: "staff@x", orgId: ORG, nowIso: NOW }),
+      Error, "people_accounts_",
+    );
+    assertEquals(m.store.job_materials_facts[0].automation_source, "xero_ref_link", "nothing written");
+  }
+});
+
 Deno.test("mark-not-job-related — BLOCKED when a fact already owns the bill", async () => {
   const seed = baseSeed();
   seed.job_materials_facts.push({

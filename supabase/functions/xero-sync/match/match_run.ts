@@ -28,12 +28,13 @@
 //
 // A bill with a person's labour on it is never matched here: no clue, no
 // shadow row, no item. It is skipped and counted (`labour_bill`). That is a
-// line of kind installer_bill or employer_super, a line on an installer account
-// (301, 306: the installer_bill_outside_app stop), or a bill from a Xero
-// contact that is a Trade App user. Each carries a name and a pay total.
+// line of kind installer_bill or employer_super, a line on a people account
+// (the one database set, _shared/people_accounts.ts: 301, 306, 475 today), on
+// our cost lines or on Xero's lines, or a bill from a Xero contact that is a
+// Trade App user. Each carries a name and a pay total.
 
 import { jobNumbersIn } from "../bill_prematch.ts";
-import { INSTALLER_ACCOUNT_CODES } from "../materials_ingest.ts";
+import { onPeopleAccount, type PeopleAccounts, peopleAccountsCode, readPeopleAccounts } from "../../_shared/people_accounts.ts";
 import { decideMatch } from "./decide.ts";
 import {
   deliveryAddressClue,
@@ -146,6 +147,7 @@ async function matchOne(
   sb: Sb,
   subjectId: string,
   types: Record<string, ClueType>,
+  people: PeopleAccounts,
 ): Promise<{ applied: string } | { skipped: string }> {
   const kind = subjectId.split(":", 1)[0];
   const documentId = subjectId.slice(kind.length + 1);
@@ -161,7 +163,7 @@ async function matchOne(
   // clue, no shadow row, no item.
   if (
     lines.some((l) =>
-      LABOUR_LINE_KINDS.has(String(l.kind ?? "")) || INSTALLER_ACCOUNT_CODES.has(String(l.account_code ?? ""))
+      LABOUR_LINE_KINDS.has(String(l.kind ?? "")) || onPeopleAccount(people, l.account_code)
     )
   ) return { skipped: "labour_bill" };
   // A Trade App user's own bill is their pay (users is small; no index needed).
@@ -178,8 +180,12 @@ async function matchOne(
   if (!counted.some((l) => l.state === "needs_person")) return { skipped: "nothing_waiting" };
 
   const bill = await read<Record<string, unknown> | null>("read_bill",
-    sb.from("xero_invoices").select("xero_invoice_id,invoice_number,reference,xero_contact_id,contact_name,invoice_date,sub_total")
+    sb.from("xero_invoices").select("xero_invoice_id,invoice_number,reference,xero_contact_id,contact_name,invoice_date,sub_total,line_items")
       .eq("xero_invoice_id", documentId).maybeSingle());
+  // Xero's own lines too (a zero line is not a cost line): still before any write.
+  if (Array.isArray(bill?.line_items) && bill.line_items.some((l: any) => onPeopleAccount(people, l?.AccountCode))) {
+    return { skipped: "labour_bill" };
+  }
   const first = lines[0];
   const money = counted.map((l) => num(l.amount_ex));
   const doc: MatchDocument = {
@@ -352,7 +358,7 @@ async function matchOne(
   }));
   const all = [...fresh, ...keptClues];
 
-  const stops: Stop[] = [...documentStops(doc, jobs)];
+  const stops: Stop[] = [...documentStops(doc, jobs, people)];
   const dup = duplicateStop(doc, others);
   if (dup) stops.push(dup);
   const candidate = all.find((c) => c.outcome === "job" && c.job_id && c.names_one && (c.class === "key" || c.class === "clue"));
@@ -446,6 +452,17 @@ async function runCore(
     console.error("[match_run] clue types unreadable");
     return { requeue: ids.map((id) => ({ id, reason: "read_failed" })), reached };
   }
+  // The one set of people accounts, once a run: unreadable or empty runs
+  // nothing and writes nothing (every bill is requeued).
+  let people: PeopleAccounts;
+  try {
+    people = await readPeopleAccounts(sb, { timeoutMs: MATCH_STATEMENT_TIMEOUT_MS });
+  } catch (e) {
+    const code = peopleAccountsCode(e) ?? "people_accounts_unreadable";
+    bump(report.failed, code);
+    console.error("[match_run]", code);
+    return { requeue: ids.map((id) => ({ id, reason: "read_failed" })), reached };
+  }
   for (const [i, id] of ids.entries()) {
     if (i >= MATCH_RUN_LIMIT || now() > deadline) {
       out.push({ id, reason: i >= MATCH_RUN_LIMIT ? "over_run_cap" : "over_run_time" });
@@ -454,7 +471,7 @@ async function runCore(
     report.run++;
     reached.add(id);
     try {
-      const res = await matchOne(sb, id, types);
+      const res = await matchOne(sb, id, types, people);
       if ("applied" in res) bump(report.applied, res.applied);
       else bump(report.skipped, res.skipped);
     } catch (e) {

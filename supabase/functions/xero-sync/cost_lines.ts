@@ -1,4 +1,4 @@
-import { INSTALLER_ACCOUNT_CODES } from "./materials_ingest.ts";
+import { onPeopleAccount, type PeopleAccounts } from "../_shared/people_accounts.ts";
 
 type Line = {
   line_key: string;
@@ -41,6 +41,8 @@ function roundSix(amount: number): number {
 type Context = {
   mirrorBillIds: Set<string>;
   orgId: string;
+  /** The one set of people accounts (read once per run by the caller). */
+  people: PeopleAccounts;
   employerSuperOn?: boolean;
 };
 
@@ -92,7 +94,7 @@ export function billCostDocument(bill: Bill, ctx: Context) {
     if (amount === 0) continue;
     const account = l.AccountCode == null ? null : String(l.AccountCode);
     const description = l.Description == null ? null : String(l.Description);
-    const installer = INSTALLER_ACCOUNT_CODES.has(account ?? "");
+    const installer = onPeopleAccount(ctx.people, account);
     const lane = /commission/i.test(description ?? "")
       ? "commission"
       : installer

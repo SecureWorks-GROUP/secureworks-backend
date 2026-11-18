@@ -24,6 +24,7 @@
 //   - Hard exclusion: a bill whose xero_invoice_id is a trade-invoice mirror
 //     (trade_invoices.xero_bill_id) can NEVER produce a materials fact.
 // ════════════════════════════════════════════════════════════
+import { onPeopleAccount, type PeopleAccounts } from "../_shared/people_accounts.ts";
 
 // ─────────────────────────────────────────────────────────────
 // Canonical job-number extractor — THE unification fix.
@@ -139,7 +140,7 @@ export type SuggestionReason =
   | "xero_link_conflict"
   // The same supplier document is entered more than once in Xero (CFO-16).
   | "duplicate_document"
-  // An installer bill (subcontractor labour, account 306 or 301): a person
+  // An installer bill (a line on a people account): a person
   // confirms each placement (JP-12), so no automatic path places it.
   | "installer_confirm";
 
@@ -159,14 +160,11 @@ export const HELD_QUEUE_REASONS = new Set<string>([
   "ai_undone",
 ]);
 
-// Installer bills: any money line on subcontractor labour (306, 301). The same
-// rule as ops-api laneOfBillLines.
-export const INSTALLER_ACCOUNT_CODES = new Set(["306", "301"]);
-export function isInstallerBill(lines: unknown): boolean {
+// Installer bills: any money line on a people account (the one database set,
+// _shared/people_accounts.ts). The same rule as ops-api laneOfBillLines.
+export function isInstallerBill(lines: unknown, people: PeopleAccounts): boolean {
   if (!Array.isArray(lines)) return false;
-  return lines.some((l: any) =>
-    Number(l?.LineAmount ?? 0) !== 0 && INSTALLER_ACCOUNT_CODES.has(String(l?.AccountCode ?? ""))
-  );
+  return lines.some((l: any) => Number(l?.LineAmount ?? 0) !== 0 && onPeopleAccount(people, l?.AccountCode));
 }
 
 export interface MatchResult {
@@ -270,7 +268,7 @@ export function matchBill(
     refToken?: string | null; // the extracted token (may exist even when no job found)
     pos: POCandidate[]; // POs to consider (caller may pre-filter to supplier; we re-filter defensively)
     config?: MatchConfig;
-    installer?: boolean; // the bill has an installer (306/301) money line
+    installer?: boolean; // the bill has a money line on a people account
   },
 ): MatchResult {
   const cfg = ctx.config || DEFAULT_MATCH_CONFIG;

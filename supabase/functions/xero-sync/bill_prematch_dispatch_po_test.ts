@@ -34,7 +34,7 @@ const DISPATCH_PO: PrematchPO = {
 };
 
 function ctx(pos: PrematchPO[]) {
-  return { ...buildJobMaps(JOBS), addressIndex: buildAddressIndex(JOBS), pos, emailJobIds: [] };
+  return { ...buildJobMaps(JOBS), addressIndex: buildAddressIndex(JOBS), pos, emailJobIds: [], people: new Set(["301", "306", "475"]) };
 }
 
 function bill(over: Partial<PrematchBill> & { line?: string; account?: string; amount?: number } = {}): PrematchBill {
