@@ -22,7 +22,9 @@ import {
 import type { ReplyPdfRead } from "./dispatch_v2_reply_pdf.ts";
 import {
   capturedEmailOf,
+  dispatchV2ReplyFlagged,
   type EmailRow,
+  OUR_SENT_ORDER_SENDER_VIA,
   type RefLinkRow,
   type RepliesStore,
   type ScanState,
@@ -313,6 +315,13 @@ class MemoryStore implements RepliesStore {
     if (!e) return Promise.resolve(null);
     Object.assign(e, patch);
     return Promise.resolve({ ...e });
+  }
+  markDismissed(_org: string, ids: string[], patch: any) {
+    const changed = this.emails.filter((e) =>
+      ids.includes(e.id) && e.state === "matched" && !e.dismissed_at
+    );
+    for (const e of changed) Object.assign(e, patch);
+    return Promise.resolve(changed.map((e) => ({ ...e })));
   }
   emailsForJob(_org: string, jobId: string, limit: number) {
     return Promise.resolve(
@@ -1499,6 +1508,10 @@ Deno.test("outlook order (3g): our own sent email placed by hand goes on the job
     decided_by: null,
     decided_by_email: null,
     matched_at: null,
+    dismissed_at: null,
+    dismissed_by: null,
+    dismissed_by_email: null,
+    dismissed_source: null,
     created_at: NOW,
     updated_at: NOW,
   });
@@ -1937,4 +1950,143 @@ Deno.test("solarspan: identifySender names Bondor for its own and its Solarspan 
     "a@b.com.au",
     "c@b.com.au",
   ]);
+});
+
+// ── Items 17 and 5: Dismiss on a supplier reply ──────────────────────────
+
+Deno.test("reply dismiss: our sent-order sender_via is the on-send value", () => {
+  assertEquals(OUR_SENT_ORDER_SENDER_VIA, OUR_SENT_ORDER_VIA);
+});
+
+Deno.test("reply dismiss: every matched supplier reply is flagged until dismissed, whatever it says", () => {
+  const base = { state: "matched", job_id: J1, dismissed_at: null, sender_via: "approved_address" };
+  assertEquals(dispatchV2ReplyFlagged(base), true);
+  assertEquals(dispatchV2ReplyFlagged({ ...base, dismissed_at: NOW }), false);
+  assertEquals(dispatchV2ReplyFlagged({ ...base, state: "unmatched" }), false);
+  assertEquals(dispatchV2ReplyFlagged({ ...base, state: "needs_confirmation" }), false);
+  assertEquals(dispatchV2ReplyFlagged({ ...base, job_id: null }), false);
+  assertEquals(dispatchV2ReplyFlagged({ ...base, sender_via: OUR_SENT_ORDER_VIA }), false);
+  assertEquals(dispatchV2ReplyFlagged(null), false);
+});
+
+Deno.test("reply dismiss: a reply on a job reads flagged, and Dismiss stamps who and when with one event", async () => {
+  const t = await scanned();
+  const reply = t.bySeq(101)!;
+  const read = await t.run("dispatch_v2_replies", {}, { job_id: J1 });
+  const listed = read.emails.find((e: any) => e.id === reply.id);
+  assertEquals(listed.flagged, true);
+  assertEquals(listed.dismissed_at, null);
+  const before = t.store.jobEvents.length;
+  const r = await t.run("dispatch_v2_replies_dismiss", { email_id: reply.id });
+  assertEquals(r.ok, true);
+  assertEquals(r.already_dismissed, []);
+  assertEquals(r.dismissed.length, 1);
+  assertEquals(r.dismissed[0].flagged, false);
+  assertEquals(r.dismissed[0].dismissed_at, NOW);
+  assertEquals(r.dismissed[0].dismissed_by_email, SHAUN.email);
+  assertEquals(r.dismissed[0].dismissed_source, "button");
+  const row = t.store.emails.find((e) => e.id === reply.id)!;
+  assertEquals(row.dismissed_by, SHAUN.id);
+  // Nothing else on the reply changed.
+  assertEquals(row.state, "matched");
+  assertEquals(row.order_id, reply.order_id);
+  assertEquals(t.store.jobEvents.length, before + 1);
+  const ev = t.store.jobEvents.at(-1);
+  assertEquals(ev.event_type, "dispatch_v2_reply_dismissed");
+  assertEquals(ev.job_id, J1);
+  assertEquals(ev.user_id, SHAUN.id);
+  assertEquals(ev.detail.email_ids, [reply.id]);
+  assertEquals(ev.detail.operator_email, SHAUN.email);
+  assertEquals(ev.detail.via, "screen");
+  // A second press changes nothing and writes no event.
+  const again = await t.run("dispatch_v2_replies_dismiss", { email_ids: [reply.id] });
+  assertEquals(again.dismissed, []);
+  assertEquals(again.already_dismissed, [reply.id]);
+  assertEquals(t.store.jobEvents.length, before + 1);
+});
+
+Deno.test("reply dismiss: Dismiss all dismisses several replies on a job at once", async () => {
+  const t = await scanned();
+  const reply = t.bySeq(101)!;
+  const second = t.bySeq(103)!;
+  assertEquals(second.state, "matched");
+  const r = await t.run("dispatch_v2_replies_dismiss", {
+    email_ids: [reply.id, second.id, reply.id],
+  });
+  assertEquals(r.dismissed.length, 2);
+  assertEquals(
+    t.store.emails.filter((e) => [reply.id, second.id].includes(e.id))
+      .every((e) => e.dismissed_source === "button"),
+    true,
+  );
+  const events = t.store.jobEvents.filter((e) => e.event_type === "dispatch_v2_reply_dismissed");
+  assertEquals(events.length, new Set([reply.job_id, second.job_id]).size);
+});
+
+Deno.test("reply dismiss: refuses an email not on a job, a missing one, no id, too many, and no named person", async () => {
+  const t = await scanned();
+  const tray = t.bySeq(107)!;
+  const reply = t.bySeq(101)!;
+  await refused(t.run("dispatch_v2_replies_dismiss", { email_id: tray.id }), 409, "not_on_a_job");
+  await refused(t.run("dispatch_v2_replies_dismiss", { email_id: uuid(999) }), 404, "email_not_found");
+  await refused(t.run("dispatch_v2_replies_dismiss", {}), 400, "invalid_request");
+  await refused(t.run("dispatch_v2_replies_dismiss", { email_ids: ["nope"] }), 400, "invalid_request");
+  await refused(
+    t.run("dispatch_v2_replies_dismiss", { email_ids: Array.from({ length: 51 }, () => reply.id) }),
+    400,
+    "invalid_request",
+  );
+  assertEquals(t.store.emails.find((e) => e.id === reply.id)!.dismissed_at ?? null, null);
+  // The ops key names a person in users, or is refused.
+  const k = setup("terminal");
+  k.store.emails = t.store.emails;
+  k.store.jobs = t.store.jobs;
+  await refused(k.run("dispatch_v2_replies_dismiss", { email_id: reply.id }), 400, "operator_required");
+  const r = await k.run("dispatch_v2_replies_dismiss", {
+    email_id: reply.id,
+    operator_email: SHAUN.email,
+  });
+  assertEquals(r.dismissed[0].dismissed_by_email, SHAUN.email);
+  assertEquals(k.store.emails.find((e) => e.id === reply.id)!.dismissed_by, null);
+});
+
+Deno.test("reply dismiss: accepting a reply date dismisses that reply", async () => {
+  const t = await scanned();
+  const s = t.store.suggestions.find((x) => x.order_id === O1)!;
+  const r = await t.run("dispatch_v2_suggestion_accept", { suggestion_id: s.id });
+  assertEquals(r.reply_dismissed, true);
+  const row = t.store.emails.find((e) => e.id === s.email_id)!;
+  assertEquals(row.dismissed_source, "suggestion");
+  assertEquals(row.dismissed_by_email, SHAUN.email);
+  assertEquals(t.store.jobEvents.at(-1).detail.reply_dismissed, true);
+});
+
+Deno.test("reply dismiss: dismissing a reply date dismisses that reply", async () => {
+  const t = await scanned();
+  const s = t.store.suggestions.find((x) => x.order_id === O1)!;
+  const r = await t.run("dispatch_v2_suggestion_dismiss", { suggestion_id: s.id });
+  assertEquals(r.reply_dismissed, true);
+  assertEquals(t.store.emails.find((e) => e.id === s.email_id)!.dismissed_source, "suggestion");
+});
+
+Deno.test("reply dismiss: a dismiss write that fails never fails Accept", async () => {
+  const t = await scanned();
+  t.store.markDismissed = () => Promise.reject(new Error("db down"));
+  const s = t.store.suggestions.find((x) => x.order_id === O1)!;
+  const r = await t.run("dispatch_v2_suggestion_accept", { suggestion_id: s.id });
+  assertEquals(r.suggestion.state, "accepted");
+  assertEquals(r.reply_dismissed, false);
+});
+
+Deno.test("reply dismiss: putting an email on a job from the tray dismisses it", async () => {
+  const t = await scanned();
+  const tray = t.bySeq(105)!;
+  const r = await t.run("dispatch_v2_replies_assign", {
+    email_id: tray.id,
+    job_id: J2,
+    order_id: O2,
+  });
+  assertEquals(r.email.flagged, false);
+  assertEquals(r.email.dismissed_source, "tray");
+  assertEquals(r.email.dismissed_by_email, SHAUN.email);
 });

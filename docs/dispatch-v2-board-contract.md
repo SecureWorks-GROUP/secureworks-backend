@@ -1995,6 +1995,102 @@ bar, the tray and the open job, and shows one line, for example
 The separate "Unmatched supplier emails" button is gone. The Emails to sort
 chip in Needs you now opens and shuts the same tray, with the same count.
 
+## 3k. Supplier replied without opening the job, and Dismiss on a reply (items 17 and 5, approved by Shaun 18 Nov 2026)
+
+Code: `supabase/functions/ops-api/dispatch_v2_replies.ts`
+(`dispatch_v2_replies_dismiss`), `dispatch_v2_replies_store.ts`
+(`dispatchV2ReplyFlagged`) and `dispatch_board.ts` (`dispatchBoardReplies`,
+`dispatchOrderRepliedAt`). Migration
+`20261118153000_dispatch_v2_reply_dismiss.sql`. The cases Shaun named: Ian Tan
+SWF-261631 (R&R's standard acknowledgement of 16 Nov, no date) and Breeanna
+Moran SWF-261656 (four Stratco replies with questions, no date). Neither was
+flagged before this.
+
+The rules in business words:
+
+1. **Every supplier reply on a job is flagged until a person dismisses it**
+   (Shaun: Q2 a, acknowledgements too). It shows under Needs you now's
+   Supplier replied as "Read R&R reply". A reply here is a
+   `dispatch_v2_supplier_emails` row at `matched` on a job; one of our own
+   sent orders put on the job (`sender_via` `our_sent_order`) never counts.
+2. **Dismiss** (Shaun: Q1 b, named Dismiss on 18 Nov) is a button on each
+   flagged reply in the job's Emails inside Dispatch. It stamps who and when
+   (`dismissed_at`, `dismissed_by`, `dismissed_by_email`, `dismissed_source`
+   `button`) and writes one `job_events` row per job,
+   `dispatch_v2_reply_dismissed`. Nothing else changes: no box, date, stage,
+   status, Xero, SMS or email.
+3. **Accept or Dismiss on that reply's date** also dismisses the reply
+   (`dismissed_source` `suggestion`; the press's own event carries
+   `reply_dismissed`). **Put on job** or **Yes, this job** from the tray
+   does too (`tray`). A failed dismiss write never fails those presses.
+4. **The board carries the counts** (item 5a): each row's `board.replies`
+   lists its flagged replies and its open date suggestions, so Supplier
+   replied shows as soon as a reply lands, without opening the job.
+5. **Any reply stops Follow up** (item 5b): each order on the Arrival line
+   carries `replied_at`, the newest matched reply after the order was sent
+   that names that order, or names no order and is from the same supplier
+   (by `supplier_key`). Follow up (2 working days after sending, box at Sent)
+   is skipped once it is set.
+6. **Old orders count too** (item 5c): an order with no supplier box (`po:`
+   entries) now carries `sent_at` once its status says sent: its
+   `last_sent_at`, else when it was made. So the same 2-working-day Follow up
+   applies. On 18 Nov 2026 no such order sat on a job at a Dispatch stage, so
+   nothing new shows today.
+7. **The cut for old replies.** The migration dismisses every reply received
+   before 16 Nov 2026 00:00 Perth (`2026-11-15T16:00:00Z`) as `backfill`, and
+   every reply already put on a job from the tray as `tray` by that person.
+   On 18 Nov that left 46 replies on 21 jobs flagged, 42 of them on 18 jobs
+   at a Dispatch stage (Ian Tan and Breeanna Moran among them).
+
+Room left on purpose (not built, waiting on Shaun's word): a reply moving a
+pay-first box to Awaiting payment only when it is really a quote or invoice,
+and a job never showing under both To pay and Supplier replied. Both read the
+same `board.replies.flagged` and `arrival.orders[].material_stage_reply`, so
+neither needs a new field.
+
+### 3k.1 `dispatch_v2_replies_dismiss` (new, POST)
+
+`POST ?action=dispatch_v2_replies_dismiss` with `{ "email_id": "<uuid>" }`, or
+`{ "email_ids": ["<uuid>", ...] }` (1 to 50, for Dismiss all on one job). The
+ops key also sends `operator_email` naming a person in `users`.
+
+Staff only (the privileged ops key or a staff session, as every Dispatch
+reply action). Absent from `ROUTINE_ALLOWED_ACTIONS`,
+`AGENT_READ_ALLOWED_ACTIONS` and `LEAD_INSTALLER_READ_ACTIONS`.
+
+```json
+{ "ok": true, "dismissed": [{ "id": "<uuid>", "flagged": false, "dismissed_at": "2026-11-18T03:00:00Z", "dismissed_by_email": "ops@example.test", "dismissed_source": "button" }], "already_dismissed": [] }
+```
+
+`dismissed` holds the replies this press changed, in the same shape as
+`dispatch_v2_replies`' `emails`. A reply already dismissed is left as it was
+and listed in `already_dismissed` (two people pressing at once: the second
+changes nothing and writes no event). Refusals: 400 `invalid_request` (no id,
+an id not a uuid, more than 50), 400 `operator_required`, 404
+`email_not_found`, 409 `not_on_a_job` (the email is in the tray or hidden).
+
+### 3k.2 New fields on the existing reads
+
+- `dispatch_v2_replies`: each email gains `flagged` (true while it shows under
+  Supplier replied), `dismissed_at`, `dismissed_by_email` and
+  `dismissed_source`.
+- `dispatch_v2_suggestion_accept` and `dispatch_v2_suggestion_dismiss`: the
+  answer gains `reply_dismissed` (true when the press dismissed the reply).
+- `pipeline` with the v2 board, each row's `board`:
+
+```json
+"replies": {
+  "flagged": [{ "id": "<email id>", "supplier_name": "R&R Fencing", "received_at": "2026-11-16T05:46:00Z" }],
+  "open_suggestions": [{ "id": "<suggestion id>", "email_id": "<email id>", "order_id": "<uuid or null>", "supplier_name": "Stratco WA", "delivery_date": "2026-11-20" }]
+}
+```
+
+  `flagged` is newest first. Either list is `null` when its read failed (the
+  top-level `board.reads.replies` or `board.reads.suggestions` says
+  `failed`); the screen then falls back to what it had, never "none".
+- Each `arrival.orders[]` entry gains `replied_at` (null when no reply), and
+  a `po:` entry's `sent_at` is no longer always null (rule 6).
+
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 
 A purchase order with `source = 'dispatch'` is refused, before any job,

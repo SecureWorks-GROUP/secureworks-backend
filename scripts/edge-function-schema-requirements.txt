@@ -1282,3 +1282,12 @@ ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_
 ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.saved_amount
 ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.target_date
 ops-api|supabase/migrations/20261118042110_trade_savings_goals.sql|column|trade_savings_goals.updated_at
+
+# Dispatch v2 items 17 and 5: a supplier reply is flagged until someone
+# dismisses it. dispatch_v2_replies.ts (dispatch_v2_replies_dismiss and the reply
+# projection) and dispatch_board.ts (the board replies) read these columns.
+ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|column|dispatch_v2_supplier_emails.dismissed_at
+ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|column|dispatch_v2_supplier_emails.dismissed_by
+ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|column|dispatch_v2_supplier_emails.dismissed_by_email
+ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|column|dispatch_v2_supplier_emails.dismissed_source
+ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|constraint|dispatch_v2_supplier_emails_dismissed_shape

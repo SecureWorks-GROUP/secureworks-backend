@@ -75,6 +75,12 @@ export type EmailRow = {
   decided_by: string | null;
   decided_by_email: string | null;
   matched_at: string | null;
+  // Items 17 and 5 (migration 20261118153000): a matched reply shows under
+  // Supplier replied until a person dismisses it (the Dismiss button).
+  dismissed_at: string | null;
+  dismissed_by: string | null;
+  dismissed_by_email: string | null;
+  dismissed_source: "button" | "suggestion" | "tray" | "backfill" | null;
   created_at: string;
   updated_at: string;
 };
@@ -114,7 +120,11 @@ export type SuggestionRow = {
   updated_at: string;
 };
 
-export type NewEmailRow = Omit<EmailRow, "id" | "created_at" | "updated_at">;
+// A new row starts flagged: the dismissed fields are left out (null).
+type DismissedFields = "dismissed_at" | "dismissed_by" | "dismissed_by_email" | "dismissed_source";
+export type NewEmailRow =
+  & Omit<EmailRow, "id" | "created_at" | "updated_at" | DismissedFields>
+  & Partial<Pick<EmailRow, DismissedFields>>;
 export type NewSuggestionRow = Omit<
   SuggestionRow,
   "id" | "created_at" | "updated_at"
@@ -153,6 +163,17 @@ export interface RepliesStore {
     expectState: EmailRow["state"],
     patch: Partial<EmailRow>,
   ): Promise<EmailRow | null>;
+  /** Items 17 and 5: dismiss these matched replies. Only a reply still
+   * flagged changes (two people pressing at once: the second changes nothing);
+   * the rows changed are returned. */
+  markDismissed(
+    orgId: string,
+    ids: string[],
+    patch: Pick<
+      EmailRow,
+      "dismissed_at" | "dismissed_by" | "dismissed_by_email" | "dismissed_source"
+    >,
+  ): Promise<EmailRow[]>;
   emailsForJob(
     orgId: string,
     jobId: string,
@@ -195,12 +216,33 @@ export interface RepliesStore {
   ): Promise<boolean>;
 }
 
+// sender_via of one of OUR sent order emails put on a job (section 3g); the
+// same value as OUR_SENT_ORDER_VIA in dispatch_v2_outlook_on_send.ts (a test
+// holds the two together). It is never a supplier reply.
+export const OUR_SENT_ORDER_SENDER_VIA = "our_sent_order";
+
+/** Items 17 and 5 (18 Nov 2026): a supplier reply that shows under Supplier
+ * replied. Matched to a job, from a supplier (not one of our own sent
+ * orders), and nobody has dismissed it. Whatever it says: an
+ * acknowledgement counts too (Shaun, Q2 a). */
+export function dispatchV2ReplyFlagged(
+  e: {
+    state?: string | null;
+    job_id?: string | null;
+    dismissed_at?: string | null;
+    sender_via?: string | null;
+  } | null | undefined,
+): boolean {
+  return !!e && e.state === "matched" && !!e.job_id && !e.dismissed_at &&
+    e.sender_via !== OUR_SENT_ORDER_SENDER_VIA;
+}
+
 export const DISPATCH_V2_REPLIES_FLAG = "dispatch_v2_replies_v1";
 // business_events.source of the Outlook capture reader (outlook-mail-capture).
 export const CAPTURE_SOURCE = "outlook-mail-capture";
 
 export const EMAIL_SELECT =
-  "id, org_id, business_event_id, sequence_number, provider_message_id, conversation_id, received_at, from_email, subject, snippet, supplier_key, supplier_name, sender_via, order_desk, job_numbers, supplier_refs, delivery_date, delivery_read, state, rung, match_reason, job_id, order_id, candidates, rejected_order_ids, decision, decided_at, decided_by, decided_by_email, matched_at, created_at, updated_at";
+  "id, org_id, business_event_id, sequence_number, provider_message_id, conversation_id, received_at, from_email, subject, snippet, supplier_key, supplier_name, sender_via, order_desk, job_numbers, supplier_refs, delivery_date, delivery_read, state, rung, match_reason, job_id, order_id, candidates, rejected_order_ids, decision, decided_at, decided_by, decided_by_email, matched_at, dismissed_at, dismissed_by, dismissed_by_email, dismissed_source, created_at, updated_at";
 export const SUGGESTION_SELECT =
   "id, org_id, job_id, order_id, email_id, supplier_key, supplier_name, delivery_date, label, quote, flags, state, accepted_order_id, acted_at, acted_by, acted_by_email, created_at, updated_at";
 export const REF_SELECT =
@@ -451,6 +493,19 @@ export function postgrestRepliesStore(client: any): RepliesStore {
         .select(EMAIL_SELECT);
       if (error) failed("supplier email update", error);
       return data?.[0] ?? null;
+    },
+
+    async markDismissed(orgId, ids, patch) {
+      if (!ids.length) return [];
+      const { data, error } = await client.from("dispatch_v2_supplier_emails")
+        .update(patch)
+        .eq("org_id", orgId)
+        .in("id", ids)
+        .eq("state", "matched")
+        .is("dismissed_at", null)
+        .select(EMAIL_SELECT);
+      if (error) failed("supplier email dismiss", error);
+      return data || [];
     },
 
     async emailsForJob(orgId, jobId, limit) {
