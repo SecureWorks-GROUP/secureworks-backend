@@ -38,7 +38,9 @@ Set the job once (a ZZTEST job number):
 ```sql
 \set job_number 'ZZTEST-...'
 \timing on
-BEGIN READ ONLY;
+-- Read only, but no open transaction: inside one, now() stays at its start
+-- and a refresh landing later would read as newer than the as-of time.
+SET default_transaction_read_only = on;
 SELECT id AS job FROM public.jobs WHERE job_number = :'job_number' \gset
 ```
 
@@ -89,7 +91,6 @@ SELECT id AS job FROM public.jobs WHERE job_number = :'job_number' \gset
    SELECT public.context_job_story_book_stored(:'job', now()) IS NOT NULL;
    SELECT public.context_job_story_book_fast(:'job', now()) IS NOT NULL;
    SELECT public.job_story_stored_profit_as_at(:'job', now());
-   ROLLBACK;
    ```
 
    Record the three times. The stored read plus `as_at` should be faster than the
