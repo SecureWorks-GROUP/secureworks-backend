@@ -280,6 +280,7 @@ const WRITERS: Record<string, string> = {
   "ops-api/trade_line_send.ts releaseStandardInvoice update": "the standard invoice this send just made, before any run could stamp it",
   "ops-api/trade_line_send.ts saveHoldingInvoice update": "a holding invoice this send just made, draft to pending_ops_review only",
   "ops-api/trade_line_send.ts stampStandardSend update": "send_id only, on the invoice this send just made",
+  "ops-api/work_order_cap_before_xero.ts checkWorkOrderCapBeforeXero update": "pay_run_id is null filter, from draft only",
   "ops-api/trade_pay_run.ts payRunPushDepsFromClient update": "the run's own push (its own run id)",
   "ops-api/trade_pay_run_wait.ts holdTradeInvoiceForPayRun update": "from the saved status at send only",
   "xero-sync/index.ts sweepTradeBillPdfs update": "keyed on a Xero bill",
