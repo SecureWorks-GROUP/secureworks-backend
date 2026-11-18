@@ -167,13 +167,30 @@ const GENERAL_GST_TOTAL_RE = new RegExp(
   "gi",
 );
 
+const SUMMARY_BARE_GST_RE = new RegExp(
+  `(?<![A-Za-z\\-])GST${GST_RATE_QUAL}\\s*:?\\s*(?:AUD\\s*)?${MONEY_CAPTURE}`,
+  "gi",
+);
+
 const NON_TOTAL_PREFIX_RE =
   /\b(?:sub|line|item|unit|net|gst|tax|discount|credit(?:ed)?|adjustment)[\s\-]*$/i;
 const CREDIT_DISQUALIFYING_PREFIX_RE = /\b(?:original|prior|previous)\s+$/i;
-const INVOICE_TOTAL_PREFIX_RE =
-  /\b(?:original(?:\s+tax)?(?:\s+invoice)?|tax\s+invoice|invoice|bill|purchase\s+order)\s+$/i;
+const INVOICE_LINE_KEYWORD_RE =
+  /\b(?:original(?:\s+tax)?(?:\s+invoice)?|against(?:\s+tax)?\s+invoice|re:?[\s]+(?:tax\s+)?invoice|applies\s+to|(?:tax\s+)?invoice|bill|purchase\s+order)\b/gi;
 const ORIGINAL_TOTAL_PREFIX_RE =
   /\b(?:original(?:\s+tax)?(?:\s+invoice)?)\s+$/i;
+
+function hasInvoiceLinePrefix(beforeOnLine: string): boolean {
+  let lastEnd = -1;
+  INVOICE_LINE_KEYWORD_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = INVOICE_LINE_KEYWORD_RE.exec(beforeOnLine)) !== null) {
+    lastEnd = m.index + m[0].length;
+  }
+  if (lastEnd < 0) return false;
+  const tail = beforeOnLine.slice(lastEnd);
+  return !/\b(?:credit|adjustment)\b/i.test(tail);
+}
 
 interface MoneyMatch {
   cents: number;
@@ -233,18 +250,42 @@ function allSameCents(matches: ReadonlyArray<MoneyMatch>): boolean {
   return matches.every((m) => m.cents === first);
 }
 
+function hasInvoiceHeadingBetween(
+  text: string,
+  fromIndex: number,
+  toIndex: number,
+): boolean {
+  if (toIndex <= fromIndex) return false;
+  const between = text.slice(fromIndex, toIndex);
+  for (const line of between.split(/\r?\n/)) {
+    if (hasInvoiceLinePrefix(`${line} `)) return true;
+  }
+  return false;
+}
+
 function filterToCreditSection(
+  text: string,
   matches: ReadonlyArray<MoneyMatch>,
   sectionStart: number,
   incMatch: MoneyMatch | null,
   firstLaterRejected: MoneyMatch | null,
+  opts: { isCredit: boolean },
 ): MoneyMatch[] {
   return matches.filter((m) => {
     if (m.index < sectionStart) return false;
-    if (incMatch && firstLaterRejected && m.index >= incMatch.end) {
-      const distToCredit = m.index - incMatch.end;
-      const distToRejected = firstLaterRejected.index - m.end;
-      if (distToCredit >= distToRejected) return false;
+    if (incMatch && m.index >= incMatch.end) {
+      if (firstLaterRejected) return false;
+      if (opts.isCredit && hasInvoiceHeadingBetween(text, incMatch.end, m.index)) {
+        return false;
+      }
+    }
+    if (
+      opts.isCredit &&
+      incMatch &&
+      m.end <= incMatch.index &&
+      hasInvoiceHeadingBetween(text, m.end, incMatch.index)
+    ) {
+      return false;
     }
     return true;
   });
@@ -268,8 +309,7 @@ function parseAmountsInternal(
     needsReview: true,
   };
 
-  // 1. Resolve inc-GST total: credit/amount-credited labelled first (refusing
-  //    if two candidates differ), else the last general total in document order.
+  // 1. Resolve credit-labelled matches first and refuse if any pair differs.
   const creditIncMatches = opts.isCredit
     ? collectMoneyMatches(
       text,
@@ -277,15 +317,38 @@ function parseAmountsInternal(
       (before) => !CREDIT_DISQUALIFYING_PREFIX_RE.test(before),
     )
     : [];
-  if (!allSameCents(creditIncMatches)) return review;
+  const creditExMatches = opts.isCredit
+    ? collectMoneyMatches(
+      text,
+      CREDIT_EX_TOTAL_RE,
+      (before) => !CREDIT_DISQUALIFYING_PREFIX_RE.test(before),
+    )
+    : [];
+  const creditGstMatches = opts.isCredit
+    ? collectMoneyMatches(
+      text,
+      CREDIT_GST_TOTAL_RE,
+      (before) => !CREDIT_DISQUALIFYING_PREFIX_RE.test(before),
+    )
+    : [];
+  if (
+    !allSameCents(creditIncMatches) ||
+    !allSameCents(creditExMatches) ||
+    !allSameCents(creditGstMatches)
+  ) {
+    return review;
+  }
 
+  // 2. Collect all unlabelled totals across the document first. Any two
+  //    different unlabelled totals anywhere in the document set needs_review
+  //    with no figure taken.
   const invoicePrefixedIncSpans: MoneyMatch[] = [];
-  const generalIncMatches = collectMoneyMatches(
+  const rawGeneralIncMatches = collectMoneyMatches(
     text,
     GENERAL_INC_TOTAL_RE,
     (before) => {
       if (NON_TOTAL_PREFIX_RE.test(before)) return false;
-      if (opts.isCredit && INVOICE_TOTAL_PREFIX_RE.test(before)) {
+      if (opts.isCredit && hasInvoiceLinePrefix(before)) {
         return false;
       }
       if (!opts.isCredit && ORIGINAL_TOTAL_PREFIX_RE.test(before)) {
@@ -294,14 +357,70 @@ function parseAmountsInternal(
       return true;
     },
   );
+  const rawGeneralExMatches = collectMoneyMatches(
+    text,
+    GENERAL_EX_TOTAL_RE,
+    (before) => {
+      if (/\b(?:line|item|unit|credit(?:ed)?|adjustment)[\s\-]*$/i.test(before)) {
+        return false;
+      }
+      if (opts.isCredit && hasInvoiceLinePrefix(before)) return false;
+      if (!opts.isCredit && ORIGINAL_TOTAL_PREFIX_RE.test(before)) return false;
+      return true;
+    },
+  );
+  const rawGeneralGstMatches = collectMoneyMatches(
+    text,
+    GENERAL_GST_TOTAL_RE,
+    (before) => {
+      if (NON_TOTAL_PREFIX_RE.test(before)) return false;
+      if (opts.isCredit && hasInvoiceLinePrefix(before)) return false;
+      if (!opts.isCredit && ORIGINAL_TOTAL_PREFIX_RE.test(before)) return false;
+      return true;
+    },
+  );
+  if (
+    !allSameCents(rawGeneralIncMatches) ||
+    !allSameCents(rawGeneralExMatches) ||
+    !allSameCents(rawGeneralGstMatches)
+  ) {
+    return review;
+  }
+
   if (opts.isCredit) {
-    const rawGeneral = collectMoneyMatches(
+    const rawInvoicePrefixed = collectMoneyMatches(
       text,
       GENERAL_INC_TOTAL_RE,
       (before) =>
-        !NON_TOTAL_PREFIX_RE.test(before) && INVOICE_TOTAL_PREFIX_RE.test(before),
+        !NON_TOTAL_PREFIX_RE.test(before) && hasInvoiceLinePrefix(before),
     );
-    invoicePrefixedIncSpans.push(...rawGeneral);
+    invoicePrefixedIncSpans.push(...rawInvoicePrefixed);
+  }
+
+  const creditExOrGstSpans = [...creditExMatches, ...creditGstMatches];
+  const creditSectionAnchor: number = creditIncMatches.length === 0 &&
+      creditExOrGstSpans.length > 0
+    ? Math.min(...creditExOrGstSpans.map((m) => m.index))
+    : -1;
+  const creditSectionEnd: number = creditIncMatches.length === 0 &&
+      creditExOrGstSpans.length > 0
+    ? Math.max(...creditExOrGstSpans.map((m) => m.end))
+    : -1;
+
+  const generalIncMatches: MoneyMatch[] = [];
+  for (const m of rawGeneralIncMatches) {
+    if (creditSectionAnchor >= 0 && m.end <= creditSectionAnchor) {
+      invoicePrefixedIncSpans.push(m);
+    } else if (
+      opts.isCredit &&
+      creditSectionEnd >= 0 &&
+      m.index >= creditSectionEnd &&
+      hasInvoiceHeadingBetween(text, creditSectionEnd, m.index)
+    ) {
+      invoicePrefixedIncSpans.push(m);
+    } else {
+      generalIncMatches.push(m);
+    }
   }
 
   const chosenIncMatch: MoneyMatch | null = creditIncMatches.length > 0
@@ -331,33 +450,14 @@ function parseAmountsInternal(
     sectionStart = rejectedIncSpans[rejectedIncSpans.length - 1].end;
   }
 
-  // 2. Resolve ex-GST total (credit-labelled first, refusing if two differ;
-  //    else last in the credit section).
-  const creditExMatches = opts.isCredit
-    ? collectMoneyMatches(
-      text,
-      CREDIT_EX_TOTAL_RE,
-      (before) => !CREDIT_DISQUALIFYING_PREFIX_RE.test(before),
-    )
-    : [];
-  if (!allSameCents(creditExMatches)) return review;
-
+  // 3. Resolve ex-GST total (credit-labelled first, else within credit section).
   const generalExMatches = filterToCreditSection(
-    collectMoneyMatches(
-      text,
-      GENERAL_EX_TOTAL_RE,
-      (before) => {
-        if (/\b(?:line|item|unit|credit(?:ed)?|adjustment)[\s\-]*$/i.test(before)) {
-          return false;
-        }
-        if (opts.isCredit && INVOICE_TOTAL_PREFIX_RE.test(before)) return false;
-        if (!opts.isCredit && ORIGINAL_TOTAL_PREFIX_RE.test(before)) return false;
-        return true;
-      },
-    ),
+    text,
+    rawGeneralExMatches,
     sectionStart,
     chosenIncMatch,
     firstLaterRejected,
+    opts,
   );
 
   const chosenExMatch: MoneyMatch | null = creditExMatches.length > 0
@@ -366,34 +466,15 @@ function parseAmountsInternal(
     ? generalExMatches[generalExMatches.length - 1]
     : null;
 
-  // 3. Resolve document-level GST total only (never bare/line GST).
-  const creditGstMatches = opts.isCredit
-    ? collectMoneyMatches(
-      text,
-      CREDIT_GST_TOTAL_RE,
-      (before) => !CREDIT_DISQUALIFYING_PREFIX_RE.test(before),
-    )
-    : [];
-  if (!allSameCents(creditGstMatches)) return review;
-
+  // 4. Resolve document-level GST total only (never bare/line GST).
   const generalGstMatches = filterToCreditSection(
-    collectMoneyMatches(
-      text,
-      GENERAL_GST_TOTAL_RE,
-      (before) => {
-        if (NON_TOTAL_PREFIX_RE.test(before)) return false;
-        if (opts.isCredit && INVOICE_TOTAL_PREFIX_RE.test(before)) return false;
-        if (!opts.isCredit && ORIGINAL_TOTAL_PREFIX_RE.test(before)) return false;
-        return true;
-      },
-    ),
+    text,
+    rawGeneralGstMatches,
     sectionStart,
     chosenIncMatch,
     firstLaterRejected,
+    opts,
   );
-  if (chosenIncMatch && !allSameCents(generalGstMatches) && creditGstMatches.length === 0) {
-    return review;
-  }
 
   const chosenGstMatch: MoneyMatch | null = creditGstMatches.length > 0
     ? creditGstMatches[creditGstMatches.length - 1]
@@ -405,7 +486,7 @@ function parseAmountsInternal(
   const gstCents: number | null = chosenGstMatch ? chosenGstMatch.cents : null;
   let incCents: number | null = chosenIncMatch ? chosenIncMatch.cents : null;
 
-  // 4. Cross-check ex + GST against inc (tolerance: 1 cent), or derive a
+  // 5. Cross-check ex + GST against inc (tolerance: 1 cent), or derive a
   //    missing figure only from a document-level GST total.
   if (exCents !== null && incCents !== null && gstCents !== null) {
     if (Math.abs(exCents + gstCents - incCents) > 1) {
@@ -421,12 +502,36 @@ function parseAmountsInternal(
     if ((incCents > 0 && exCents <= 0) || (exCents > 0 && incCents <= 0)) {
       return review;
     }
+    if (exCents > 0 && incCents - exCents > Math.round(exCents * 0.1) + 1) {
+      return review;
+    }
+    if (chosenExMatch) {
+      const summaryBareGst = filterToCreditSection(
+        text,
+        collectMoneyMatches(
+          text,
+          SUMMARY_BARE_GST_RE,
+          (before) => before.trim() === "",
+        ),
+        chosenExMatch.end,
+        chosenIncMatch,
+        firstLaterRejected,
+        opts,
+      );
+      if (summaryBareGst.length > 0) {
+        if (!allSameCents(summaryBareGst)) return review;
+        const summaryGstCents = summaryBareGst[summaryBareGst.length - 1].cents;
+        if (Math.abs(exCents + summaryGstCents - incCents) > 1) {
+          return review;
+        }
+      }
+    }
   } else if (exCents === null && incCents !== null && gstCents !== null) {
     if (incCents === 0 && gstCents === 0) {
       incCents = null;
     } else {
       const derivedEx = incCents - gstCents;
-      if (derivedEx <= 0) {
+      if (derivedEx <= 0 || gstCents > Math.round(derivedEx * 0.1) + 1) {
         return review;
       }
       exCents = derivedEx;
@@ -434,7 +539,10 @@ function parseAmountsInternal(
   } else if (incCents === null && exCents !== null && gstCents !== null) {
     if (exCents === 0 && gstCents === 0) {
       exCents = null;
-    } else if (exCents <= 0 && gstCents > 0) {
+    } else if (
+      exCents <= 0 && gstCents > 0 ||
+      exCents > 0 && gstCents > Math.round(exCents * 0.1) + 1
+    ) {
       return review;
     } else {
       incCents = exCents + gstCents;
