@@ -35,6 +35,7 @@ import { recordWorkOrderPeopleChange } from "./work_order_amount_change.ts";
 import { clientSignoffForm, hasOfficeClientConfirmation, validSignoffDay, SIGNED_CLIENT_COPY_COLUMNS } from "./client_signoff_form_data.ts";
 import { GOOGLE_REVIEW_URL as SEEDED_GOOGLE_REVIEW_URL } from "../_shared/google_review_link.ts";
 import { signatureDataUrl } from "../_shared/signature_image.ts";
+import { readGroupClaimFlow, confirmGroupWorkOrderHours, readGroupClaim } from "./group_claim.ts";
 import { readSwitch } from "../_shared/switch_cache.ts";
 import { calculateTradeInvoiceMoney, TRADE_INVOICE_EMPLOYER_SUPER_BASIS, TRADE_INVOICE_WORKER_WITHHOLD_RATE } from "./trade_invoice_money.ts";
 import { resolveTradeInvoiceTimeEntry } from "./trade_invoice_time_entry.ts";
@@ -1560,6 +1561,10 @@ export async function submitGroupWorkOrderHours(
   const group = await resolveGroup(client, body);
   const participants = await loadParticipants(client, String(group.id));
   requireParticipant(participants, caller.userId);
+  if (await readGroupClaimFlow(client)) {
+    await confirmGroupWorkOrderHours(client, caller.userId, { group_id: group.id, days: [body] }, "upsert");
+    return await readGroupWorkOrderMyShare(client, caller, { group_id: group.id });
+  }
   const entry = groupHoursFromBody(body);
   const { error } = await client.from("group_work_order_time_entries").upsert({
     group_id: group.id,
@@ -1592,6 +1597,10 @@ export async function deleteGroupWorkOrderHours(
       "Name the day to remove.",
       400,
     );
+  }
+  if (await readGroupClaimFlow(client)) {
+    await confirmGroupWorkOrderHours(client, caller.userId, { group_id: group.id, days: [{ work_date: workDate }] }, "delete");
+    return await readGroupWorkOrderMyShare(client, caller, { group_id: group.id });
   }
   const { error } = await client.from("group_work_order_time_entries").delete()
     .eq("group_id", group.id).eq("user_id", caller.userId).eq(
@@ -2557,6 +2566,9 @@ export async function readGroupWorkOrderMyShare(
       const pay = await allInSharePay(client, group, myShare);
       Object.assign(response, {my_budget: myShare, my_share: pay.invoice_ex, my_cash_pay: pay.cash_pay, my_super: pay.super_amount, budget_remainder: pay.budget_remainder});
     }
+  }
+  if (await readGroupClaimFlow(client)) {
+    Object.assign(response, { claim: await readGroupClaim(client, String(group.id), caller.userId) });
   }
   return response;
 }
