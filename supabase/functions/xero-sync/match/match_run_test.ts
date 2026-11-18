@@ -51,6 +51,9 @@ type World = {
   timeout?: string;
   // match_slow_bills rows, kept across calls like the table.
   slowBills?: Array<{ subject_id: string; cuts: number; reason: string; parked_at?: string | null }>;
+  // The runner's fake clock (ms). A slow read moves it on when it answers or is
+  // cut, so what the runner decides never depends on how fast the machine is.
+  clock: { t: number };
 };
 
 // match_bill_read's named reads, by the table (or function) each reads.
@@ -108,10 +111,14 @@ function answer(w: World, target: string, signal: AbortSignal | null, result: ()
   if (w.slow?.target !== target || (w.slow.only !== undefined && w.slow.only !== doc)) return Promise.resolve(result());
   const slow = w.slow;
   return new Promise((done) => {
-    const timer = setTimeout(() => done(result()), slow.ms);
+    const timer = setTimeout(() => {
+      w.clock.t += slow.ms;
+      done(result());
+    }, slow.ms);
     if (slow.mode === "abort") {
       signal?.addEventListener("abort", () => {
         clearTimeout(timer);
+        w.clock.t += 1_000_000; // past any budget in these tests
         done({ data: null, error: { message: "AbortError: signal is aborted without reason" } });
       });
     }
@@ -324,7 +331,9 @@ const sealedOrder = {
   from_sealed_scope: true,
   matched: false,
 };
-const world = (over: Partial<World> = {}): World => ({ queries: [], rpcs: [], ...over });
+const world = (over: Partial<World> = {}): World => ({ queries: [], rpcs: [], clock: { t: 0 }, ...over });
+/** The world's fake clock, for the runner's `now`. */
+const clockOf = (w: World) => () => w.clock.t;
 const applies = (w: World) => w.rpcs.filter((r) => r.fn === "match_apply");
 const requeues = (w: World) => (w.upserts ?? []).filter((u) => u.table === "match_queue");
 
@@ -738,7 +747,7 @@ Deno.test("one slow bill: its request is cut at the run's time, the bill requeue
   // The orders read answers only when cut short, as a stuck query would.
   const w = world({ lines: Object.assign({}, billLines("a"), billLines("b")), slow: { target: "v_job_orders", ms: 60_000, mode: "abort" } });
   const started = Date.now();
-  const report = await runMatchFor(fake(w), ["xero_bill:a", "xero_bill:b"], { ruleVersion: "v1", budgetMs: 150 });
+  const report = await runMatchFor(fake(w), ["xero_bill:a", "xero_bill:b"], { ruleVersion: "v1", budgetMs: 150, now: clockOf(w) });
   const took = Date.now() - started;
   assert(took < 2_000, `bounded by the budget, took ${took} ms`);
   assertEquals(report.failed, { over_run_time: 1 });
@@ -753,7 +762,7 @@ Deno.test("one slow bill: its request is cut at the run's time, the bill requeue
 Deno.test("one slow bill: a read that answers after the time is not followed by the write", async () => {
   // The evidence read ignores the signal and answers late with no error.
   const w = world({ lines: billLines(), slow: { target: "context_job_evidence_for_bills", ms: 300, mode: "late" } });
-  const report = await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1", budgetMs: 100 });
+  const report = await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1", budgetMs: 100, now: clockOf(w) });
   assertEquals(applies(w).length, 0, "match_apply is never started once the time is up");
   assertEquals(report.failed, { over_run_time: 1 });
   assertEquals(requeues(w)[0].rows[0].reason, "over_run_time");
@@ -761,7 +770,7 @@ Deno.test("one slow bill: a read that answers after the time is not followed by 
 
 Deno.test("one slow bill: a write cut short is requeued and counted apart, never as applied", async () => {
   const w = world({ lines: billLines(), slow: { target: "match_apply", ms: 60_000, mode: "abort" } });
-  const report = await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1", budgetMs: 150 });
+  const report = await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1", budgetMs: 150, now: clockOf(w) });
   assertEquals(applies(w).length, 1);
   assertEquals(report.applied, {});
   assertEquals(report.failed, { apply_over_run_time: 1 });
@@ -774,7 +783,7 @@ Deno.test("one slow bill in the sync: the step ends near its budget and the othe
     slow: { target: "v_job_orders", ms: 60_000, mode: "abort" },
   });
   const started = Date.now();
-  const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:a", "xero_bill:b", "xero_bill:c"], budgetMs: 150 });
+  const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:a", "xero_bill:b", "xero_bill:c"], budgetMs: 150, now: clockOf(w) });
   assert(Date.now() - started < 2_000);
   assertEquals([out.run, applies(w).length], [1, 0]);
   assertEquals(requeues(w).length, 1);
@@ -841,17 +850,17 @@ const slowA = (over: Partial<World> = {}) =>
 
 Deno.test("parking: two cuts that started with the whole budget park the bill; the next run passes over it and the bills behind it run", async () => {
   const w = slowA();
-  const one = await runMatchFor(fake(w), ["xero_bill:a", "xero_bill:b"], { ruleVersion: "v1", budgetMs: 120 });
+  const one = await runMatchFor(fake(w), ["xero_bill:a", "xero_bill:b"], { ruleVersion: "v1", budgetMs: 120, now: clockOf(w) });
   assertEquals([one.failed, one.parked], [{ over_run_time: 1 }, 0]);
   assertEquals(w.slowBills?.map((b) => [b.subject_id, b.cuts, b.reason]), [["xero_bill:a", 1, "slow_bill_cut"]]);
   assertEquals(requeues(w)[0].rows.map((r: any) => r.subject_id), ["xero_bill:a", "xero_bill:b"]);
   w.upserts = [];
-  const two = await runMatchFor(fake(w), ["xero_bill:a", "xero_bill:b"], { ruleVersion: "v1", budgetMs: 120 });
+  const two = await runMatchFor(fake(w), ["xero_bill:a", "xero_bill:b"], { ruleVersion: "v1", budgetMs: 120, now: clockOf(w) });
   assertEquals(two.parked, 1, "the second cut parks it, with a named reason");
   assertEquals(w.slowBills?.map((b) => [b.subject_id, b.cuts, b.reason, !!b.parked_at]), [["xero_bill:a", 2, "parked_slow_bill", true]]);
   assertEquals(requeues(w)[0].rows.map((r: any) => r.subject_id), ["xero_bill:b"], "a parked bill is not requeued");
   w.upserts = [];
-  const three = await runMatchFor(fake(w), ["xero_bill:a", "xero_bill:b"], { ruleVersion: "v1", budgetMs: 120 });
+  const three = await runMatchFor(fake(w), ["xero_bill:a", "xero_bill:b"], { ruleVersion: "v1", budgetMs: 120, now: clockOf(w) });
   assertEquals(three.skipped, { parked_slow_bill: 1 });
   assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:b"], "the bill behind it runs");
   assertEquals(requeues(w).length, 0);
@@ -935,7 +944,7 @@ Deno.test("parking: a failed park read or write loses no bill", async () => {
   assertEquals(r.backlogAt, pos, "the backlog bill was not reached: the position stays");
   // Write fails on the second cut: the bill is requeued, not parked.
   const wf = slowA({ slowBills: [{ subject_id: "xero_bill:a", cuts: 1, reason: "slow_bill_cut" }], fail: "match_slow_bills:upsert" });
-  const o2 = await runMatchFor(fake(wf), ["xero_bill:a"], { ruleVersion: "v1", budgetMs: 120 });
+  const o2 = await runMatchFor(fake(wf), ["xero_bill:a"], { ruleVersion: "v1", budgetMs: 120, now: clockOf(wf) });
   assertEquals([o2.parked, o2.failed.slow_bill_write_failed], [0, 1]);
   assertEquals(requeues(wf)[0].rows.map((x: any) => [x.subject_id, x.reason]), [["xero_bill:a", "over_run_time"]]);
 });
@@ -949,7 +958,7 @@ Deno.test("parking through the sync step (what xero-sync calls): a slow backlog 
   });
   const sync = async () => {
     w.upserts = [];
-    const out = await syncMatchStep(fake(w), { on: true, changed: [], budgetMs: 120 });
+    const out = await syncMatchStep(fake(w), { on: true, changed: [], budgetMs: 120, now: clockOf(w) });
     // What the sync put back on the queue is what the next sync reads first.
     w.queue = requeues(w).flatMap((u: any) => u.rows).map((r: any) => ({ subject_kind: "cost_document", subject_id: r.subject_id }));
     return out;
@@ -970,4 +979,32 @@ Deno.test("parking through the sync step (what xero-sync calls): a slow backlog 
   assertEquals([four.skipped, four.parked, four.failed], [{ parked_slow_bill: 1 }, 0, {}]);
   assertEquals(applies(w).map((x) => x.args.p_subject_id), ["xero_bill:b", "xero_bill:c"]);
   assertEquals(w.slowBills?.length, 1, "still parked until its lines change");
+});
+
+Deno.test("parking: a park 24 hours old is tried once more; cut again it is parked again with its count kept, run clean its row goes", async () => {
+  const parkedAt = "2026-11-18T00:00:00.000Z";
+  const day = 24 * 60 * 60 * 1000;
+  const parked = () => [{ subject_id: "xero_bill:a", cuts: 2, reason: "parked_slow_bill", parked_at: parkedAt }];
+  // Under 24 hours: passed over.
+  const young = slowA({ slowBills: parked(), clock: { t: Date.parse(parkedAt) + day - 1 } });
+  const y = await runMatchFor(fake(young), ["xero_bill:a"], { ruleVersion: "v1", budgetMs: 120, now: clockOf(young) });
+  assertEquals([y.skipped, y.parked_retried, young.queries.some((q) => q.table === "context_job_evidence_for_bills")], [{ parked_slow_bill: 1 }, 0, false]);
+  // 24 hours: tried once; still slow, so parked again, count kept at 2, the park time moved on, not requeued.
+  const old = slowA({ slowBills: parked(), clock: { t: Date.parse(parkedAt) + day } });
+  const retryAt = old.clock.t;
+  const o = await runMatchFor(fake(old), ["xero_bill:a"], { ruleVersion: "v1", budgetMs: 120, now: clockOf(old) });
+  assertEquals([o.parked_retried, o.parked, o.failed], [1, 1, { over_run_time: 1 }]);
+  assertEquals(old.slowBills?.map((b) => [b.cuts, b.reason, b.parked_at]), [[2, "parked_slow_bill", new Date(retryAt + 1_000_000).toISOString()]]);
+  assertEquals(requeues(old).length, 0);
+  // The next run, straight after: passed over again (the retry is once a day).
+  const after = await runMatchFor(fake(old), ["xero_bill:a"], { ruleVersion: "v1", budgetMs: 120, now: clockOf(old) });
+  assertEquals([after.skipped, after.parked_retried], [{ parked_slow_bill: 1 }, 0]);
+  // 24 hours and quick now: runs, applied, its row deleted.
+  const healed = world({ lines: billLines("a"), slowBills: parked(), clock: { t: Date.parse(parkedAt) + day } });
+  const h = await runMatchFor(fake(healed), ["xero_bill:a"], { ruleVersion: "v1", now: clockOf(healed) });
+  assertEquals([h.parked_retried, applies(healed).length, healed.slowBills], [1, 1, []]);
+  // An unreadable park time never retries.
+  const odd = world({ lines: billLines("a"), slowBills: [{ ...parked()[0], parked_at: null }], clock: { t: Date.parse(parkedAt) + 10 * day } });
+  const u = await runMatchFor(fake(odd), ["xero_bill:a"], { ruleVersion: "v1", now: clockOf(odd) });
+  assertEquals([u.skipped, applies(odd).length], [{ parked_slow_bill: 1 }, 0]);
 });

@@ -40,7 +40,9 @@
 // bill cut while it started with more than half the run's budget is counted in
 // match_slow_bills; at two such cuts it is parked (`parked_slow_bill`, counted
 // in `parked` and then in `skipped`) and passed over by every path until the
-// sync reports its lines changed. A clean run clears the count.
+// sync reports its lines changed, except one more try once the park is 24
+// hours old (cut again, parked again, count kept). A clean run clears the
+// count. Deleting a bill's row in match_slow_bills is the manual undo.
 //
 // A bill with a person's labour on it is never matched here: no clue, no
 // shadow row, no item. It is skipped and counted (`labour_bill`). That is a
@@ -101,8 +103,10 @@ export interface MatchRunReport {
   run: number;
   applied: Record<string, number>;
   requeued: number;
-  /** Bills parked this run after their second cut (`parked_slow_bill`). */
+  /** Bills parked this run after their second cut (`parked_slow_bill`), a retried one parked again included. */
   parked: number;
+  /** Parked bills tried once more this run because their park is 24 hours old. */
+  parked_retried: number;
   skipped: Record<string, number>;
   failed: Record<string, number>;
 }
@@ -122,6 +126,8 @@ export const PARKED_SLOW_BILL = "parked_slow_bill";
 export const MATCH_SLOW_START_SHARE = 0.5;
 /** Cuts that park a bill. */
 export const MATCH_SLOW_PARK_CUTS = 2;
+/** A parked bill is tried once more after this long (director 03:57); cut again, it is parked again with its count kept. */
+export const MATCH_PARKED_RETRY_MS = 24 * 60 * 60 * 1000;
 
 /** Postgres ended the statement at its statement_timeout (match_bill_read's 5 s). */
 const statementTimedOut = (error: unknown) => (error as { code?: unknown } | null)?.code === "57014";
@@ -467,7 +473,7 @@ async function requeueAll(sb: Sb, rows: Requeue[], report: MatchRunReport): Prom
   }
 }
 
-type SlowRow = { subject_id: string; cuts: number; reason: string };
+type SlowRow = { subject_id: string; cuts: number; reason: string; parked_at?: string | null };
 /** What a run learned about slow bills: counts to write, parks, and counts to clear. */
 type SlowPlan = { cut: Map<string, number>; clear: Set<string> };
 
@@ -479,7 +485,7 @@ async function readSlowBills(sb: Sb, ids: string[]): Promise<Map<string, SlowRow
   const out = new Map<string, SlowRow>();
   for (let i = 0; i < ids.length; i += MATCH_BACKLOG_CHUNK) {
     const rows = await timedRead<SlowRow[]>("read_slow_bills",
-      sb.from("match_slow_bills").select("subject_id,cuts,reason").eq("subject_kind", "cost_document")
+      sb.from("match_slow_bills").select("subject_id,cuts,reason,parked_at").eq("subject_kind", "cost_document")
         .in("subject_id", ids.slice(i, i + MATCH_BACKLOG_CHUNK)));
     for (const r of rows ?? []) out.set(r.subject_id, r);
   }
@@ -491,9 +497,9 @@ async function readSlowBills(sb: Sb, ids: string[]): Promise<Map<string, SlowRow
  * delete). A park that could not be written is requeued instead, so no bill is
  * lost; a failed write is counted, never thrown.
  */
-async function settleSlowBills(sb: Sb, slow: SlowPlan, requeue: Requeue[], report: MatchRunReport): Promise<void> {
+async function settleSlowBills(sb: Sb, slow: SlowPlan, requeue: Requeue[], report: MatchRunReport, now: () => number): Promise<void> {
   if (slow.cut.size) {
-    const at = new Date().toISOString();
+    const at = new Date(now()).toISOString();
     const rows = [...slow.cut].map(([subject_id, cuts]) => ({
       subject_kind: "cost_document",
       subject_id,
@@ -587,10 +593,16 @@ async function runCore(
     }
     const known = fresh.has(id) ? undefined : slowRows?.get(id);
     if (known?.reason === PARKED_SLOW_BILL) {
-      // Reached, so a backlog position moves past it; never requeued.
-      bump(report.skipped, PARKED_SLOW_BILL);
-      reached.add(id);
-      continue;
+      const parkedAt = Date.parse(String(known.parked_at ?? ""));
+      // One more try once the park is 24 hours old (a spell of database strain
+      // must not park a healthy bill for good); an unreadable time never retries.
+      if (!(parkedAt <= now() - MATCH_PARKED_RETRY_MS)) {
+        // Reached, so a backlog position moves past it; never requeued.
+        bump(report.skipped, PARKED_SLOW_BILL);
+        reached.add(id);
+        continue;
+      }
+      report.parked_retried++;
     }
     const at = now();
     if (at > deadline) {
@@ -611,7 +623,7 @@ async function runCore(
       // A cut counts only when the bill started with most of the budget: a
       // bill that started late was cut by the bills before it.
       if ((code === OVER_TIME || code === APPLY_OVER_TIME) && deadline - at > opts.budgetMs * MATCH_SLOW_START_SHARE) {
-        const cuts = (fresh.has(id) ? 0 : known?.cuts ?? 0) + 1;
+        const cuts = Math.min(MATCH_SLOW_PARK_CUTS, (fresh.has(id) ? 0 : known?.cuts ?? 0) + 1);
         slow.cut.set(id, cuts);
         slow.clear.delete(id);
         if (cuts >= MATCH_SLOW_PARK_CUTS) continue; // parked when written; requeued if the write fails
@@ -629,7 +641,7 @@ async function runCore(
   return { requeue: out, reached, slow };
 }
 
-const emptyReport = (): MatchRunReport => ({ run: 0, applied: {}, requeued: 0, parked: 0, skipped: {}, failed: {} });
+const emptyReport = (): MatchRunReport => ({ run: 0, applied: {}, requeued: 0, parked: 0, parked_retried: 0, skipped: {}, failed: {} });
 const subjectsOf = (ids: unknown[]) =>
   [...new Set(ids.filter((s): s is string => typeof s === "string" && s.includes(":")))];
 
@@ -644,7 +656,7 @@ export async function runMatchFor(
   const now = opts.now ?? Date.now;
   const budgetMs = opts.budgetMs ?? MATCH_RUN_BUDGET_MS;
   const { requeue, slow } = await runCore(sb, ids, now() + budgetMs, now, report, { budgetMs });
-  await settleSlowBills(sb, slow, requeue, report);
+  await settleSlowBills(sb, slow, requeue, report, now);
   await requeueAll(sb, requeue, report);
   if (Object.keys(report.failed).length) console.error("[match_run] failures", JSON.stringify(report.failed));
   return report;
@@ -866,7 +878,7 @@ export async function syncMatchRun(
       }
     }
   }
-  await settleSlowBills(sb, slow, requeue, report);
+  await settleSlowBills(sb, slow, requeue, report, now);
   await requeueAll(sb, requeue, report);
   if (Object.keys(report.failed).length || report.errors.length) {
     console.error("[match_run] sync step", JSON.stringify({ failed: report.failed, errors: report.errors }));
