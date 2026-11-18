@@ -338,6 +338,7 @@ for (const [label, screen] of Object.entries(costScreens)) {
       s.tables.job_assignments = [attendance(today), attendance(changeDay)];
       const out = await screen(s);
       assertEquals(out.rate_assumed, 0);
+      assertEquals(out.rate_missing, 0);
       assertEquals(out.trades[0].hours, 4);
       assertEquals(out.trades[0].cost, 108);
       assertEquals(out.trades[0].rate, 27);
@@ -417,14 +418,40 @@ for (const [label, screen] of Object.entries(costScreens)) {
       );
     }));
 
-  Deno.test(`${label} labour screen refuses missing or unreadable rates and retries after an office correction`, async () => {
-    const s = store([]);
-    s.tables.job_assignments = [attendance(today)];
-    await assertRejects(() => screen(s), ApiError, "trade_rate_missing");
-    s.tables.trade_rates.push(nextRate());
-    const retried = await screen(s);
+  Deno.test(`${label} labour screen leaves a trade with no rate history out of the totals, counts it, and retries after an office correction`, async () => {
+    const s = store([{ ...oldRate(), user_id: "second-trade-fixture" }]);
+    s.tables.job_assignments = [
+      attendance(today),
+      attendance(changeDay),
+      { ...attendance(today), user_id: "second-trade-fixture" },
+    ];
+    const out = await screen(s);
+    assertEquals(out.rate_missing, 2);
+    assertEquals(out.rate_assumed, 0);
+    assertEquals(
+      out.trades.map((r: Row) => [r.user_id, r.hours, r.cost]),
+      [["second-trade-fixture", 2, 46]],
+    );
+    assertEquals(out.total_hours, 2);
+    assertEquals(out.total_labour_cost ?? out.total_cost, 46);
+    assertEquals(s.writes, []);
+
+    const none = store([]);
+    none.tables.job_assignments = [attendance(today)];
+    const empty = await screen(none);
+    assertEquals(empty.rate_missing, 1);
+    assertEquals(empty.trades, []);
+    assertEquals(empty.total_hours, 0);
+    assertEquals(empty.total_labour_cost ?? empty.total_cost, 0);
+
+    none.tables.trade_rates.push(nextRate());
+    const retried = await screen(none);
+    assertEquals(retried.rate_missing, 0);
     assertEquals(retried.rate_assumed, 1);
     assertEquals(retried.trades[0].cost, 62);
+  });
+
+  Deno.test(`${label} labour screen still refuses an unreadable rate history`, async () => {
     const failed = store([oldRate()], "select");
     failed.tables.job_assignments = [attendance(today)];
     await assertRejects(() => screen(failed), ApiError, "trade_rate_read_failed");
