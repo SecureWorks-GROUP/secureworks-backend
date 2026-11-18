@@ -1,12 +1,17 @@
 -- FU26.1 follow-up (blocking items before job_story_stored_profit_v1 goes on).
 -- Replaces four private FU26.1 bodies (20261118065939), each md5-guarded:
---  1. the stamped staff read never reuses a supplied book that carries a store
---     as-at time; it resolves the book through the current wrapper;
+--  1. with job_story_stored_profit_v1 on, the stamped staff read never reuses
+--     a supplied book (stored or fallback); it resolves the book through the
+--     current wrapper. Off, it reuses a supplied book exactly as main does;
 --  2. a snapshot counts only after the store was armed (install, or any write
---     to the job_profit_refresh_v1 row), and only while the same 11 source
---     triggers are present and enabled O or A (never R replica-only or D);
+--     to the job_profit_refresh_v1 row), only from a refresh transaction begun
+--     after the arm, and only while the same 11 source triggers are present
+--     and enabled O or A (never R replica-only or D). Arming waits for every
+--     in-flight write on those 11 tables to commit (SHARE lock to its commit),
+--     so a write made while the refresh was off is visible to any counted refresh;
 --  3. a snapshot counts only while its two event sets are exactly the ones its
---     refresh stored (count and amount, recorded at refresh);
+--     refresh stored (count and a fingerprint of every field of every row,
+--     recorded at refresh);
 --  4. install and remove pin every helper they copy, and every body an
 --     already-installed or already-removed answer trusts.
 -- On merge: two private tables, private functions, four replaced private
@@ -22,28 +27,28 @@ SET LOCAL statement_timeout = '120s';
 DO $guard$
 /* function block */ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.job_story_stored_profit_as_at(uuid,timestamptz)'))
-    NOT IN ('33655a0a0bf3c36cb83ff2796d747af6','05d149259e4ed4b90dfb31f3f9dda4ff') THEN
+    NOT IN ('33655a0a0bf3c36cb83ff2796d747af6','48d8c171c00cb3015688a27abffd4800') THEN
   RAISE EXCEPTION 'story_stored_profit_guards_preimage: job_story_stored_profit_as_at'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.install_job_story_stored_profit()'))
-    NOT IN ('597475dfd06f211f9b836675f0cb172f','6aaee48d89c6e3e55058a11be4142100') THEN
+    NOT IN ('597475dfd06f211f9b836675f0cb172f','48ddebb7caa8539699d770b5eca774b7') THEN
   RAISE EXCEPTION 'story_stored_profit_guards_preimage: install_job_story_stored_profit'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.remove_job_story_stored_profit()'))
     NOT IN ('8e96644715a2ca31fe88b6a48a1df499','404751117e0e76af73d0b32e0388ded1') THEN
   RAISE EXCEPTION 'story_stored_profit_guards_preimage: remove_job_story_stored_profit'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_job_story_text_get_stamped(uuid,jsonb,boolean)'))
-    NOT IN ('935cecb054f2ff9cc77e05df5e1a199a','0d4040250186678ad880a69be4367df3') THEN
+    NOT IN ('935cecb054f2ff9cc77e05df5e1a199a','a712ec6772216f23eb8791e1d9cefb7d') THEN
   RAISE EXCEPTION 'story_stored_profit_guards_preimage: context_job_story_text_get_stamped'; END IF;
  -- The live staff read is the original (not installed) or one of the two
  -- stamped bodies (installed).
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_job_story_text_get(uuid,jsonb,boolean)'))
-    NOT IN ('ac51513f6164fa256011d67c1bd82b10','935cecb054f2ff9cc77e05df5e1a199a','0d4040250186678ad880a69be4367df3') THEN
+    NOT IN ('ac51513f6164fa256011d67c1bd82b10','935cecb054f2ff9cc77e05df5e1a199a','a712ec6772216f23eb8791e1d9cefb7d') THEN
   RAISE EXCEPTION 'story_stored_profit_guards_preimage: context_job_story_text_get'; END IF;
  -- This migration's own new functions: absent, or exactly this migration's body.
  IF EXISTS(SELECT 1 FROM (VALUES
    ('public.job_story_stored_profit_setup()','f6c89476ff1e9886c66e0907dfeab421'),
-   ('public.job_story_stored_profit_arm()','2db6d33311022f27eddd49c0e790f89b'),
+   ('public.job_story_stored_profit_arm()','6a464d989843143fdf8b8c6ce528d076'),
    ('public.job_story_stored_profit_rearm_trg()','a586dc515a9406118ace00837ae68337'),
-   ('public.job_story_stored_profit_count_trg()','ef96ec3564f09f41f60b0b84acec6f65')) v(sig,m)
+   ('public.job_story_stored_profit_count_trg()','5f186940947c020de80915ba0993672a')) v(sig,m)
    JOIN pg_proc p ON p.oid=to_regprocedure(v.sig) WHERE md5(p.prosrc)<>v.m) THEN
   RAISE EXCEPTION 'story_stored_profit_guards_preimage: own helper changed'; END IF;
 END $guard$;
@@ -76,24 +81,41 @@ ALTER TABLE public.job_story_stored_profit_arm ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.job_story_stored_profit_arm FROM PUBLIC,anon,authenticated;
 GRANT SELECT,INSERT,UPDATE,DELETE ON public.job_story_stored_profit_arm TO service_role;
 
--- Event counts the refresh stored for each summary. One row per stored
--- summary (deleted with it); keyed to the summary's computed_at, so a count
--- left by an earlier refresh never vouches for a later one.
+-- Event sets the refresh stored for each summary: the count and a
+-- fingerprint (md5 of every row's full text, rows in C order, rendered under
+-- fixed time zone and date settings), and when that refresh's transaction
+-- began. One row per stored summary (deleted with it); keyed to the summary's
+-- computed_at, so a row left by an earlier refresh never vouches for a later one.
 CREATE TABLE IF NOT EXISTS public.job_story_stored_profit_counts (
  job_id uuid PRIMARY KEY,
  computed_at timestamptz NOT NULL,
+ refresh_started_at timestamptz NOT NULL,
  cost_events bigint NOT NULL,
- cost_amount numeric,
+ cost_print text NOT NULL,
  revenue_events bigint NOT NULL,
- revenue_amount numeric
+ revenue_print text NOT NULL
 );
 ALTER TABLE public.job_story_stored_profit_counts ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.job_story_stored_profit_counts FROM PUBLIC,anon,authenticated;
 GRANT SELECT,INSERT,UPDATE,DELETE ON public.job_story_stored_profit_counts TO service_role;
 
+-- Arming first waits for every in-flight write on the 11 source tables to
+-- commit: SHARE conflicts with the ROW EXCLUSIVE a writer holds to its commit,
+-- and is held to the arming transaction's commit, so a write begun while the
+-- refresh was off is committed before the stamp, and a write after it queues
+-- (it runs once the flag write commits). A lock not had in 2 seconds fails the
+-- arm: install refuses; a flag write goes on with no stamp (see below).
 CREATE OR REPLACE FUNCTION public.job_story_stored_profit_arm()
-RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $fn$
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp SET lock_timeout='2s' AS $fn$
+DECLARE t text;
 /* function block */ BEGIN
+ FOREACH t IN ARRAY ARRAY['job_materials_facts','trade_invoice_lines','trade_invoices','purchase_orders',
+   'job_budgets','xero_invoices','xero_supplier_credit_note_allocations','jobs','work_orders',
+   'group_work_order_shares','group_work_orders'] LOOP
+  IF to_regclass('public.'||t) IS NOT NULL THEN
+   EXECUTE format('LOCK TABLE public.%I IN SHARE MODE',t);
+  END IF;
+ END LOOP;
  -- job_story_stored_profit_arm_pkey (singleton).
  INSERT INTO public.job_story_stored_profit_arm(singleton,armed_at,setup)
  VALUES(true,clock_timestamp(),public.job_story_stored_profit_setup())
@@ -125,7 +147,8 @@ END $fn$;
 -- summary after both event sets, so this counts what that refresh stored.
 -- It never fails a refresh: a failed count leaves no row for the new stamp.
 CREATE OR REPLACE FUNCTION public.job_story_stored_profit_count_trg() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $fn$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp
+ SET TimeZone='UTC' SET DateStyle='ISO, MDY' SET IntervalStyle='postgres' SET extra_float_digits='1' AS $fn$
 /* function block */ BEGIN
  /* count block */ BEGIN
   IF TG_OP='DELETE' THEN
@@ -133,12 +156,16 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $fn$
    DELETE FROM public.job_story_stored_profit_counts WHERE job_id=OLD.job_id;
   ELSE
    -- job_cost_events_stored_job_idx and job_revenue_events_stored_job_idx.
-   INSERT INTO public.job_story_stored_profit_counts(job_id,computed_at,cost_events,cost_amount,revenue_events,revenue_amount)
-   SELECT NEW.job_id,NEW.computed_at,c.n,c.a,r.n,r.a
-   FROM (SELECT count(*) n,sum(e.amount_ex) a FROM public.job_cost_events_stored e WHERE e.job_id=NEW.job_id) c,
-        (SELECT count(*) n,sum(e.amount_ex) a FROM public.job_revenue_events_stored e WHERE e.job_id=NEW.job_id) r
-   ON CONFLICT(job_id) DO UPDATE SET computed_at=EXCLUDED.computed_at,cost_events=EXCLUDED.cost_events,cost_amount=EXCLUDED.cost_amount,
-    revenue_events=EXCLUDED.revenue_events,revenue_amount=EXCLUDED.revenue_amount;
+   -- now() is this refresh transaction's start.
+   INSERT INTO public.job_story_stored_profit_counts(job_id,computed_at,refresh_started_at,cost_events,cost_print,revenue_events,revenue_print)
+   SELECT NEW.job_id,NEW.computed_at,now(),c.n,c.f,r.n,r.f
+   FROM (SELECT count(*) n,md5(coalesce(string_agg(e::text,'|' ORDER BY e::text COLLATE "C"),'')) f
+         FROM public.job_cost_events_stored e WHERE e.job_id=NEW.job_id) c,
+        (SELECT count(*) n,md5(coalesce(string_agg(e::text,'|' ORDER BY e::text COLLATE "C"),'')) f
+         FROM public.job_revenue_events_stored e WHERE e.job_id=NEW.job_id) r
+   ON CONFLICT(job_id) DO UPDATE SET computed_at=EXCLUDED.computed_at,refresh_started_at=EXCLUDED.refresh_started_at,
+    cost_events=EXCLUDED.cost_events,cost_print=EXCLUDED.cost_print,
+    revenue_events=EXCLUDED.revenue_events,revenue_print=EXCLUDED.revenue_print;
   END IF;
  EXCEPTION WHEN OTHERS THEN
   RAISE WARNING 'job_story_stored_profit_count_failed code=%',SQLSTATE;
@@ -149,11 +176,14 @@ END $fn$;
 -- 2 and 3. The as-at time of a stored snapshot the story may use for this job, or NULL.
 -- Usable only while the store is armed, the profit refresh is on, every one of
 -- its source triggers is installed and enabled (the same ones as when armed),
--- nothing for the job is queued or marked, the summary was computed after the
--- arm stamp on the as-of Perth day, and its two event sets are exactly the
--- ones its refresh counted, none stamped later or on another day.
+-- nothing for the job is queued or marked, the summary was computed by a
+-- refresh transaction begun after the arm stamp, on the as-of Perth day, and
+-- its two event sets are exactly the ones its refresh fingerprinted (every
+-- field of every row), none stamped later or on another day. The fingerprint
+-- settings are the counts trigger's own.
 CREATE OR REPLACE FUNCTION public.job_story_stored_profit_as_at(p_job_id uuid,p_as_of timestamptz)
-RETURNS timestamptz LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $fn$
+RETURNS timestamptz LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=public,pg_temp
+ SET TimeZone='UTC' SET DateStyle='ISO, MDY' SET IntervalStyle='postgres' SET extra_float_digits='1' AS $fn$
 DECLARE stamp timestamptz; v_armed_at timestamptz; v_setup text;
 /* function block */ BEGIN
  -- job_story_stored_profit_arm_pkey (one row).
@@ -172,28 +202,31 @@ DECLARE stamp timestamptz; v_armed_at timestamptz; v_setup text;
  -- transaction, stamping each row with clock_timestamp(): events before summary.
  SELECT s.computed_at INTO stamp FROM public.job_profit_stored s
  JOIN public.job_story_stored_profit_counts k ON k.job_id=s.job_id AND k.computed_at=s.computed_at
- CROSS JOIN LATERAL (SELECT count(*) n,sum(c.amount_ex) a,
+ CROSS JOIN LATERAL (SELECT count(*) n,md5(coalesce(string_agg(c::text,'|' ORDER BY c::text COLLATE "C"),'')) f,
    bool_or(c.computed_at>s.computed_at OR (c.computed_at AT TIME ZONE 'Australia/Perth')::date<>(s.computed_at AT TIME ZONE 'Australia/Perth')::date) late
   FROM public.job_cost_events_stored c WHERE c.job_id=p_job_id) ce
- CROSS JOIN LATERAL (SELECT count(*) n,sum(e.amount_ex) a,
+ CROSS JOIN LATERAL (SELECT count(*) n,md5(coalesce(string_agg(e::text,'|' ORDER BY e::text COLLATE "C"),'')) f,
    bool_or(e.computed_at>s.computed_at OR (e.computed_at AT TIME ZONE 'Australia/Perth')::date<>(s.computed_at AT TIME ZONE 'Australia/Perth')::date) late
   FROM public.job_revenue_events_stored e WHERE e.job_id=p_job_id) re
  WHERE s.job_id=p_job_id
   AND s.computed_at>v_armed_at
+  AND k.refresh_started_at>v_armed_at
   AND s.computed_at<=p_as_of
   AND (s.computed_at AT TIME ZONE 'Australia/Perth')::date=(p_as_of AT TIME ZONE 'Australia/Perth')::date
   AND NOT EXISTS(SELECT 1 FROM public.job_profit_dirty d WHERE d.job_id=p_job_id)
   AND NOT EXISTS(SELECT 1 FROM public.job_profit_change_events q WHERE q.job_id=p_job_id)
   -- Exactly the events this refresh stored: none missing, none added, no
-  -- amount changed, none stamped later or on another day.
-  AND ce.n=k.cost_events AND ce.a IS NOT DISTINCT FROM k.cost_amount AND NOT coalesce(ce.late,false)
-  AND re.n=k.revenue_events AND re.a IS NOT DISTINCT FROM k.revenue_amount AND NOT coalesce(re.late,false);
+  -- field of any row changed, none stamped later or on another day.
+  AND ce.n=k.cost_events AND ce.f=k.cost_print AND NOT coalesce(ce.late,false)
+  AND re.n=k.revenue_events AND re.f=k.revenue_print AND NOT coalesce(re.late,false);
  RETURN stamp;
 END $fn$;
 
--- 1. Stamped staff read: a supplied book stamped by the store is never
--- trusted; it is resolved through the current book wrapper, which falls back
--- while a change waits. Built from FU26.1's stamped body (one counted swap).
+-- 1. Stamped staff read: with job_story_stored_profit_v1 on, a supplied book
+-- is never trusted (a stored one, or a fallback one built before a later
+-- change); it is resolved through the current book wrapper, which falls back
+-- while a change waits. Off, a supplied book is reused exactly as the
+-- installed read does. Built from FU26.1's stamped body (one counted swap).
 DO $stamp$
 DECLARE d text; live_was_stamped boolean;
 /* function block */ BEGIN
@@ -206,10 +239,10 @@ DECLARE d text; live_was_stamped boolean;
      /length($o$AND (p_card #>> '{book,job_id}') = p_job_id::text THEN$o$)<>1 THEN
    RAISE EXCEPTION 'story_stored_profit_guards_preimage_text: stamped book test'; END IF;
   d:=replace(d,$o$AND (p_card #>> '{book,job_id}') = p_job_id::text THEN$o$,
-   $n$AND (p_card #>> '{book,job_id}') = p_job_id::text AND NOT ((p_card -> 'book') ? 'computed_at') THEN$n$);
+   $n$AND (p_card #>> '{book,job_id}') = p_job_id::text AND NOT public.job_story_stored_profit_on() THEN$n$);
   EXECUTE d;
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_story_text_get_stamped(uuid,jsonb,boolean)'::regprocedure)
-     IS DISTINCT FROM '0d4040250186678ad880a69be4367df3' THEN
+     IS DISTINCT FROM 'a712ec6772216f23eb8791e1d9cefb7d' THEN
    RAISE EXCEPTION 'story_stored_profit_guards_stamped_result'; END IF;
   -- Installed: the live staff read is the stamped body, so it moves too.
   IF live_was_stamped THEN
@@ -233,7 +266,7 @@ DECLARE book text; fast text; switched text; txt text; stamped text; unstamped t
  SELECT prosrc INTO txt FROM pg_proc WHERE oid='public.context_job_story_text_get(uuid,jsonb,boolean)'::regprocedure;
  SELECT prosrc INTO stamped FROM pg_proc WHERE oid='public.context_job_story_text_get_stamped(uuid,jsonb,boolean)'::regprocedure;
  SELECT prosrc INTO unstamped FROM pg_proc WHERE oid='public.context_job_story_text_get_unstamped(uuid,jsonb,boolean)'::regprocedure;
- IF md5(switched) IS DISTINCT FROM 'a4535d4e67f1a8bd261e81c83b8532c8' OR md5(stamped) IS DISTINCT FROM '0d4040250186678ad880a69be4367df3' THEN
+ IF md5(switched) IS DISTINCT FROM 'a4535d4e67f1a8bd261e81c83b8532c8' OR md5(stamped) IS DISTINCT FROM 'a712ec6772216f23eb8791e1d9cefb7d' THEN
   RAISE EXCEPTION 'story_stored_profit_helper_changed'; END IF;
  IF NOT (book=switched AND txt=stamped) THEN
   IF md5(fast) IS DISTINCT FROM 'af4fc8363060be37e1aec1046d933561' OR book IS DISTINCT FROM fast THEN

@@ -5,10 +5,10 @@ SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 DO $guard$
 /* function block */ BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.job_story_stored_profit_as_at(uuid,timestamptz)'::regprocedure)<>'05d149259e4ed4b90dfb31f3f9dda4ff'
- OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.install_job_story_stored_profit()'::regprocedure)<>'6aaee48d89c6e3e55058a11be4142100'
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.job_story_stored_profit_as_at(uuid,timestamptz)'::regprocedure)<>'48d8c171c00cb3015688a27abffd4800'
+ OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.install_job_story_stored_profit()'::regprocedure)<>'48ddebb7caa8539699d770b5eca774b7'
  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.remove_job_story_stored_profit()'::regprocedure)<>'404751117e0e76af73d0b32e0388ded1'
- OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_story_text_get_stamped(uuid,jsonb,boolean)'::regprocedure)<>'0d4040250186678ad880a69be4367df3' THEN
+ OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_story_text_get_stamped(uuid,jsonb,boolean)'::regprocedure)<>'a712ec6772216f23eb8791e1d9cefb7d' THEN
   RAISE EXCEPTION 'story_stored_profit_guards_down_preimage'; END IF;
 END $guard$;
 DROP TRIGGER IF EXISTS job_story_stored_profit_rearm ON public.feature_flags;
@@ -20,7 +20,7 @@ DECLARE d text; live_was_stamped boolean;
  live_was_stamped:=(SELECT prosrc FROM pg_proc WHERE oid='public.context_job_story_text_get(uuid,jsonb,boolean)'::regprocedure)
   =(SELECT prosrc FROM pg_proc WHERE oid='public.context_job_story_text_get_stamped(uuid,jsonb,boolean)'::regprocedure);
  d:=replace(pg_get_functiondef('public.context_job_story_text_get_stamped(uuid,jsonb,boolean)'::regprocedure),
-  $n$AND (p_card #>> '{book,job_id}') = p_job_id::text AND NOT ((p_card -> 'book') ? 'computed_at') THEN$n$,
+  $n$AND (p_card #>> '{book,job_id}') = p_job_id::text AND NOT public.job_story_stored_profit_on() THEN$n$,
   $o$AND (p_card #>> '{book,job_id}') = p_job_id::text THEN$o$);
  EXECUTE d;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_story_text_get_stamped(uuid,jsonb,boolean)'::regprocedure)
