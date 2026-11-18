@@ -108,6 +108,22 @@ Deno.test("hold 1590: a line held whole is over by the excess, not by the held a
   assertEquals([e.amount_ex, e.summary.amount_ex], [800, 800], "the held amount stays the whole line");
 });
 
+Deno.test("hold 1590: a same-job deduction lowers claimed so far and over by", async () => {
+  const calls: any[] = [];
+  const client = { rpc: (_name: string, args: any) => { calls.push(args); return Promise.resolve({ error: null }); } };
+  const f = facts({ [JOB_A]: { job_number: "ZZF-1", workOrder: { status: "approved" }, allowed_ex: 200, backed_billed_ex: 0 } });
+  const backed = [
+    { job_id: JOB_A, line_type: "labour", line_total_ex: 200, sent_amount_ex: 200 },
+    { job_id: JOB_A, line_type: "labour_deduction", line_total_ex: -50, sent_amount_ex: -50 },
+    { job_id: JOB_A, line_type: "commission", line_total_ex: 70, sent_amount_ex: 70 },
+  ];
+  const held = { id: "zz-h3", row: { job_id: JOB_A, line_type: "labour", line_total_ex: 300, sent_amount_ex: 300, hold_reason: "over_amount" } as any };
+  const ctx = { tradeUserId: "zz-user", tradeName: null, tradeRole: "lead_installer", weekStart: "2026-11-16", facts: f, backed };
+  assertEquals(await raiseHeldLines(client, [held], ctx), { raised: 1, failed: 0 });
+  const e = calls[0].p_evidence;
+  assertEquals([e.work_order_amount_ex, e.claimed_so_far_ex, e.line_amount_ex, e.over_by_ex], [200, 150, 300, 250]);
+});
+
 Deno.test("hold 1590: over by is worked in cents and never below zero", () => {
   assertEquals(overAmountFigures(400000, 360000, 80000).over_by_ex, 400);
   assertEquals(overAmountFigures(100010, 100000, 30).over_by_ex, 0.2);

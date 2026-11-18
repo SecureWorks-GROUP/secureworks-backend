@@ -18,6 +18,7 @@ import {
   tradePayBasisFor,
 } from "./trade_pay_rule.ts";
 import { WEEKLY_INVOICE_DEDUCTION_LINE_TYPES } from "./trade_invoice_weekly.ts";
+import { countsAgainstWorkOrder } from "./work_order_total_cap.ts";
 
 /** Director rule 21: logs and error text carry codes and ids only, never a
  * database message (it can quote row values). */
@@ -503,10 +504,11 @@ export async function raiseHeldLines(
       console.error("[ops-api] pay line raise failed (send unchanged):", lineSendLogCode(error));
     }
   };
+  // The cap's own count (countsAgainstWorkOrder): a same-job deduction is
+  // signed negative and lowers what this send claims, as on the invoice.
   const backedOnJob = new Map<string, number>();
   for (const row of ctx.backed) {
-    if (!row.job_id || isKeptDeduction(row)) continue;
-    if (key(row.line_type) === "commission" || key(row.line_type) === "reimbursement") continue;
+    if (!row.job_id || !countsAgainstWorkOrder(row.line_type)) continue;
     backedOnJob.set(String(row.job_id), (backedOnJob.get(String(row.job_id)) ?? 0) + cents(row.line_total_ex));
   }
   const ownPaidPart = new Map<string, number>();
