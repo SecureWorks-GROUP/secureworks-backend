@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { myPayYearSummaryPdf } from "./trade_year_summary_pdf.ts";
+import { summariseTradePayHistory } from "./trade_money.ts";
 import { TRADE_PREVIEW_READS } from "./trade_owner_preview.ts";
 
 type Row = Record<string, any>;
@@ -10,6 +11,8 @@ const invoice = (id: string, week: string): Row => ({
   gross_earned: 112.01, super_rate: 0.12, super_basis: "inclusive_12_112_v1", super_amount: 12,
   subtotal_ex: 112.01, total_inc: 112.01, net_pay: 100.01, amount_paid: 0, gst_on: false,
   gst: 0, reimbursements: [], recurring_deduction_label: null, recurring_deduction_amount: null,
+  // Made up. Every fixture invoice has reached Xero unless a test says otherwise.
+  xero_bill_id: "bill-" + id,
 });
 function store() {
   const rows = [invoice("ZZTEST-01", "2026-07-01"), invoice("ZZTEST-02", "2027-06-30")];
@@ -139,5 +142,63 @@ Deno.test("mixed invoices total recorded super and identify every missing split"
     assert.deepEqual(text.slice(index + 2, index + 5), ["$47.23", "Not recorded", "$47.23"]);
   }
   rows[0].super_amount = null;
+  assert.equal((await read()).status, 503);
+});
+
+Deno.test("an invoice with no Xero bill reads Not yet processed and the PDF totals equal pay history to the cent", async () => {
+  const { rows, read } = store();
+  // Odd cents on purpose, with figures that must not leak into any total.
+  rows.push(
+    { ...invoice("ZZTEST-03", "2026-09-06"), gross_earned: 333.33, subtotal_ex: 333.33, total_inc: 333.33,
+      super_amount: 35.71, net_pay: 297.62 },
+    { ...invoice("ZZTEST-04", "2026-10-04"), xero_bill_id: null, amount_paid: 5, gst: 10.17,
+      recurring_deduction_label: "repayment", recurring_deduction_amount: 20.03 },
+  );
+  const text = await contents(await read());
+  const shown = (label: string) => text[text.indexOf(label) + 1];
+  const row = text.indexOf("ZZTEST-04");
+  assert.deepEqual(text.slice(row, row + 3), ["ZZTEST-04", "2026-09-28", "Not yet processed"]);
+  // No figure follows on that row: the next text is the next invoice's number.
+  assert.equal(text[row + 3], "ZZTEST-02");
+  assert.ok(text.includes("1 invoice not yet processed"));
+  assert.ok(!text.some(v => v.startsWith("Super not recorded")));
+
+  // The same rows through pay history: one financial year, read on its last day.
+  const history = summariseTradePayHistory(rows, "2027-06-30",
+    { years: 1, priorSuper: 0, taxPercent: null, rates: [], paidRuns: new Set() });
+  assert.equal(history.years.length, 1);
+  const year = history.years[0];
+  const money = (value: number) => "$" + value.toFixed(2);
+  assert.equal(shown("Total (includes super)"), money(year.total_inc_super));
+  assert.equal(shown("Paid to your super fund"), money(year.paid_to_super));
+  assert.equal(text[text.indexOf("Paid to you") + 1], money(year.paid_to_you));
+  assert.equal(shown("Reimbursements"), money(year.reimbursements));
+  assert.equal(year.invoices, 3);
+  assert.equal(history.super.not_in_xero_count, 1);
+  assert.deepEqual(history.super.by_invoice.filter(i => i.status === "not_in_xero"),
+    [{ invoice_id: "ZZTEST-04", invoice_number: "ZZTEST-04", week_start: "2026-09-28", amount: 0, status: "not_in_xero" }]);
+  // Fixed figures as well, so both cannot drift together: three billed invoices only.
+  assert.deepEqual([shown("Total (includes super)"), shown("Paid to your super fund"), shown("GST"), shown("Repayments")],
+    ["$557.35", "$59.71", "$0.00", "$0.00"]);
+
+  // A second unbilled invoice with no recorded split is not yet processed, not "super not recorded".
+  rows.push({ ...invoice("ZZTEST-05", "2026-11-01"), xero_bill_id: "", super_basis: null, super_amount: null, net_pay: null });
+  const two = await contents(await read());
+  assert.ok(two.includes("2 invoices not yet processed"));
+  assert.ok(!two.some(v => v.startsWith("Super not recorded")));
+  assert.equal(two[two.indexOf("Total (includes super)") + 1], "$557.35");
+
+  // Once the office pushes the bill it is paid like any other, in both readers.
+  rows[3].xero_bill_id = "bill-pushed";
+  rows[3].gst = 0;
+  const pushed = await contents(await read());
+  const after = summariseTradePayHistory(rows, "2027-06-30",
+    { years: 1, priorSuper: 0, taxPercent: null, rates: [], paidRuns: new Set() });
+  assert.equal(pushed[pushed.indexOf("Total (includes super)") + 1], money(after.years[0].total_inc_super));
+  assert.equal(pushed[pushed.indexOf("Total (includes super)") + 1], "$669.36");
+  assert.ok(pushed.includes("1 invoice not yet processed"));
+
+  // The bill column missing from a row refuses; it is never read as billed or unbilled.
+  delete rows[0].xero_bill_id;
   assert.equal((await read()).status, 503);
 });

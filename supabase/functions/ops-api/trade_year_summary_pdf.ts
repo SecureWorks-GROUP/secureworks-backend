@@ -25,14 +25,18 @@ function textAt(text: string, x: number, y: number, size: number, width: number)
 function invoiceLine(row: Row) {
   const day = row.week_end || row.created_at?.slice(0, 10);
   if (!day || !row.invoice_number) throw new Error("summary_unreadable");
+  const number = String(row.invoice_number), week = row.week_start || mondayOf(day);
+  // The shared totals function decides: an invoice with no Xero bill is not yet
+  // processed and adds nothing to any total, exactly as in pay history.
+  const { totals, notInXero } = historyInvoiceTotals(row, day, null);
+  if (notInXero) return { notInXero, recordedSuper: null, number, week, amounts: [0, 0, 0, 0, 0, 0] };
   const recordedSuper = recordedHistorySuper(row);
-  const { totals } = historyInvoiceTotals(row, day, null, recordedSuper);
   const repayment = row.recurring_deduction_amount;
   if (repayment === undefined || (repayment === null && row.recurring_deduction_label)) {
     throw new Error("summary_unreadable");
   }
   return {
-    recordedSuper, number: String(row.invoice_number), week: row.week_start || mondayOf(day),
+    notInXero, recordedSuper, number, week,
     amounts: [totals.total_inc_super, totals.paid_to_super, totals.paid_to_you,
       totals.reimbursements, historyAmount(row.gst), repayment === null ? 0 : historyAmount(repayment)],
   };
@@ -42,7 +46,8 @@ function render(fy: number, profile: Row, rows: Row[]) {
   const invoices = rows.map(invoiceLine).sort((a, b) =>
     a.week.localeCompare(b.week) || a.number.localeCompare(b.number));
   const rowHeight = Math.min(16, Math.max(10, Math.floor(510 / invoices.length)));
-  const height = Math.max(792, 282 + invoices.length * rowHeight);
+  const notProcessed = invoices.filter(invoice => invoice.notInXero).length;
+  const height = Math.max(792, 282 + (notProcessed ? 16 : 0) + invoices.length * rowHeight);
   const ops: string[] = [];
   let y = height - 46;
   ops.push(textAt(`Pay summary, 1 July ${fy - 1} to 30 June ${fy}`, 36, y, 17, 540));
@@ -57,9 +62,13 @@ function render(fy: number, profile: Row, rows: Row[]) {
       ops.push(textAt(label, 36, y, 11, 240), textAt(money(cents / 100), 276, y, 11, 290));
       y -= 16;
     });
-  const notRecorded = invoices.filter(invoice => invoice.recordedSuper === null).length;
+  const notRecorded = invoices.filter(invoice => !invoice.notInXero && invoice.recordedSuper === null).length;
   if (notRecorded) {
     ops.push(textAt(`Super not recorded on ${notRecorded} invoice${notRecorded === 1 ? "" : "s"}`, 36, y, 10, 540));
+    y -= 16;
+  }
+  if (notProcessed) {
+    ops.push(textAt(`${notProcessed} invoice${notProcessed === 1 ? "" : "s"} not yet processed`, 36, y, 10, 540));
     y -= 16;
   }
   y -= 10;
@@ -71,6 +80,11 @@ function render(fy: number, profile: Row, rows: Row[]) {
   ops.push(`0.6 G 36 ${y - 3} m 576 ${y - 3} l S`);
   for (const invoice of invoices) {
     y -= rowHeight;
+    if (invoice.notInXero) {
+      tableRow([invoice.number, invoice.week], Math.min(10, rowHeight - 1));
+      ops.push(textAt("Not yet processed", columns[2], y, Math.min(10, rowHeight - 1), columns[5] - columns[2] - 5));
+      continue;
+    }
     tableRow([invoice.number, invoice.week, money(invoice.amounts[0]),
       invoice.recordedSuper === null ? "Not recorded" : money(invoice.recordedSuper), money(invoice.amounts[2])], Math.min(10, rowHeight - 1));
   }
