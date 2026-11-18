@@ -71,7 +71,7 @@ function buildSuperInclusiveAuditText(
       }  ${moneyLabel(model.recurring_deduction_line.line_total)}`,
     );
     lines.push(
-      `PAID TO YOU after the weekly deduction ${moneyLabel(model.trade_payable)}`,
+      `YOUR PAY after the weekly deduction ${moneyLabel(model.trade_payable)}`,
     );
   }
   return lines;
