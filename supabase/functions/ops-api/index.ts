@@ -11634,6 +11634,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         })
         return json(result.body, result.status)
       }
+      case 'trade_pay_settings':
+      case 'set_trade_pay_setting': {
+        const { tradePaySettingsAction } = await import('./trade_pay_settings.ts')
+        const result = await tradePaySettingsAction(client, action, req.method, body, {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          userId: authMode === 'jwt' ? authUser?.id || null : null,
+        })
+        return json(result.body, result.status)
+      }
       case 'set_trade_rate_ops': return json(await setTradeRate(client, null, body,
         requestActor.source === 'jwt' ? requestActor.actor.slice('user:'.length) : null))
       case 'trade_rate_history': {
