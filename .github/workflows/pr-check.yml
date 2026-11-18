@@ -717,6 +717,7 @@ jobs:
             supabase/functions/ghl-proxy/stage_move_target_test.ts \
             supabase/functions/xero-sync/xero_invoice_reconciliation_test.ts \
             supabase/functions/xero-sync/customer_allocations_test.ts \
+            supabase/functions/xero-sync/job_marks_test.ts \
             supabase/functions/xero-sync/xero_mirror_check_test.ts \
             supabase/functions/ops-api/xero_void_mirror_test.ts \
             supabase/functions/xero-sync/xero_age_test.ts \
