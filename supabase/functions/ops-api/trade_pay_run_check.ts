@@ -13,13 +13,12 @@
 // an empty one. Contract: docs/trade-pay-run-check-v1.md.
 //
 // Org: always the caller's. A staff session reads its profile's org (never the
-// server org substituted for a missing one); the server key reads the server
-// org, as the other staff reads here do.
+// server org substituted for a missing one).
 //
-// Staff only: the action is not in any trade, routine or agent-read list, so
-// the ops-api front door admits only the staff operator set (admin, owner,
-// ops_manager) or the server key. It names trades and their pay. Never writes,
-// never calls Xero.
+// Pay run approvers only: it names trades and their pay, so the ops-api handler
+// refuses anyone not on trade_pay_settings.pay_run_approver_user_ids, the server
+// key included, before this runs (pay_figures_approver.ts). Never writes, never
+// calls Xero.
 // ════════════════════════════════════════════════════════════
 
 export class TradePayRunCheckError extends Error {
