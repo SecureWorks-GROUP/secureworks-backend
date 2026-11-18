@@ -168,6 +168,9 @@ CREATE OR REPLACE FUNCTION public.job_cost_lines_backfill_bills(
 RETURNS jsonb
 LANGUAGE plpgsql
 SET search_path = ''
+-- A row-lock wait inside the writer (a sync writing the same bill) ends after
+-- 5 s as lock_not_available, caught below as a clean busy stop.
+SET lock_timeout = '5s'
 AS $$
 DECLARE
   super_on boolean; b record; doc jsonb; result jsonb;
@@ -211,8 +214,9 @@ BEGIN
       BEGIN
         result := public.job_cost_lines_upsert_documents(jsonb_build_array(doc));
       EXCEPTION WHEN lock_not_available THEN
-        -- The sync is writing this bill now (cost_line_shadow_busy). Stop here; the
-        -- cursor stays before this bill so the next call starts with it.
+        -- The sync is writing this bill now: the writer's try-lock refused
+        -- (cost_line_shadow_busy) or a row lock waited past lock_timeout. Stop
+        -- here; the cursor stays before this bill so the next call starts with it.
         busy := true;
         EXIT;
       END;

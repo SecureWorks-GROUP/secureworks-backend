@@ -149,6 +149,18 @@ BEGIN
   END LOOP;
 END;
 $$;
+-- A row-lock wait ends as a clean busy stop, not a hung call. The wait itself
+-- needs a second session, which this one-session contract cannot hold, so the
+-- setting is pinned here and the busy branch is the same lock_not_available catch.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_proc
+      WHERE oid = 'public.job_cost_lines_backfill_bills(uuid,date,date,integer,date,text)'::regprocedure
+        AND 'lock_timeout=5s' = ANY (proconfig)) THEN
+    RAISE EXCEPTION 'twin: lock_timeout 5s is not set on the backfill';
+  END IF;
+END;
+$$;
 SET LOCAL ROLE service_role;
 DO $$
 BEGIN
