@@ -1,7 +1,7 @@
 // JWT flag: --no-verify-jwt. Keep this line at the top: the deploy workflow reads
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
-import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, type SendRow, type SortedSend } from './trade_line_send.ts'
+import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, linesInJobOrder, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, tradeLineHoldFlagOn, type SendRow, type SortedSend } from './trade_line_send.ts'
 import { readJobAmountsLeft, type LineHoldFacts } from './trade_line_hold.ts'
 import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
 import { ExpenseCaptureError, expenseCaptureFields, expenseNextStep, refuseBilledReimbursement } from './expense_capture_v2.ts'
@@ -15401,8 +15401,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // refusal: each line is paid this week or held for the office
             // (trade_line_send.ts). Group shares keep their own door. Anything
             // unreadable reads as off, which is main.
-            const lineHoldMode = !(Array.isArray(extra_items) && extra_items.some(isGroupShareInvoiceItem)) &&
-              await lineHoldSendApplies(client, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead)
+            // FU49 item 4: with the switch on, the job amount guard locks each
+            // job a saved line names, so this send's lines are saved in job
+            // order whether or not the hold applies to its week (a group share
+            // or a week before the pay rule still meets the guard).
+            const lineHoldFlagOn = await tradeLineHoldFlagOn(client)
+            const lineHoldMode = lineHoldFlagOn && !(Array.isArray(extra_items) && extra_items.some(isGroupShareInvoiceItem)) &&
+              await lineHoldSendApplies(client, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead, true)
             const lineHoldWeeklySource = weeklyInvoice
             const invoiceSuperBasis = groupInvoiceBasis.superBasis ??
               await tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead)
@@ -16784,23 +16789,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               lineHoldMode && (lineHoldSorted?.held.length ?? 0) > 0
                 ? { ...payload, hold_lines: lineHoldHeldLineRows('') }
                 : payload
+            const lineJobOrder = { jobOrder: lineHoldFlagOn }
             const saveStandard = () => retryReimbursementClaims(client, reimbursements, async () => await persistWithFreeNumber(() => weeklyInvoice
               ? weekAutofill
                 ? _persistTradeInvoiceWeekDraft(client, lineHoldRpcPayload(invoicePayload), [
                   ...lineItems.map((line: any) => toTradeInvoiceLineRow('', line, { line_type: 'labour' })),
                   ...extraLineItems.map((line: any) => toTradeInvoiceLineRow('', line)),
-                ], priorDraftId)
+                ], priorDraftId, lineJobOrder)
                 : _persistWeeklyTradeInvoice(
                   client,
                   lineHoldRpcPayload(invoicePayload),
                   weeklyInvoiceWithReimbursements(weeklyInvoice, reimbursements.lines),
                   priorDraftId,
+                  lineJobOrder,
                 )
               : week_start && reimbursements.lines.length > 0
               ? _persistTradeInvoiceWeekDraft(client, { ...invoicePayload, org_id: tradeUser.orgId }, [
                   ...lineItems.map((line: any) => toTradeInvoiceLineRow('', line, { line_type: 'labour' })),
                   ...extraLineItems.map((extra: any) => toTradeInvoiceLineRow('', extra)),
-                ], priorDraftId)
+                ], priorDraftId, lineJobOrder)
               : replaceTradeInvoiceDraftKeepingPrior({
               createInvoice: async () => {
                 const { data: newInvoice, error: invErr } = await client.from('trade_invoices')
@@ -16813,10 +16820,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 return newInvoice.id
               },
               insertLines: async (replacementId) => {
-                const lineRows = [
+                const lineRows = tradeInvoiceLinesForInsert([
                   ...lineItems.map((line: any) => toTradeInvoiceLineRow(replacementId, line, { line_type: 'labour' })),
                   ...extraLineItems.map((extra: any) => toTradeInvoiceLineRow(replacementId, extra)),
-                ]
+                ], lineJobOrder)
                 const { error: lineErr } = await client.from('trade_invoice_lines').insert(lineRows)
                 if (lineErr) throw new Error('Failed to save invoice line items: ' + lineErr.message)
               },
@@ -19372,13 +19379,25 @@ export async function _persistWeeklyTradeInvoice(
   invoicePayload: Record<string, unknown>,
   invoice: WeeklyWorkOrderInvoice,
   requestedPriorDraftId: string | null,
+  opts: { jobOrder?: boolean } = {},
 ): Promise<string> {
   return await _persistTradeInvoiceWeekDraft(
     client,
     invoicePayload,
     weeklyInvoiceLineRows(invoice),
     requestedPriorDraftId,
+    opts,
   )
+}
+
+// FU49 item 4: the rows a save hands the database. With jobOrder (the
+// trade_line_hold_v1 switch on) they go in job id order (linesInJobOrder);
+// off, exactly as given. Positions are fixed by the caller first.
+export function tradeInvoiceLinesForInsert<T extends Record<string, any>>(
+  lineRows: readonly T[],
+  opts: { jobOrder?: boolean } = {},
+): T[] {
+  return opts.jobOrder ? linesInJobOrder(lineRows) : [...lineRows]
 }
 
 export async function _persistTradeInvoiceWeekDraft(
@@ -19386,6 +19405,7 @@ export async function _persistTradeInvoiceWeekDraft(
   invoicePayload: Record<string, unknown>,
   lineRows: Array<Record<string, unknown>>,
   requestedPriorDraftId: string | null,
+  opts: { jobOrder?: boolean } = {},
 ): Promise<string> {
   // v2 is v1 unchanged plus the time-entry stamp on the lines it inserted
   // (20261012180000_trade_invoice_time_entries.sql). v3 is v2 unchanged plus
@@ -19393,10 +19413,10 @@ export async function _persistTradeInvoiceWeekDraft(
   // (20261013143700_trade_recurring_deductions.sql).
   const { data, error } = await client.rpc(Object.hasOwn(invoicePayload, 'accepted_untouched') ? 'persist_weekly_trade_invoice_v4' : 'persist_weekly_trade_invoice_v3', {
     p_invoice: invoicePayload,
-    p_lines: lineRows.map((line, linePosition) => ({
+    p_lines: tradeInvoiceLinesForInsert(lineRows.map((line, linePosition) => ({
       ...line,
       line_position: line.line_position ?? linePosition,
-    })),
+    })), opts),
     p_requested_prior_draft_id: requestedPriorDraftId,
   })
   const invoiceId = String(data || '')

@@ -145,6 +145,15 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
         return Promise.resolve(Response.json("6c2f0a52-0000-4000-8000-0000000fd999"));
       }
       if (name === "trade_is_off_job_crew") return Promise.resolve(Response.json(false));
+      if (name === "work_order_backed_billed") {
+        // The database's one billed sum (FU49 item 8): the fixture's billed
+        // figure for the backed job, 0 for every other job asked.
+        const args = typeof init?.body === "string" ? JSON.parse(init.body) : {};
+        return Promise.resolve(Response.json((args.p_job_ids || []).map((job_id: string) => ({
+          job_id,
+          billed_ex: job_id === BACKED_JOB ? world.billedBefore ?? 0 : 0,
+        }))));
+      }
       if (name === "persist_trade_work_order_invoice_v1" || name.startsWith("persist_weekly_trade_invoice_v")) {
         const args = typeof init?.body === "string" ? JSON.parse(init.body) : {};
         const id = `6c2f0a52-0000-4000-8000-0000000fe${String(++nextInvoice).padStart(3, "0")}`;
@@ -618,3 +627,24 @@ for (const autofill of [false, true]) {
     assertEquals([out.body.send.in_pay_ex, out.body.send.held_ex, out.body.send.sent_ex], [300, 300, 600]);
   });
 }
+
+handlerTest("FU49 item 4: switch on, a send's lines reach the database in job id order; off, in the order sent", async () => {
+  // Sent with the later job id first.
+  const items = () => [
+    { ...line(COMM_JOB, "ZZF-5003", "Commission", 1, 50), row_type: "commission" },
+    line(BACKED_JOB, "ZZF-5001", "Materials", 4, 50),
+  ];
+  const commission = {
+    commission_id: "zz-c", budget_id: "zz-b", version: 1, state: "named", salesperson_user_id: TRADE_ID,
+    rule_id: "zz-r", percent: 10, expected_amount_ex_gst: 500, claimed_ex_gst: 0, remaining_ex_gst: 500,
+  };
+  const on = await send(items(), { lineHold: true, agreed: 4000, commission });
+  assertEquals(on.status, 200, JSON.stringify(on.body));
+  const onStandard = on.invoices.filter((i) => kind(i) === "standard");
+  assertEquals(onStandard.length, 1);
+  assertEquals(linesOf(on, onStandard[0].id).map((row) => row.job_id), [BACKED_JOB, COMM_JOB]);
+  const off = await send(items(), { lineHold: false, agreed: 4000, commission });
+  assertEquals(off.status, 200, JSON.stringify(off.body));
+  assertEquals(off.invoices.length, 1);
+  assertEquals(linesOf(off, off.invoices[0].id).map((row) => row.job_id), [COMM_JOB, BACKED_JOB]);
+});

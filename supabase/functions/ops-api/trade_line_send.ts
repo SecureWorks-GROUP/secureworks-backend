@@ -78,18 +78,61 @@ export type SortedSend = {
   skipped: Array<{ row: SendRow; reason: "not_yours" | "claimed" }>;
 };
 
-/** Step 1: the switch is on and the new pay rule applies to the week.
- * Anything unreadable reads as off, so the door behaves exactly as today. */
-export async function lineHoldSendApplies(
-  client: any,
-  payDay: unknown,
-  settingsRead?: ReturnType<typeof readTradePaySettings>,
-): Promise<boolean> {
+/** trade_line_hold_v1 as stored (feature_flags by flag_name). Anything
+ * unreadable reads as off, which is main. */
+export async function tradeLineHoldFlagOn(client: any): Promise<boolean> {
   try {
     const flag = await client.from("feature_flags").select("enabled")
       .eq("flag_name", TRADE_LINE_HOLD_FLAG).limit(1);
     if (flag?.error || !Array.isArray(flag?.data)) return false;
-    if (flag.data[0]?.enabled !== true) return false;
+    return flag.data[0]?.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * FU49 item 4. The job amount guard takes one lock per job, in the order a
+ * statement's rows reach it, and the header guard takes them by job id. Rows
+ * saved under a counted invoice therefore go in job id order, so two sends on
+ * the same jobs wait for each other instead of deadlocking. A copy, sorted by
+ * job id as the database orders a uuid (lower-case text, code unit order);
+ * stable, rows with no job last. Each row keeps its own fields, so a stored
+ * line_position still gives the order the trade sent.
+ */
+export function linesInJobOrder<T extends Record<string, any>>(
+  rows: readonly T[],
+): T[] {
+  const id = (row: T) =>
+    row?.job_id == null || row.job_id === ""
+      ? null
+      : String(row.job_id).toLowerCase();
+  return rows.map((row, index) => ({ row, index, job: id(row) }))
+    .sort((a, b) =>
+      a.job === b.job
+        ? a.index - b.index
+        : a.job === null
+        ? 1
+        : b.job === null
+        ? -1
+        : a.job < b.job
+        ? -1
+        : 1
+    )
+    .map((entry) => entry.row);
+}
+
+/** Step 1: the switch is on and the new pay rule applies to the week.
+ * Anything unreadable reads as off, so the door behaves exactly as today.
+ * `flagOn`: the switch as the caller already read it (tradeLineHoldFlagOn). */
+export async function lineHoldSendApplies(
+  client: any,
+  payDay: unknown,
+  settingsRead?: ReturnType<typeof readTradePaySettings>,
+  flagOn?: boolean,
+): Promise<boolean> {
+  try {
+    if (!(flagOn ?? await tradeLineHoldFlagOn(client))) return false;
     const rule = await readTradePayRule(client, settingsRead);
     if (!rule.ok) return false;
     return tradePayBasisFor(rule, payDay) !== null;
