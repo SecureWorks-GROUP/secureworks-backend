@@ -1,4 +1,4 @@
--- Rollback of cl-payrun-xero-found (20261118999911): drops the recording
+-- Rollback of cl-payrun-xero-found (20261118194200): drops the recording
 -- function and the run row's release_xero_found column. Refuses while any run
 -- row holds a found bill, so a record is never thrown away by a rollback.
 SET LOCAL lock_timeout = '5s';

@@ -1114,7 +1114,7 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261118170500", "trade_pay_run_release"),
                       # cl-payrun-xero-found: the found Xero bill on the run
                       # row (trade_pay_run.ts).
-                      ("20261118999911", "trade_pay_run_xero_found")]:
+                      ("20261118194200", "trade_pay_run_xero_found")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

@@ -8,8 +8,8 @@
 BEGIN;
 SET LOCAL statement_timeout = '120s';
 -- Rule 17: re-apply what this contract asserts on.
-\ir ../../../migrations/20261118999911_trade_pay_run_xero_found.sql
-\ir ../../../migrations/20261118999911_trade_pay_run_xero_found.sql
+\ir ../../../migrations/20261118194200_trade_pay_run_xero_found.sql
+\ir ../../../migrations/20261118194200_trade_pay_run_xero_found.sql
 
 CREATE FUNCTION pg_temp.zz_assert(ok boolean, words text) RETURNS void
 LANGUAGE plpgsql AS $$ BEGIN
@@ -43,13 +43,13 @@ SELECT pg_temp.zz_assert((SELECT enabled = false FROM public.feature_flags WHERE
 SAVEPOINT zz_collide;
 CREATE OR REPLACE FUNCTION public.record_trade_pay_run_xero_found(p_run_id uuid, p_invoice_id uuid, p_actor uuid, p_found jsonb)
 RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
-\ir ../../../migrations/20261118999911_trade_pay_run_xero_found.sql
+\ir ../../../migrations/20261118194200_trade_pay_run_xero_found.sql
 ROLLBACK TO SAVEPOINT zz_collide;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_apply_error \gset
 SAVEPOINT zz_collide;
 CREATE OR REPLACE FUNCTION public.record_trade_pay_run_xero_found(p_run_id uuid, p_invoice_id uuid, p_actor uuid, p_found jsonb)
 RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
-\ir ../../../rollbacks/20261118999911_trade_pay_run_xero_found_down.sql
+\ir ../../../rollbacks/20261118194200_trade_pay_run_xero_found_down.sql
 ROLLBACK TO SAVEPOINT zz_collide;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_down_error \gset
 \set ON_ERROR_ROLLBACK off
@@ -60,10 +60,10 @@ SELECT pg_temp.zz_assert(:'collide_down_error' LIKE '%rollback: another body is 
   'the rollback must refuse another body: ' || :'collide_down_error');
 -- Round trip: down, then up again.
 SAVEPOINT zz_round;
-\ir ../../../rollbacks/20261118999911_trade_pay_run_xero_found_down.sql
+\ir ../../../rollbacks/20261118194200_trade_pay_run_xero_found_down.sql
 SELECT pg_temp.zz_assert(to_regprocedure('public.record_trade_pay_run_xero_found(uuid,uuid,uuid,jsonb)') IS NULL,
   'the rollback drops the function');
-\ir ../../../migrations/20261118999911_trade_pay_run_xero_found.sql
+\ir ../../../migrations/20261118194200_trade_pay_run_xero_found.sql
 RELEASE SAVEPOINT zz_round;
 \echo 'PASS: cl-payrun-xero-found column, body, grants, release untouched, switch off, Rule 15 guard and rollback round trip.'
 
@@ -211,7 +211,7 @@ SELECT pg_temp.zz_assert(pg_temp.zz_error(format('SELECT public.release_trade_pa
 \set ON_ERROR_STOP off
 \set ON_ERROR_ROLLBACK on
 SAVEPOINT zz_keep;
-\ir ../../../rollbacks/20261118999911_trade_pay_run_xero_found_down.sql
+\ir ../../../rollbacks/20261118194200_trade_pay_run_xero_found_down.sql
 ROLLBACK TO SAVEPOINT zz_keep;
 SELECT :'LAST_ERROR_MESSAGE' AS keep_error \gset
 \set ON_ERROR_ROLLBACK off
