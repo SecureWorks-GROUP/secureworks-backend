@@ -8,7 +8,9 @@
  *    invoice, job or labour row is read;
  *  - the server key gets 403 with nothing read;
  *  - a failed, missing or empty approver list refuses (403), never passes;
- *  - an approver gets past the check to the action's own reads.
+ *  - an approver gets past the check to the action's own reads;
+ *  - the action named only in a POST body (no ?action=) returns no pay figures
+ *    and reads nothing past the check, for an office user and the server key.
  * Roles only, made-up ids; no names, rates or amounts.
  */
 // deno-lint-ignore-file no-import-prefix no-explicit-any
@@ -82,6 +84,7 @@ async function call(
   query: Record<string, string>,
   token: string,
   settings: Settings = "approver",
+  form: "query" | "body" = "query",
 ): Promise<{ status: number; body: any; paths: string[] }> {
   const handle = await handler();
   const paths: string[] = [];
@@ -153,14 +156,23 @@ async function call(
   }) as typeof fetch;
   try {
     const url = new URL("https://example.invalid/ops-api");
-    url.searchParams.set("action", action);
+    if (form === "query") url.searchParams.set("action", action);
     for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
     const res = await withEnv(() =>
       handle(
-        new Request(url, {
-          method: "GET",
-          headers: { authorization: `Bearer ${token}` },
-        }),
+        form === "query"
+          ? new Request(url, {
+            method: "GET",
+            headers: { authorization: `Bearer ${token}` },
+          })
+          : new Request(url, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ action, ...query }),
+          }),
       )
     );
     const text = await res.text();
@@ -214,6 +226,20 @@ for (const { action, query } of ACTIONS) {
       const out = await call(action, query, "approver-jwt", settings);
       assertEquals(out.status, 403, JSON.stringify(out.body));
       assertEquals(out.body.code, "pay_figures_approver_unreadable");
+      assertNothingPastTheGate(action, out.paths);
+    });
+  }
+
+  for (const token of ["office-jwt", SERVICE_KEY]) {
+    const who = token === SERVICE_KEY ? "the server key" : "an office user";
+    Deno.test(`pay figures: ${action} named only in a POST body returns no pay figures to ${who}`, async () => {
+      const out = await call(action, query, token, "approver", "body");
+      assert(out.status >= 400, `${out.status} ${JSON.stringify(out.body)}`);
+      assertEquals(
+        Object.keys(out.body ?? {}).filter((k) => k !== "error" && k !== "code"),
+        [],
+        JSON.stringify(out.body),
+      );
       assertNothingPastTheGate(action, out.paths);
     });
   }

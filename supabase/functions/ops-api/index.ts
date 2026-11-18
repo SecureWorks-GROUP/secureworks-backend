@@ -6296,25 +6296,6 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     })
   }
 
-  // Named pay figures are approver-only (pay_figures_approver.ts): checked once
-  // here, after the front door and before the action reads anything. The
-  // server, routine and agent keys carry no person and are refused.
-  const payFiguresAction = _preAuthUrl.searchParams.get('action')
-  if (payFiguresAction && PAY_FIGURES_APPROVER_ACTIONS.has(payFiguresAction)) {
-    const payRefusal = await payFiguresApproverRefusal(sb(), {
-      authMode,
-      userId: authMode === 'jwt' ? authUser?.id ?? null : null,
-    })
-    if (payRefusal) {
-      console.log(opsApiDeniedLogLine(payFiguresAction, req.method, requestActor, payRefusal.status, payRefusal.code))
-      recordOpsApiActorMissing(sb, authMode, requestActor)
-      return new Response(JSON.stringify({ error: payRefusal.error, code: payRefusal.code }), {
-        status: payRefusal.status,
-        headers: { ...CORS, 'Content-Type': 'application/json' },
-      })
-    }
-  }
-
   // Hoisted so the outer catch can audit a refused SES money-chain press: consts
   // declared inside the try are not in scope in its catch (defect 2).
   let auditAction: string | null = null
@@ -6323,6 +6304,23 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     const url = new URL(req.url)
     const action = url.searchParams.get('action')
     auditAction = action
+
+    // Named pay figures are approver-only (pay_figures_approver.ts): checked
+    // once, on the same resolved action the dispatch below switches on, after
+    // the front door and before the action reads anything. The server, routine
+    // and agent keys carry no person and are refused.
+    if (action && PAY_FIGURES_APPROVER_ACTIONS.has(action)) {
+      const payRefusal = await payFiguresApproverRefusal(sb(), {
+        authMode,
+        userId: authMode === 'jwt' ? authUser?.id ?? null : null,
+      })
+      if (payRefusal) {
+        console.log(opsApiDeniedLogLine(action, req.method, requestActor, payRefusal.status, payRefusal.code))
+        recordOpsApiActorMissing(sb, authMode, requestActor)
+        return json({ error: payRefusal.error, code: payRefusal.code }, payRefusal.status)
+      }
+    }
+
     console.log(opsApiRequestLogLine(action, req.method, requestActor))
     recordOpsApiActorMissing(sb, authMode, requestActor)
 
