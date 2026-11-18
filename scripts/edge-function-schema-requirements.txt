@@ -1297,3 +1297,8 @@ ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|column|
 ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|column|dispatch_v2_supplier_emails.dismissed_by_email
 ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|column|dispatch_v2_supplier_emails.dismissed_source
 ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|constraint|dispatch_v2_supplier_emails_dismissed_shape
+# cl-payrun-escape (PR 1646): release_pay_run_invoice calls the release
+# function, and the weekly pay run read selects released_at on every recorded
+# run, so ops-api must not deploy ahead of the migration.
+ops-api|supabase/migrations/20261118170500_trade_pay_run_release.sql|column|trade_pay_run_invoices.released_at
+ops-api|supabase/migrations/20261118170500_trade_pay_run_release.sql|function|release_trade_pay_run_invoice
