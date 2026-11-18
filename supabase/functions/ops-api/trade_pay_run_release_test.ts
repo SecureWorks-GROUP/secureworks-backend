@@ -1,6 +1,8 @@
 // deno-lint-ignore-file no-explicit-any no-import-prefix
 // cl-payrun-escape: an approver takes one invoice back out of an approved
-// pay run, to review. No network, no database: every value and id is made up.
+// pay run, to review. cl-payrun-xero-lookup: on a lapsed push claim the server
+// searches Xero itself. No network, no database, no Xero: every value and id
+// is made up and the Xero search is a stub.
 import "./trade_app_visibility_rules_test_env.ts";
 import {
   assert,
@@ -10,6 +12,8 @@ import {
 import {
   PAY_RUN_RELEASE_REFUSALS,
   type PayRunPushDeps,
+  type PayRunReleaseXeroCheck,
+  RELEASED_FROM_RUN_WORDS,
   type PayRunReleaseDeps,
   payRunEligible,
   payRunPlacement,
@@ -59,6 +63,8 @@ function makeWorld() {
       pushed_at: null as string | null,
       xero_bill_id: null as string | null,
       released_at: null as string | null,
+      // A push claim set and never given back, older than its lease.
+      claim_lapsed: false,
     },
     invoice: {
       id: INV,
@@ -74,6 +80,10 @@ function makeWorld() {
       recurring_deduction_amount: null as number | null,
     },
     pushes: 0,
+    searches: [] as string[],
+    bills: [] as Array<Record<string, unknown>>,
+    checks: [] as Array<PayRunReleaseXeroCheck | null>,
+    invoiceNumber: "ZZTEST-INV-7" as string | null,
     logs: [] as Record<string, unknown>[],
   };
   const pushDeps: PayRunPushDeps = {
@@ -114,9 +124,20 @@ function makeWorld() {
     approvers: pushDeps.approvers,
     runById: pushDeps.runById,
     log: pushDeps.log,
-    release: (_runId, _invoiceId, actor, _reason) => {
+    now: () => "2026-11-24T02:00:00.000Z",
+    invoiceNumber: () => Promise.resolve(db.invoiceNumber),
+    searchXero: (number) => {
+      db.searches.push(number);
+      return Promise.resolve(db.bills);
+    },
+    release: (_runId, _invoiceId, actor, _reason, check) => {
+      db.checks.push(check);
       if (db.row.released_at) {
         return Promise.resolve({ already_released: true, run_status: db.run.status });
+      }
+      if (db.row.claim_lapsed && check?.source !== "ops_api_xero_lookup") {
+        const r = PAY_RUN_RELEASE_REFUSALS.pay_run_push_claim_lapsed;
+        return Promise.reject(new TradePayRunError(r.code, r.words, r.status));
       }
       if (db.invoice.xero_bill_id) {
         const r = PAY_RUN_RELEASE_REFUSALS.pay_run_invoice_billed;
@@ -126,6 +147,7 @@ function makeWorld() {
       db.invoice.pay_run_id = null;
       db.row.verdict = "stopped";
       db.row.released_at = "2026-11-24T02:00:00Z";
+      db.row.claim_lapsed = false;
       db.run.status = "pushed";
       return Promise.resolve({
         already_released: false,
@@ -209,18 +231,85 @@ Deno.test("release: switch off, server key, someone off the list, another org: r
   assertEquals(calls, 0);
 });
 
-Deno.test("release: the Xero check goes to the database as sent, and anything but a record is no check", async () => {
-  const { releaseDeps } = makeWorld();
-  const seen: unknown[] = [];
-  const deps: PayRunReleaseDeps = {
-    ...releaseDeps,
-    release: (r, i, a, reason, check) => (seen.push(check), releaseDeps.release(r, i, a, reason, check)),
-  };
-  const check = { in_xero: false, checked_by: APPROVER, checked_at: "2026-11-24T02:00:00Z" };
-  for (const xeroCheck of [undefined, null, true, "checked", [check], check]) {
-    await press(deps, { xeroCheck });
+Deno.test("release: no lapsed claim, no Xero search, and a check sent in the request is never read", async () => {
+  const { db, releaseDeps } = makeWorld();
+  const out = await press(releaseDeps, {
+    xeroCheck: { in_xero: false, checked_by: APPROVER, checked_at: "2026-11-24T02:00:00Z" },
+    xero_check: { in_xero: false },
+  });
+  assertEquals(out.already_released, false);
+  assertEquals(db.searches, []);
+  assertEquals(db.checks, [null]);
+});
+
+Deno.test("release: a lapsed claim, the server searches Xero, finds no bill and sends what it found", async () => {
+  const { db, releaseDeps } = makeWorld();
+  db.row.claim_lapsed = true;
+  const out = await press(releaseDeps);
+  assertEquals(out.already_released, false);
+  assertEquals(db.searches, ["ZZTEST-INV-7"]);
+  assertEquals(db.checks, [null, {
+    in_xero: false,
+    checked_by: APPROVER,
+    checked_at: "2026-11-24T02:00:00.000Z",
+    source: "ops_api_xero_lookup",
+    searched_number: "ZZTEST-INV-7",
+    bills_found: 0,
+  }]);
+  assertEquals(db.invoice.status, "pending_ops_review");
+  assert(JSON.stringify(db.logs).includes('"xero_searched":true'));
+});
+
+Deno.test("release: a lapsed claim and a bill in Xero: refused, nothing released, bill ids logged", async () => {
+  const { db, releaseDeps } = makeWorld();
+  db.row.claim_lapsed = true;
+  db.bills = [{ InvoiceID: "ZZTEST-XERO-BILL-1", Status: "DRAFT" }];
+  await refused(press(releaseDeps), "pay_run_xero_check_found_in_xero", 409);
+  assertEquals(db.checks, [null]);
+  assertEquals(db.row.released_at, null);
+  assertEquals(db.invoice.pay_run_id, RUN);
+  assert(JSON.stringify(db.logs).includes("ZZTEST-XERO-BILL-1"));
+});
+
+Deno.test("release: a lapsed claim and Xero cannot be searched, or no number to search: refused, nothing released", async () => {
+  const failing = makeWorld();
+  failing.db.row.claim_lapsed = true;
+  await refused(
+    press({ ...failing.releaseDeps, searchXero: () => Promise.reject(new Error("ZZTEST Xero down")) }),
+    "pay_run_xero_lookup_failed",
+    503,
+  );
+  await refused(
+    press({ ...failing.releaseDeps, searchXero: () => Promise.resolve(null as any) }),
+    "pay_run_xero_lookup_failed",
+    503,
+  );
+  await refused(
+    press({ ...failing.releaseDeps, invoiceNumber: () => Promise.reject(new Error("ZZTEST read failed")) }),
+    "pay_run_xero_lookup_failed",
+    503,
+  );
+  assertEquals(failing.db.row.released_at, null);
+  const unnumbered = makeWorld();
+  unnumbered.db.row.claim_lapsed = true;
+  for (const n of [null, "", "   "]) {
+    unnumbered.db.invoiceNumber = n;
+    await refused(press(unnumbered.releaseDeps), "pay_run_xero_lookup_no_number", 409);
   }
-  assertEquals(seen, [null, null, null, null, null, check]);
+  assertEquals(unnumbered.db.searches, []);
+  assertEquals(unnumbered.db.row.released_at, null);
+});
+
+Deno.test("release: the answer says the invoice went back to review, and a queried invoice stays queried", async () => {
+  const { db, releaseDeps } = makeWorld();
+  db.invoice.status = "queried";
+  const out = await press(releaseDeps);
+  assertEquals(out.status, "queried");
+  assertEquals(out.words, RELEASED_FROM_RUN_WORDS);
+  assert(RELEASED_FROM_RUN_WORDS.includes("went back to the office for review"));
+  assert(RELEASED_FROM_RUN_WORDS.includes("a queried invoice stays queried"));
+  // A second press says already released, with no new words.
+  assertEquals((await press(releaseDeps)).words, undefined);
 });
 
 Deno.test("release: the reason is trimmed, passed to the database and never logged", async () => {
@@ -243,7 +332,11 @@ Deno.test("release: the reason is trimmed, passed to the database and never logg
   assert(JSON.stringify(failing.db.logs).includes("pay_run_invoice_billed"));
 });
 
-function rpcClient(answer: { data?: unknown; error?: { message: string } | null }) {
+function rpcClient(answer: {
+  data?: unknown;
+  error?: { message: string } | null;
+  invoice?: { data: unknown; error: unknown };
+}) {
   const calls: Array<{ name: string; params: any }> = [];
   return {
     calls,
@@ -252,16 +345,35 @@ function rpcClient(answer: { data?: unknown; error?: { message: string } | null 
         calls.push({ name, params });
         return Promise.resolve({ data: answer.data ?? null, error: answer.error ?? null });
       },
-      from: () => {
-        throw new Error("ZZTEST the release reads nothing itself");
+      from: (table: string) => {
+        calls.push({ name: `from:${table}`, params: null });
+        const q: any = {
+          select: () => q,
+          eq: (col: string, val: unknown) => (calls.push({ name: "eq", params: [col, val] }), q),
+          maybeSingle: () => Promise.resolve(answer.invoice ?? { data: null, error: null }),
+        };
+        return q;
       },
     },
   };
 }
 
+const noSearch = () => Promise.reject(new Error("ZZTEST no Xero in this test"));
+
+Deno.test("release: the invoice number is read by id, and a failed read throws", async () => {
+  const ok = rpcClient({ invoice: { data: { invoice_number: "ZZTEST-INV-7" }, error: null } });
+  const deps = payRunReleaseDepsFromClient(ok.client, () => Promise.resolve(true), noSearch);
+  assertEquals(await deps.invoiceNumber(INV), "ZZTEST-INV-7");
+  assertEquals(ok.calls, [{ name: "from:trade_invoices", params: null }, { name: "eq", params: ["id", INV] }]);
+  const missing = rpcClient({ invoice: { data: null, error: null } });
+  assertEquals(await payRunReleaseDepsFromClient(missing.client, () => Promise.resolve(true), noSearch).invoiceNumber(INV), null);
+  const broken = rpcClient({ invoice: { data: null, error: { message: "ZZTEST" } } });
+  await assertRejects(() => payRunReleaseDepsFromClient(broken.client, () => Promise.resolve(true), noSearch).invoiceNumber(INV));
+});
+
 Deno.test("release: the database call and every refusal it can raise", async () => {
   const ok = rpcClient({ data: { already_released: false, run_status: "approved" } });
-  const deps = payRunReleaseDepsFromClient(ok.client, () => Promise.resolve(true));
+  const deps = payRunReleaseDepsFromClient(ok.client, () => Promise.resolve(true), noSearch);
   assertEquals(await deps.release(RUN, INV, APPROVER, REASON, null), {
     already_released: false,
     run_status: "approved",
@@ -286,6 +398,8 @@ Deno.test("release: the database call and every refusal it can raise", async () 
     ["pay_run_xero_check_not_approver", "pay_run_xero_check_not_approver", 403],
     ["pay_run_xero_check_stale", "pay_run_xero_check_stale", 409],
     ["pay_run_xero_check_invalid", "pay_run_xero_check_invalid", 400],
+    // cl-payrun-xero-lookup: a check that is not this server's own search.
+    ["pay_run_xero_check_not_server", "pay_run_xero_check_not_server", 409],
     ["pay_run_invoice_billed", "pay_run_invoice_billed", 409],
     ["pay_run_invoice_status", "pay_run_invoice_status", 409],
     // The group release guard on trade_invoices (20261030133000).
@@ -296,20 +410,20 @@ Deno.test("release: the database call and every refusal it can raise", async () 
   for (const [message, code, status] of cases) {
     const c = rpcClient({ error: { message } });
     await refused(
-      payRunReleaseDepsFromClient(c.client, () => Promise.resolve(true)).release(RUN, INV, APPROVER, REASON, null),
+      payRunReleaseDepsFromClient(c.client, () => Promise.resolve(true), noSearch).release(RUN, INV, APPROVER, REASON, null),
       code,
       status,
     );
   }
   const empty = rpcClient({ data: null });
   await refused(
-    payRunReleaseDepsFromClient(empty.client, () => Promise.resolve(true)).release(RUN, INV, APPROVER, REASON, null),
+    payRunReleaseDepsFromClient(empty.client, () => Promise.resolve(true), noSearch).release(RUN, INV, APPROVER, REASON, null),
     "pay_run_write_failed",
     503,
   );
 });
 
-Deno.test("release: the door is staff only at the front door, POST only, a signed-in approver, no Xero", () => {
+Deno.test("release: the door is staff only at the front door, POST only, a signed-in approver, Xero read only", () => {
   const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url));
   const routine = src.slice(src.indexOf("const ROUTINE_ALLOWED_ACTIONS = new Set(["));
   const action = "release_pay_run_invoice";
@@ -324,9 +438,11 @@ Deno.test("release: the door is staff only at the front door, POST only, a signe
   assert(body.includes("req.method !== 'POST'"));
   assert(body.includes("requestActor.source === 'jwt'"));
   assert(body.includes("releasePayRunInvoice("));
-  assert(body.includes("xeroCheck: body?.xero_check"));
-  assert(body.includes("payRunReleaseDepsFromClient(client, () => readFlag(client, PAY_RUN_SWITCH))"));
-  for (const banned of ["pushTradeInvoiceToXeroAction", "xeroPost", "getXero", "Xero(", "body?.actor", "body?.user_id"]) {
+  assert(body.includes("payRunReleaseDepsFromClient("));
+  assert(body.includes("() => readFlag(client, PAY_RUN_SWITCH)"));
+  // The one Xero call: the stuck-invoice release's live-bill search.
+  assert(body.includes("findLiveTradeBillsByNumber(xeroGet, auth, invoiceNumber)"));
+  for (const banned of ["pushTradeInvoiceToXeroAction", "xeroPost", "Xero(", "xero_check", "xeroCheck", "body?.actor", "body?.user_id"]) {
     assertEquals(body.includes(banned), false, banned);
   }
 });
