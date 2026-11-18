@@ -3,8 +3,9 @@
 // its recent changes (office staff). POST set_work_order_cap_start sets it: a
 // signed-in approver only, never the server key; who may is the database's
 // owner_approval_authority, checked by set_work_order_cap_start before it
-// reads anything. Every change, by this door or by hand in SQL, is recorded in
-// work_order_cap_start_changes. Logs carry codes only.
+// reads anything. The door records its own change in work_order_cap_start_changes;
+// a hand change in SQL is recorded there once the director installs the record
+// trigger (install_work_order_cap_start_record). Logs carry codes only.
 // deno-lint-ignore-file no-explicit-any
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -24,6 +25,7 @@ const SET_REFUSALS: Array<[string, number, string, string]> = [
   ["work_order_cap_start_not_approver", 403, "approver_required", "Only an approver on the work order approver list can set the cap's start date."],
   ["work_order_cap_start_reason_invalid", 400, "reason_invalid", "Give a reason of 3 to 500 characters."],
   ["work_order_cap_start_changed", 409, "cap_start_changed", "The start date changed since you read it. Read it again, then set it."],
+  ["work_order_cap_start_not_recorded", 503, "cap_start_unrecorded", "The start date was not saved because its record could not be written. Try again in a minute."],
   ["work_order_cap_settings_missing", 409, "cap_settings_missing", "The cap's settings row is missing, so no job is capped. Tell the office."],
 ];
 

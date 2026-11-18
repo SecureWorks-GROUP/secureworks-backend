@@ -16,16 +16,19 @@ EXCEPTION WHEN OTHERS THEN
   IF SQLERRM <> wanted THEN RAISE; END IF;
 END $$;
 
--- What runs on merge: no start date, the hold switch untouched, the door service role only.
+-- What runs on merge: no start date, the hold switch untouched, no trigger on the settings
+-- table (the director installs it after proof), the door service role only.
 DO $$ BEGIN
   PERFORM pg_temp.assert_ok((SELECT cap_start_on IS NULL FROM public.work_order_cap_settings WHERE id = 1), 'start date set on merge');
   PERFORM pg_temp.assert_ok(NOT EXISTS (SELECT 1 FROM public.feature_flags WHERE flag_name = 'trade_line_hold_v1' AND enabled), 'hold switch on');
-  PERFORM pg_temp.assert_ok(EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'work_order_cap_settings_record'
-    AND tgrelid = 'public.work_order_cap_settings'::regclass AND NOT tgisinternal), 'record trigger missing');
+  PERFORM pg_temp.assert_ok(NOT EXISTS (SELECT 1 FROM pg_trigger
+    WHERE tgrelid = 'public.work_order_cap_settings'::regclass AND NOT tgisinternal), 'a trigger on the settings table at merge');
   PERFORM pg_temp.assert_ok(has_function_privilege('service_role', 'public.set_work_order_cap_start(uuid,text,date,date,text)', 'EXECUTE')
     AND NOT has_function_privilege('authenticated', 'public.set_work_order_cap_start(uuid,text,date,date,text)', 'EXECUTE')
     AND NOT has_function_privilege('anon', 'public.set_work_order_cap_start(uuid,text,date,date,text)', 'EXECUTE'), 'door grants');
-  PERFORM pg_temp.assert_ok(NOT has_function_privilege('service_role', 'public.work_order_cap_settings_record()', 'EXECUTE'), 'record function callable');
+  PERFORM pg_temp.assert_ok(NOT has_function_privilege('service_role', 'public.work_order_cap_settings_record()', 'EXECUTE')
+    AND NOT has_function_privilege('service_role', 'public.install_work_order_cap_start_record()', 'EXECUTE')
+    AND NOT has_function_privilege('service_role', 'public.remove_work_order_cap_start_record()', 'EXECUTE'), 'record functions callable');
   PERFORM pg_temp.assert_ok((SELECT relrowsecurity FROM pg_class WHERE oid = 'public.work_order_cap_start_changes'::regclass), 'record RLS off');
   PERFORM pg_temp.assert_ok(has_table_privilege('service_role', 'public.work_order_cap_start_changes', 'SELECT')
     AND NOT has_table_privilege('service_role', 'public.work_order_cap_start_changes', 'INSERT')
@@ -47,14 +50,12 @@ DO $$ DECLARE
 BEGIN
   -- Who may set it is checked before anything is read: with the settings row gone, a
   -- stranger still gets not_approver, never settings_missing.
-  ALTER TABLE public.work_order_cap_settings DISABLE TRIGGER work_order_cap_settings_record;
   DELETE FROM public.work_order_cap_settings;
   PERFORM pg_temp.expect_error(format($c$SELECT public.set_work_order_cap_start(%L, NULL, NULL, DATE '2026-11-24', 'ZZTEST start')$c$, stranger),
     'work_order_cap_start_not_approver');
   PERFORM pg_temp.expect_error(format($c$SELECT public.set_work_order_cap_start(%L, NULL, NULL, DATE '2026-11-24', 'ZZTEST start')$c$, approver),
     'work_order_cap_settings_missing');
   INSERT INTO public.work_order_cap_settings (id, cap_start_on) VALUES (1, NULL);
-  ALTER TABLE public.work_order_cap_settings ENABLE TRIGGER work_order_cap_settings_record;
 
   PERFORM pg_temp.expect_error(format($c$SELECT public.set_work_order_cap_start(NULL, NULL, NULL, DATE '2026-11-24', 'ZZTEST start')$c$),
     'work_order_cap_start_not_approver');
@@ -64,29 +65,48 @@ BEGIN
   PERFORM pg_temp.expect_error(format($c$SELECT public.set_work_order_cap_start(%L, NULL, DATE '2026-11-01', DATE '2026-11-24', 'ZZTEST start')$c$, approver),
     'work_order_cap_start_changed');
   PERFORM pg_temp.assert_ok((SELECT count(*) FROM public.work_order_cap_start_changes) = before_n, 'a refusal recorded a change');
+  -- As merged (no trigger installed), a hand change in SQL records nothing, as on main.
+  UPDATE public.work_order_cap_settings SET cap_start_on = DATE '2026-12-01' WHERE id = 1;
+  UPDATE public.work_order_cap_settings SET cap_start_on = NULL WHERE id = 1;
+  PERFORM pg_temp.assert_ok((SELECT count(*) FROM public.work_order_cap_start_changes) = before_n, 'a hand change recorded before install');
 
+  -- The door records its own change, naming the approver.
   answer := public.set_work_order_cap_start(approver, ' approver@example.invalid ', NULL, DATE '2026-11-24', ' ZZTEST start ');
-  PERFORM pg_temp.assert_ok(answer = jsonb_build_object('changed', true, 'cap_start_on', '2026-11-24',
-    'previous_start', NULL, 'authority', 'owner'), 'set answer ' || answer::text);
-  PERFORM pg_temp.assert_ok((SELECT cap_start_on FROM public.work_order_cap_settings WHERE id = 1) = DATE '2026-11-24', 'date not saved');
   SELECT * INTO r FROM public.work_order_cap_start_changes ORDER BY id DESC LIMIT 1;
   PERFORM pg_temp.assert_ok(r.via = 'approver' AND r.set_by = approver AND r.set_by_email = 'approver@example.invalid'
     AND r.authority = 'owner' AND r.reason = 'ZZTEST start' AND r.previous_start IS NULL
-    AND r.new_start = DATE '2026-11-24' AND r.db_role IS NOT NULL, 'approver record');
-  PERFORM pg_temp.assert_ok(coalesce(current_setting('sw.work_order_cap_start_by', true), '') = '', 'approver marker left set');
+    AND r.new_start = DATE '2026-11-24' AND r.db_role IS NOT NULL
+    AND (SELECT count(*) FROM public.work_order_cap_start_changes) = before_n + 1, 'approver record');
+  PERFORM pg_temp.assert_ok(answer = jsonb_build_object('changed', true, 'cap_start_on', '2026-11-24',
+    'previous_start', NULL, 'authority', 'owner', 'change_id', r.id), 'set answer ' || answer::text);
+  PERFORM pg_temp.assert_ok((SELECT cap_start_on FROM public.work_order_cap_settings WHERE id = 1) = DATE '2026-11-24', 'date not saved');
+  PERFORM pg_temp.assert_ok(coalesce(current_setting('sw.work_order_cap_start_change', true), '') = '', 'door marker left set');
 
   -- A retry of the same ask: changed false, nothing recorded.
   answer := public.set_work_order_cap_start(approver, NULL, NULL, DATE '2026-11-24', 'ZZTEST retry');
   PERFORM pg_temp.assert_ok(answer ->> 'changed' = 'false', 'retry changed');
   PERFORM pg_temp.assert_ok((SELECT count(*) FROM public.work_order_cap_start_changes) = before_n + 1, 'retry recorded');
 
-  -- Direct SQL, as before this change, is still allowed and now recorded, naming the role.
+  -- The director's install, after proof: twice is one trigger.
+  PERFORM public.install_work_order_cap_start_record();
+  PERFORM public.install_work_order_cap_start_record();
+  PERFORM pg_temp.assert_ok((SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.work_order_cap_settings'::regclass
+    AND tgname = 'work_order_cap_settings_record' AND NOT tgisinternal) = 1, 'install');
+
+  -- Installed: a door change is still recorded once, by the door.
+  answer := public.set_work_order_cap_start(approver, NULL, DATE '2026-11-24', DATE '2026-11-26', 'ZZTEST installed');
+  PERFORM pg_temp.assert_ok((SELECT count(*) FROM public.work_order_cap_start_changes) = before_n + 2
+    AND (SELECT via FROM public.work_order_cap_start_changes ORDER BY id DESC LIMIT 1) = 'approver', 'door change recorded twice');
+
+  -- A hand change in SQL is recorded, naming the role; a forged door marker does not hide it.
+  PERFORM set_config('sw.work_order_cap_start_change', (answer ->> 'change_id'), true);
   UPDATE public.work_order_cap_settings SET cap_start_on = DATE '2026-12-01' WHERE id = 1;
+  PERFORM set_config('sw.work_order_cap_start_change', '', true);
   SELECT * INTO r FROM public.work_order_cap_start_changes ORDER BY id DESC LIMIT 1;
   PERFORM pg_temp.assert_ok(r.via = 'direct_sql' AND r.set_by IS NULL AND r.authority IS NULL
-    AND r.previous_start = DATE '2026-11-24' AND r.new_start = DATE '2026-12-01' AND r.db_role IS NOT NULL, 'direct record');
+    AND r.previous_start = DATE '2026-11-26' AND r.new_start = DATE '2026-12-01' AND r.db_role IS NOT NULL, 'direct record');
   UPDATE public.work_order_cap_settings SET updated_at = now() WHERE id = 1;
-  PERFORM pg_temp.assert_ok((SELECT count(*) FROM public.work_order_cap_start_changes) = before_n + 2, 'an unchanged date recorded');
+  PERFORM pg_temp.assert_ok((SELECT count(*) FROM public.work_order_cap_start_changes) = before_n + 3, 'an unchanged date recorded');
   -- A row removed and put back is two changes.
   DELETE FROM public.work_order_cap_settings WHERE id = 1;
   INSERT INTO public.work_order_cap_settings (id, cap_start_on) VALUES (1, DATE '2026-12-01');
@@ -106,8 +126,8 @@ BEGIN
   PERFORM pg_temp.expect_error('TRUNCATE public.work_order_cap_start_changes', 'work_order_cap_start_changes_write_once');
 END $$;
 
--- Live runs as service_role (ops-api's door call and a hand UPDATE through the API): both are
--- recorded, naming that role.
+-- Live runs as service_role (ops-api's door call and, once installed, a hand UPDATE through
+-- the API): both are recorded, naming that role.
 SET LOCAL ROLE service_role;
 SELECT public.set_work_order_cap_start('f1990800-0000-4000-8000-0000000000a1', NULL, DATE '2026-11-24', DATE '2026-11-25', 'ZZTEST as service role');
 UPDATE public.work_order_cap_settings SET cap_start_on = DATE '2026-11-24', updated_at = now() WHERE id = 1;
@@ -119,6 +139,10 @@ DO $$ BEGIN
     'service role records ' || (SELECT array_agg(via || ':' || db_role ORDER BY id)::text
       FROM (SELECT * FROM public.work_order_cap_start_changes ORDER BY id DESC LIMIT 2) t));
   PERFORM pg_temp.assert_ok((SELECT cap_start_on FROM public.work_order_cap_settings WHERE id = 1) = DATE '2026-11-24', 'service role update');
+  -- The remove takes the trigger off; a hand change then records nothing again.
+  PERFORM public.remove_work_order_cap_start_record();
+  PERFORM pg_temp.assert_ok(NOT EXISTS (SELECT 1 FROM pg_trigger
+    WHERE tgrelid = 'public.work_order_cap_settings'::regclass AND NOT tgisinternal), 'remove');
 END $$;
 
 -- The before-switch counts (PR text, run here verbatim). Live may hold a job with no status or

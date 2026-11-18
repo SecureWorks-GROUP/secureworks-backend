@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any no-import-prefix require-await
 // Follow-up 49 item 9(b), before the switch: the cap's start date doors
 // (work_order_cap_start.ts). The database decides who is an approver and
-// records every change; these cases pin what the doors send and refuse.
+// records the change; these cases pin what the doors send and refuse.
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { workOrderCapStartAction } from "./work_order_cap_start.ts";
 
@@ -87,6 +87,7 @@ Deno.test("set: database refusals map to their codes; anything else is 503, neve
     [{ data: null, error: { message: "work_order_cap_start_changed" } }, 409, "cap_start_changed"],
     [{ data: null, error: { message: "work_order_cap_settings_missing" } }, 409, "cap_settings_missing"],
     [{ data: null, error: { message: "work_order_cap_start_reason_invalid" } }, 400, "reason_invalid"],
+    [{ data: null, error: { message: "work_order_cap_start_not_recorded" } }, 503, "cap_start_unrecorded"],
     [{ data: null, error: { message: "boom", code: "XX000" } }, 503, "cap_start_unwritable"],
     [{ data: null, error: null }, 503, "cap_start_unwritable"],
     [{ data: { changed: "yes" }, error: null }, 503, "cap_start_unwritable"],
