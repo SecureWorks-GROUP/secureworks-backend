@@ -2,7 +2,7 @@
 import { countedHistoryInvoice, historyAmount, payHistoryStart, summariseTradePayHistory } from './trade_money.ts'
 import { readTradePaySettings, tradePayTaxPercent } from './trade_pay_rule.ts'
 
-const invoiceColumns = [
+export const invoiceColumns = [
   'id', 'invoice_number', 'week_start', 'week_end', 'created_at', 'status', 'xero_bill_status',
   'amount_paid', 'gross_earned', 'super_rate', 'super_amount', 'super_basis', 'super_base_ex',
   'net_pay', 'subtotal_ex', 'gst_on', 'gst', 'total_inc', 'recurring_deduction_label', 'recurring_deduction_amount',

@@ -1539,6 +1539,7 @@ import {
   sanitiseRoofPhotosMeta,
   buildRoofReportJob,
 } from './roof_report_template.ts'
+import { myPayYearSummaryPdf } from './trade_year_summary_pdf.ts'
 import { readTradePayHistory } from './trade_pay_history_read.ts'
 import { summariseTradeMoney, tradeMoneyRow } from './trade_money.ts'
 import {
@@ -5345,6 +5346,7 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'group_work_order_preview_client_link',
   'my_money',
   'my_pay_history',
+  'my_pay_year_summary_pdf',
   // A trade's own savings goal (trade_savings_goal.ts, P1-07.4): the session's
   // user only; never on the owner's preview reads.
   'my_savings_goal',
@@ -13300,6 +13302,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'group_work_order_preview_client_link':
       case 'my_money':
       case 'my_pay_history':
+      case 'my_pay_year_summary_pdf':
       case 'my_savings_goal':
       case 'set_my_savings_goal':
       case 'unlock_makesafe_report':
@@ -13554,6 +13557,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             return await groupWorkOrderJson(previewGroupClientLink(client, groupCaller, groupPayload))
           }
           case 'my_money': return json(await myMoney(client, tradeUser, url.searchParams))
+          case 'my_pay_year_summary_pdf':
+            return await myPayYearSummaryPdf(client, tradeUser, req.method, url.searchParams, CORS)
           case 'my_pay_history': {
             if (req.method !== 'GET') return json({ error: 'my_pay_history requires GET' }, 405)
             const answer = await readTradePayHistory(client, tradeUser.id, getAWSTDate(), url.searchParams.get('years'))
