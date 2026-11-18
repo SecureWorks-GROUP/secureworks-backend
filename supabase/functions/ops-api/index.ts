@@ -46,6 +46,7 @@ import {
 } from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { divisionTrackingOption, loadDraftStandard } from '../_shared/xero_draft_standard.ts'
+import { recordXeroDraft } from '../_shared/xero_draft_register.ts'
 import { invoiceDivisionTag } from './invoice_division_tag.ts'
 import { commissionCapCodeFromDbError, commissionCapRefusal, commissionLineState, loggableClientLineId, readJobCommissionRecords, readJobCommissionRecordsReusing, type JobCommissionRecord } from './job_commission.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
@@ -2744,6 +2745,28 @@ function createTradeXeroBillOnce(
   }, args)
 }
 
+// P3-01.9: a trade bill's register row (X6). Recorded after its PDFs are
+// attached; never raised (phase 2 owns the pay path's stop). recordXeroDraft
+// never throws and does nothing while the draft standard switch is off.
+function recordTradeBillDraft(
+  client: any,
+  args: { tradeInvoiceId: string; bill: any; payload: any; pdfAttached: boolean; jobIds: unknown[] },
+) {
+  return recordXeroDraft(client, {
+    orgId: DEFAULT_ORG_ID,
+    xeroDocumentId: args.bill?.InvoiceID,
+    documentType: 'ACCPAY',
+    sourceKind: 'trade_invoice',
+    sourceId: args.tradeInvoiceId,
+    registerRow: 'X6',
+    jobIds: args.jobIds.map((id) => (id == null ? null : String(id))),
+    payload: args.payload?.Invoices?.[0],
+    returned: args.bill,
+    hasSourceDocument: args.pdfAttached === true,
+    raise: false,
+  })
+}
+
 function tradeXeroBillSearchApiError(error: unknown): never {
   if (error instanceof TradeXeroBillSearchError) {
     throw new ApiError(error.message, error.status, { ok: false, code: error.code, error: error.message })
@@ -3028,6 +3051,13 @@ async function pushTradeInvoiceToXeroAction(
       tradeName,
     },
   )
+  await recordTradeBillDraft(client, {
+    tradeInvoiceId: invoice_id,
+    bill,
+    payload: xeroPayload,
+    pdfAttached,
+    jobIds: reviewLines.map((line: any) => line?.job_id),
+  })
 
   // Cache in xero_invoices
   try {
@@ -14664,6 +14694,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   tradeName,
                 },
               )
+              await recordTradeBillDraft(client, {
+                tradeInvoiceId: tradeInv.id,
+                bill: xeroInv,
+                payload: xeroPayload,
+                pdfAttached: woPdfAttached,
+                jobIds: [wo.job_id],
+              })
               xeroBillId = identity.xeroBillId
               xeroBillNumber = identity.xeroBillNumber
               xeroSuccess = !!xeroBillId
@@ -17498,6 +17535,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                       tradeName,
                     },
                   )
+                  await recordTradeBillDraft(client, {
+                    tradeInvoiceId: invoice.id,
+                    bill,
+                    payload: xeroPayload,
+                    pdfAttached,
+                    jobIds: [...lineItems, ...extraLineItems].map((l: any) => l?.job_id),
+                  })
                   xeroBillId = identity.xeroBillId
                   xeroBillNumber = identity.xeroBillNumber
                   // Cache
@@ -42694,6 +42738,26 @@ async function createInvoice(
     }
   }
 
+  // P3-01.9: register row X3, raised when incomplete. Only a document Xero
+  // returned as DRAFT is recorded (an invoice created AUTHORISED is not a
+  // draft). Nothing is attached to a customer invoice by design. Never throws.
+  if (providerInvoiceStatus && providerInvoiceStatus.trim().toUpperCase() === 'DRAFT') {
+    const jIdForRegister = job_id || jobId
+    await recordXeroDraft(client, {
+      orgId: DEFAULT_ORG_ID,
+      xeroDocumentId: providerInvoiceId,
+      documentType: 'ACCREC',
+      sourceKind: 'customer_invoice',
+      sourceId: jIdForRegister ? String(jIdForRegister) : null,
+      registerRow: 'X3',
+      jobIds: [jIdForRegister ? String(jIdForRegister) : null],
+      payload: invoice.Invoices[0],
+      returned: xeroInv,
+      hasSourceDocument: true,
+      raise: true,
+    })
+  }
+
   // Email acceptance is separate from successful invoice creation. A timeout or
   // incomplete response leaves the delivery outcome unknown; never retry here.
   const emailRequested = !sesContext && !internal.captainLock && !!send_email
@@ -65674,6 +65738,22 @@ export async function pushExpenseToXero(
     entity_type: 'expense_receipt',
     entity_id: expense_id,
     payload: { xero_bill_id: xeroBillId, xero_status: 'draft' },
+  })
+
+  // P3-01.9: register row X7. No receipt is attached on this path yet, and
+  // phase 2 owns the stop, so nothing is raised. Never throws.
+  await recordXeroDraft(client, {
+    orgId: DEFAULT_ORG_ID,
+    xeroDocumentId: xeroBillId,
+    documentType: 'ACCPAY',
+    sourceKind: 'expense_receipt',
+    sourceId: expense_id,
+    registerRow: 'X7',
+    jobIds: [expense.job_id],
+    payload: billBody,
+    returned: result?.Invoices?.[0],
+    hasSourceDocument: false,
+    raise: false,
   })
 
   return { success: true, xero_bill_id: xeroBillId, xero_status: 'draft' }
