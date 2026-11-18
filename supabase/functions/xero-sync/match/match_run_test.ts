@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 // P2-02.7: the matcher runner. Fake client only; made-up amounts and ids.
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { matchPending, proposalOnly, runMatchFor } from "./match_run.ts";
+import { matchPending, matchSweep, matchSweepRequest, proposalOnly, runMatchFor } from "./match_run.ts";
 
 const JOB = "11111111-1111-4111-8111-111111111111";
 const BILL = "bill-1";
@@ -25,6 +25,8 @@ type World = {
   fail?: string; // a table whose read fails
   applyError?: Record<string, unknown>;
   queue?: any[];
+  waiting?: Array<{ document_kind: string; document_id: string }>; // needs_person lines
+  openItems?: string[]; // subject_ids with an open item
   queries: Array<{ table: string; op: string }>;
   rpcs: Array<{ fn: string; args: any }>;
 };
@@ -42,6 +44,14 @@ function fake(w: World) {
             return { data: CLUE_TYPES, error: null };
           case "job_cost_lines":
             if (filters.document_number) return { data: [], error: null };
+            if (filters.state === "needs_person" && filters.document_id === undefined) {
+              const rows = (w.waiting ?? [])
+                .filter((r) => r.document_kind === filters.document_kind)
+                .filter((r) => filters["lt:document_id"] === undefined || r.document_id < String(filters["lt:document_id"]))
+                .sort((a, b) => (a.document_id < b.document_id ? 1 : -1))
+                .slice(0, Number(filters.limit ?? 1e9));
+              return { data: rows.map((r) => ({ document_id: r.document_id })), error: null };
+            }
             return { data: w.lines?.[String(filters.document_id)] ?? [], error: null };
           case "xero_invoices":
             return {
@@ -68,6 +78,11 @@ function fake(w: World) {
               }],
               error: null,
             };
+          case "reconcile_items": {
+            const asked = (filters["in:subject_id"] as string[]) ?? [];
+            const hit = asked.filter((s) => (w.openItems ?? []).includes(s));
+            return { data: hit.map((subject_id) => ({ subject_id })), error: null };
+          }
           case "v_job_orders":
             return { data: w.orders ?? [], error: null };
           case "match_queue": {
@@ -87,11 +102,12 @@ function fake(w: World) {
         neq: () => chain,
         not: () => chain,
         or: () => chain,
-        in: () => chain,
+        in: (k: string, v: unknown) => ((filters[`in:${k}`] = v), chain),
+        lt: (k: string, v: unknown) => ((filters[`lt:${k}`] = v), chain),
         gte: () => chain,
         lte: () => chain,
         order: () => chain,
-        limit: () => chain,
+        limit: (n: number) => ((filters.limit = n), chain),
         maybeSingle: () => Promise.resolve(result()),
         then: (res: any, rej: any) => Promise.resolve(result()).then(res, rej),
       };
@@ -258,4 +274,78 @@ Deno.test("match_pending never takes a queued credit off the queue", async () =>
   const w = world({ queue: [{ subject_kind: "cost_document", subject_id: "xero_credit_note:c1" }] });
   assertEquals(await matchPending(fake(w)), { matched: 0 });
   assert(!w.queries.some((q) => q.op === "delete"));
+});
+
+const waitingBills = (ids: string[]) => ids.map((document_id) => ({ document_kind: "xero_bill", document_id }));
+
+Deno.test("match_sweep: a bill with an open item is left; a bill without one is run", async () => {
+  const w = world({
+    waiting: [...waitingBills(["b1", "b2"]), { document_kind: "xero_credit_note", document_id: "c1" }],
+    openItems: ["xero_bill:b2"],
+    lines: Object.assign({}, billLines("b1"), billLines("b2")),
+  });
+  const out = await matchSweep(fake(w));
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:b1"]);
+  assertEquals([out.swept, out.with_open_item, out.run, out.done, out.next], [2, 1, 1, true, null]);
+  // A waiting credit note is not swept: the read asks for bills only.
+  assert(!applies(w).some((a) => String(a.args.p_subject_id).startsWith("xero_credit_note")));
+});
+
+Deno.test("match_sweep: 60 waiting bills, 50 a call; the next call picks up after the cursor", async () => {
+  const ids = Array.from({ length: 60 }, (_, i) => `b${String(i).padStart(2, "0")}`);
+  const lines = Object.assign({}, ...ids.map((id) => billLines(id)));
+  const w = world({ waiting: waitingBills(ids), lines });
+  const first = await matchSweep(fake(w));
+  assertEquals([first.swept, first.done, first.next, applies(w).length], [50, false, "b10", 50]);
+  const w2 = world({ waiting: waitingBills(ids), lines });
+  const second = await matchSweep(fake(w2), { after: String(first.next) });
+  assertEquals([second.swept, second.done, second.next], [10, true, null]);
+  assertEquals(applies(w2).map((a) => a.args.p_subject_id), ids.slice(0, 10).reverse().map((d) => `xero_bill:${d}`));
+});
+
+Deno.test("match_sweep: an unreadable item list or waiting list runs nothing and keeps the cursor", async () => {
+  const items = world({ waiting: waitingBills(["b1"]), lines: billLines("b1"), fail: "reconcile_items" });
+  const r1 = await matchSweep(fake(items), { after: "b9" });
+  assertEquals([r1.error, r1.next, r1.done, applies(items).length], ["items_unreadable", "b9", false, 0]);
+  const lines = world({ waiting: waitingBills(["b1"]), fail: "job_cost_lines" });
+  const r2 = await matchSweep(fake(lines), { after: "b9" });
+  assertEquals([r2.error, r2.next, applies(lines).length], ["lines_unreadable", "b9", 0]);
+});
+
+Deno.test("match_sweep: nothing waiting is done in one read", async () => {
+  const w = world({ waiting: [] });
+  assertEquals(await matchSweep(fake(w)), { swept: 0, with_open_item: 0, next: null, done: true });
+  assertEquals(w.queries.length, 1);
+});
+
+Deno.test("match_sweep: out of time mid-sweep, the rest are requeued and the cursor still moves on", async () => {
+  let t = 0;
+  const w = world({ waiting: waitingBills(["a", "b"]), lines: Object.assign({}, billLines("a"), billLines("b")) });
+  const out = await matchSweep(fake(w), { budgetMs: 5, now: () => (t += 10) });
+  assertEquals([out.run, out.requeued, out.done], [0, 2, true]);
+  assertEquals(w.rpcs.filter((r) => r.fn === "match_requeue").map((r) => r.args.p_reason), ["over_run_time", "over_run_time"]);
+});
+
+Deno.test("match_sweep door: only a POST with the exact server key; nothing read otherwise", async () => {
+  const url = "https://x.invalid/xero-sync?action=match_sweep";
+  for (const [method, auth, status] of [
+    ["POST", "Bearer anon-or-user-jwt", 403],
+    ["POST", null, 403],
+    ["GET", "Bearer server-key", 405],
+  ] as const) {
+    const w = world({ waiting: waitingBills(["b1"]), lines: billLines("b1") });
+    const headers: Record<string, string> = auth ? { authorization: auth } : {};
+    const out = await matchSweepRequest(new Request(url, { method, headers }), fake(w), "server-key");
+    assertEquals(out.status, status);
+    assertEquals([w.queries.length, w.rpcs.length], [0, 0]);
+  }
+  const bad = await matchSweepRequest(
+    new Request(`${url}&after=`, { method: "POST", headers: { authorization: "Bearer server-key" } }), fake(world()), "server-key");
+  assertEquals(bad.status, 400);
+  const w = world({ waiting: waitingBills(["b1"]), lines: billLines("b1") });
+  const ok = await matchSweepRequest(
+    new Request(url, { method: "POST", headers: { authorization: "Bearer server-key" } }), fake(w), "server-key");
+  assertEquals([ok.status, ok.body.swept, ok.body.done], [200, 1, true]);
+  // An empty server key refuses everyone.
+  assertEquals((await matchSweepRequest(new Request(url, { method: "POST", headers: { authorization: "Bearer " } }), fake(world()), "")).status, 403);
 });

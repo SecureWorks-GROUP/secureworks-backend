@@ -60,7 +60,7 @@ import { builderReferenceAnnotation, decideBuilderReference, loadBuilderReferenc
 // tests can import matchUnlinkedInvoices without binding a port.
 import { parseBankSummary } from './bank_summary.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { MATCH_RUN_BUDGET_MS, matchPending, runMatchFor } from './match/match_run.ts'
+import { MATCH_RUN_BUDGET_MS, matchPending, matchSweepRequest, runMatchFor } from './match/match_run.ts'
 import {
   buildMaterialsFactRow,
   buildQueueRow,
@@ -241,6 +241,14 @@ if (import.meta.main) serve(async (req: Request) => {
         // P2-02.7: re-match bills waiting in match_queue, 50 at a time. One
         // query when nothing waits. Proposals only (match/match_run.ts).
         return json(await matchPending(sb))
+      case 'match_sweep': {
+        // P2-02.7: bills waiting for a person with no open Reconcile item,
+        // 50 a call, by document id descending. POST with the exact service
+        // key; the caller passes back `next` as `?after=` until `done`.
+        // Proposals only, behind reconcile_matcher_v1.
+        const out = await matchSweepRequest(req, sb, SUPABASE_SERVICE_KEY)
+        return json(out.body, out.status)
+      }
       case 'sync_reports':
         return json(await syncReports(sb))
       case 'sync_projects':

@@ -1,5 +1,6 @@
 // P2-02.7 (Follow-up 66 b): run the matcher on cost documents the sync just
-// changed, and on the match queue.
+// changed, on the match queue, and in a bounded sweep over waiting bills with
+// no open Reconcile item (match_sweep).
 //
 // PROPOSALS ONLY. The matcher may name a job for a bill from a job number, an
 // order (a PO named on the bill, a sealed-scope order or one open order of the
@@ -425,4 +426,92 @@ export async function matchPending(sb: Sb): Promise<Record<string, unknown>> {
   if (del.error) return { matched: 0, error: "queue_delete_failed" };
   const report = await runMatchFor(sb, ids, { ruleVersion: "v1" });
   return { matched: report.run, ...report };
+}
+
+/** Lines read per sweep page. The page is cut to MATCH_RUN_LIMIT bills. */
+export const MATCH_SWEEP_LINE_PAGE = 500;
+
+/**
+ * The match_sweep action: a bounded pass over bills that wait for a person and
+ * have no open Reconcile item, so a bill the sync wrote before the matcher ran
+ * (or the backfill twin wrote) still gets a proposal.
+ *
+ * Bills only, like the runner: a waiting credit note is not swept (no raiser
+ * for credits yet; see the PR). By document id, descending (a Xero id, not a
+ * date), at most MATCH_RUN_LIMIT bills a call. The caller holds the cursor: pass `after` = the `next` of the
+ * last call until `done`. Nothing is stored between calls, so with
+ * reconcile_matcher_v1 off (no item raised) a second pass from the top runs
+ * the same bills again; each run re-marks the bill's clues and adds one shadow
+ * row (match_apply).
+ *
+ * A failed read of the waiting lines or of the open items runs nothing and
+ * returns the cursor it was given: an unread item is never "no item". A bill
+ * the runner requeues (time, a failed read) is past the cursor: it waits in
+ * match_queue for match_pending.
+ */
+export async function matchSweep(
+  sb: Sb,
+  opts: { after?: string | null; now?: () => number; budgetMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const after = opts.after ?? null;
+  // job_cost_lines_document_idx (document_kind, document_id), read backwards.
+  let q = sb.from("job_cost_lines").select("document_id")
+    .eq("document_kind", "xero_bill").eq("state", "needs_person");
+  if (after) q = q.lt("document_id", after);
+  let lines: { data: unknown; error: unknown } | null = null;
+  try {
+    lines = await q.order("document_id", { ascending: false }).limit(MATCH_SWEEP_LINE_PAGE);
+  } catch {
+    lines = null;
+  }
+  if (lines?.error || !Array.isArray(lines?.data)) {
+    console.error("[match_sweep] waiting lines unreadable");
+    return { swept: 0, error: "lines_unreadable", next: after, done: false };
+  }
+  const rows = lines.data as Array<{ document_id: string }>;
+  const docs = [...new Set(rows.map((r) => r.document_id).filter((d) => typeof d === "string" && d))];
+  const taken = docs.slice(0, MATCH_RUN_LIMIT);
+  const done = rows.length < MATCH_SWEEP_LINE_PAGE && docs.length <= MATCH_RUN_LIMIT;
+  const next = done ? null : taken[taken.length - 1] ?? after;
+  if (!taken.length) return { swept: 0, with_open_item: 0, next, done };
+
+  const subjects = taken.map((d) => `xero_bill:${d}`);
+  // reconcile_items_open_subject_idx. Any open item on the bill, of any kind.
+  let items: { data: unknown; error: unknown } | null = null;
+  try {
+    items = await sb.from("reconcile_items").select("subject_id")
+      .eq("subject_table", "cost_document").eq("status", "open").in("subject_id", subjects);
+  } catch {
+    items = null;
+  }
+  if (items?.error || !Array.isArray(items?.data)) {
+    console.error("[match_sweep] open items unreadable");
+    return { swept: 0, error: "items_unreadable", next: after, done: false };
+  }
+  const open = new Set((items.data as Array<{ subject_id: string }>).map((r) => r.subject_id));
+  const toRun = subjects.filter((s) => !open.has(s));
+  const report = await runMatchFor(sb, toRun, { ruleVersion: "v1", now: opts.now, budgetMs: opts.budgetMs });
+  return { swept: subjects.length, with_open_item: subjects.length - toRun.length, ...report, next, done };
+}
+
+/**
+ * The match_sweep door. Every call writes clue and shadow rows, even with the
+ * matcher switch off, so only the exact server key may call it (as
+ * cost_lines_backfill_documents): a signed-in user's JWT, the anon key or the
+ * ops key is refused 403 before anything is read.
+ */
+export async function matchSweepRequest(
+  req: Request,
+  sb: Sb,
+  serviceKey: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  if (!serviceKey || req.headers.get("authorization") !== `Bearer ${serviceKey}`) {
+    return { status: 403, body: { error: "service_key_required" } };
+  }
+  if (req.method !== "POST") return { status: 405, body: { error: "post_required" } };
+  const after = new URL(req.url).searchParams.get("after");
+  if (after != null && (after.length === 0 || after.length > 200)) {
+    return { status: 400, body: { error: "invalid_after" } };
+  }
+  return { status: 200, body: await matchSweep(sb, { after }) };
 }
