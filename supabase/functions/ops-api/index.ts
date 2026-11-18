@@ -13,7 +13,9 @@ import { setCouncilRequired } from './council_mark.ts'
 import { JobLabourPayReadError, readHourlyCappedJobs, readHourlyLabourLimits } from './job_labour_cap.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
+import { addMyselfToJob, jobsNearMe, SelfAddError, SELF_ADDED_CONTACT_ACCESS_FILTER, bookingGrantsContactAccess, contactFreeJob } from './trade_self_add.ts'
 import { SelfAllocationRefusal, selfAllocateForInvoice } from './trade_self_allocation.ts'
+import { readMySavingsGoal, setMySavingsGoal } from './trade_savings_goal.ts'
 import {
   isWorkOrderInvoiceItem,
   loadTradeInvoiceJobModes,
@@ -40,7 +42,7 @@ import {
 } from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { divisionTrackingOption } from '../_shared/xero_draft_standard.ts'
-import { commissionCapCodeFromDbError, commissionCapRefusal, readJobCommissionRecords } from './job_commission.ts'
+import { commissionCapCodeFromDbError, commissionCapRefusal, commissionLineState, readJobCommissionRecords, type JobCommissionRecord } from './job_commission.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
@@ -5339,6 +5341,10 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'freeze_group_work_order',
   'group_work_order_preview_client_link',
   'my_money',
+  // A trade's own savings goal (trade_savings_goal.ts, P1-07.4): the session's
+  // user only; never on the owner's preview reads.
+  'my_savings_goal',
+  'set_my_savings_goal',
   'unlock_makesafe_report',
   'upload_photo',
   'get_upload_url',
@@ -5352,6 +5358,8 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   // for the signed-in trade, inside their company.
   'trade_invoice_job_modes',
   'self_allocate_for_invoice',
+  'add_myself_to_job',
+  'jobs_near_me',
   'submit_trade_invoice',
   'my_trade_invoices',
   'get_trade_invoice',
@@ -11610,7 +11618,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         })
         return json(result.body, result.status)
       }
-      case 'set_trade_rate_ops': return json(await setTradeRate(client, null, body))
+      case 'set_trade_rate_ops': return json(await setTradeRate(client, null, body,
+        requestActor.source === 'jwt' ? requestActor.actor.slice('user:'.length) : null))
+      case 'trade_rate_history': {
+        if (req.method !== 'GET') throw new ApiError('GET required', 405)
+        return json(await tradeRateHistory(client, url.searchParams))
+      }
       case 'approve_trade_invoice': {
         // Ops (Shaun) approves a pending_ops_review trade invoice after verifying
         // manual hours against the schedule. Moves it to 'approved' so the Xero
@@ -13259,6 +13272,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'freeze_group_work_order':
       case 'group_work_order_preview_client_link':
       case 'my_money':
+      case 'my_savings_goal':
+      case 'set_my_savings_goal':
       case 'unlock_makesafe_report':
       case 'upload_photo':
       case 'get_upload_url':
@@ -13290,6 +13305,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'crew_charges_on_my_jobs':
       case 'review_crew_charge':
       case 'submit_work_order_invoice':
+      case 'add_myself_to_job':
+      case 'jobs_near_me':
       case 'search_all_jobs':
       case 'generate_trade_invoice':
       case 'my_invoices':
@@ -13509,6 +13526,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             return await groupWorkOrderJson(previewGroupClientLink(client, groupCaller, groupPayload))
           }
           case 'my_money': return json(await myMoney(client, tradeUser, url.searchParams))
+          // P1-07.4: the goal is always the session trade's (tradeUser.id). A
+          // user id in the body or query string is never read.
+          case 'my_savings_goal': {
+            if (req.method !== 'GET') return json({ error: 'my_savings_goal requires GET' }, 405)
+            const answer = await readMySavingsGoal(client, tradeUser.id)
+            return json(answer.body, answer.status)
+          }
+          case 'set_my_savings_goal': {
+            if (req.method !== 'POST') return json({ error: 'set_my_savings_goal requires POST' }, 405)
+            const answer = await setMySavingsGoal(client, tradeUser.id, body)
+            return json(answer.body, answer.status)
+          }
           case 'unlock_makesafe_report': return json(await unlockMakesafeReport(client, body, tradeUser, tradeJobAccess, isDispatcher))
           case 'my_hours': return json(await myHours(client, tradeUser.id, url.searchParams))
           case 'submit_trade_invoice': return json(await submitTradeInvoice(client, tradeUser.id, body))
@@ -13563,6 +13592,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 office_note: tradeInvoiceOfficeNote(inv, detailLines),
               },
             })
+          }
+          case 'add_myself_to_job':
+          case 'jobs_near_me': {
+            const method = action === 'add_myself_to_job' ? 'POST' : 'GET'
+            if (req.method !== method) return json({ error: `${action} requires ${method}` }, 405)
+            try {
+              if (action === 'jobs_near_me') return json(await jobsNearMe(client, url.searchParams, tradeUser))
+              return json(await addMyselfToJob(client, body, tradeUser, {
+                createAssignment: (b) => createAssignment(client, b),
+                isUserDateConflict: isAssignmentUserDateConflict,
+                enrollGroup: (jobId, userId) => enrollClockGroupParticipant(client, jobId, userId, async () => {
+                  const modes = await loadTradeInvoiceJobModes(client, {
+                    tradeId: userId, orgId: tradeUser.orgId, jobIds: [jobId],
+                    jobVertical: _jobVertical, normaliseManagedVerticals: _normalizeManagedVerticals,
+                  })
+                  return modes.jobs[0]?.invoice_mode
+                }),
+              }))
+            } catch (error) {
+              if (error instanceof SelfAddError) return json({ ok: false, error: error.message, code: error.code }, error.status)
+              throw error
+            }
           }
           case 'search_all_jobs':
             return json(await searchAllJobs(client, url.searchParams, tradeUser, isDispatcher))
@@ -15175,6 +15226,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const extraLineItems: any[] = []
             let extraSubtotal = 0
             let clientPricedExtraCount = 0
+            let commissionRecordsForOffers: Map<string, JobCommissionRecord> | null = null
             if (hasExtras) {
               // Client lines are trimmed once (type and job references) and
               // every step below reads those values. Weekly work-order lines
@@ -15267,6 +15319,24 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }
               }
 
+              // P1-04.3: offered commission is priced before the weekly rate
+              // check, under the existing commission switch. Reuse this bounded
+              // record read for authority and the cap; switch off keeps today's
+              // typed-extra path. Job ids come from the tenant-scoped read above.
+              const commissionOfferJobIds = extraItemsIn.filter((item: any) =>
+                item && isCommissionLine(extraLineType(item)) &&
+                item.source !== 'clock' && item._source !== 'clock' && item.source !== 'server_labour' &&
+                !isGroupShareInvoiceItem(item) && !item.group_share_id
+              ).map((item: any) => item.job_id ? jobById[item.job_id]?.id : jobByNumber[item.job_number]?.id)
+                .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+              if (!weeklyInvoice && commissionOfferJobIds.length > 0 && await readFlag(client, 'commission_from_job_only_v1')) {
+                try {
+                  commissionRecordsForOffers = await readJobCommissionRecords(client, commissionOfferJobIds)
+                } catch {
+                  throw new ApiError('Could not check the commission on this invoice. Nothing was saved. Please submit again.', 503, { saved: false, code: 'commission_unreadable' })
+                }
+              }
+
               // Who may bill each job (trade_invoice_extra_job_authority.ts).
               // Before any extra line is priced or written, every line that
               // names a job must name one job in the caller's company that the
@@ -15294,7 +15364,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   },
                   lines: jobLines,
                   jobVertical: _jobVertical,
-                  readCommissionRecords: (jobIds) => readJobCommissionRecords(client, jobIds),
+                  readCommissionRecords: (jobIds) => commissionRecordsForOffers
+                    ? Promise.resolve(commissionRecordsForOffers)
+                    : readJobCommissionRecords(client, jobIds),
                 }).catch((error) => {
                   if (error instanceof ExtraJobBillingRefusal) {
                     throw new ApiError(error.message, 403, {
@@ -15423,9 +15495,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     label: rawItem.job_number || rawItem.job_id || 'extra',
                   })
                   : null
+                const offeredJob = rawItem.job_id ? jobById[rawItem.job_id] : jobByNumber[String(rawItem.job_number || '')]
+                const commissionState = commissionRecordsForOffers && isCommissionLine(extraLineType(rawItem))
+                  ? commissionLineState(commissionRecordsForOffers.get(offeredJob?.id) ?? null, tradeUser.id)
+                  : null
+                const serverCommissionAmount = commissionState?.state === 'offer' ? commissionState.remaining_ex : null
+                const serverResolvedCommissionLine = serverCommissionAmount !== null
+                if (serverResolvedCommissionLine && ['rate', 'unit_rate', 'amount', 'commission_amount', 'line_total_ex'].some((key) => Object.hasOwn(rawItem, key))) {
+                  const lineId = rawItem.line_id ?? rawItem.id
+                  console.warn('[ops-api] commission_client_amount_ignored', { line_id: typeof lineId === 'string' ? lineId : null })
+                }
                 const officeHourly = weekAutofill && !serverResolvedWeeklyLine && !isWorkOrderInvoiceItem(rawItem) && (rawItem.row_type === 'labour' || isTradeInvoiceTimeLineType(rawItem.type))
-                const item = { ...(extraTimeEntry ? { ...rawItem, quantity: extraTimeEntry.hours } : rawItem),
-                  ...(officeHourly ? { rate: dayRate(extraTimeEntry?.work_date || rawItem.date || todayPerth()) } : {}) }
+                const item = serverResolvedCommissionLine
+                  ? { ...rawItem, quantity: 1, rate: serverCommissionAmount }
+                  : { ...(extraTimeEntry ? { ...rawItem, quantity: extraTimeEntry.hours } : rawItem),
+                    ...(officeHourly ? { rate: dayRate(extraTimeEntry?.work_date || rawItem.date || todayPerth()) } : {}) }
+                const serverPricedExtra = serverResolvedWeeklyLine || serverResolvedCommissionLine
                 const qty = Number(item.quantity || 0)
                 const rate = Number(item.rate || 0)
                 if (week_start) {
@@ -15438,14 +15523,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 if (week_start && !resolvedJob && item.type !== 'final_payout_deduction') throw new ApiError('Manual invoice job is not active or does not exist: ' + (item.job_number || item.job_id), 422)
                 // Only a line the server priced itself is server_resolved. The
                 // client's own rate_source is never trusted (B14).
-                const rateSource = serverResolvedWeeklyLine || officeHourly ? 'server_resolved' : 'client_entered'
+                const rateSource = serverPricedExtra || officeHourly ? 'server_resolved' : 'client_entered'
                 if (week_start && rateSource === 'client_entered') clientPricedExtraCount++
                 const amt = Math.round((Number(item.quantity || 1) * Number(item.rate || 0)) * 100) / 100
                 if (serverResolvedWeeklyLine && Math.abs(amt - Number(item.line_total_ex)) > 0.01) {
                   throw new ApiError('A server-resolved weekly line no longer matches its quantity and rate', 422)
                 }
                 extraSubtotal += amt
-                const extraHours = serverResolvedWeeklyLine ? 0 : Number(item.quantity ?? item.qty ?? item.hours ?? 0)
+                const extraHours = serverPricedExtra ? 0 : Number(item.quantity ?? item.qty ?? item.hours ?? 0)
                 // B14: a typed rate above the office limit holds the line for
                 // office review, which holds the whole invoice out of Xero.
                 const extraRateHold: ExtraRateHold | null = item.type === 'final_payout_deduction'
@@ -15453,7 +15538,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   : extraLineRateHold({
                     lineType: item.type,
                     rate,
-                    serverResolved: Boolean(serverResolvedWeeklyLine) || officeHourly,
+                    serverResolved: Boolean(serverPricedExtra) || officeHourly,
                     rules: extraRateRules,
                     tradeHourlyRate: resolvedRate > 0 ? resolvedRate : null,
                   })
@@ -15471,7 +15556,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 // never the SWMS- prefix. Same resolver + evaluator as the
                 // assigned path; soft, never blocks, never touches $/hours.
                 let extraHoursFlag: HoursFlagOutcome | null = null
-                if (!serverResolvedWeeklyLine && isMakeSafeLine({ jobType: resolvedJob?.type, division: item.division || resolvedJob?.type, lineType: item.type })) {
+                if (!serverPricedExtra && isMakeSafeLine({ jobType: resolvedJob?.type, division: item.division || resolvedJob?.type, lineType: item.type })) {
                   extraHoursFlag = evaluateHoursFlag({
                     chargedHours: extraHours,
                     candidates: resolvedJob?.id ? candidatesForJob(resolvedJob.id) : [],
@@ -15542,7 +15627,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   site_address: item.site_address || (resolvedJob
                     ? [resolvedJob.site_address, resolvedJob.site_suburb].filter(Boolean).join(', ')
                     : null),
-                  query_note: serverResolvedWeeklyLine
+                  query_note: serverPricedExtra
                     ? null
                     : extraHoursFlag?.flagged
                     ? extraHoursFlag.queryNote + ' | ' + extraRateNote
@@ -15607,7 +15692,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (commissionClaims.length > 0) {
                 let records
                 try {
-                  records = await readJobCommissionRecords(client, commissionClaims.map((c: any) => c.jobId))
+                  records = commissionRecordsForOffers ?? await readJobCommissionRecords(client, commissionClaims.map((c: any) => c.jobId))
                 } catch {
                   throw new ApiError('Could not check the commission on this invoice. Nothing was saved. Please submit again.', 503, { saved: false, code: 'commission_unreadable' })
                 }
@@ -18114,6 +18199,19 @@ export async function tradeCalendarEvents(
       )
     )
   }
+  if (!isDispatcher && pageRows.length > 0) {
+    const allowed = new Set<string>()
+    const ids = collectUniqueStringIds(pageRows.map((e: any) => e.assignment_id))
+    for (let i = 0; i < ids.length; i += 25) {
+      // job_assignments_pkey, at most 25 exact page rows per read.
+      const { data: bookings, error: bookingError } = await client.from('job_assignments')
+        .select('id, added_by, self_added_status').in('id', ids.slice(i, i + 25))
+      if (bookingError) throw bookingError
+      for (const b of bookings || []) if (bookingGrantsContactAccess(b)) allowed.add(String(b.id))
+    }
+    pageRows = pageRows.filter((e: any) => allowed.has(String(e.assignment_id)) ||
+      tradeViewerQuoteVisibleForJob({ type: e.job_type, job_number: e.job_number, job_family: e.job_family }, { managedVerticals }))
+  }
   const events = pageRows.map((event: any) => {
     const { org_id, ...safeEvent } = event
     return safeEvent
@@ -19005,6 +19103,7 @@ async function viewerGenuineAssignmentJobIds(client: any, viewer: TradeAuthConte
   while (true) {
     const { data, error } = await client.from('job_assignments')
       .select('job_id')
+      .or(SELF_ADDED_CONTACT_ACCESS_FILTER)
       .eq('user_id', viewer.id)
       .eq('is_ghost', false)
       .or('status.is.null,status.neq.cancelled')
@@ -38317,7 +38416,8 @@ export async function createAssignment(client: any, body: any) {
       ? { duration_days: Math.round(Number(body.durationDays || body.duration_days)) } : {}),
     start_time: startTime || start_time || null,
     end_time: endTime || end_time || null,
-    role: role || 'lead_installer',
+    role: body.self_added === true ? 'installer' : role || 'lead_installer',
+    ...(body.self_added === true ? { added_by: 'self', self_added_status: 'added', self_added_at: new Date().toISOString() } : {}),
     notes: notes || null,
     assignment_type: assignmentType || assignment_type || 'install',
     crew_name: crewName || crew_name || null,
@@ -38400,7 +38500,7 @@ export async function createAssignment(client: any, body: any) {
   await client.from('job_events').insert({
     job_id: jId,
     event_type: 'assignment_created',
-    detail_json: { assignment_id: data.id, date: sDate, operator: body.operator_email || body.user_email || null },
+    detail_json: { assignment_id: data.id, date: sDate, operator: body.operator_email || body.user_email || null, ...(body.self_added === true ? { self_added: true } : {}) },
   })
 
   // ── SMS to assigned installer ──
@@ -38493,7 +38593,7 @@ export async function createAssignment(client: any, body: any) {
       },
       metadata: { operator: body.operator_email || body.user_email || null },
     })
-    if (jobData?.ghl_opportunity_id) {
+    if (jobData?.ghl_opportunity_id && body.self_added !== true) {
       const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=update_custom_fields`
       fetch(ghlUrl, {
         method: 'POST',
@@ -44171,6 +44271,7 @@ async function assertAssigned(client: any, jobId: string, userId: string, isAdmi
     .eq('job_id', jobId)
     .eq('user_id', userId)
     .neq('status', 'cancelled')
+    .or(SELF_ADDED_CONTACT_ACCESS_FILTER)
     .limit(1)
     .maybeSingle()
   if (!data) throw new Error('You are not assigned to this job')
@@ -44555,15 +44656,17 @@ export async function resolveTradeJobAccessTier(
       return { tier: 'division_manager', quoteVisible: true, reason: 'vertical_manager', job }
     }
   }
-  const { data: assigned } = await client
+  const { data: assigned, error: assignmentError } = await client
     .from('job_assignments')
     .select('id')
     .eq('job_id', jobId)
     .eq('user_id', userId)
     .neq('status', 'cancelled')
+    .or(SELF_ADDED_CONTACT_ACCESS_FILTER)
     .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
     .limit(1)
     .maybeSingle()
+  if (assignmentError) throw assignmentError
   if (assigned) {
     return { tier: 'allocated', quoteVisible: false, reason: 'assigned', job }
   }
@@ -44872,6 +44975,7 @@ export async function searchAllJobs(
       (from, limit) =>
         client.from('job_assignments')
           .select('id, job_id')
+          .or(SELF_ADDED_CONTACT_ACCESS_FILTER)
           .eq('user_id', viewer.id)
           .neq('status', 'cancelled')
           .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
@@ -45503,7 +45607,7 @@ const GHOST_EXCLUDED_COLUMN = 'is_ghost'
 const GHOST_EXCLUDED_VALUE = false
 
 const OCCUPANCY_PROBE_SELECT = `
-        job_id, id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name,
+        job_id, id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, added_by, self_added_status,
         started_at, completed_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         user:user_id ( id, name )
       `
@@ -45642,6 +45746,8 @@ export function _shouldRecoverOccupiedPoolJob(input: {
 function occupiedPoolAssignmentCard(assignment: any, job: any) {
   return {
     id: assignment?.id,
+    added_by: assignment?.added_by,
+    self_added_status: assignment?.self_added_status,
     scheduled_date: assignment?.scheduled_date ?? null,
     scheduled_end: assignment?.scheduled_end ?? null,
     start_time: assignment?.start_time ?? null,
@@ -45705,7 +45811,7 @@ export async function myJobs(
   // family-tagged repair job (jobs.type unchanged, per the SES boards' rule)
   // on every myJobs lane, not only the make-safe pool.
   const ASSIGNMENT_SELECT_ADMIN = `
-        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
+        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at, added_by, self_added_status,
         clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         user:user_id ( id, name ),
         jobs:job_id (
@@ -45714,7 +45820,7 @@ export async function myJobs(
         )
       `
   const ASSIGNMENT_SELECT_USER = `
-        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
+        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at, added_by, self_added_status,
         clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         jobs:job_id (
           id, type, status, archived, client_name, client_phone, client_email,
@@ -45894,7 +46000,7 @@ export async function myJobs(
   // A plain embed + top-level `jobs.type` filter does NOT constrain the parent and
   // would either error or return ALL of the trade's old assignments — both wrong.
   const ASSIGNMENT_SELECT_USER_MAKESAFE = `
-        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at,
+        id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name, started_at, completed_at, added_by, self_added_status,
         clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
         jobs:job_id!inner (
           id, type, status, archived, client_name, client_phone, client_email,
@@ -46430,6 +46536,13 @@ export async function myJobs(
       a.jobs.vertical = _jobVertical(a.jobs)
     }
   }
+
+  // A self-added booking is clockable, but is not customer-detail authority yet.
+  assignments = (assignments || []).filter((a: any) =>
+    bookingGrantsContactAccess(a) || tradeViewerQuoteVisibleForJob(a.jobs, myJobsQuoteCtx)
+  )
+
+  for (const a of assignments) { delete a.added_by; delete a.self_added_status }
 
   // Trade Today `recent` is an action queue, not assignment history. Load the
   // current make-safe cycle's report evidence for past cards so completed visits
@@ -57861,7 +57974,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   let asnQuery = client
     .from('job_assignments')
     .select(`
-      id, scheduled_date, start_time, status, role, assignment_type, crew_name,
+      id, scheduled_date, start_time, status, role, assignment_type, crew_name, added_by, self_added_status,
       started_at, completed_at, hours_worked, break_minutes, clocked_on_at, clocked_off_at,
       invoiced_in,
       jobs:job_id (
@@ -57884,6 +57997,10 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   const { data: rawAssignments, error } = await asnQuery.order('scheduled_date', { ascending: true })
 
   if (error) throw error
+
+  for (const a of rawAssignments || []) {
+    if (!bookingGrantsContactAccess(a) && a.jobs) a.jobs = contactFreeJob(a.jobs)
+  }
 
   // M9 FIX A2: attach external_ref to each assignment's jobs object so the trade
   // weekly job cards can display the insurer/builder ref. Batch-resolved: prefer
@@ -58119,8 +58236,11 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
         ? Math.round((new Date(a.completed_at).getTime() - new Date(a.started_at).getTime()) / 3600000 * 100) / 100
         : 0
     totalHours += hours
+    const { added_by, ...card } = a
     return {
-      ...a,
+      ...card,
+      added_by_self: added_by === 'self',
+      self_added_status: a.self_added_status ?? null,
       hours,
       // null hours_worked means no clock data — the client renders an editable
       // (required) hours field for this card instead of a read-only value.
@@ -58248,6 +58368,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
 
   const response = {
     assignments: enriched,
+    self_add: await readFlag(client, 'trade_self_add_v1'),
     rate,
     // rate_resolved=false signals the client to show a "Rate not set — contact
     // office" card state and BLOCK that card's inclusion (never a silent $0).  [F5]
@@ -58412,7 +58533,7 @@ export const _myMoneyForTest = myMoney
 export const _presentTradeInvoiceSafeForTest = presentTradeInvoiceSafe
 
 // ── set_trade_rate: office sets rate; trade writes are refused ──
-async function setTradeRate(client: any, authUserId: string | null, body: any) {
+async function setTradeRate(client: any, authUserId: string | null, body: any, actorUserId: string | null = null) {
   const { user_id, hourly_rate } = body
   if (authUserId) {
     throw new ApiError('Rates are set by the office. Contact the office to change your rate.', 403)
@@ -58452,7 +58573,7 @@ async function setTradeRate(client: any, authUserId: string | null, body: any) {
       user_id: targetUserId,
       hourly_rate: Number(hourly_rate),
       effective_from: today,
-      created_by: authUserId || targetUserId,
+      created_by: actorUserId ?? null,
     })
     .select()
     .single()
@@ -58463,6 +58584,44 @@ async function setTradeRate(client: any, authUserId: string | null, body: any) {
 
 // ── list_trade_invoices: ops dashboard view ──
 export const _setTradeRateForTest = setTradeRate
+
+function tradeRateSetter(rate: any) {
+  const office = !!rate.created_by && rate.created_by !== rate.user_id
+  return {
+    set_by_kind: office ? 'office' : 'not_recorded',
+    set_by_name: office ? rate.set_by?.name ?? null : null,
+  }
+}
+
+async function tradeRateHistory(client: any, params: URLSearchParams) {
+  const rates: any[] = []
+  const pageSize = 1000
+  // Optional trade filter uses idx_trade_rates_user; both name joins use users' PK.
+  for (let offset = 0; ; offset += pageSize) {
+    let query = client.from('trade_rates')
+      .select('id, user_id, hourly_rate, effective_from, effective_to, created_at, created_by, users:user_id(name), set_by:created_by(name)')
+      .order('effective_from', { ascending: false })
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(offset, offset + pageSize - 1)
+    if (params.get('user_id')) query = query.eq('user_id', params.get('user_id'))
+    const { data, error } = await query
+    if (error) throw error
+    for (const rate of data || []) {
+      rates.push({
+        user_id: rate.user_id,
+        trade_name: rate.users?.name ?? null,
+        hourly_rate: rate.hourly_rate,
+        effective_from: rate.effective_from,
+        effective_to: rate.effective_to,
+        set_at: rate.created_at,
+        ...tradeRateSetter(rate),
+      })
+    }
+    if (!data || data.length < pageSize) break
+  }
+  return { rates }
+}
 
 async function listTradeInvoices(client: any, params: URLSearchParams) {
   const limit = parseInt(params.get('limit') || '50')
@@ -58512,7 +58671,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
   const today = getAWSTDate()
   const { data: rates, error: ratesError } = await client
     .from('trade_rates')
-    .select('user_id, hourly_rate, effective_from, users:user_id(name)')
+    .select('user_id, hourly_rate, effective_from, created_by, users:user_id(name), set_by:created_by(name)')
     .lte('effective_from', today)
     .or(`effective_to.is.null,effective_to.gte.${today}`)
     .order('effective_from', { ascending: false })
@@ -58527,7 +58686,9 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
   return {
     invoices: mergeTradeBillRows(weekly.data || [], noWeek.data || [], stuckRows.slice(0, STUCK_TRADE_BILLS_CAP))
       .map((invoice: any) => presentTradeInvoiceSafe(invoice)),
-    rates: currentRates,
+    rates: currentRates.map(({ created_by, set_by, ...rate }: any) => ({
+      ...rate, ...tradeRateSetter({ ...rate, created_by, set_by }),
+    })),
     ...(stuckCapHit
       ? { stuck_note: `More than ${STUCK_TRADE_BILLS_CAP} invoices are stuck with no Xero bill; only the newest ${STUCK_TRADE_BILLS_CAP} are listed.` }
       : {}),
