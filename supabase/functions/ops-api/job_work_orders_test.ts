@@ -7,6 +7,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   approveJobWorkOrder,
+  autoIssueJobWorkOrders,
   buildVariationEmails,
   computeWorkOrderFigures,
   correctWorkOrderVariation,
@@ -84,6 +85,10 @@ class Query {
   }
   eq(col: string, val: any) {
     this.filters.push((r) => get(r, col) === val);
+    return this;
+  }
+  gte(col: string, val: any) {
+    this.filters.push((r) => get(r, col) != null && get(r, col) >= val);
     return this;
   }
   neq(col: string, val: any) {
@@ -2691,4 +2696,80 @@ Deno.test("old work order list: crew work orders only, never the job's own work 
     new URLSearchParams({ job_id: JOB }),
   );
   assertEquals(withDraft.work_orders.map((w: any) => w.id), ["crew-1"]);
+});
+
+const SEALED_REVISION = "55555555-5555-4555-8555-555555555555";
+const OPENED_AT = "2026-11-17T01:00:00Z";
+
+function scopeSweepFixture(amount: number | null) {
+  const job = {
+    id: JOB, org_id: ORG, job_number: "ZZTEST-SCOPE", type: "fencing",
+    status: "accepted", expected_costs: { scope_revision_id: SEALED_REVISION },
+  };
+  // The opening trigger supplies the empty draft before the sweep reads it.
+  const db = baseDb({
+    jobs: [job],
+    work_orders: [{
+      id: WO, job_id: JOB, org_id: ORG, jobs: job, kind: "job", status: "draft",
+      scope_items: [], agreed_labour_ex: null, created_at: OPENED_AT, updated_at: OPENED_AT,
+    }],
+    feature_flags: ["job_labour_budget_v1", "job_work_order_auto_issue_v1"]
+      .map((flag_name) => ({ flag_name, enabled: true })),
+    job_budgets: [{
+      id: crypto.randomUUID(), job_id: JOB, scope_revision_id: SEALED_REVISION, version: 1,
+      labour: { pay: "group_work_order", work_order_amount_ex_gst: amount },
+    }],
+    scope_revisions: [{
+      id: SEALED_REVISION, job_id: JOB, status: "frozen", revision_number: 1,
+      frozen_at: "2026-11-16T01:00:00Z",
+      pricing_canonical_text: JSON.stringify({
+        labourCostEstimate: 137,
+        line_items: [{ description: "Install fence", category: "fencing", quantity: 3, unit: "m" }],
+      }),
+    }],
+  });
+  db.rpcImpl = (fn, args) => {
+    if (fn === "owner_approved_job_work_order_drafts") return { data: [], error: null };
+    if (fn !== "auto_issue_job_work_order") throw new Error("unexpected RPC");
+    const row = db.tables.work_orders.find((w) => w.id === args.p_work_order_id);
+    assertEquals(row.status, "draft");
+    assertEquals(row.updated_at, args.p_expected_updated_at);
+    row.status = "approved";
+    return { data: row, error: null };
+  };
+  return db;
+}
+
+Deno.test("opening sweep issues one job work order with the sealed budget's exact cents", async () => {
+  for (const amount of [2240, 2240.37]) {
+    _resetSwitchCacheForTest();
+    try {
+      const db = scopeSweepFixture(amount);
+      const sweep = await autoIssueJobWorkOrders(db, {}, new Date(OPENED_AT));
+      assertEquals(sweep.issued, 1);
+      const rows = db.tables.work_orders.filter((w) => w.job_id === JOB && w.kind === "job");
+      assertEquals(rows.length, 1);
+      assertEquals(rows[0].status, "approved");
+      assertEquals(rows[0].quote_filled_scope_revision_id, SEALED_REVISION);
+      assertEquals(rows[0].agreed_labour_ex, amount);
+    } finally {
+      _resetSwitchCacheForTest();
+    }
+  }
+});
+
+Deno.test("opening sweep leaves the job work order draft without an amount for the office", async () => {
+  _resetSwitchCacheForTest();
+  try {
+    const db = scopeSweepFixture(null);
+    const sweep = await autoIssueJobWorkOrders(db, {}, new Date(OPENED_AT));
+    assertEquals(db.tables.work_orders.length, 1);
+    const [row] = db.tables.work_orders;
+    assertEquals(row.quote_filled_scope_revision_id, SEALED_REVISION);
+    assertEquals(row.agreed_labour_ex, null);
+    assertEquals(row.status, "draft");
+    assertEquals(sweep.issued, 0);
+  } finally {
+    _resetSwitchCacheForTest();
+  }
 });

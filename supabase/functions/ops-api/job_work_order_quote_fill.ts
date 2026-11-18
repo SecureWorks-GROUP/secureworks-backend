@@ -425,13 +425,16 @@ async function linesForJob(
   // the job budget's work order amount (taken crew options already in it),
   // read from the budget stored for this same accepted revision. A budget for
   // another revision, or none, leaves the quote's figure; an unreadable one, or
-  // one with no amount, holds the draft for the approver.
+  // one with no amount, holds the draft for the approver. A sealed budget with
+  // no amount leaves the agreed labour empty (director 18 Nov, P1-05.5): the
+  // quote's estimate is never written as agreed, the office sets it.
   if (pricing && quote.scope_revision_id) {
     const budget = await readNewestJobBudgetLabour(client, String(job.id));
     if (budget.state === "unreadable") {
       reviewFlags.push(JOB_BUDGET_UNREADABLE_FLAG);
     } else if (budget.state === "found" && budget.scope_revision_id === quote.scope_revision_id) {
       if (budget.work_order_amount_ex_gst === null) {
+        result.agreed_labour_ex = null;
         reviewFlags.push(JOB_BUDGET_LABOUR_MISSING_FLAG);
       } else {
         result.agreed_labour_ex = budget.work_order_amount_ex_gst;

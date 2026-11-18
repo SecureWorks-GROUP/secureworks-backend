@@ -340,7 +340,8 @@ order fill are exactly as before.
   fill reads (`job_work_order_quote_fill.ts`). A budget for another revision
   leaves the quote's figure. An unreadable budget, or one with no amount,
   holds the draft for the approver (`job_budget_unreadable`,
-  `job_budget_labour_missing`). Group mode keeps today's rule: billing equals
+  `job_budget_labour_missing`); one with no amount leaves `agreed_labour_ex`
+  empty for the office, never the quote's estimate (P1-05.5). Group mode keeps today's rule: billing equals
   the agreed amount.
 - **How the trade invoices.** A job whose newest budget is `hourly_capped` is
   invoiced by the hour (`invoice_mode` `hourly`, reason `hourly_capped`),
