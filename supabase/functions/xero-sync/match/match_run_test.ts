@@ -38,6 +38,7 @@ type World = {
   waiting?: Array<{ document_kind: string; document_id: string; created_at?: string; kind?: string }>; // needs_person lines
   openItems?: string[]; // subject_ids with an open item
   switchOn?: boolean | "fail";
+  tradeUsers?: string[]; // xero_contact_ids that are Trade App users
   backlogAt?: { cursor_at: string | null; note: string | null } | null; // xero_sync_state row
   queries: Array<{ table: string; op: string }>;
   rpcs: Array<{ fn: string; args: any }>;
@@ -66,6 +67,11 @@ function fake(w: World) {
             return { data: w.switchOn === undefined ? null : { enabled: w.switchOn }, error: null };
           case "xero_sync_state":
             return { data: w.backlogAt ?? null, error: null };
+          case "users":
+            return {
+              data: (w.tradeUsers ?? []).filter((c) => c === filters.xero_contact_id).map((c) => ({ id: `u-${c}`, xero_contact_id: c })),
+              error: null,
+            };
           case "match_clue_types":
             return { data: CLUE_TYPES, error: null };
           case "job_cost_lines":
@@ -529,6 +535,32 @@ Deno.test("sync backlog: a bill already run this sync is passed over; a failed o
     assertEquals(r.errors.length, 1, fail);
     assertEquals(bad.backlogAt, pos, fail);
   }
+});
+
+Deno.test("an installer-account line or a Trade App user's own bill is labour too: never matched", async () => {
+  const acct: Record<string, any[]> = billLines();
+  acct[BILL][0].account_code = "306";
+  const w1 = world({ lines: acct });
+  assertEquals((await runMatchFor(fake(w1), [`xero_bill:${BILL}`], { ruleVersion: "v1" })).skipped, { labour_bill: 1 });
+  const w2 = world({ lines: billLines(), tradeUsers: ["supplier-1"] });
+  const r2 = await runMatchFor(fake(w2), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  assertEquals([r2.skipped, applies(w2).length], [{ labour_bill: 1 }, 0]);
+  assert(!w2.queries.some((q) => q.table === "xero_invoices"));
+  // An unreadable user list is not "not a person": the bill is requeued.
+  const w3 = world({ lines: billLines(), fail: "users" });
+  const r3 = await runMatchFor(fake(w3), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  assertEquals([r3.failed, r3.requeued, applies(w3).length], [{ read_trade_user: 1 }, 1, 0]);
+});
+
+Deno.test("sync, switch on: a queued bill the sync also changed comes off the queue and runs once", async () => {
+  const w = world({
+    queue: [{ subject_kind: "cost_document", subject_id: "xero_bill:a" }],
+    lines: billLines("a"),
+    waiting: [],
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:a"] });
+  assertEquals([out.changed, out.queued, out.run, applies(w).length], [1, 0, 1, 1]);
+  assert(w.queries.some((q) => q.table === "match_queue" && q.op === "delete"));
 });
 
 Deno.test("a bill with a person's labour on it is never matched: no bill read, no clue, no shadow row", async () => {

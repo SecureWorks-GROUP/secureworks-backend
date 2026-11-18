@@ -24,11 +24,14 @@
 // to 25 waiting bills with no open item, oldest first (syncMatchRun). Every
 // requeue of a run is one batched statement.
 //
-// A bill with a person's labour on it (a line of kind installer_bill or
-// employer_super: a name and a pay total) is never matched here: no clue, no
-// shadow row, no item. It is skipped and counted (`labour_bill`).
+// A bill with a person's labour on it is never matched here: no clue, no
+// shadow row, no item. It is skipped and counted (`labour_bill`). That is a
+// line of kind installer_bill or employer_super, a line on an installer account
+// (301, 306: the installer_bill_outside_app stop), or a bill from a Xero
+// contact that is a Trade App user. Each carries a name and a pay total.
 
 import { jobNumbersIn } from "../bill_prematch.ts";
+import { INSTALLER_ACCOUNT_CODES } from "../materials_ingest.ts";
 import { decideMatch } from "./decide.ts";
 import {
   deliveryAddressClue,
@@ -151,7 +154,18 @@ async function matchOne(
   if (!lines?.length) return { skipped: "no_cost_lines" };
   // A person's labour, alone or beside supplier lines: no read of the bill, no
   // clue, no shadow row, no item.
-  if (lines.some((l) => LABOUR_LINE_KINDS.has(String(l.kind ?? "")))) return { skipped: "labour_bill" };
+  if (
+    lines.some((l) =>
+      LABOUR_LINE_KINDS.has(String(l.kind ?? "")) || INSTALLER_ACCOUNT_CODES.has(String(l.account_code ?? ""))
+    )
+  ) return { skipped: "labour_bill" };
+  // A Trade App user's own bill is their pay (users is small; no index needed).
+  const partyId = lines.find((l) => typeof l.party_id === "string" && l.party_id)?.party_id;
+  if (partyId) {
+    const people = await read<Array<{ id: string }>>("read_trade_user",
+      sb.from("users").select("id").eq("xero_contact_id", partyId).limit(1));
+    if (people?.length) return { skipped: "labour_bill" };
+  }
   const counted = lines.filter((l) => l.state != null);
   if (!counted.length) return { skipped: "no_counted_lines" };
   // Proposals are for bills waiting for a person. A bill already on a job,
@@ -617,14 +631,16 @@ export async function syncMatchRun(
       const queued = await timedRead<Array<{ subject_id: string }>>("queue_read",
         sb.from("match_queue").select("subject_id").eq("subject_kind", "cost_document").like("subject_id", "xero_bill:%")
           .order("queued_at", { ascending: true }).limit(room));
-      const ids = (queued ?? []).map((r) => r.subject_id).filter((id) => !run.includes(id));
-      if (ids.length) {
-        const del = await sb.from("match_queue").delete().eq("subject_kind", "cost_document").in("subject_id", ids)
+      const taken = (queued ?? []).map((r) => r.subject_id);
+      if (taken.length) {
+        // Every id read comes off; one the sync also changed runs once.
+        const del = await sb.from("match_queue").delete().eq("subject_kind", "cost_document").in("subject_id", taken)
           .abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS));
         if (del.error) report.errors.push("queue_delete_failed");
         else {
-          run.push(...ids);
-          report.queued = ids.length;
+          const fresh = taken.filter((id) => !run.includes(id));
+          run.push(...fresh);
+          report.queued = fresh.length;
         }
       }
     } catch (e) {
