@@ -901,7 +901,7 @@ export async function invoiceContext(
             unwrap(
               await client.from("work_orders").select(
                 "wo_number, trade_name, status, scheduled_date, completed_at",
-              ).eq("job_id", jobRow.id).neq("kind", "job").order("created_at", {
+              ).eq("job_id", jobRow.id).eq("kind", "crew").order("created_at", {
                 ascending: false,
               }).limit(50),
             ),

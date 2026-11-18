@@ -2686,6 +2686,15 @@ Deno.test("old work order list: crew work orders only, never the job's own work 
       kind: "crew",
       status: "cancelled",
     },
+    // An additional work order on the job (20261119090000) is not a crew one.
+    {
+      id: "additional-1",
+      org_id: ORG,
+      job_id: JOB,
+      wo_number: "WO-ZZTEST-2",
+      kind: "additional",
+      status: "approved",
+    },
   );
   const out = await listWorkOrders(db, new URLSearchParams({ job_id: JOB }));
   assertEquals(out.work_orders.map((w: any) => w.id), ["crew-1"]);

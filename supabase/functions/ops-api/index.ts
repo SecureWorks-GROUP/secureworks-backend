@@ -354,6 +354,12 @@ import {
   setRestorationStageAction,
 } from './restoration_stage_store.ts'
 import { setRestorationWorkOrderAction } from './restoration_work_order.ts'
+import {
+  AdditionalWorkOrderError,
+  addJobWorkOrderAction,
+  approveAdditionalWorkOrderAction,
+  listJobWorkOrdersAction,
+} from './job_additional_work_orders.ts'
 import { RestorationWorkflowError } from './restoration_workflow.ts'
 import { renderRestorationReportAction } from './restoration_report_store.ts'
 import {
@@ -10898,6 +10904,42 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // None of them sends anything, touches Xero or writes an invoice: the
       // priced quote must never reach a trade, and the hand-off to money is an
       // object in the READ that prepare_ses_invoice_obligation then judges.
+      // More than one work order on a job (job_additional_work_orders.ts,
+      // docs/job-additional-work-orders-v1.md). The writes need a staff
+      // session or the ops key with the owner-directed fence; none sends
+      // anything or touches Xero. Absent from the routine, agent-read and
+      // trade lists: the amounts are office only.
+      case 'add_job_work_order':
+      case 'approve_additional_work_order':
+      case 'job_work_orders': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser) && authMode !== 'api_key') {
+          return json({ error: 'An authorised operator session is required.', code: 'operator_access_required' }, 403)
+        }
+        const read = action === 'job_work_orders'
+        if (req.method !== (read ? 'GET' : 'POST')) {
+          return json({ error: `${action} requires ${read ? 'GET' : 'POST'}`, code: 'method_not_allowed' }, 405)
+        }
+        const additionalAuth = {
+          authMode,
+          userId: authMode === 'jwt' ? authUser?.id || null : null,
+          orgId: authMode === 'jwt' ? authUser?.orgId || null : null,
+          relayedBy: requestActor?.actor || null,
+        }
+        try {
+          if (read) return json(await listJobWorkOrdersAction(client, url.searchParams, additionalAuth.orgId))
+          return json(action === 'add_job_work_order'
+            ? await addJobWorkOrderAction(client, body, additionalAuth)
+            : await approveAdditionalWorkOrderAction(client, body, additionalAuth))
+        } catch (error) {
+          if (error instanceof AdditionalWorkOrderError) {
+            return json({ error: error.message, code: error.code }, error.status)
+          }
+          if (error instanceof JobWorkOrderError) {
+            return json({ error: error.message, code: (error as any).code }, (error as any).status || 400)
+          }
+          throw error
+        }
+      }
       case 'restoration_set_work_order': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser) && authMode !== 'api_key') {
           return json({ error: 'An authorised operator session is required.', code: 'operator_access_required' }, 403)
@@ -14165,7 +14207,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let woQuery = (client as any).from('work_orders')
               .select(woColumns)
               .eq('id', work_order_id)
-            if (!retireCrewWorkOrders) woQuery = woQuery.neq('kind', 'job')
+            woQuery = retireCrewWorkOrders ? woQuery.in('kind', ['crew', 'job']) : woQuery.eq('kind', 'crew')
             const { data: wo, error: woFetchErr } = await woQuery
               .eq('org_id', tradeUser.orgId)
               .eq('jobs.org_id', tradeUser.orgId)
@@ -18656,7 +18698,7 @@ async function opsSummary(client: any) {
     client.from('work_orders')
       .select('id, status, scheduled_date, job_id, wo_number')
       .eq('org_id', DEFAULT_ORG_ID)
-      .neq('kind', 'job')
+      .eq('kind', 'crew')
       .in('status', ['draft', 'sent', 'accepted', 'in_progress']),
 
     // KPI targets
@@ -20283,7 +20325,7 @@ export async function tradeWorkOrders(
     let query = client
       .from('work_orders')
       .select(workOrderSelect)
-    if (!retireCrewWorkOrders) query = query.neq('kind', 'job')
+    query = retireCrewWorkOrders ? query.in('kind', ['crew', 'job']) : query.eq('kind', 'crew')
     query = query
       .eq('org_id', viewer.orgId)
       .eq('jobs.org_id', viewer.orgId)
@@ -21151,7 +21193,7 @@ async function pipeline(
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
         client.from('purchase_orders').select(dispatchList ? DISPATCH_DELIVERY_LIST_SELECT : 'job_id').in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
-        client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled').neq('kind', 'job')),
+        client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled').eq('kind', 'crew')),
       readPipelineEnrichmentRows(jobIds, 'council_submissions', (chunkIds) =>
         client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', chunkIds)),
       readPipelineEnrichmentRows(jobIds, 'po_communications', (chunkIds) =>
@@ -21616,7 +21658,7 @@ async function jobDetail(
     client.from('job_events').select('*, users:user_id(name)').eq('job_id', jobId).order('created_at', { ascending: false }).limit(50),
     client.from('job_media').select('*').eq('job_id', jobId).order('created_at'),
     client.from('purchase_orders').select('*').eq('job_id', jobId).neq('status', 'deleted').order('created_at', { ascending: false }),
-    client.from('work_orders').select('*').eq('job_id', jobId).neq('kind', 'job').neq('status', 'cancelled').order('created_at', { ascending: false }),
+    client.from('work_orders').select('*').eq('job_id', jobId).eq('kind', 'crew').neq('status', 'cancelled').order('created_at', { ascending: false }),
     client.from('xero_projects').select('*').eq('job_id', jobId).maybeSingle(),
     client.from('job_contacts').select('*').eq('job_id', jobId).eq('status', 'active').order('contact_label'),
     client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at, event_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
@@ -22182,7 +22224,7 @@ export async function listWorkOrders(client: any, params: URLSearchParams) {
 
   let query = client.from('work_orders')
     .select('*')
-    .neq('kind', 'job')
+    .eq('kind', 'crew')
     .neq('status', 'cancelled')
     .order('created_at', { ascending: false })
 
@@ -22851,7 +22893,7 @@ async function assembleJobDossier(client: any, body: any) {
     const { data, error } = await client.from('work_orders')
       .select('id, wo_number, trade_name, status, scheduled_date, sent_at, accepted_at, completed_at, created_at')
       .eq('job_id', jobId)
-      .neq('kind', 'job')
+      .eq('kind', 'crew')
       .order('created_at', { ascending: false })
       .limit(50)
     if (error) throw new Error(error.message)
@@ -40760,7 +40802,7 @@ export async function updateJobStatus(client: any, body: any) {
         let draftWoQuery = client.from('work_orders')
           .select('id, wo_number')
           .eq('job_id', jId)
-          .neq('kind', 'job')
+          .eq('kind', 'crew')
           .eq('status', 'draft')
         if (ordersOn) draftWoQuery = draftWoQuery.is('quote_builder_version_id', null)
         const { data: draftWOs } = await draftWoQuery
@@ -49011,7 +49053,7 @@ async function tradeJobDetail(
     // order, so this is a real mismatch, not a theoretical one.
     client.from('work_orders')
       .select('id, wo_number, scope_items, special_instructions, scheduled_date, status')
-      .eq('job_id', jobId).neq('kind', 'job').neq('status', 'cancelled').order('created_at', { ascending: false }),
+      .eq('job_id', jobId).eq('kind', 'crew').neq('status', 'cancelled').order('created_at', { ascending: false }),
     // All crew assignments for this job (not filtered by date — user explicitly opened this job)
     client.from('job_assignments')
       .select('id, user_id, scheduled_date, start_time, role, is_lead, crew_name, status, started_at, completed_at, acknowledged_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, hours_worked, users:user_id(name, phone)')
@@ -60146,7 +60188,8 @@ async function withAgreedLabourForAllocatedJobsOnly(
     }
     out.push(tier === 'office' || tier === 'division_manager' || tier === 'allocated'
       ? job
-      : { ...job, work_order_agreed_ex: null, job_work_order_id: null })
+      : (({ cap_work_order_id: _capId, cap_agreed_ex: _capEx, work_orders: _orders, ...rest }) =>
+        ({ ...rest, work_order_agreed_ex: null, job_work_order_id: null }))(job))
   }
   return out
 }
