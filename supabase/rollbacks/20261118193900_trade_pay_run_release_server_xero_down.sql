@@ -1,4 +1,4 @@
--- Rollback of cl-payrun-xero-lookup (20261118999902): stands 20261118170500's
+-- Rollback of cl-payrun-xero-lookup (20261118193900): stands 20261118170500's
 -- release body back up, byte for byte. Run it before 20261118170500's rollback
 -- (that one refuses any body but its own). Refuses when another body is
 -- installed. Writes no row; release records already kept stay as they are.

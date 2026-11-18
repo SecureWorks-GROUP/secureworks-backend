@@ -8,8 +8,8 @@
 BEGIN;
 SET LOCAL statement_timeout = '120s';
 -- Rule 17: re-apply what this contract asserts on.
-\ir ../../../migrations/20261118999902_trade_pay_run_release_server_xero.sql
-\ir ../../../migrations/20261118999902_trade_pay_run_release_server_xero.sql
+\ir ../../../migrations/20261118193900_trade_pay_run_release_server_xero.sql
+\ir ../../../migrations/20261118193900_trade_pay_run_release_server_xero.sql
 
 CREATE FUNCTION pg_temp.zz_assert(ok boolean, words text) RETURNS void
 LANGUAGE plpgsql AS $$ BEGIN
@@ -37,13 +37,13 @@ SELECT pg_temp.zz_assert((SELECT enabled = false FROM public.feature_flags WHERE
 SAVEPOINT zz_collide;
 CREATE OR REPLACE FUNCTION public.release_trade_pay_run_invoice(p_run_id uuid, p_invoice_id uuid, p_actor uuid, p_reason text, p_xero_check jsonb DEFAULT NULL)
 RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
-\ir ../../../migrations/20261118999902_trade_pay_run_release_server_xero.sql
+\ir ../../../migrations/20261118193900_trade_pay_run_release_server_xero.sql
 ROLLBACK TO SAVEPOINT zz_collide;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_apply_error \gset
 SAVEPOINT zz_collide;
 CREATE OR REPLACE FUNCTION public.release_trade_pay_run_invoice(p_run_id uuid, p_invoice_id uuid, p_actor uuid, p_reason text, p_xero_check jsonb DEFAULT NULL)
 RETURNS jsonb LANGUAGE sql AS $other$ SELECT '{"zztest":"another owner"}'::jsonb $other$;
-\ir ../../../rollbacks/20261118999902_trade_pay_run_release_server_xero_down.sql
+\ir ../../../rollbacks/20261118193900_trade_pay_run_release_server_xero_down.sql
 ROLLBACK TO SAVEPOINT zz_collide;
 SELECT :'LAST_ERROR_MESSAGE' AS collide_down_error \gset
 \set ON_ERROR_ROLLBACK off
@@ -54,11 +54,11 @@ SELECT pg_temp.zz_assert(:'collide_down_error' LIKE '%rollback: another body is 
   'the rollback must refuse another body: ' || :'collide_down_error');
 -- The rollback stands 20261118170500's body back up; a re-apply comes back.
 SAVEPOINT zz_round;
-\ir ../../../rollbacks/20261118999902_trade_pay_run_release_server_xero_down.sql
+\ir ../../../rollbacks/20261118193900_trade_pay_run_release_server_xero_down.sql
 SELECT pg_temp.zz_assert((SELECT md5(prosrc) FROM pg_proc
   WHERE oid = 'public.release_trade_pay_run_invoice(uuid,uuid,uuid,text,jsonb)'::regprocedure) = '152edcbbc1ddff5f29d91e8f8af71860',
   'the rollback restores the earlier body');
-\ir ../../../migrations/20261118999902_trade_pay_run_release_server_xero.sql
+\ir ../../../migrations/20261118193900_trade_pay_run_release_server_xero.sql
 RELEASE SAVEPOINT zz_round;
 \echo 'PASS: cl-payrun-xero-lookup body, grants, switch off, Rule 15 guard and rollback round trip.'
 
