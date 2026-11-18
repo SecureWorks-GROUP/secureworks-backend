@@ -127,6 +127,20 @@ function makeClient(tables: Tables, recorded: any[] = []) {
         return api;
       },
       not: () => api,
+      // PostgREST or=(a.op.v,...): enough of the grammar for the self-added
+      // contact filter the tier check carries (is.null, eq, neq).
+      or: (expr: string) => {
+        const terms = expr.split(",").map((t) => {
+          const [c, op, ...rest] = t.split(".");
+          const v = rest.join(".");
+          if (op === "is" && v === "null") return (r: any) => (r?.[c] ?? null) === null;
+          if (op === "eq") return (r: any) => String(r?.[c] ?? "") === v;
+          if (op === "neq") return (r: any) => r?.[c] != null && String(r[c]) !== v;
+          throw new Error(`fake or(): unsupported term ${t}`);
+        });
+        preds.push((r) => terms.some((f) => f(r)));
+        return api;
+      },
       single: () => {
         const { data } = run();
         return Promise.resolve({ data: data[0] ?? null, error: null });
@@ -2463,7 +2477,8 @@ Deno.test("trade_labour_budget: an allocated trade passes but the QUOTED labour 
     orgId: ORG_A,
     managedVerticals: [],
   });
-  assertEquals(p.labour_budget, 0);
+  assertEquals("labour_budget" in p, false);
+  assertEquals(JSON.stringify(p).includes("3200"), false);
 });
 
 Deno.test("trade_labour_budget: the division manager passes (was refused by the strict assignment check) and gets the quoted labour fallback", async () => {
@@ -2518,7 +2533,7 @@ Deno.test("trade_labour_budget: an unallocated stranger is refused — another t
   );
 });
 
-Deno.test("trade_labour_budget: an allocated crew member on that same make-safe still gets the crew costs", async () => {
+Deno.test("trade_labour_budget: an allocated crew member on that same make-safe gets hours only, never a rate", async () => {
   const t = seed();
   t.job_assignments.push({
     id: "a-ms-lead",
@@ -2538,7 +2553,101 @@ Deno.test("trade_labour_budget: an allocated crew member on that same make-safe 
     managedVerticals: [],
   });
   assertEquals(p.trades.length, 1);
-  assertEquals(p.trades[0].rate, 95);
+  assertEquals(p.trades[0], { user_id: LEAD, name: "Trade", hours: 6, shifts: 1 });
+  assertEquals("rate" in p.trades[0], false);
+});
+
+// Ruling 17: no labour budget, rate, cost or remainder on any trade surface.
+const LABOUR_MONEY_KEYS = new Set(["labour_budget", "total_cost", "remainder", "rate", "cost"]);
+function labourMoneyKeysIn(value: unknown, path = "$"): string[] {
+  if (Array.isArray(value)) return value.flatMap((v, i) => labourMoneyKeysIn(v, `${path}[${i}]`));
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>).flatMap(([k, v]) => [
+      ...(LABOUR_MONEY_KEYS.has(k) ? [`${path}.${k}`] : []),
+      ...labourMoneyKeysIn(v, `${path}.${k}`),
+    ]);
+  }
+  return [];
+}
+
+function labourFixture() {
+  const t = seed();
+  t.job_assignments.push(
+    { id: "a-l1", job_id: JOB_FENCE, user_id: LEAD, scheduled_date: "2026-08-03", status: "complete", is_lead: true, role: "lead_installer", started_at: "2026-08-03T00:00:00Z", completed_at: "2026-08-03T04:00:00Z" },
+    { id: "a-l2", job_id: JOB_FENCE, user_id: LEAD, scheduled_date: "2026-08-04", status: "complete", is_lead: true, role: "lead_installer", started_at: "2026-08-04T00:00:00Z", completed_at: "2026-08-04T03:30:00Z" },
+    { id: "a-c1", job_id: JOB_FENCE, user_id: CREW, scheduled_date: "2026-08-03", status: "complete", is_lead: false, role: "lead_installer", started_at: "2026-08-03T00:00:00Z", completed_at: "2026-08-03T05:00:00Z" },
+  );
+  // Made-up rate for the lead only; the crew member has no rate history.
+  t.trade_rates = [{ id: "r-1", user_id: LEAD, hourly_rate: 10, effective_from: "2026-01-01", effective_to: null }];
+  return t;
+}
+
+Deno.test("trade_labour_budget: an allocated trade's response carries no budget, rate, cost or remainder anywhere, and never reads trade_rates", async () => {
+  const recorded: any[] = [];
+  const p = await _tradeLabourBudgetForTest(makeClient(labourFixture(), recorded), new URLSearchParams({ jobId: JOB_FENCE }), CREW, false, {
+    orgId: ORG_A,
+    managedVerticals: [],
+  });
+  assertEquals(labourMoneyKeysIn(p), []);
+  assertEquals(p, {
+    rate_assumed: 0,
+    rate_missing: 0,
+    total_hours: 12.5,
+    trades: [
+      { user_id: LEAD, name: "Trade", hours: 7.5, shifts: 2 },
+      // A crewmate with no rate history still shows: no rate is read for this tier.
+      { user_id: CREW, name: "Trade", hours: 5, shifts: 1 },
+    ],
+  });
+  const tablesRead = recorded.map((r) => r.table);
+  assertEquals(tablesRead.includes("trade_rates"), false);
+  assertEquals(tablesRead.includes("purchase_orders"), false);
+  assertEquals(recorded.some((r) => String(r.select || "").includes("pricing_json")), false);
+});
+
+Deno.test("trade_labour_budget: an allocated trade's failed hours read refuses, never answers zero hours", async () => {
+  const client = makeClient(labourFixture());
+  let assignmentReads = 0;
+  const failed: any = {
+    select: () => failed,
+    eq: () => failed,
+    not: () => failed,
+    then: (res: any) => res({ data: null, error: { code: "57014" } }),
+  };
+  // The tier check reads job_assignments first; only the hours read fails.
+  const failing = {
+    ...client,
+    from: (table: string) =>
+      table === "job_assignments" && ++assignmentReads === 2 ? failed : client.from(table),
+  };
+  await assertRejects(
+    () =>
+      _tradeLabourBudgetForTest(failing, new URLSearchParams({ jobId: JOB_FENCE }), CREW, false, {
+        orgId: ORG_A,
+        managedVerticals: [],
+      }),
+    Error,
+    "labour_assignments_read_failed",
+  );
+});
+
+Deno.test("trade_labour_budget: office and division manager responses are unchanged from main", async () => {
+  const expected = {
+    labour_budget: 600,
+    rate_assumed: 0,
+    rate_missing: 1,
+    total_hours: 7.5,
+    total_cost: 75,
+    remainder: 525,
+    trades: [{ user_id: LEAD, name: "Trade", hours: 7.5, rate: 10, cost: 75 }],
+  };
+  const office = await _tradeLabourBudgetForTest(makeClient(labourFixture()), new URLSearchParams({ jobId: JOB_FENCE }), OFFICE, true);
+  assertEquals(JSON.stringify(office), JSON.stringify(expected));
+  const manager = await _tradeLabourBudgetForTest(makeClient(labourFixture()), new URLSearchParams({ jobId: JOB_FENCE }), HENRY, false, {
+    orgId: ORG_A,
+    managedVerticals: ["fencing"],
+  });
+  assertEquals(JSON.stringify(manager), JSON.stringify(expected));
 });
 
 Deno.test("labour-cost rule: office, division manager and allocated pass; the open-pool exception and a stranger do not", () => {

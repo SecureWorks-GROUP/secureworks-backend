@@ -340,7 +340,8 @@ order fill are exactly as before.
   fill reads (`job_work_order_quote_fill.ts`). A budget for another revision
   leaves the quote's figure. An unreadable budget, or one with no amount,
   holds the draft for the approver (`job_budget_unreadable`,
-  `job_budget_labour_missing`). Group mode keeps today's rule: billing equals
+  `job_budget_labour_missing`); one with no amount leaves `agreed_labour_ex`
+  empty for the office, never the quote's estimate (P1-05.5). Group mode keeps today's rule: billing equals
   the agreed amount.
 - **How the trade invoices.** A job whose newest budget is `hourly_capped` is
   invoiced by the hour (`invoice_mode` `hourly`, reason `hourly_capped`),
@@ -370,7 +371,18 @@ order fill are exactly as before.
   On an hourly job the job entry carries `limit: "hourly_maximum"` and
   `hourly_maximum_ex` (that whole limit), and the message names the most the
   work order pays the crew and the most this invoice may still bill (never
-  another trade's figure). A maximum that
+  another trade's figure). Those figures are shown only on a job where every
+  billed line is the trade's own; on a job another trade billed on, the entry
+  carries `amount_hidden: true` and neither figure, and the words are only
+  "This invoice is more than the agreed work order total. Ask the office."
+  (`WORK_ORDER_CAP_WORDS`, director ruling 18 Nov 2026). The same rule holds
+  the two other places a trade sees what a job has left, with
+  `trade_line_hold_v1` on: `my_hours` gives `job_left_ex` null,
+  `job_left_hidden: true` and `job_left_words`, and a held line's words say
+  "this line is more than this job's work order has left" with no amount, its
+  `hold_detail.left_ex` and `allowed_ex` null and `left_hidden: true` (`LEFT_HIDDEN_WORDS`,
+  `trade_line_hold.ts`; the owner read is `readJobsBilledOnlyBy`, and a failed
+  owner read hides the amount). A maximum that
   cannot be read is `capped_unreadable` with a zero limit and the budget
   check's code in `unreadable_reason`: `labour_hourly_invalid` (no `hourly`,
   `{}`, any property missing or not a number, a rate or hours not above zero,

@@ -14,6 +14,7 @@ import {
   withJobPrefix,
 } from "../_shared/xero_draft_standard.ts";
 import { readSwitch } from "../_shared/switch_cache.ts";
+import { recordXeroDraft } from "../_shared/xero_draft_register.ts";
 import {
   attachPdfBase64ToXeroInvoice,
   hasXeroPdfBase64Payload,
@@ -635,6 +636,31 @@ function lineAmountTypes(body: any): "Exclusive" | "NoTax" | "Inclusive" {
   return "Exclusive";
 }
 
+// P3-01.9: the job ids a supplier draft names (body or line job_number), for
+// its register row and Reconcile item. Read only when the draft standard
+// switch is on (recordXeroDraft reads nothing else when it is off); a failed
+// read names no job rather than guessing one. Index: idx_jobs_job_number.
+async function supplierDraftJobIds(client: any, body: any): Promise<string[]> {
+  try {
+    if (!await readSwitch(client, "xero_draft_standard_v1")) return [];
+    const bodyJobNumber = String(body?.job_number || "").trim();
+    const rawLines = body?.line_items || body?.lines;
+    const numbers = new Set<string>();
+    if (bodyJobNumber) numbers.add(bodyJobNumber);
+    for (const line of Array.isArray(rawLines) ? rawLines : []) {
+      const n = String(line?.job_number || "").trim();
+      if (n) numbers.add(n);
+    }
+    if (!numbers.size) return [];
+    const { data, error } = await client.from("jobs").select("id")
+      .eq("org_id", DEFAULT_ORG_ID).in("job_number", [...numbers].slice(0, 50));
+    if (error || !Array.isArray(data)) return [];
+    return data.map((j: any) => String(j.id));
+  } catch {
+    return [];
+  }
+}
+
 export async function createSupplierBill(
   client: any,
   body: any,
@@ -693,17 +719,34 @@ export async function createSupplierBill(
   let pdf: { attached: boolean; filename?: string; error?: string } = {
     attached: false,
   };
-  if (hasXeroPdfBase64Payload(body?.pdf_base64)) {
-    const attached = await attachPdfBase64ToXeroInvoice({
-      invoiceId: inv.InvoiceID,
-      filename: body.pdf_filename || reference || inv.InvoiceNumber ||
-        "supplier-bill",
-      pdfBase64: body.pdf_base64,
-      accessToken,
-      tenantId,
-      fetchImpl: deps.fetchImpl,
+  try {
+    if (hasXeroPdfBase64Payload(body?.pdf_base64)) {
+      const attached = await attachPdfBase64ToXeroInvoice({
+        invoiceId: inv.InvoiceID,
+        filename: body.pdf_filename || reference || inv.InvoiceNumber ||
+          "supplier-bill",
+        pdfBase64: body.pdf_base64,
+        accessToken,
+        tenantId,
+        fetchImpl: deps.fetchImpl,
+      });
+      pdf = { attached: true, filename: attached.filename };
+    }
+  } finally {
+    // P3-01.9: recorded even when the attach throws (the bill exists).
+    await recordXeroDraft(client, {
+      orgId: DEFAULT_ORG_ID,
+      xeroDocumentId: inv.InvoiceID,
+      documentType: "ACCPAY",
+      sourceKind: "supplier_bill",
+      sourceId: null,
+      registerRow: "X9",
+      jobIds: await supplierDraftJobIds(client, body),
+      payload: payload.Invoices[0],
+      returned: inv,
+      hasSourceDocument: pdf.attached,
+      raise: true,
     });
-    pdf = { attached: true, filename: attached.filename };
   }
 
   return {
@@ -873,5 +916,19 @@ export async function createSupplierCreditNote(
     );
   }
   requireDraftStatus(note.Status, "created supplier credit note");
+  // P3-01.9: no document is attached to a credit note until P3-02.4.
+  await recordXeroDraft(client, {
+    orgId: DEFAULT_ORG_ID,
+    xeroDocumentId: note.CreditNoteID,
+    documentType: "ACCPAYCREDIT",
+    sourceKind: "supplier_credit",
+    sourceId: null,
+    registerRow: "X9",
+    jobIds: await supplierDraftJobIds(client, body),
+    payload: payload.CreditNotes[0],
+    returned: note,
+    hasSourceDocument: false,
+    raise: true,
+  });
   return { ok: true, status: "DRAFT", credit_note: presentCreditNote(note), ...diagnostics };
 }

@@ -285,6 +285,12 @@ jobs:
         run: |
           deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts
 
+      # Follow-up 56: the director's switch checks stay reads (read-only
+      # session, ZZTEST only, no write verb, listed functions only).
+      - name: Check switch check files stay reads
+        run: |
+          deno test --allow-read scripts/proof/switch-checks/switch-checks_static_test.ts
+
       # Debt Workshop (secureworks-wiki debt-workshop-spec.md; docs/debt-workshop/README.md):
       # the plain rules (scope, lane, kind, share, due dates, categories, steps with the
       # weekend shift, templates, the bank-feed matcher), the Supabase store, and every
@@ -502,6 +508,14 @@ jobs:
             supabase/functions/ops-api/makesafe_pdf_declared_type_test.ts \
             supabase/functions/ops-api/makesafe_intake_gate_test.ts
 
+      # Trade App access tiers, including ruling 17: an allocated trade's
+      # trade_labour_budget carries hours only, never a budget, rate, cost or
+      # remainder. Same --no-check reason as above.
+      - name: Test Trade App access tiers and the trade labour privacy rule
+        run: |
+          deno test --no-check --allow-env --allow-read \
+            supabase/functions/ops-api/trade_access_tier_test.ts
+
       # Builder mail read from a general company Group (swwa@) must never store
       # or download anyone else's mail, and one purchase order must stay one job
       # when it reaches both swwa@ and ses@. The runtime file is filtered because
@@ -572,6 +586,20 @@ jobs:
       # invoice changes in any figure or field. Drives the real ops-api request
       # handler with every database call answered by a fetch stub, plus the
       # money and audit PDF suites the deduction is built on.
+      # Receipt capture and the not-booked-on-this-job mark (cl-receipt-ownjob).
+      # Every database call is a stub; no switch is turned on. --no-check: the
+      # behaviour only; index.ts types are covered by the deno check step.
+      - name: Test receipt capture and the not-booked-on-this-job mark
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/ops-api/expense_capture_v2_test.ts \
+            supabase/functions/ops-api/expense_own_job_test.ts \
+            supabase/functions/ops-api/expense_reimbursement_lines_test.ts
+          # This file's source-slice test fails on main already; run the
+          # not-booked case on its own until that test is repaired.
+          deno test --no-check --allow-read --allow-env --filter "cl-receipt-ownjob" \
+            supabase/functions/ops-api/trade_invoice_reimbursement_test.ts
+
       - name: Test trade recurring deductions
         run: |
           deno test --allow-env --allow-net=127.0.0.1 --allow-read \
@@ -580,6 +608,20 @@ jobs:
             supabase/functions/ops-api/trade_invoice_money_audit_test.ts \
             supabase/functions/ops-api/trade_invoice_pdf_test.ts \
             supabase/functions/ops-api/trade_money_test.ts
+
+      # Weekly pay run read, approval and push (P1-10.2, P1-10.3, P1-10.5), and
+      # the run's own state: every old door refuses a run's invoice (cl-1622-fix).
+      # An approver can take a stuck invoice back out of its run (cl-payrun-escape).
+      # Every database call is a stub and the Xero push is stubbed or refused
+      # before Xero; no switch is turned on anywhere.
+      - name: Test weekly pay run
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/trade_pay_run_test.ts \
+            supabase/functions/ops-api/trade_pay_run_push_test.ts \
+            supabase/functions/ops-api/trade_pay_run_hold_test.ts \
+            supabase/functions/ops-api/trade_pay_run_doors_test.ts \
+            supabase/functions/ops-api/trade_pay_run_release_test.ts
 
       # One super rule (P1-01): every amount includes super, chosen by pay week
       # behind trade_pay_inclusive_super_v1. Drives the real
@@ -590,6 +632,14 @@ jobs:
           deno test --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/trade_pay_rule_test.ts \
             supabase/functions/ops-api/trade_pay_rule_handler_test.ts
+
+      # With the weekly pay run on, a sent invoice waits for the run (P1-10.4):
+      # drives the real generate_trade_invoice handler with every database call
+      # answered by a fetch stub and fails on any call outside it (Xero).
+      - name: Test pay run wait on send
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/trade_pay_run_wait_test.ts
 
       # Automated money messages are off (captain, 30 Sep 2026). Drives the
       # real ops-api and daily-digest request handlers with every database,
@@ -720,6 +770,8 @@ jobs:
             supabase/functions/xero-sync/job_marks_test.ts \
             supabase/functions/xero-sync/xero_mirror_check_test.ts \
             supabase/functions/xero-sync/draft_approval_check_test.ts \
+            supabase/functions/_shared/supplier_credit_parse_test.ts \
+            supabase/functions/xero-sync/supplier_credit_propose_test.ts \
             supabase/functions/ops-api/xero_void_mirror_test.ts \
             supabase/functions/xero-sync/xero_age_test.ts \
             supabase/functions/xero-sync/cost_lines_backfill_test.ts \
@@ -733,6 +785,7 @@ jobs:
             supabase/functions/ops-api/job_dispatch_orders_test.ts \
             supabase/functions/ops-api/job_trace_test.ts \
             supabase/functions/_shared/xero_cooldown_test.ts \
+            supabase/functions/_shared/xero_draft_standard_test.ts \
             supabase/functions/_shared/xero_write_register_test.ts \
             supabase/functions/ops-api/invoice_create_contract_test.ts \
             supabase/functions/ops-api/ops_api_operator_auth_test.ts \
@@ -972,6 +1025,7 @@ jobs:
       - name: Test group work orders and completion-pack email
         run: |
           deno test --allow-read --allow-env \
+            supabase/functions/ops-api/group_claim_test.ts \
             supabase/functions/ops-api/group_work_order_test.ts \
           supabase/functions/ops-api/trade_owner_preview_test.ts \
             supabase/functions/ops-api/trade_client_signoff_test.ts \

@@ -471,6 +471,13 @@ export function parseJobProfitListFilters(params: URLSearchParams):
   };
 }
 
+// The live API predates computed_at. Publish it only for a stored row.
+function profitRowForResponse(row: Record<string, any>): Record<string, any> {
+  if (row.computed_at !== null) return row;
+  const { computed_at: _live, ...legacy } = row;
+  return legacy;
+}
+
 /** ops-api `job_profit`: one job's numbers and its dated money timeline. */
 export async function jobProfitAction(
   client: any,
@@ -516,7 +523,7 @@ export async function jobProfitAction(
     jobId = jobs[0].id;
   }
 
-  const { data: rows, error } = await client.from("v_job_profit")
+  const { data: rows, error } = await client.from("v_job_profit_read")
     .select("*")
     .eq("job_id", jobId)
     .limit(2);
@@ -535,14 +542,14 @@ export async function jobProfitAction(
       body: { error: "job profit view returned more than one row for a job" },
     };
   }
-  const summary = rows[0];
+  const summary = profitRowForResponse(rows[0]);
 
   const [costs, revenue, patioScope, patioFrozen] = await Promise.all([
-    client.from("v_job_cost_events").select(COST_EVENT_COLUMNS).eq(
+    client.from("v_job_cost_events_read").select(COST_EVENT_COLUMNS).eq(
       "job_id",
       summary.job_id,
     ).order("event_date", { ascending: true }).limit(2000),
-    client.from("v_job_revenue_events").select(REVENUE_EVENT_COLUMNS).eq(
+    client.from("v_job_revenue_events_read").select(REVENUE_EVENT_COLUMNS).eq(
       "job_id",
       summary.job_id,
     ).order("invoice_date", { ascending: true }).limit(2000),
@@ -785,7 +792,7 @@ export async function jobProfitListAction(
   // or above the planner's estimate, and work_type is computed, so that
   // estimate is about 1 for every type filter. One row past the page says
   // whether another page exists.
-  let query = client.from("v_job_profit").select("*");
+  let query = client.from("v_job_profit_read").select("*");
   if (f.types.length) query = query.in("work_type", f.types);
   if (f.statuses.length) query = query.in("status", f.statuses);
   const dateColumn = f.dateField === "invoiced"
@@ -814,8 +821,8 @@ export async function jobProfitListAction(
       body: { error: `job profit list read failed: ${error.message}` },
     };
   }
-  const rows: unknown[] = data || [];
-  const page = rows.slice(0, f.limit);
+  const rows: Record<string, any>[] = data || [];
+  const page = rows.slice(0, f.limit).map(profitRowForResponse);
   return {
     status: 200,
     body: {

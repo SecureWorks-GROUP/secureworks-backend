@@ -189,6 +189,12 @@ dispatch_v2_set_delivery_date        # probe=source-only
 #    production by a smoke run. ──
 dispatch_v2_tray_attachment_open     # probe=source-only
 
+# ── Ops screen Dispatch tab v2: Read now (docs/dispatch-v2-board-contract.md,
+#    section 3j). Reads Outlook and runs the supplier reply scan now: a staff
+#    press with side effects (mail capture), source-only, never fired at
+#    production by a smoke run. ──
+dispatch_v2_read_now                 # probe=source-only
+
 # ── Ops screen Dispatch tab v2: a supplier order's material stage set by hand
 #    (docs/dispatch-v2-board-contract.md, section 3b). A staff write:
 #    source-only, never fired at production by a smoke run. ──
@@ -481,6 +487,9 @@ backfill_job_work_orders # probe=source-only
 auto_issue_job_work_orders # probe=source-only
 resend_work_order_variation_emails # probe=source-only
 correct_work_order_variation # probe=source-only
+# Jobs billed over their agreed labour (work_order_overbilled.ts). A read, but
+#    a bare call checks every job billed in the last 90 days, so never probed live.
+list_overbilled_job_work_orders # probe=source-only
 # Work order lines from the accepted quote (docs/quote-work-order-lines-v1.md).
 #    A pure read; a bare call is refused 400 "job_id required" before any query.
 quote_work_order_lines
@@ -514,6 +523,8 @@ job_schedule_reminder_sweep # probe=source-only
 # Ruling 17 step 4: a job paid hourly up to a maximum (job_labour_cap.ts). Staff read; the raise is an approver's signed-in write
 job_labour_cap # probe=source-only
 raise_job_labour_cap # probe=source-only
+work_order_cap_start # probe=source-only
+set_work_order_cap_start # probe=source-only
 
 # Tracking correction GET is refused before any provider reads or writes.
 xero_correct_bill_tracking # probe=bounded-refusal

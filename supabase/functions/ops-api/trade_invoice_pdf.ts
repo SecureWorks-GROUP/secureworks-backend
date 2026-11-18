@@ -15,21 +15,21 @@ import { distinctXeroPdfFilenames } from "./xero_attachment.ts";
 const moneyLabel = (value: number): string => `$${value.toFixed(2)}`;
 
 // Super inclusive (P1-01): every amount includes super. Three figures: the
-// total, what is paid to the person, what is paid to their super fund.
+// total, the person's pay and the super on it (recorded, not a payment).
 function buildSuperInclusiveAuditText(
   model: TradeInvoiceAuditModel,
   tradeName: string,
   invoiceNumber: string,
 ): string[] {
   const base = model.super_base_ex;
-  // P1-01.4: the totals block reads Total (includes super), Paid to your
-  // super fund, Paid to you, then GST when on.
+  // P1-01.4: the totals block reads Total (includes super), Super on your
+  // pay, Your pay, then GST when on. Nothing here says a payment was made.
   const lines: string[] = [
     "TAX INVOICE - every amount includes super; the super fund gets 12/112 of the total",
     `${tradeName}  ${invoiceNumber}`,
     `Total (includes super) ${moneyLabel(model.header.submitted_total)}`,
-    `Paid to your super fund ${moneyLabel(model.header.super_amount)}`,
-    `Paid to you ${moneyLabel(model.header.amount_payable)}`,
+    `Super on your pay ${moneyLabel(model.header.super_amount)}`,
+    `Your pay ${moneyLabel(model.header.amount_payable)}`,
   ];
   if (model.gst_amount > 0) {
     lines.push(`GST ${moneyLabel(model.gst_amount)}`);
@@ -55,11 +55,11 @@ function buildSuperInclusiveAuditText(
       moneyLabel(model.super_line.line_total)
     }`,
   );
-  lines.push(`Paid to you ${moneyLabel(model.header.amount_payable)}`);
+  lines.push(`Your pay ${moneyLabel(model.header.amount_payable)}`);
   const cashBeforeDeduction = model.header.amount_payable + model.gst_amount;
   if (model.gst_amount > 0) {
     lines.push(
-      `GST ${moneyLabel(model.gst_amount)}. Paid to you including GST ${
+      `GST ${moneyLabel(model.gst_amount)}. Your pay including GST ${
         moneyLabel(Math.round(cashBeforeDeduction * 100) / 100)
       }`,
     );
@@ -71,7 +71,7 @@ function buildSuperInclusiveAuditText(
       }  ${moneyLabel(model.recurring_deduction_line.line_total)}`,
     );
     lines.push(
-      `PAID TO YOU after the weekly deduction ${moneyLabel(model.trade_payable)}`,
+      `YOUR PAY after the weekly deduction ${moneyLabel(model.trade_payable)}`,
     );
   }
   return lines;
@@ -230,6 +230,10 @@ export function pdfFromTextLines(lines: string[]): Uint8Array<ArrayBuffer> {
     return utf8(ops.join("\n"));
   });
 
+  return assembleTextPdf(contentStreams);
+}
+
+export function assembleTextPdf(contentStreams: Uint8Array[], pageHeight = 792, winAnsi = false): Uint8Array<ArrayBuffer> {
   const pageCount = contentStreams.length;
   const pageIds = contentStreams.map((_, i) => 4 + i * 2);
   const contentIds = contentStreams.map((_, i) => 5 + i * 2);
@@ -241,11 +245,11 @@ export function pdfFromTextLines(lines: string[]): Uint8Array<ArrayBuffer> {
     }] /Count ${pageCount} >>`,
   );
   byNumber[3] = utf8(
-    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica${winAnsi ? " /Encoding /WinAnsiEncoding" : ""} >>`,
   );
   for (let i = 0; i < pageCount; i++) {
     byNumber[pageIds[i]] = utf8(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 ${pageHeight}] /Contents ${
         contentIds[i]
       } 0 R /Resources << /Font << /F1 3 0 R >> >> >>`,
     );

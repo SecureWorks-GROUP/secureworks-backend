@@ -22,6 +22,7 @@ import {
   _opsApiRequestHandlerForTest,
   myHours,
 } from "./index.ts";
+import { LEFT_HIDDEN_WORDS } from "./trade_line_hold.ts";
 import {
   decideTradeInvoiceMode,
   isWorkOrderInvoiceItem,
@@ -139,6 +140,7 @@ function fakeClient(world: World = {}) {
       };
       const builder: any = {
         select: () => builder,
+        neq: () => builder,
         eq(col: string, val: unknown) {
           filters.push(["eq", col, val]);
           return builder;
@@ -341,7 +343,10 @@ Deno.test("job_ids: 1 to 50 uuids, deduplicated", () => {
 
 const WEEK_END = "2026-11-08";
 
-function hoursClient(world: { failJobs?: boolean } = {}) {
+const scopeReads = { n: 0 };
+function hoursClient(
+  world: { failJobs?: boolean; lineHold?: boolean; billedOnFence?: number; failBilled?: boolean; outOfScope?: string[]; failScope?: boolean; fenceBilledBy?: string[] } = {},
+) {
   const card = (id: string, jobId: string, type: string) => ({
     id,
     scheduled_date: "2026-11-04",
@@ -368,8 +373,41 @@ function hoursClient(world: { failJobs?: boolean } = {}) {
     group_work_orders: [{ id: "group-1", ...GROUPS[0] }],
     work_orders: WORK_ORDERS,
     trade_rates: [{ hourly_rate: 50, effective_from: "2026-01-01" }],
+    // P1-05.8: the held-line rule and the pay rule for this week.
+    feature_flags: world.lineHold
+      ? [{ flag_name: "trade_line_hold_v1", enabled: true }, { flag_name: "trade_pay_inclusive_super_v1", enabled: true }]
+      : [],
+    trade_pay_settings: world.lineHold ? [{ id: 1, inclusive_super_from: "2026-01-05" }] : [],
+    // Billed lines on the fencing job, one per trade named (made-up amounts).
+    trade_invoice_lines: (world.fenceBilledBy ?? []).map((user_id, i) => ({
+      id: `line-${i}`, trade_invoice_id: `inv-${i}`, job_id: FENCE, line_type: "labour", line_total_ex: 100,
+      trade_invoices: { id: `inv-${i}`, user_id, status: "approved" },
+    })),
   };
   return {
+    rpc: (name: string, args?: any) => {
+      // FU49-9b: the cap scope, every job in scope unless the world names it out.
+      if (name === "work_order_cap_scope") {
+        scopeReads.n++;
+        if (world.failScope) return Promise.resolve({ data: null, error: { message: "boom" } });
+        return Promise.resolve({
+          data: [...new Set<string>(args?.p_job_ids ?? [])].map((job_id) => ({ job_id, in_scope: !(world.outOfScope ?? []).includes(job_id) })),
+          error: null,
+        });
+      }
+      if (name === "trade_is_off_job_crew") return Promise.resolve({ data: false, error: null });
+      if (name === "work_order_backed_billed") {
+        if (world.failBilled) return Promise.resolve({ data: null, error: { message: "boom" } });
+        return Promise.resolve({
+          data: (args?.p_job_ids ?? []).map((id: string) => ({
+            job_id: id,
+            billed_ex: id === FENCE ? (world.billedOnFence ?? 0) : 0,
+          })),
+          error: null,
+        });
+      }
+      return Promise.resolve({ data: null, error: null });
+    },
     from(table: string) {
       const filters: Array<[string, string, unknown]> = [];
       const result = () => {
@@ -385,6 +423,7 @@ function hoursClient(world: { failJobs?: boolean } = {}) {
       };
       const builder: any = {
         select: () => builder,
+        neq: () => builder,
         eq(col: string, val: unknown) {
           if (table !== "job_assignments") filters.push(["eq", col, val]);
           return builder;
@@ -398,6 +437,7 @@ function hoursClient(world: { failJobs?: boolean } = {}) {
         or: () => builder,
         not: () => builder,
         order: () => builder,
+        range: () => builder,
         limit: () => builder,
         maybeSingle() {
           const r = result();
@@ -452,11 +492,78 @@ Deno.test("my_hours: a failed mode read never fails the hours view and never gue
   assertEquals(out.total_hours, 8);
 });
 
+Deno.test("my_hours, held-line rule on: each card says what its job has left, and the answer says line_hold", async () => {
+  const out: any = await myHours(hoursClient({ lineHold: true, billedOnFence: 850.5 }), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  assertEquals(out.line_hold, true);
+  assert(!("job_left_unavailable" in out));
+  const cards = Object.fromEntries(out.assignments.map((a: any) => [a.id, a]));
+  assertEquals(cards["card-fence"].job_left_ex, 1000, "approved 1,850.50 less 850.50 billed");
+  assertEquals(cards["card-makesafe"].job_left_ex, null, "no approved amount");
+  assertEquals(cards["card-fence"].job_capped, true);
+});
+
+Deno.test("cap left: my_hours shows a job's amount left only when every billed line on it is the trade's own", async () => {
+  // Trade A billed alone: A sees the figure.
+  const alone: any = await myHours(hoursClient({ lineHold: true, billedOnFence: 850.5, fenceBilledBy: [TRADE] }), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  const a = alone.assignments.find((c: any) => c.id === "card-fence");
+  assertEquals([a.job_left_ex, a.job_left_hidden, a.job_left_words], [1000, false, null]);
+  // Trade B billed on the same job too: A sees words, no amount.
+  const shared: any = await myHours(hoursClient({ lineHold: true, billedOnFence: 850.5, fenceBilledBy: [TRADE, "ZZTEST-TRADE-B"] }), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  const s = shared.assignments.find((c: any) => c.id === "card-fence");
+  assertEquals([s.job_left_ex, s.job_left_hidden, s.job_left_words], [null, true, LEFT_HIDDEN_WORDS.my_hours]);
+  assertEquals(s.job_capped, true, "still capped; only the figure is withheld");
+  assert(!JSON.stringify(s).includes("1000"), "no remainder anywhere on the card");
+  // A job with no approved amount says nothing either way.
+  const m = shared.assignments.find((c: any) => c.id === "card-makesafe");
+  assertEquals([m.job_left_ex, m.job_left_hidden, m.job_left_words], [null, false, null]);
+});
+
+Deno.test("FU49-9b my_hours, held-line rule on: a job outside the cap's start date has nothing left to show and job_capped false", async () => {
+  const out: any = await myHours(hoursClient({ lineHold: true, billedOnFence: 850.5, outOfScope: [FENCE] }), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  assert(!("job_left_unavailable" in out));
+  const cards = Object.fromEntries(out.assignments.map((a: any) => [a.id, a]));
+  assertEquals([cards["card-fence"].job_left_ex, cards["card-fence"].job_capped], [null, false]);
+});
+
+Deno.test("FU49-9b my_hours, held-line rule on: a failed scope read says unavailable, never no cap", async () => {
+  const out: any = await myHours(hoursClient({ lineHold: true, billedOnFence: 850.5, failScope: true }), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  assertEquals([out.line_hold, out.job_left_unavailable], [true, true]);
+  for (const a of out.assignments) assertEquals([a.job_left_ex ?? null, a.job_capped ?? null], [null, null]);
+});
+
+Deno.test("my_hours, held-line rule on: an unreadable amount says so and never reads as no amount", async () => {
+  const out: any = await myHours(hoursClient({ lineHold: true, failBilled: true }), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  assertEquals([out.line_hold, out.job_left_unavailable], [true, true]);
+  assertEquals(out.total_hours, 8);
+});
+
+Deno.test("my_hours, held-line rule off: no line_hold and no job_left_ex", async () => {
+  scopeReads.n = 0;
+  const out: any = await myHours(hoursClient(), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  assert(!("line_hold" in out) && !("job_left_unavailable" in out));
+  for (const a of out.assignments) {
+    assert(!("job_left_ex" in a) && !("job_capped" in a));
+    assert(!("job_left_hidden" in a) && !("job_left_words" in a));
+  }
+  assertEquals(scopeReads.n, 0, "switch off reads no cap scope");
+});
+
 // ── 5. Through the real handler ─────────────────────────────────────────────
 
 async function call(
   action: string,
-  init: { method?: string; query?: Record<string, string>; body?: unknown; role?: string } = {},
+  init: {
+    method?: string;
+    query?: Record<string, string>;
+    body?: unknown;
+    role?: string;
+    /** Jobs the trade is allocated to (job_assignments rows). */
+    assignedJobs?: string[];
+    /** users.trade_sees_all_jobs: the office (see-everything) tier. */
+    seesAll?: boolean;
+    /** The job_assignments read fails. */
+    assignmentsFail?: boolean;
+  } = {},
 ): Promise<{ status: number; body: any; tables: string[] }> {
   const tables: string[] = [];
   const originalFetch = globalThis.fetch;
@@ -491,7 +598,7 @@ async function call(
         role: init.role ?? "lead_installer",
         name: "Fixture Trade",
         managed_verticals: [],
-        trade_sees_all_jobs: false,
+        trade_sees_all_jobs: init.seesAll === true,
         invoice_type: "hourly",
         trade_details: {},
         invoice_any_job: null,
@@ -507,6 +614,16 @@ async function call(
     if (table === "group_work_orders") {
       const jobs = values("job_id");
       return reply(GROUPS.filter((row) => !jobs || jobs.includes(row.job_id)));
+    }
+    if (table === "job_assignments" && init.assignmentsFail) {
+      return Promise.resolve(Response.json({ code: "57014", message: "timeout" }, { status: 500 }));
+    }
+    if (table === "job_assignments") {
+      const jobs = values("job_id");
+      const users = values("user_id");
+      return reply((init.assignedJobs ?? [])
+        .map((jobId) => ({ id: `a-${jobId}`, job_id: jobId, user_id: TRADE, status: "scheduled" }))
+        .filter((row) => (!jobs || jobs.includes(row.job_id)) && (!users || users.includes(row.user_id))));
     }
     if (table === "work_orders") {
       const jobs = values("job_id");
@@ -549,6 +666,7 @@ handlerTest("trade_invoice_job_modes: a plain trade gets each job's mode; anothe
   for (const role of ["lead_installer", "installer"]) {
     const out = await call("trade_invoice_job_modes", {
       role,
+      assignedJobs: [FENCE],
       query: { job_ids: [FENCE, PATIO, CREATED_MAKESAFE, FOREIGN].join(",") },
     });
     assertEquals(out.status, 200, JSON.stringify(out.body));
@@ -584,6 +702,47 @@ handlerTest("trade_invoice_job_modes: a plain trade gets each job's mode; anothe
     ]);
     assertEquals(out.body.not_found, [FOREIGN]);
   }
+});
+
+handlerTest("trade_invoice_job_modes: a trade not on the job gets no agreed labour anywhere; the mode is unchanged", async () => {
+  const out = await call("trade_invoice_job_modes", {
+    role: "installer",
+    assignedJobs: [],
+    query: { job_ids: [FENCE, PATIO].join(",") },
+  });
+  assertEquals(out.status, 200, JSON.stringify(out.body));
+  const fence = out.body.jobs.find((j: any) => j.job_id === FENCE);
+  assertEquals(fence.invoice_mode, "work_order");
+  assertEquals(fence.invoice_mode_reason, "fencing_job");
+  assertEquals(fence.work_order_agreed_ex, null);
+  assertEquals(fence.job_work_order_id, null);
+  // No figure and no work order id anywhere in the answer.
+  assert(!JSON.stringify(out.body).includes("1850"), JSON.stringify(out.body));
+  assert(!JSON.stringify(out.body).includes(WO_FENCE), JSON.stringify(out.body));
+  assert(out.tables.includes("job_assignments"));
+});
+
+handlerTest("trade_invoice_job_modes: a failed assignment read refuses 503, never keeps or drops the figure by guess", async () => {
+  const out = await call("trade_invoice_job_modes", {
+    role: "installer",
+    assignmentsFail: true,
+    query: { job_ids: FENCE },
+  });
+  assertEquals(out.status, 503, JSON.stringify(out.body));
+  assertEquals(out.body.code, "invoice_mode_unavailable");
+  assert(!JSON.stringify(out.body).includes("1850"));
+});
+
+handlerTest("trade_invoice_job_modes: office (see-everything) keeps the agreed labour on a job it is not allocated to", async () => {
+  const out = await call("trade_invoice_job_modes", {
+    role: "admin",
+    seesAll: true,
+    assignedJobs: [],
+    query: { job_ids: FENCE },
+  });
+  assertEquals(out.status, 200, JSON.stringify(out.body));
+  assertEquals(out.body.jobs[0].work_order_agreed_ex, 1850.5);
+  assertEquals(out.body.jobs[0].job_work_order_id, WO_FENCE);
 });
 
 handlerTest("trade_invoice_job_modes: bad job_ids answer 400 before any job is read; GET only", async () => {

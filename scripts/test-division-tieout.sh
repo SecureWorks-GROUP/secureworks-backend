@@ -12,7 +12,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Private Unix socket only. An existing database is never a target.
-initdb -D "$cluster/data" -U postgres -A trust --no-locale >/dev/null
+initdb -D "$cluster/data" -U postgres -A trust --no-locale -E UTF8 >/dev/null
 pg_ctl -D "$cluster/data" -l "$cluster/postgres.log" \
   -o "-c listen_addresses='' -k '$cluster'" -w start >/dev/null
 psql -X -h "$cluster" -p 5432 -U postgres -d postgres -v ON_ERROR_STOP=1 \

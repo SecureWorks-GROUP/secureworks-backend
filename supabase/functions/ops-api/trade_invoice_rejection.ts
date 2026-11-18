@@ -19,10 +19,11 @@ export async function rejectTradeInvoiceStorage(
     return { data: typeof data === "string" ? { id: data } : null, error };
   }
   return await client.from("trade_invoices")
-    .update({ status: "ops-reject", query_note: note })
+    .update({ status: "ops-reject", query_note: note, office_sent_back_at: new Date().toISOString() })
     .eq("id", invoiceId)
     .is("xero_bill_id", null)
     .is("xero_pushed_at", null)
+    .is("pay_run_id", null)
     .select("id")
     .maybeSingle();
 }

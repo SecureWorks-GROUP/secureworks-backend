@@ -217,10 +217,12 @@ Deno.test("ZZTEST standalone SQL fixture uses the exact existing persist functio
 
 Deno.test("ZZTEST receipt-bearing dated hourly submission uses atomic save; switch-off stays legacy", async () => {
   const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const start = source.indexOf("            const invoiceId = await retryReimbursementClaims(client, reimbursements,");
-  const end = source.indexOf("            const invoice = { id: invoiceId }", start);
+  // P1-05.8 wraps the save in saveStandard (the held-line send calls it too);
+  // switch off, the handler calls it once, exactly as before.
+  const start = source.indexOf("            const saveStandard = () => retryReimbursementClaims(client, reimbursements,");
+  const end = source.indexOf("            // ── P1-05.8: save the pay, then the office's part", start);
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-  const submit = new AsyncFunction("ctx", "with (ctx) {" + source.slice(start, end).replace(/: (any|number)\b/g, "") + "return invoiceId; }");
+  const submit = new AsyncFunction("ctx", "with (ctx) {" + source.slice(start, end).replace(/: (any|number)\b/g, "") + "const invoiceId = await saveStandard(); return invoiceId; }");
   for (const enabled of [false, true]) {
     const result = await resolve(receipt(), { flagOn: enabled });
     let atomic = 0, legacy = 0;
@@ -373,4 +375,23 @@ Deno.test("FU17 receipt-free undated drafts keep the group-share-capable legacy 
   assertEquals(saved, "ZZTEST-legacy");
   assertEquals(atomic, 0);
   assertEquals(legacy, 1);
+});
+
+Deno.test("ZZTEST cl-receipt-ownjob: a marked receipt is paid back only after the office confirms it", async () => {
+  const marked = await resolve(receipt({ unbooked_job_id: "ZZTEST-job" }));
+  assertEquals(marked.lines, []);
+  assertEquals(marked.skipped_items, [{
+    expense_receipt_id: "ZZTEST-receipt",
+    code: "reimbursement_not_booked",
+    words: "You are not booked on that job, so the office checks this receipt before it is paid back.",
+  }]);
+  const queried = await resolve(receipt({ unbooked_job_id: "ZZTEST-job", status: "queried" }));
+  assertEquals(queried.skipped_items.map((s: any) => s.code), ["reimbursement_not_booked"]);
+  // Confirmed at approval: one line, already office approved, as for any approved receipt.
+  const confirmed = await resolve(receipt({ unbooked_job_id: "ZZTEST-job", status: "approved" }));
+  assertEquals(confirmed.skipped_items, []);
+  assertEquals([confirmed.lines.length, confirmed.lines[0].hold_reason, confirmed.lines[0].office_review_status], [1, null, "approved"]);
+  // Unmarked: as on main (held for the office's usual review while pending).
+  const unmarked = await resolve(receipt());
+  assertEquals([unmarked.lines.length, unmarked.lines[0].hold_reason], [1, "reimbursement"]);
 });

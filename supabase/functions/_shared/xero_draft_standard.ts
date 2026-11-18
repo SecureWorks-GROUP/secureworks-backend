@@ -41,12 +41,12 @@ const STOCK_DIVISION_OPTIONS: Record<string, string> = {
 }
 
 // Main's mapper body is retained line for line. Existing invoice create/edit
-// callers never read the switch and never receive the new draft rules.
+// callers use this mapping even when option validation uses the stored list.
 // Change this rule in both places; scripts/test-division-twin.sh proves they agree.
 export function divisionTrackingOption(jobNumber: string, jobType?: string | null): string {
   // An explicit type always wins, including when the job has no number yet.
   const type = String(jobType || '').trim().toLowerCase()
-  // Granny-flat accounting is unresolved. Never infer a division from its retained number.
+  // The legacy invoice path keeps its original answer when a granny flat retains a patio number.
   if (type === 'granny_flat') return ''
   if (type === 'repair') return 'SW - MAKESAFE'
   if (type === 'roofing' || type === 'renovation') return 'SW - PRIVATE ROOFING'
@@ -91,11 +91,12 @@ export async function draftDivisionTrackingOption(
 
   const stock = String(input.stock_division || '').trim()
   if (stock.startsWith('SW - ')) return stock
-  const stockOption = STOCK_DIVISION_OPTIONS[stock.toLowerCase()]
-  if (stockOption) return stockOption
+  const stockKey = stock.toLowerCase()
+  if (Object.hasOwn(STOCK_DIVISION_OPTIONS, stockKey)) return STOCK_DIVISION_OPTIONS[stockKey]
 
   const option = draftJobDivisionCandidate(input.job_number || '', input.job_type)
   if (option === 'Private Renovations') {
+    if (!orgId) return ''
     // Only this org's stored ACTIVE option authorises the exact name.
     // No caller-supplied option list and no Xero option creation.
     try {
@@ -167,8 +168,8 @@ export async function loadDraftStandard(client: SupabaseLike, orgId: string, req
       !Array.isArray(rulesRes?.data) || !Array.isArray(optionsRes?.data))) {
     throw new Error('DRAFT_STANDARD_UNAVAILABLE')
   }
-  if (rulesRes?.error) console.error('[xero_draft_standard] account rules not read:', rulesRes.error.message)
-  if (optionsRes?.error) console.error('[xero_draft_standard] division options not read:', optionsRes.error.message)
+  if (rulesRes?.error) console.error('[xero_draft_standard] account rules not read:', rulesRes.error.code || 'read_failed')
+  if (optionsRes?.error) console.error('[xero_draft_standard] division options not read:', optionsRes.error.code || 'read_failed')
   const rules: XeroAccountRule[] = rulesRes?.error ? [] : (rulesRes?.data || [])
   const optionRows: { option_name: string }[] = optionsRes?.error ? [] : (optionsRes?.data || [])
   return {

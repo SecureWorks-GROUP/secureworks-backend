@@ -72,8 +72,11 @@ Deno.test("ZZTEST expense push is unchanged switch-off and any claim stops Xero 
         "xeroPost",
         "logBusinessEvent",
         "requestFetch",
+        "recordXeroDraft",
+        "DEFAULT_ORG_ID",
         pushBody,
       );
+      let recorded = 0;
       const run = () =>
         push(
           fake(status, enabled),
@@ -93,15 +96,25 @@ Deno.test("ZZTEST expense push is unchanged switch-off and any claim stops Xero 
             return { Invoices: [{ InvoiceID: "ZZTEST-bill" }] };
           },
           () => {},
+          undefined,
+          // P3-01.9: the register record runs after a successful create only.
+          async (_client: unknown, input: { registerRow: string; raise: boolean }) => {
+            assertEquals([input.registerRow, input.raise], ["X7", false]);
+            recorded++;
+            return { recorded: false, skipped: "switch_off" };
+          },
+          "ZZTEST-org",
         );
       if (enabled || status === "submitted") {
         const error = await assertRejects(run, ApiError);
         assertEquals(error.status, 409);
         assertEquals(error.detail.code, "expense_on_trade_invoice");
         assertEquals(calls, 0);
+        assertEquals(recorded, 0);
       } else {
         await run();
         assertEquals(calls, 2);
+        assertEquals(recorded, 1);
       }
     }
   }
