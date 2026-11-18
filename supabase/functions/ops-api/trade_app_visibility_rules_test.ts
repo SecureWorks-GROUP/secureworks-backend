@@ -1239,8 +1239,7 @@ const PER_JOB_TRADE_DOORS: Array<
   { action: "roof_report_template" },
   { action: "save_roof_report", body: { fields: {} } },
   { action: "submit_roof_report", body: { fields: {} } },
-  // trade_labour_budget names crew pay, so it is refused even earlier, by the
-  // pay run approver check: its own end-to-end case is below the loop.
+  { action: "trade_labour_budget" },
   { action: "complete_my_job" },
   { action: "waive_neighbour_signoff", body: { reason: "neighbour away" } },
   { action: "log_my_job_hours", body: { hours: 2 } },
@@ -1302,11 +1301,6 @@ async function callTradeDoor(
       return Promise.resolve(
         Response.json({ id: "req-door" }, { status: 201 }),
       );
-    }
-    if (rest?.[1] === "trade_pay_settings") {
-      return Promise.resolve(Response.json({
-        pay_run_approver_user_ids: ["7d4f0a52-0000-4000-8000-0000000da0a1"],
-      }));
     }
     if (rest?.[1] === "users") {
       return Promise.resolve(Response.json({
@@ -1387,23 +1381,6 @@ for (const door of PER_JOB_TRADE_DOORS) {
     );
   });
 }
-
-Deno.test("rule table (end-to-end): trade_labour_budget refuses an ordinary trade, allocated or not, before touching job data", async () => {
-  // Named pay figures are approver-only (pay_figures_approver.ts): the crew
-  // labour budget names each crew member's rate, so even an allocated trade
-  // who is not a pay run approver is refused before the tier check reads a job.
-  for (const allocated of [false, true]) {
-    const out = await callTradeDoor("trade_labour_budget", {}, allocated);
-    assertEquals(out.status, 403, out.text);
-    assertEquals(JSON.parse(out.text).code, "pay_figures_not_approver");
-    assertEquals(out.writes, []);
-    assertEquals(
-      out.tables.filter((t) => t !== "users" && t !== "trade_pay_settings"),
-      [],
-      "trade_labour_budget read job data before refusing",
-    );
-  }
-});
 
 Deno.test("rule table (end-to-end): an allocated trade's request_assistance is filed under their own session id, never the body's requested_by", async () => {
   const out = await callTradeDoor("request_assistance", {

@@ -1,14 +1,14 @@
 /**
- * Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
+ * The weekly pay run check is approver-only (director ruling 18 Nov 2026,
+ * 08:14 (4), narrowed 08:34 to trade_pay_run_check alone).
  *
  * Through the real ops-api request handler, with every database call answered
- * by a fetch spy (nothing leaves the process), for each of the six actions:
+ * by a fetch spy (nothing leaves the process), for trade_pay_run_check:
  *  - an office user who is not a pay run approver gets 403 and no pay, rate,
  *    invoice, job or labour row is read;
  *  - the server key gets 403 with nothing read;
  *  - a failed, missing or empty approver list refuses (403), never passes;
  *  - an approver gets past the check to the action's own reads.
- * trade_labour_budget (Trade App) is also refused for an ordinary trade.
  * Roles only, made-up ids; no names, rates or amounts.
  */
 // deno-lint-ignore-file no-import-prefix no-explicit-any
@@ -23,7 +23,6 @@ import {
 
 const SERVICE_KEY = "test-service-role-key";
 const ORG = "00000000-0000-0000-0000-000000000001";
-const JOB = "7d4f0a52-0000-4000-8000-0000000000b1";
 const PEOPLE: Record<string, { id: string; role: string }> = {
   "approver-jwt": { id: "7d4f0a52-0000-4000-8000-0000000000a1", role: "owner" },
   "office-jwt": { id: "7d4f0a52-0000-4000-8000-0000000000a2", role: "admin" },
@@ -73,11 +72,6 @@ type Settings = "approver" | "error" | "missing" | "empty" | "throws";
 
 const ACTIONS: Array<{ action: string; query: Record<string, string> }> = [
   { action: "trade_pay_run_check", query: {} },
-  { action: "list_trade_invoices", query: {} },
-  { action: "labour_reconciliation", query: { job_id: JOB } },
-  { action: "list_trade_invoice_lines", query: { job_id: JOB } },
-  { action: "list_new_trade_invoices", query: {} },
-  { action: "trade_labour_budget", query: { jobId: JOB, job_id: JOB } },
 ];
 
 // What the gate itself may touch: the caller's profile and the approver list.
@@ -189,7 +183,7 @@ function assertNothingPastTheGate(action: string, paths: string[]) {
   assertEquals(past, [], `${action} read past the approver check`);
 }
 
-Deno.test("pay figures: the six actions are the approver list", () => {
+Deno.test("pay figures: the approver list is the pay run check alone", () => {
   assertEquals(
     [...PAY_FIGURES_APPROVER_ACTIONS].sort(),
     ACTIONS.map((a) => a.action).sort(),
@@ -236,17 +230,6 @@ for (const { action, query } of ACTIONS) {
     );
   });
 }
-
-Deno.test("pay figures: trade_labour_budget refuses an ordinary trade before any job or rate read", async () => {
-  const out = await call(
-    "trade_labour_budget",
-    { jobId: JOB, job_id: JOB },
-    "trade-jwt",
-  );
-  assertEquals(out.status, 403, JSON.stringify(out.body));
-  assertEquals(out.body.code, "pay_figures_not_approver");
-  assertNothingPastTheGate("trade_labour_budget", out.paths);
-});
 
 Deno.test("pay figures: keys with no person are refused without a read", async () => {
   for (const authMode of ["api_key", "routine", "agent_read", null]) {

@@ -1,10 +1,10 @@
 // deno-lint-ignore-file no-explicit-any
-// Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
+// The weekly pay run check is approver-only (director ruling 18 Nov 2026,
+// 08:14 (4), narrowed 08:34 to trade_pay_run_check alone).
 //
 // Every ops-api action listed here returns named pay figures: a trade's name
-// beside what they were paid, their hourly rate or their labour cost. Only a
-// signed-in person on trade_pay_settings.pay_run_approver_user_ids may read
-// one. The handler runs this check once, after the front door and before the
+// beside what they were paid. Only a signed-in person on
+// trade_pay_settings.pay_run_approver_user_ids may read one. The handler runs this check once, after the front door and before the
 // action's dispatch, so no pay, rate, person or job row is read for anyone
 // else. The server key, the routine key and the agent read key are refused:
 // they carry no person to check. A failed or empty approver read refuses.
@@ -15,11 +15,6 @@
 
 export const PAY_FIGURES_APPROVER_ACTIONS: ReadonlySet<string> = new Set([
   "trade_pay_run_check",
-  "list_trade_invoices",
-  "labour_reconciliation",
-  "list_trade_invoice_lines",
-  "list_new_trade_invoices",
-  "trade_labour_budget",
 ]);
 
 export type PayFiguresRefusal = {
