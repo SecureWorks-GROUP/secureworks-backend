@@ -13965,7 +13965,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               try {
                 buildTradeInvoiceAuditModel(woSubmittedLines, woMoney, tradeXeroUser?.name || 'Trade')
               } catch (error) {
-                tradeInvoiceMoneyApiError(error)
+                // Codes only: the money error's own text carries figures.
+                const code = error instanceof TradeInvoiceMoneyError ? error.code : 'audit_lines_invalid'
+                console.error('[ops-api] submit_work_order_invoice: backed lines refused before save:', code)
+                const message = 'Your invoice could not be checked, so nothing was sent. Tell the office.'
+                throw new ApiError(message, 422, { ok: false, success: false, saved: false, code, error: message, userMessage: message })
               }
             }
             if (woLineHoldMode) {
