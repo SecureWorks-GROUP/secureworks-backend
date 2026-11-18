@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 BEGIN;
 -- A re-apply is a no-op on this migration's own bodies.
-\ir ../../../migrations/20261119010000_match_apply_held_unchanged.sql
+\ir ../../../migrations/20261118195800_match_apply_held_unchanged.sql
 SET LOCAL statement_timeout = '60s';
 CREATE TEMP TABLE held_checks(label text);
 CREATE FUNCTION pg_temp.check_it(ok boolean,label text) RETURNS void LANGUAGE plpgsql AS $$

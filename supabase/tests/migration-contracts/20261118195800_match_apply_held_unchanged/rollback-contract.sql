@@ -13,6 +13,6 @@ BEGIN
     RAISE EXCEPTION 'failed: rollback keeps match_apply grants'; END IF;
 END $check$;
 -- The down runs again cleanly on main's body.
-\ir ../../../rollbacks/20261119010000_match_apply_held_unchanged_down.sql
+\ir ../../../rollbacks/20261118195800_match_apply_held_unchanged_down.sql
 SELECT 'PASS P2-02.8 rollback';
 ROLLBACK;

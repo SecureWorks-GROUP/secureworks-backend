@@ -1341,5 +1341,5 @@ ops-api|supabase/migrations/20261118195200_reconcile_list_page.sql|function|reco
 xero-sync|supabase/migrations/20261118195500_trade_invoice_bill_mirror_rule.sql|function|trade_invoice_bill_mirror_verdicts
 # P2-02.8: the matcher runner reads each bill through match_bill_read and keeps
 # its slow-bill counts in match_slow_bills, so xero-sync must not deploy first.
-xero-sync|supabase/migrations/20261119010000_match_apply_held_unchanged.sql|table|match_slow_bills
-xero-sync|supabase/migrations/20261119010000_match_apply_held_unchanged.sql|function|match_bill_read
+xero-sync|supabase/migrations/20261118195800_match_apply_held_unchanged.sql|table|match_slow_bills
+xero-sync|supabase/migrations/20261118195800_match_apply_held_unchanged.sql|function|match_bill_read

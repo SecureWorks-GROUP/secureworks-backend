@@ -3,7 +3,7 @@ BEGIN;
 -- P2-02.8 patches match_apply on top of this one: unwind it first.
 SELECT to_regprocedure('public.match_clues_unchanged(text,text,jsonb,text)') IS NOT NULL AS held_installed \gset
 \if :held_installed
-\ir ../../../rollbacks/20261119010000_match_apply_held_unchanged_down.sql
+\ir ../../../rollbacks/20261118195800_match_apply_held_unchanged_down.sql
 \endif
 \ir ../../../migrations/20261118195300_reconcile_undo.sql
 CREATE TEMP TABLE undo_checks(label text);
