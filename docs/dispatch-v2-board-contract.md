@@ -1921,6 +1921,80 @@ email is still put on the job. Each file saved writes one `job_events` row,
 - A later order confirmation of the same email (3e.2) may still save the same
   PDF again as a crew-visible copy: the 3e.2 path checks its own claims only.
 
+## 3j. Read now (item 19, approved by Shaun 18 Nov 2026)
+
+Shaun, 17 Nov: remove Switch back to v1 and put a **Read now** button in that
+corner, which gets the latest for every job without refreshing the page and
+scans the email for the relevant jobs.
+
+Today Outlook is read every five minutes (cron `outlook-mail-poll`, minutes 2,
+7, 12 ...) and supplier replies are matched a minute later (cron
+`dispatch-v2-replies-scan`, minutes 3, 8, 13 ...). The scan also waits until a
+captured row is two minutes old. Read now runs both now.
+
+### 3j.1 `dispatch_v2_read_now` (new, POST)
+
+Staff only (`_opsApiCallerIsStaffOperator`: the ops server key, or a signed-in
+admin, owner or ops_manager). Absent from `ROUTINE_ALLOWED_ACTIONS`,
+`AGENT_READ_ALLOWED_ACTIONS` and `LEAD_INSTALLER_READ_ACTIONS`. No body. Code:
+`supabase/functions/ops-api/dispatch_v2_read_now.ts`.
+
+In order:
+
+1. The capture lane. `automation_lane_enabled('capture')` off: nothing is read
+   and the answer says `lane: "paused"` (both crons are paused by the same
+   switch).
+2. Mail. Posts `outlook-mail-capture` exactly as `trigger_context_email_poll`
+   does (`{"mode": "poll"}`, service key), with `wait: true`, for at most 25
+   seconds. The reader keeps its own gates (`email_reader_v1`,
+   `email_capture_v2`) and its own per-mailbox leases. Slow or failed mail
+   never stops step 3.
+3. Replies. The scan the cron runs (`dispatch_v2_replies_scan`, then the
+   confirmed-order PDF sweep), with `peek: true`: it also reads rows saved in
+   the last two minutes, so a reply read in step 2 is matched now. The cursor
+   moves only over the rows older than two minutes, so a row committed a moment
+   late is still read by the next run, and the rows read early are skipped
+   then as already stored (`dispatch_v2_supplier_emails` is unique on
+   `business_event_id`). Feature flag `dispatch_v2_replies_v1` off: `off`.
+4. The Emails to sort count: `needs_confirmation + unmatched_order_desk`, the
+   tray's own count.
+
+Answer (counts and codes only, never email words):
+
+```json
+{ "ok": true, "read_at": "2026-11-18T06:32:05.000Z", "lane": "on",
+  "mail": { "status": "read", "emails_read": 3, "mailboxes": 11, "mailboxes_not_read": 0 },
+  "replies": { "status": "scanned", "stored": 2, "matched": 1,
+               "needs_confirmation": 1, "unmatched": 0, "suggestions": 1 },
+  "left_to_sort": 4, "reused": false }
+```
+
+`mail.status` is `read`, `off` (with `reason`), `slow` (no answer in 25
+seconds; the reader may still finish) or `failed` (with `code`). `replies.status`
+is `scanned`, `off` or `failed` (with `code`). A failed step never fails the
+press: the answer is still 200. `mailboxes_not_read` counts a mailbox busy in
+the cron's own run as not read this time.
+
+One at a time: a press while a run is going, or within 30 seconds of the last
+one, gets that run's answer back with `reused: true`. The guard is per worker;
+two workers at once is safe for the reasons in step 3 and the reader's leases.
+
+Reads mail only. No send, no job stage or status, no Xero, no GHL; it writes
+only what the two crons already write.
+
+### 3j.2 The screen
+
+The v2 corner button "Switch back to v1" is gone; Read now sits in its place.
+The v1 screen keeps "Switch to v2", and `?dispatch_version=v1` in the address
+still opens v1. After the press the screen reloads the board, the Needs you now
+bar, the tray and the open job, and shows one line, for example
+"Read 2:32pm. 2 new supplier emails." The button is off while it runs.
+
+### 3j.3 Item 20: one way into the tray
+
+The separate "Unmatched supplier emails" button is gone. The Emails to sort
+chip in Needs you now opens and shuts the same tray, with the same count.
+
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 
 A purchase order with `source = 'dispatch'` is refused, before any job,
