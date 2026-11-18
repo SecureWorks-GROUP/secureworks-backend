@@ -50,7 +50,8 @@ function store(rates: Row[], fault?: "select" | "update") {
     from(table: string) {
       const predicates: Array<(r: Row) => boolean> = [];
       let operation = "select", values: Row = {}, limit = Infinity;
-      let sort: { key: string; ascending: boolean } | undefined;
+      const sorts: Array<{ key: string; ascending: boolean }> = [];
+      let start = 0;
       const predicate = (key: string, op: string, value: any) => (r: Row) => {
         if (op === "is") return (r[key] ?? null) === value;
         if (op === "eq") return r[key] === value;
@@ -72,13 +73,12 @@ function store(rates: Row[], fault?: "select" | "update") {
         let rows = (tables[table] || []).filter((r) =>
           predicates.every((p) => p(r))
         );
-        if (sort) {
-          const { key, ascending } = sort;
+        for (const { key, ascending } of sorts.slice().reverse()) {
           rows.sort((a, b) =>
             String(a[key]).localeCompare(String(b[key])) * (ascending ? 1 : -1)
           );
         }
-        rows = rows.slice(0, limit);
+        rows = rows.slice(start, start + limit);
         if (operation !== "select") writes.push(operation);
         if (operation === "update") {
           rows.forEach((r) => Object.assign(r, values));
@@ -129,7 +129,12 @@ function store(rates: Row[], fault?: "select" | "update") {
           return query;
         },
         order: (key: string, opts: any = {}) => {
-          sort = { key, ascending: opts.ascending !== false };
+          sorts.push({ key, ascending: opts.ascending !== false });
+          return query;
+        },
+        range: (from: number, to: number) => {
+          start = from;
+          limit = to - from + 1;
           return query;
         },
         limit: (n: number) => {
@@ -332,6 +337,7 @@ for (const [label, screen] of Object.entries(costScreens)) {
       ]);
       s.tables.job_assignments = [attendance(today), attendance(changeDay)];
       const out = await screen(s);
+      assertEquals(out.rate_assumed, 0);
       assertEquals(out.trades[0].hours, 4);
       assertEquals(out.trades[0].cost, 108);
       assertEquals(out.trades[0].rate, 27);
@@ -387,6 +393,7 @@ for (const [label, screen] of Object.entries(costScreens)) {
         { ...oldRate(), user_id: "second-trade-fixture", hourly_rate: 17 },
       ]);
       s.tables.job_assignments = [
+        attendance("2030-12-01"),
         attendance(today),
         attendance(changeDay),
         { ...attendance(today), user_id: "second-trade-fixture" },
@@ -399,13 +406,27 @@ for (const [label, screen] of Object.entries(costScreens)) {
           cost: row.cost,
         })),
         [
-          { user_id: "trade-fixture", cost: 62 },
+          { user_id: "trade-fixture", cost: 154 },
           { user_id: "second-trade-fixture", cost: 68 },
         ],
       );
+      assertEquals(out.rate_assumed, 2);
       assertEquals(
         s.reads.filter((table) => table === "trade_rates").length,
         2,
       );
     }));
+
+  Deno.test(`${label} labour screen refuses missing or unreadable rates and retries after an office correction`, async () => {
+    const s = store([]);
+    s.tables.job_assignments = [attendance(today)];
+    await assertRejects(() => screen(s), ApiError, "trade_rate_missing");
+    s.tables.trade_rates.push(nextRate());
+    const retried = await screen(s);
+    assertEquals(retried.rate_assumed, 1);
+    assertEquals(retried.trades[0].cost, 62);
+    const failed = store([oldRate()], "select");
+    failed.tables.job_assignments = [attendance(today)];
+    await assertRejects(() => screen(failed), ApiError, "trade_rate_read_failed");
+  });
 }
