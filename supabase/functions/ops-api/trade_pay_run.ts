@@ -1199,7 +1199,7 @@ export async function approvePayRun(
     if (code && RPC_REFUSALS[code]) throw RPC_REFUSALS[code]();
     throw new TradePayRunError(
       code ?? "pay_run_approve_failed",
-      "The pay run could not be recorded. Nothing was approved.",
+      "The pay run answer could not be read. Open the pay run again to see whether it was recorded.",
       503,
     );
   }

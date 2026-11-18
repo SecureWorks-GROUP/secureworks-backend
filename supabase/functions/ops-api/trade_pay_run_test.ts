@@ -14,6 +14,7 @@ import {
   PAY_RUN_CHECK_RULE,
   PAY_RUN_REACH,
   type PayRunApproveDeps,
+  payRunApproveDepsFromClient,
   payRunCutOff,
   payRunEligible,
   payRunPlacement,
@@ -1393,4 +1394,108 @@ Deno.test("approve pay run: staff only at the ops-api front door, POST only, no 
   assert(body.includes("requestActor.source === 'jwt'"));
   // The approve path never reaches Xero.
   assertEquals(/xero/i.test(body.replace(/never calls Xero/, "")), false);
+});
+
+async function migrationText(suffix: string): Promise<string> {
+  const dir = new URL("../../migrations/", import.meta.url);
+  for await (const e of Deno.readDir(dir)) {
+    if (e.name.endsWith(suffix)) {
+      return await Deno.readTextFile(new URL(e.name, dir));
+    }
+  }
+  throw new Error(`no migration ending ${suffix}`);
+}
+
+/** The named parameters of `public.<fn>(` as the migration declares them. */
+function declaredParams(sql: string, fn: string): string[] {
+  const at = sql.indexOf(`FUNCTION public.${fn}(`);
+  assert(at >= 0, `${fn} not declared`);
+  const open = at + `FUNCTION public.${fn}(`.length;
+  const args = sql.slice(open, sql.indexOf(")", open));
+  return args.split(",").map((a) => a.trim().split(/\s+/)[0]);
+}
+
+Deno.test("approve pay run: the production dependencies call what the migrations install", async () => {
+  const calls: Array<{ kind: string; name: string; args: any }> = [];
+  const selects = new Map<string, string[]>();
+  const client = {
+    rpc: (name: string, args: any) => {
+      calls.push({ kind: "rpc", name, args });
+      return Promise.resolve({ data: { run_id: RUN_ID }, error: null });
+    },
+    from(table: string) {
+      const q: any = {
+        select(cols: string) {
+          selects.set(table, cols.split(",").map((c) => c.trim()));
+          return q;
+        },
+        in: () => q,
+        order: () => q,
+        range: () => q,
+        then: (res: (v: any) => unknown) =>
+          Promise.resolve({ data: [], error: null }).then(res),
+      };
+      return q;
+    },
+  };
+  const deps = payRunApproveDepsFromClient(client, () => Promise.resolve(true));
+  await deps.approve({
+    p_org_id: ORG,
+    p_week_start: WEEK,
+    p_actor: APPROVER,
+    p_snapshot: { check_rule: PAY_RUN_CHECK_RULE, invoices: [] },
+  });
+  await deps.withdraw({
+    kind: "pay_claim_stopped",
+    subject_table: "trade_invoices",
+    subject_id: id(1),
+    reason: "Clean in this pay run",
+  });
+  await deps.raise({
+    kind: "pay_claim_stopped",
+    subject_table: "trade_invoices",
+    subject_id: id(1),
+    job_ids: [],
+    suggestion: {},
+    evidence: { reason: "x" },
+    raised_by: "phase1:pay_run",
+  });
+  await deps.invoiceJobs([id(1)]);
+  await deps.userRoles([user(1)]);
+
+  const runs = await migrationText("_trade_pay_runs.sql");
+  assertEquals(
+    Object.keys(calls.find((c) => c.name === "approve_trade_pay_run")!.args),
+    declaredParams(runs, "approve_trade_pay_run"),
+  );
+  const reconcile = await migrationText("_reconcile_item_raise.sql");
+  assertEquals(
+    Object.keys(calls.find((c) => c.name === "reconcile_item_withdraw")!.args),
+    declaredParams(reconcile, "reconcile_item_withdraw"),
+  );
+  // reconcile_item_raise declares its arguments by position and names them by
+  // ALIAS inside; the call uses those names, in order (open gap: PostgREST
+  // calls by name, see the PR).
+  const aliases = [
+    ...reconcile.matchAll(/(p_\w+) ALIAS FOR \$(\d)/g),
+  ].sort((a, b) => Number(a[2]) - Number(b[2])).map((m) => m[1]);
+  assertEquals(aliases.length, 7);
+  assertEquals(
+    Object.keys(calls.find((c) => c.name === "reconcile_item_raise")!.args),
+    aliases,
+  );
+
+  // trade_invoice_lines job columns as created (20260325000003).
+  const timer = await migrationText("_timer_invoice_system.sql");
+  const lineTable = timer.slice(
+    timer.indexOf("CREATE TABLE trade_invoice_lines ("),
+  );
+  const lineCols = lineTable.slice(0, lineTable.indexOf(");"));
+  for (const col of selects.get("trade_invoice_lines")!) {
+    assert(
+      new RegExp(`\\b${col}\\b`).test(lineCols),
+      `trade_invoice_lines.${col}`,
+    );
+  }
+  assertEquals(selects.get("users"), ["id", "role"]);
 });
