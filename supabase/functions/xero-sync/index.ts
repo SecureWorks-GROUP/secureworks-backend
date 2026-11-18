@@ -605,7 +605,7 @@ async function sweepTradeBillPdfs(sb: any, accessToken: string, tenantId: string
         if (!inv) { out.skipped++; continue }
         if (!shouldBackfillTradeBillPdf(inv, tradeInv)) {
           // Already has one (or void): refresh the cached flag so it drops out of the sweep.
-          // status, raw_json and line_items come from this one read, or nothing is written.
+          // status, raw_json, line_items, sub_total and total come from this one read, or nothing is written.
           const snapshot = tradeBillSweepSnapshotPatch(inv, new Date().toISOString())
           if (snapshot) await sb.from('xero_invoices').update(snapshot).eq('xero_invoice_id', inv.InvoiceID)
           out.skipped++
@@ -614,6 +614,9 @@ async function sweepTradeBillPdfs(sb: any, accessToken: string, tenantId: string
         const attached = await attachTradeBillAuditPdf(inv, tradeInv, accessToken, tenantId)
         if (attached === true) {
           out.attached++
+          // Same one read: a draft the office changed in Xero stores its new amount with
+          // its new status. With no snapshot the row stays a candidate and the next run's
+          // read (HasAttachments true) refreshes it; nothing is attached twice.
           const snapshot = tradeBillSweepSnapshotPatch(inv, new Date().toISOString(), { ...inv, HasAttachments: true })
           if (snapshot) await sb.from('xero_invoices').update(snapshot).eq('xero_invoice_id', inv.InvoiceID)
         } else {
