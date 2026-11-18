@@ -268,3 +268,13 @@ Deno.test("credit notes: a credit item is decided like a bill, negative parts se
   const err = await refused(reconcileDecide(fake(wrong) as any, { ...place, action: "split", parts }, staff));
   assertEquals([err.status, err.message], [409, "The parts do not add up to the line."]);
 });
+
+Deno.test("switch in the database: a refusal raised by reconcile_decide itself (switch turned off after the door read it) is the door's 409 words", async () => {
+  const w = world({ rpcError: { code: "55000", message: "reconcile_decide_off" } });
+  const err = await refused(reconcileDecide(fake(w) as any, place, staff));
+  assertEquals(
+    [err.status, err.code, err.message],
+    [409, "reconcile_decide_off", RECONCILE_DECIDE_WORDS.reconcile_decide_off[1]],
+  );
+  assertEquals(w.rpcs.length, 1, "one call, nothing after the refusal");
+});

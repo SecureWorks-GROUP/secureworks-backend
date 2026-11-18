@@ -1,5 +1,7 @@
 \set ON_ERROR_STOP on
 BEGIN;
+-- 20261119999920 patches this body; take its switch check out before re-applying.
+\ir ../../../rollbacks/20261119999920_reconcile_decide_switch_in_database_down.sql
 \ir ../../../migrations/20261118195300_reconcile_undo.sql
 CREATE TEMP TABLE undo_checks(label text);
 CREATE FUNCTION pg_temp.check_it(ok boolean,label text) RETURNS void LANGUAGE plpgsql AS $$
