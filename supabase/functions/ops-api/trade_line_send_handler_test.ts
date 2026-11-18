@@ -64,6 +64,14 @@ type World = {
   // FU49-9b: jobs outside the cap's scope (default: every job in scope), or a failed scope read.
   outOfScope?: string[];
   scopeFails?: boolean;
+  // FU49 item 3: the job amount guard refuses the move to approved.
+  capRefusal?: boolean;
+  // The pay rule does not apply, so the door is not in hold mode.
+  payRuleOff?: boolean;
+  // The switch read fails.
+  flagsFail?: boolean;
+  // Xero's contact lookup fails.
+  contactFails?: boolean;
 };
 
 type Captured = {
@@ -75,6 +83,8 @@ type Captured = {
   guardHits: number;
   xero: Array<{ method: string; path: string; body: string | null }>;
   scopeReads: number;
+  // Xero calls and invoice status moves, in order.
+  events: string[];
 };
 
 function filterValues(url: URL, column: string): string[] | null {
@@ -95,6 +105,7 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
   let guardLeft = world.guardFailures ?? 0;
   let guardHits = 0;
   let scopeReads = 0;
+  const events: string[] = [];
   let nextInvoice = 0;
   let nextLine = 0;
   const originalFetch = globalThis.fetch;
@@ -112,7 +123,11 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
     // Xero is answered here so a test sees exactly what Xero would receive.
     if (url.hostname.endsWith("xero.com")) {
       xero.push({ method, path: url.pathname + url.search, body: typeof init?.body === "string" ? init.body : null });
+      events.push(`xero ${method}`);
       if (url.pathname.includes("/Attachments")) return Promise.resolve(Response.json({ Attachments: [{ AttachmentID: "zz-att" }] }));
+      if (url.pathname.includes("Contacts") && world.contactFails) {
+        return Promise.resolve(Response.json({ Message: "ZZTEST down" }, { status: 500 }));
+      }
       if (url.pathname.includes("Contacts")) return Promise.resolve(Response.json({ Contacts: [{ ContactID: "zz-contact", Name: "Fixture Trade" }] }));
       if (method === "PUT" || method === "POST") {
         const sent = typeof init?.body === "string" ? JSON.parse(init.body) : {};
@@ -230,10 +245,11 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
       return reply([{ id: "zz-rate", hourly_rate: 50, effective_from: "2026-01-01", effective_to: null }]);
     }
     if (table === "feature_flags") {
+      if (world.flagsFail && url.searchParams.get("flag_name") === "eq.trade_line_hold_v1") return fail();
       const names = filterValues(url, "flag_name") || [];
       return reply(names.map((name) => ({
         flag_name: name,
-        enabled: name === "trade_pay_inclusive_super_v1" || (name === "trade_line_hold_v1" && world.lineHold === true) ||
+        enabled: (name === "trade_pay_inclusive_super_v1" && !world.payRuleOff) || (name === "trade_line_hold_v1" && world.lineHold === true) ||
           (name === "trade_week_autofill_v1" && world.autofill === true),
       })));
     }
@@ -275,6 +291,16 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
       }
       if (method === "PATCH" || method === "DELETE") {
         const ids = filterValues(url, "id");
+        const patch = method === "PATCH" && typeof init?.body === "string" ? JSON.parse(init.body) : {};
+        if (patch.status) events.push(`status ${patch.status} from ${url.searchParams.get("status") ?? "any"}`);
+        if (
+          world.capRefusal && patch.status === "approved" && url.searchParams.get("status") === "eq.draft"
+        ) {
+          return Promise.resolve(Response.json(
+            { code: "23514", message: "job_amount_guard", details: world.agreedJob ?? BACKED_JOB },
+            { status: 400 },
+          ));
+        }
         return reply((ids || []).map((id) => ({ id })));
       }
       return reply([]);
@@ -300,7 +326,7 @@ async function send(extra_items: any[], world: World = {}): Promise<Captured> {
     } catch {
       body = { raw: text };
     }
-    return { status: res.status, body, invoices, lines, raises, guardHits, xero, scopeReads };
+    return { status: res.status, body, invoices, lines, raises, guardHits, xero, scopeReads, events };
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -714,4 +740,64 @@ handlerTest("cap start date, switch off: the scope is never read and an over-amo
   assertEquals(paid.scopeReads, 0);
   assertEquals(paid.status, 200, JSON.stringify(paid.body));
   assert(!("send" in paid.body) && !("held_lines" in paid.body), JSON.stringify(paid.body));
+});
+
+// ── Follow-up 49 item 3: the cap is checked before the Xero bill ───────────
+
+const CAP_WORDS =
+  "The work order does not have room for this invoice. Ask the office to check the work order, then send it again. Nothing was sent to Xero.";
+
+const firstXero = (out: Captured) => out.events.findIndex((e) => e.startsWith("xero "));
+const capMove = (out: Captured) => out.events.indexOf("status approved from eq.draft");
+
+for (const payRuleOff of [false, true]) {
+  const mode = payRuleOff ? "switch on, not in hold mode" : "hold mode";
+  handlerTest(`FU49 work-order door, ${mode}: a cap refusal makes no Xero call and answers in plain words`, async () => {
+    const out = await send([], { lineHold: true, payRuleOff, crewWo: CREW_WO(), agreed: 4000, agreedJob: MISC_JOB, capRefusal: true });
+    assertEquals(out.status, 409, JSON.stringify(out.body));
+    assertEquals(out.body, { ok: false, code: "work_order_amount_refused", error: CAP_WORDS });
+    assertEquals(out.xero, [], "no Xero call at all");
+    // The refused move left the draft, and only a note was written to it.
+    assertEquals(out.events.filter((e) => e.startsWith("status ")), ["status approved from eq.draft", "status draft from any"]);
+  });
+
+  handlerTest(`FU49 work-order door, ${mode}: the invoice reaches a counted status before any Xero call`, async () => {
+    const out = await send([], { lineHold: true, payRuleOff, crewWo: CREW_WO(), agreed: 4000, agreedJob: MISC_JOB });
+    assertEquals(out.status, 200, JSON.stringify(out.body));
+    assert(capMove(out) >= 0, out.events.join(" | "));
+    assert(capMove(out) < firstXero(out), out.events.join(" | "));
+    assert(out.xero.some((x) => x.method === "PUT" && x.path.endsWith("/Invoices")), "the bill still reaches Xero");
+  });
+}
+
+handlerTest("FU49 work-order door, switch off: no move before Xero, as before", async () => {
+  const out = await send([], { lineHold: false, crewWo: CREW_WO(), capRefusal: true });
+  assertEquals(out.status, 200, JSON.stringify(out.body));
+  assertEquals(capMove(out), -1, out.events.join(" | "));
+  assertEquals(out.events.find((e) => e.startsWith("status ")), "status approved from any", "the checkpoint is the first move");
+  assert(out.events.indexOf("status approved from any") > firstXero(out));
+});
+
+handlerTest("FU49 work-order door: a switch that cannot be read still checks the cap first", async () => {
+  const out = await send([], { flagsFail: true, crewWo: CREW_WO() });
+  assertEquals(out.status, 200, JSON.stringify(out.body));
+  assert(capMove(out) >= 0 && capMove(out) < firstXero(out), out.events.join(" | "));
+});
+
+handlerTest("FU49 work-order door: a contact failure after the check leaves an approved invoice with no bill", async () => {
+  const out = await send([], { lineHold: true, crewWo: CREW_WO(), agreed: 4000, agreedJob: MISC_JOB, contactFails: true });
+  assertEquals(out.xero.some((x) => x.method === "PUT" && x.path.endsWith("/Invoices")), false, "no bill");
+  // Answered as a Xero miss: saved, and the office pushes it.
+  assertEquals(out.status, 200);
+  assertEquals([out.body.ok, out.body.success, out.body.code], [false, true, "XERO_PUSH_FAILED"]);
+  // The retryable mark keeps it approved with no bill.
+  assertEquals(out.events.filter((e) => e.startsWith("status ")), ["status approved from eq.draft", "status approved from any"]);
+});
+
+handlerTest("FU49 work-order door, switch off: a contact failure still stops the send as before", async () => {
+  const out = await send([], { lineHold: false, crewWo: CREW_WO(), contactFails: true });
+  assertEquals(out.events.filter((e) => e.startsWith("status ")), []);
+  assertEquals(out.status, 500);
+  // No raw Xero text, URL or name reaches the trade.
+  assertEquals(out.body.code, "trade_invoice_error");
 });
