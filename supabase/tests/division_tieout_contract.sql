@@ -9,3 +9,10 @@ BEGIN;
 \ir ../rollbacks/20261118075750_xero_division_month_accounts_down.sql
 \ir migration-contracts/20261118075750_xero_division_month_accounts/rollback-contract.sql
 ROLLBACK;
+
+\ir migration-contracts/20261118111052_division_tieout_tables/contract.sql
+BEGIN;
+\ir ../migrations/20261118111052_division_tieout_tables.sql
+\ir ../rollbacks/20261118111052_division_tieout_tables_down.sql
+\ir migration-contracts/20261118111052_division_tieout_tables/rollback-contract.sql
+ROLLBACK;
