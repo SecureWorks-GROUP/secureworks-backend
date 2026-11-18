@@ -250,7 +250,7 @@ Deno.test("wiring: every door that saves or changes a trade line checks the cap 
   // submit_work_order_invoice: before the claim that saves the invoice.
   const door = src.indexOf("case 'submit_work_order_invoice': {");
   const doorCap = src.indexOf(CALL + "workOrderLines)", door);
-  const claim = src.indexOf("await _claimWorkOrderInvoiceBeforeXero(", door);
+  const claim = src.indexOf("_claimWorkOrderInvoiceBeforeXero(", door);
   assert(
     door > 0 && doorCap > door && doorCap < claim,
     "the crew work order door checks before it saves",
@@ -743,4 +743,25 @@ Deno.test("ZZTEST changed work order: cap follows the change to the cent and rea
   assertEquals((await check(224.01))?.jobs[0].most_this_invoice_ex, 224);
   await assertRejects(() => readWorkOrderCapFacts(fakeClient({ fail: "work_order_amount_changes" }),
     [{ jobId: JOB, ref: "ZZTEST-P2", agreedEx: 1120, workOrderId: WO }]), WorkOrderTotalCapReadError);
+});
+
+Deno.test("P1-05.8: the cap reader ignores a holding invoice's lines; standard and follow_on count", async () => {
+  const held = line("h1", "pending_ops_review", "labour", 700);
+  (held.trade_invoices as any).invoice_kind = "held";
+  const standard = line("s1", "pending_acknowledgment", "labour", 300);
+  (standard.trade_invoices as any).invoice_kind = "standard";
+  const followOn = line("f1", "approved", "labour", 50);
+  (followOn.trade_invoices as any).invoice_kind = "follow_on";
+  const lines = [held, standard, followOn];
+  const lanes = lines.map((l) => ({ line_id: l.id, cost_lane: "labour" }));
+  const facts = await readWorkOrderCapFacts(
+    fakeClient({ lines, lanes, variations: [] }),
+    [{ jobId: JOB, ref: "SWF-1", agreedEx: 2000, workOrderId: WO }],
+  );
+  assertEquals(facts.billedEx.get(JOB), 350);
+  const billed = await readBilledOnJobs(
+    fakeClient({ lines, lanes, variations: [] }),
+    [JOB],
+  );
+  assertEquals(billed.get(JOB), 350);
 });

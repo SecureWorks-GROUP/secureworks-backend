@@ -7,8 +7,17 @@ export interface ParsedSupplierCredit {
   credit_number: string;
   credit_date: string | null;
   amount_ex: number | null;
+  amount_gst: number | null;
   amount_inc: number | null;
   names_bill_number: string | null;
+  needs_review: boolean;
+}
+
+export interface ParsedCreditAmounts {
+  exGst: number | null;
+  gst: number | null;
+  incGst: number | null;
+  needsReview: boolean;
 }
 
 const CREDIT_HEADING_RE =
@@ -119,55 +128,72 @@ const NAMED_BILL_PATTERNS: ReadonlyArray<{ re: RegExp }> = [
 const MONEY_CAPTURE =
   "(?:\\(\\s*\\$?\\s*([\\d,]+\\.\\d{2})\\s*\\)|-?\\s*\\$\\s*-?\\s*([\\d,]+(?:\\.\\d{2})?)|-?\\s*([\\d,]+\\.\\d{2}))";
 
-const EX_GST_PATTERNS: ReadonlyArray<RegExp> = [
-  new RegExp(
-    `\\bSub[\\s\\-]?total(?!\\s*\\(?inc\\b)(?:\\s*(?:\\(ex[^)]*\\)|ex(?:cl(?:uding)?\\.?)?\\s*gst))?\\s*:?\\s*(?:AUD\\s*)?${MONEY_CAPTURE}`,
-    "i",
-  ),
-  new RegExp(
-    `(?<![A-Za-z\\-])(?:Credit\\s+Total|Total(?:\\s+Credit)?|Amount)\\s*(?:\\(ex[^)]*\\)|ex(?:cl(?:uding)?\\.?)?\\s*gst)\\s*:?\\s*(?:AUD\\s*)?${MONEY_CAPTURE}`,
-    "i",
-  ),
-];
+const EX_QUAL = "(?:\\(ex[^)]*\\)|ex(?:cl(?:uding)?\\.?)?\\s*gst)";
+const INC_QUAL = "(?:\\(inc[^)]*\\)|inc(?:l(?:uding)?\\.?)?\\s*gst)";
+const NOT_EX_OR_GST_AHEAD = "(?!\\s*(?:\\(?ex(?:cl|\\b)|gst\\b|tax\\b))";
+const GST_RATE_QUAL =
+  "(?:\\s*(?:\\(\\s*10%\\s*\\)|@?\\s*10%))?(?!\\s*[\\-\\s]?free\\b)";
 
-const INC_GST_PATTERNS: ReadonlyArray<RegExp> = [
-  new RegExp(
-    `(?<![A-Za-z\\-])(?:Credit\\s+Total|Total(?:\\s+(?:Credit|Due|Amount))?|Amount(?:\\s+Due)?)\\s*(?:\\(inc[^)]*\\)|inc(?:l(?:uding)?\\.?)?\\s*gst)\\s*:?\\s*(?:AUD\\s*)?${MONEY_CAPTURE}`,
-    "i",
-  ),
-  new RegExp(
-    `(?<![A-Za-z\\-])(?:Credit\\s+Total|Total(?:\\s+(?:Due|Amount|Credit))?|Amount\\s+Due)(?!\\s*(?:\\(?ex(?:cl|\\b)|gst\\b))\\s*:?\\s*(?:AUD\\s*)?${MONEY_CAPTURE}`,
-    "i",
-  ),
-];
+const CREDIT_TOTAL_HEAD =
+  "(?:Credit(?:\\s+(?:Note|Memo))?\\s+Total|Adjustment(?:\\s+Note)?\\s+Total|Total\\s+Credit(?:ed|\\s+Note|\\s+Amount)?|(?:Total\\s+)?Amount\\s+Credited|Credited\\s+Amount|Credit\\s+Amount|Net\\s+Credit)";
 
-const TOTAL_GST_RE = new RegExp(
-  `\\bTotal\\s+GST(?:\\s*(?:\\(\\s*10%\\s*\\)|@?\\s*10%))?\\s*:?\\s*(?:AUD\\s*)?${MONEY_CAPTURE}`,
-  "i",
-);
-
-const STANDALONE_GST_RE = new RegExp(
-  `\\bGST\\b(?:\\s*(?:\\(\\s*10%\\s*\\)|@?\\s*10%))?\\s*:?\\s*(?:AUD\\s*)?${MONEY_CAPTURE}`,
+const CREDIT_INC_TOTAL_RE = new RegExp(
+  `(?<![A-Za-z\\-])${CREDIT_TOTAL_HEAD}(?:\\s*${INC_QUAL}|${NOT_EX_OR_GST_AHEAD})\\s*:?\\s*(?:AUD\\s*)?${MONEY_CAPTURE}`,
   "gi",
 );
 
-const GST_QUALIFIER_BEFORE_RE =
-  /(?:\b(?:inc|incl|including|ex|excl|excluding|plus|less|no|without|free)\.?|\+)\s*\(?\s*$/i;
+const GENERAL_INC_TOTAL_RE = new RegExp(
+  `(?<![A-Za-z\\-])(?:(?:Total(?:\\s+(?:Due|Amount|Payable))?|Amount\\s+(?:Due|Payable))(?:\\s*${INC_QUAL}|${NOT_EX_OR_GST_AHEAD})|Amount\\s*${INC_QUAL})\\s*:?\\s*(?:AUD\\s*)?${MONEY_CAPTURE}`,
+  "gi",
+);
 
-function roundCents(n: number): number {
-  return Math.round(n * 100) / 100;
+const CREDIT_EX_TOTAL_RE = new RegExp(
+  `(?<![A-Za-z\\-])(?:(?:Credit(?:\\s+(?:Note|Memo))?|Adjustment(?:\\s+Note)?)\\s+Sub[\\s\\-]?total(?!\\s*\\(?inc\\b)(?:\\s*${EX_QUAL})?|${CREDIT_TOTAL_HEAD}\\s*${EX_QUAL})\\s*:?\\s*(?:AUD\\s*)?${MONEY_CAPTURE}`,
+  "gi",
+);
+
+const GENERAL_EX_TOTAL_RE = new RegExp(
+  `(?<![A-Za-z\\-])(?:Sub[\\s\\-]?total(?!\\s*\\(?inc\\b)(?:\\s*${EX_QUAL})?|(?:Total(?:\\s+Amount)?|Amount)\\s*${EX_QUAL})\\s*:?\\s*(?:AUD\\s*)?${MONEY_CAPTURE}`,
+  "gi",
+);
+
+const CREDIT_GST_TOTAL_RE = new RegExp(
+  `(?<![A-Za-z\\-])(?:Credit(?:\\s+(?:Note|Memo))?\\s+(?:Total\\s+)?GST|Adjustment(?:\\s+Note)?\\s+(?:Total\\s+)?GST|Total\\s+Credit\\s+GST|Total\\s+GST\\s+Credited|GST\\s+Credited)${GST_RATE_QUAL}\\s*:?\\s*(?:AUD\\s*)?${MONEY_CAPTURE}`,
+  "gi",
+);
+
+const GENERAL_GST_TOTAL_RE = new RegExp(
+  `(?<![A-Za-z\\-])(?:Total\\s+GST|GST\\s+Total)${GST_RATE_QUAL}\\s*:?\\s*(?:AUD\\s*)?${MONEY_CAPTURE}`,
+  "gi",
+);
+
+const NON_TOTAL_PREFIX_RE =
+  /\b(?:sub|line|item|unit|net|gst|tax|discount|credit(?:ed)?|adjustment)[\s\-]*$/i;
+const CREDIT_DISQUALIFYING_PREFIX_RE = /\b(?:original|prior|previous)\s+$/i;
+const INVOICE_TOTAL_PREFIX_RE =
+  /\b(?:original(?:\s+tax)?(?:\s+invoice)?|tax\s+invoice|invoice|bill|purchase\s+order)\s+$/i;
+const ORIGINAL_TOTAL_PREFIX_RE =
+  /\b(?:original(?:\s+tax)?(?:\s+invoice)?)\s+$/i;
+
+interface MoneyMatch {
+  cents: number;
+  index: number;
+  end: number;
 }
 
-function parseNonNegativeMoney(s: string | null | undefined): number | null {
+function toCents(n: number): number {
+  return Math.round(n * 100);
+}
+
+function fromCents(cents: number): number {
+  return cents / 100;
+}
+
+function parseNonNegativeCents(s: string | null | undefined): number | null {
   if (!s) return null;
   const n = Number(s.replace(/[^0-9.]/g, ""));
   if (!Number.isFinite(n) || n < 0) return null;
-  return roundCents(n);
-}
-
-function parsePositiveMoney(s: string | null | undefined): number | null {
-  const n = parseNonNegativeMoney(s);
-  return n !== null && n > 0 ? n : null;
+  return toCents(n);
 }
 
 function moneyGroup(m: RegExpMatchArray | null): string | null {
@@ -175,63 +201,274 @@ function moneyGroup(m: RegExpMatchArray | null): string | null {
   return m[1] ?? m[2] ?? m[3] ?? null;
 }
 
-function parseStandaloneGst(text: string): number | null {
-  const totalGstMatch = TOTAL_GST_RE.exec(text);
-  if (totalGstMatch) {
-    return parseNonNegativeMoney(moneyGroup(totalGstMatch));
-  }
-  const re = new RegExp(STANDALONE_GST_RE.source, "gi");
+function linePrefixBefore(text: string, index: number): string {
+  const nl = text.lastIndexOf("\n", index - 1);
+  const cr = text.lastIndexOf("\r", index - 1);
+  const start = Math.max(nl, cr) + 1;
+  return text.slice(start, index);
+}
+
+function collectMoneyMatches(
+  text: string,
+  re: RegExp,
+  filterPrefix?: (beforeOnLine: string) => boolean,
+): MoneyMatch[] {
+  const globalRe = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+  const out: MoneyMatch[] = [];
   let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const before = text.slice(Math.max(0, m.index - 24), m.index);
-    if (GST_QUALIFIER_BEFORE_RE.test(before)) continue;
-    const val = parseNonNegativeMoney(moneyGroup(m));
-    if (val !== null) return val;
+  while ((m = globalRe.exec(text)) !== null) {
+    const before = linePrefixBefore(text, m.index);
+    if (filterPrefix && !filterPrefix(before)) continue;
+    const cents = parseNonNegativeCents(moneyGroup(m));
+    if (cents !== null) {
+      out.push({ cents, index: m.index, end: m.index + m[0].length });
+    }
   }
-  return null;
+  return out;
+}
+
+function allSameCents(matches: ReadonlyArray<MoneyMatch>): boolean {
+  if (matches.length <= 1) return true;
+  const first = matches[0].cents;
+  return matches.every((m) => m.cents === first);
+}
+
+function filterToCreditSection(
+  matches: ReadonlyArray<MoneyMatch>,
+  sectionStart: number,
+  incMatch: MoneyMatch | null,
+  firstLaterRejected: MoneyMatch | null,
+): MoneyMatch[] {
+  return matches.filter((m) => {
+    if (m.index < sectionStart) return false;
+    if (incMatch && firstLaterRejected && m.index >= incMatch.end) {
+      const distToCredit = m.index - incMatch.end;
+      const distToRejected = firstLaterRejected.index - m.end;
+      if (distToCredit >= distToRejected) return false;
+    }
+    return true;
+  });
+}
+
+function parseAmountsInternal(
+  text: string,
+  opts: { isCredit: boolean },
+): ParsedCreditAmounts {
+  const empty: ParsedCreditAmounts = {
+    exGst: null,
+    gst: null,
+    incGst: null,
+    needsReview: false,
+  };
+  if (!text) return empty;
+  const review: ParsedCreditAmounts = {
+    exGst: null,
+    gst: null,
+    incGst: null,
+    needsReview: true,
+  };
+
+  // 1. Resolve inc-GST total: credit/amount-credited labelled first (refusing
+  //    if two candidates differ), else the last general total in document order.
+  const creditIncMatches = opts.isCredit
+    ? collectMoneyMatches(
+      text,
+      CREDIT_INC_TOTAL_RE,
+      (before) => !CREDIT_DISQUALIFYING_PREFIX_RE.test(before),
+    )
+    : [];
+  if (!allSameCents(creditIncMatches)) return review;
+
+  const invoicePrefixedIncSpans: MoneyMatch[] = [];
+  const generalIncMatches = collectMoneyMatches(
+    text,
+    GENERAL_INC_TOTAL_RE,
+    (before) => {
+      if (NON_TOTAL_PREFIX_RE.test(before)) return false;
+      if (opts.isCredit && INVOICE_TOTAL_PREFIX_RE.test(before)) {
+        return false;
+      }
+      if (!opts.isCredit && ORIGINAL_TOTAL_PREFIX_RE.test(before)) {
+        return false;
+      }
+      return true;
+    },
+  );
+  if (opts.isCredit) {
+    const rawGeneral = collectMoneyMatches(
+      text,
+      GENERAL_INC_TOTAL_RE,
+      (before) =>
+        !NON_TOTAL_PREFIX_RE.test(before) && INVOICE_TOTAL_PREFIX_RE.test(before),
+    );
+    invoicePrefixedIncSpans.push(...rawGeneral);
+  }
+
+  const chosenIncMatch: MoneyMatch | null = creditIncMatches.length > 0
+    ? creditIncMatches[creditIncMatches.length - 1]
+    : generalIncMatches.length > 0
+    ? generalIncMatches[generalIncMatches.length - 1]
+    : null;
+
+  const rejectedIncSpans: MoneyMatch[] = chosenIncMatch
+    ? [
+      ...invoicePrefixedIncSpans,
+      ...generalIncMatches.filter((m) => m.cents !== chosenIncMatch.cents),
+    ].sort((a, b) => a.index - b.index)
+    : invoicePrefixedIncSpans.sort((a, b) => a.index - b.index);
+
+  let sectionStart = 0;
+  let firstLaterRejected: MoneyMatch | null = null;
+  if (chosenIncMatch) {
+    for (const r of rejectedIncSpans) {
+      if (r.end <= chosenIncMatch.index && r.end > sectionStart) {
+        sectionStart = r.end;
+      } else if (r.index >= chosenIncMatch.end && !firstLaterRejected) {
+        firstLaterRejected = r;
+      }
+    }
+  } else if (rejectedIncSpans.length > 0) {
+    sectionStart = rejectedIncSpans[rejectedIncSpans.length - 1].end;
+  }
+
+  // 2. Resolve ex-GST total (credit-labelled first, refusing if two differ;
+  //    else last in the credit section).
+  const creditExMatches = opts.isCredit
+    ? collectMoneyMatches(
+      text,
+      CREDIT_EX_TOTAL_RE,
+      (before) => !CREDIT_DISQUALIFYING_PREFIX_RE.test(before),
+    )
+    : [];
+  if (!allSameCents(creditExMatches)) return review;
+
+  const generalExMatches = filterToCreditSection(
+    collectMoneyMatches(
+      text,
+      GENERAL_EX_TOTAL_RE,
+      (before) => {
+        if (/\b(?:line|item|unit|credit(?:ed)?|adjustment)[\s\-]*$/i.test(before)) {
+          return false;
+        }
+        if (opts.isCredit && INVOICE_TOTAL_PREFIX_RE.test(before)) return false;
+        if (!opts.isCredit && ORIGINAL_TOTAL_PREFIX_RE.test(before)) return false;
+        return true;
+      },
+    ),
+    sectionStart,
+    chosenIncMatch,
+    firstLaterRejected,
+  );
+
+  const chosenExMatch: MoneyMatch | null = creditExMatches.length > 0
+    ? creditExMatches[creditExMatches.length - 1]
+    : generalExMatches.length > 0
+    ? generalExMatches[generalExMatches.length - 1]
+    : null;
+
+  // 3. Resolve document-level GST total only (never bare/line GST).
+  const creditGstMatches = opts.isCredit
+    ? collectMoneyMatches(
+      text,
+      CREDIT_GST_TOTAL_RE,
+      (before) => !CREDIT_DISQUALIFYING_PREFIX_RE.test(before),
+    )
+    : [];
+  if (!allSameCents(creditGstMatches)) return review;
+
+  const generalGstMatches = filterToCreditSection(
+    collectMoneyMatches(
+      text,
+      GENERAL_GST_TOTAL_RE,
+      (before) => {
+        if (NON_TOTAL_PREFIX_RE.test(before)) return false;
+        if (opts.isCredit && INVOICE_TOTAL_PREFIX_RE.test(before)) return false;
+        if (!opts.isCredit && ORIGINAL_TOTAL_PREFIX_RE.test(before)) return false;
+        return true;
+      },
+    ),
+    sectionStart,
+    chosenIncMatch,
+    firstLaterRejected,
+  );
+  if (chosenIncMatch && !allSameCents(generalGstMatches) && creditGstMatches.length === 0) {
+    return review;
+  }
+
+  const chosenGstMatch: MoneyMatch | null = creditGstMatches.length > 0
+    ? creditGstMatches[creditGstMatches.length - 1]
+    : generalGstMatches.length > 0
+    ? generalGstMatches[generalGstMatches.length - 1]
+    : null;
+
+  let exCents: number | null = chosenExMatch ? chosenExMatch.cents : null;
+  const gstCents: number | null = chosenGstMatch ? chosenGstMatch.cents : null;
+  let incCents: number | null = chosenIncMatch ? chosenIncMatch.cents : null;
+
+  // 4. Cross-check ex + GST against inc (tolerance: 1 cent), or derive a
+  //    missing figure only from a document-level GST total.
+  if (exCents !== null && incCents !== null && gstCents !== null) {
+    if (Math.abs(exCents + gstCents - incCents) > 1) {
+      return review;
+    }
+    if ((incCents > 0 && exCents <= 0) || (exCents > 0 && incCents <= 0)) {
+      return review;
+    }
+  } else if (exCents !== null && incCents !== null) {
+    if (exCents - incCents > 1) {
+      return review;
+    }
+    if ((incCents > 0 && exCents <= 0) || (exCents > 0 && incCents <= 0)) {
+      return review;
+    }
+  } else if (exCents === null && incCents !== null && gstCents !== null) {
+    if (incCents === 0 && gstCents === 0) {
+      incCents = null;
+    } else {
+      const derivedEx = incCents - gstCents;
+      if (derivedEx <= 0) {
+        return review;
+      }
+      exCents = derivedEx;
+    }
+  } else if (incCents === null && exCents !== null && gstCents !== null) {
+    if (exCents === 0 && gstCents === 0) {
+      exCents = null;
+    } else if (exCents <= 0 && gstCents > 0) {
+      return review;
+    } else {
+      incCents = exCents + gstCents;
+    }
+  }
+
+  const finalEx = exCents !== null && exCents > 0 ? fromCents(exCents) : null;
+  const finalInc = incCents !== null && incCents > 0 ? fromCents(incCents) : null;
+  const finalGst = gstCents !== null && (finalEx !== null || finalInc !== null)
+    ? fromCents(gstCents)
+    : null;
+
+  return {
+    exGst: finalEx,
+    gst: finalGst,
+    incGst: finalInc,
+    needsReview: false,
+  };
+}
+
+export function parseCreditAmounts(text: string): ParsedCreditAmounts {
+  return parseAmountsInternal(text, { isCredit: true });
 }
 
 // Amount extraction: positive numbers only; a missing or zero total is null.
-// When only one of ex-GST or inc-GST is explicitly labelled and a standalone
-// GST amount is also present, derives the missing figure to the cent.
+// Derives a missing ex/inc figure only when a document-level GST total is
+// present, and withholds amounts when ex + GST mismatches inc beyond one cent.
 export function parseAmounts(
   text: string,
 ): { exGst: number | null; incGst: number | null } {
   if (!text) return { exGst: null, incGst: null };
-
-  let exGst: number | null = null;
-  for (const re of EX_GST_PATTERNS) {
-    const val = parsePositiveMoney(moneyGroup(text.match(re)));
-    if (val !== null) {
-      exGst = val;
-      break;
-    }
-  }
-
-  let incGst: number | null = null;
-  for (const re of INC_GST_PATTERNS) {
-    const val = parsePositiveMoney(moneyGroup(text.match(re)));
-    if (val !== null) {
-      incGst = val;
-      break;
-    }
-  }
-
-  if (exGst === null && incGst !== null) {
-    const gst = parseStandaloneGst(text);
-    if (gst !== null) {
-      const derived = roundCents(incGst - gst);
-      exGst = derived > 0 ? derived : null;
-    }
-  } else if (incGst === null && exGst !== null) {
-    const gst = parseStandaloneGst(text);
-    if (gst !== null) {
-      const derived = roundCents(exGst + gst);
-      incGst = derived > 0 ? derived : null;
-    }
-  }
-
-  return { exGst, incGst };
+  const isCredit = CREDIT_HEADING_RE.test(text.slice(0, 1500));
+  const res = parseAmountsInternal(text, { isCredit });
+  return { exGst: res.exGst, incGst: res.incGst };
 }
 
 const MONTHS: Record<string, number> = {
@@ -325,13 +562,15 @@ export function parseSupplierCredit(text: string): ParsedSupplierCredit | null {
 
   const namesBillNumber = firstMatchingToken(text, NAMED_BILL_PATTERNS);
   const creditDate = parseCreditDate(text);
-  const amounts = parseAmounts(text);
+  const amounts = parseCreditAmounts(text);
 
   return {
     credit_number: creditNumber,
     credit_date: creditDate,
     amount_ex: amounts.exGst,
+    amount_gst: amounts.gst,
     amount_inc: amounts.incGst,
     names_bill_number: namesBillNumber,
+    needs_review: amounts.needsReview,
   };
 }

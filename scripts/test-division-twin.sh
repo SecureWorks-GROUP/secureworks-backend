@@ -51,6 +51,26 @@ jq -r '"\(.jobs) job examples, \(.stock) stock examples, \(.mismatches | length)
 [[ "${results##*$'\n'}" == t ]] || { echo 'Rollback left a division function installed' >&2; exit 1; }
 jq -e '.mismatches | length == 0' <<<"$report" >/dev/null
 
+# Run the registered successor contract against the same JSON as the switched-on mapper.
+# The standalone proof also works on an empty disposable database.
+(
+  cd "$root"
+  psql -Xqtw "$url" -v ON_ERROR_STOP=1 <<'SQL'
+BEGIN;
+CREATE TABLE IF NOT EXISTS public.jobs (
+  id uuid PRIMARY KEY, org_id uuid NOT NULL, job_number text UNIQUE, type text, status text
+);
+CREATE TABLE IF NOT EXISTS public.feature_flags (flag_name text PRIMARY KEY, enabled boolean, description text);
+\i supabase/migrations/20261117163100_xero_draft_standard.sql
+\i supabase/migrations/20261118080638_job_division_option.sql
+\i supabase/migrations/20261118120115_division_rulings.sql
+\i supabase/migrations/20261118120115_division_rulings.sql
+\i supabase/tests/migration-contracts/20261118120115_division_rulings/examples.sql
+\i supabase/rollbacks/20261118120115_division_rulings_down.sql
+\i supabase/tests/migration-contracts/20261118120115_division_rulings/rollback-contract.sql
+ROLLBACK;
+SQL
+)
 # Both the SQL and the TypeScript mapper must agree with the same examples.
 deno test --no-check --allow-env --allow-read --filter 'division examples:' \
   "$root/supabase/functions/_shared/xero_draft_standard_test.ts"

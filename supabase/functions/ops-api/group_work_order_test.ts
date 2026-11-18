@@ -3620,3 +3620,21 @@ Deno.test("claim crew: an invalid person is refused before any crew write", asyn
   assertEquals(error.status, 409);
   assertEquals(db.rows("group_work_order_participants").length, 2);
 });
+
+Deno.test("P1-13.6 switch off keeps the old hours submit, share read and delete", async () => {
+  const db = new Memory();
+  seedSplit(db, "open");
+  db.rows("feature_flags").push({ flag_name: "group_claim_flow_v1", enabled: false });
+  const client = db.client();
+  const day = { group_id: GROUP, work_date: "2026-10-20", start_time: "08:00", finish_time: "10:00", break_minutes: 0 };
+  const saved = await submitGroupWorkOrderHours(client, trade(USER_A), day);
+  assertEquals("claim" in saved, false);
+  assertEquals(saved, await readGroupWorkOrderMyShare(client, trade(USER_A), day));
+  const row = db.rows("group_work_order_time_entries").find(e => e.group_id === GROUP && e.user_id === USER_A && e.work_date === day.work_date);
+  assertEquals(row?.hours, 2);
+  assertEquals(row && "suggested" in row, false);
+  const after = await deleteGroupWorkOrderHours(client, trade(USER_A), day);
+  assertEquals("claim" in after, false);
+  assertEquals(db.rows("group_work_order_time_entries").some(e => e.group_id === GROUP && e.user_id === USER_A && e.work_date === day.work_date), false);
+  assertEquals(db.rows("group_work_order_approvals"), []);
+});
