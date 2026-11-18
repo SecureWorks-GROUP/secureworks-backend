@@ -799,7 +799,7 @@ Deno.test("loader: a work-order job with an approved job work order says its agr
   const woReads = client.reads.filter((r) => r.table === "work_orders");
   assertEquals(woReads.length, 1);
   const filters = woReads[0].filters;
-  assert(filters.some(([op, col, val]) => op === "eq" && col === "kind" && val === "job"));
+  assertEquals(filters.find(([op, col]) => op === "in" && col === "kind")?.[2], ["job", "additional"]);
   assert(filters.some(([op, col, val]) => op === "eq" && col === "status" && val === "approved"));
   assert(filters.some(([op, col, val]) => op === "eq" && col === "org_id" && val === ORG));
   assertEquals(filters.find(([op, col]) => op === "in" && col === "job_id")?.[2], [FENCE]);
