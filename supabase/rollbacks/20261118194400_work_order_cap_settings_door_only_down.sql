@@ -1,4 +1,4 @@
--- Undo 20261118999909 (placeholder version): the service role may update the cap settings
+-- Undo 20261118194400 (placeholder version): the service role may update the cap settings
 -- again, as 20261118194100 left it.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
