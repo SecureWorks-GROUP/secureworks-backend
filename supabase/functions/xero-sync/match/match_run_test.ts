@@ -43,7 +43,25 @@ type World = {
   queries: Array<{ table: string; op: string }>;
   rpcs: Array<{ fn: string; args: any }>;
   upserts?: Array<{ table: string; rows: any; timed: boolean }>;
+  // A slow request: `abort` answers only when its signal fires (as the client does);
+  // `late` ignores the signal and answers after `ms`.
+  slow?: { target: string; ms: number; mode: "abort" | "late" };
 };
+
+// Answers a request now, or slowly as the world says.
+function answer(w: World, target: string, signal: AbortSignal | null, result: () => any): Promise<any> {
+  if (w.slow?.target !== target) return Promise.resolve(result());
+  const slow = w.slow;
+  return new Promise((done) => {
+    const timer = setTimeout(() => done(result()), slow.ms);
+    if (slow.mode === "abort") {
+      signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        done({ data: null, error: { message: "AbortError: signal is aborted without reason" } });
+      });
+    }
+  });
+}
 
 function fake(w: World) {
   return {
@@ -53,6 +71,7 @@ function fake(w: World) {
       let cols = "";
       let upserted: any = null;
       let timed = false;
+      let signal: AbortSignal | null = null;
       const result = () => {
         w.queries.push({ table, op });
         if (w.fail === table || w.fail === `${table}:${op}`) return { data: null, error: { code: "XX000" } };
@@ -155,7 +174,7 @@ function fake(w: World) {
         select: (c = "") => ((cols = c), chain),
         delete: () => ((op = "delete"), chain),
         upsert: (rows: any) => ((op = "upsert"), (upserted = rows), chain),
-        abortSignal: () => ((timed = true), chain),
+        abortSignal: (s: AbortSignal) => ((timed = true), (signal = s), chain),
         gt: (k: string, v: unknown) => ((filters[`gt:${k}`] = v), chain),
         eq: (k: string, v: unknown) => ((filters[k] = v), chain),
         like: (k: string, v: string) => ((filters[`like:${k}`] = v), chain),
@@ -168,20 +187,28 @@ function fake(w: World) {
         lte: () => chain,
         order: () => chain,
         limit: (n: number) => ((filters.limit = n), chain),
-        maybeSingle: () => Promise.resolve(result()),
-        then: (res: any, rej: any) => Promise.resolve(result()).then(res, rej),
+        // As the client: the signal goes before maybeSingle, whose builder has no abortSignal.
+        maybeSingle: () => ({ then: (res: any, rej: any) => answer(w, table, signal, result).then(res, rej) }),
+        then: (res: any, rej: any) => answer(w, table, signal, result).then(res, rej),
       };
       return chain;
     },
+    // As the client: rpc returns a builder that takes a signal and is awaited.
     rpc(fn: string, args: any) {
       w.rpcs.push({ fn, args });
-      if (fn === "match_apply") {
-        return Promise.resolve(w.applyError ? { data: null, error: w.applyError } : { data: { applied: "shadow" }, error: null });
-      }
-      if (fn === "context_job_evidence_for_bills" && w.fail === fn) {
-        return Promise.resolve({ data: null, error: { code: "XX000" } });
-      }
-      return Promise.resolve({ data: [], error: null });
+      const result = () => {
+        if (fn === "match_apply") {
+          return w.applyError ? { data: null, error: w.applyError } : { data: { applied: "shadow" }, error: null };
+        }
+        if (fn === "context_job_evidence_for_bills" && w.fail === fn) return { data: null, error: { code: "XX000" } };
+        return { data: [], error: null };
+      };
+      let signal: AbortSignal | null = null;
+      const builder: any = {
+        abortSignal: (s: AbortSignal) => ((signal = s), builder),
+        then: (res: any, rej: any) => answer(w, fn, signal, result).then(res, rej),
+      };
+      return builder;
     },
   };
 }
@@ -617,4 +644,89 @@ Deno.test("match_pending door: only a POST with the exact server key; nothing re
     new Request(url, { method: "POST", headers: { authorization: "Bearer server-key" } }), fake(w), "server-key");
   assertEquals([ok.status, ok.body.matched], [200, 1]);
   assertEquals(MATCH_BACKLOG_STATE_KEY, "match_backlog");
+});
+
+Deno.test("one slow bill: its request is cut at the run's time, the bill requeued, nothing written, the next bill not started", async () => {
+  // The orders read answers only when cut short, as a stuck query would.
+  const w = world({ lines: Object.assign({}, billLines("a"), billLines("b")), slow: { target: "v_job_orders", ms: 60_000, mode: "abort" } });
+  const started = Date.now();
+  const report = await runMatchFor(fake(w), ["xero_bill:a", "xero_bill:b"], { ruleVersion: "v1", budgetMs: 150 });
+  const took = Date.now() - started;
+  assert(took < 2_000, `bounded by the budget, took ${took} ms`);
+  assertEquals(report.failed, { over_run_time: 1 });
+  assertEquals(report.run, 1, "the second bill is not started after the time");
+  assertEquals(applies(w).length, 0);
+  assertEquals(requeues(w)[0].rows.map((r: any) => [r.subject_id, r.reason]), [
+    ["xero_bill:a", "over_run_time"],
+    ["xero_bill:b", "over_run_time"],
+  ]);
+});
+
+Deno.test("one slow bill: a read that answers after the time is not followed by the write", async () => {
+  // The evidence read ignores the signal and answers late with no error.
+  const w = world({ lines: billLines(), slow: { target: "context_job_evidence_for_bills", ms: 300, mode: "late" } });
+  const report = await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1", budgetMs: 100 });
+  assertEquals(applies(w).length, 0, "match_apply is never started once the time is up");
+  assertEquals(report.failed, { over_run_time: 1 });
+  assertEquals(requeues(w)[0].rows[0].reason, "over_run_time");
+});
+
+Deno.test("one slow bill: a write cut short is requeued and counted apart, never as applied", async () => {
+  const w = world({ lines: billLines(), slow: { target: "match_apply", ms: 60_000, mode: "abort" } });
+  const report = await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1", budgetMs: 150 });
+  assertEquals(applies(w).length, 1);
+  assertEquals(report.applied, {});
+  assertEquals(report.failed, { apply_over_run_time: 1 });
+  assertEquals(requeues(w)[0].rows[0].reason, "over_run_time");
+});
+
+Deno.test("one slow bill in the sync: the step ends near its budget and the other bills wait in the queue", async () => {
+  const w = world({
+    lines: Object.assign({}, billLines("a"), billLines("b"), billLines("c")),
+    slow: { target: "v_job_orders", ms: 60_000, mode: "abort" },
+  });
+  const started = Date.now();
+  const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:a", "xero_bill:b", "xero_bill:c"], budgetMs: 150 });
+  assert(Date.now() - started < 2_000);
+  assertEquals([out.run, applies(w).length], [1, 0]);
+  assertEquals(requeues(w).length, 1);
+  assertEquals(new Set(requeues(w)[0].rows.map((r: any) => r.reason)), new Set(["over_run_time"]));
+  assertEquals(requeues(w)[0].rows.length, 3);
+});
+
+Deno.test("every request of a bill carries the bill's signal; the clue types read has its own limit", async () => {
+  const w = world({ lines: billLines(), orders: [sealedOrder] });
+  const sb = fake(w);
+  const seen: string[] = [];
+  const wrapped = {
+    from(table: string) {
+      const chain = sb.from(table);
+      const plain = chain.abortSignal;
+      chain.abortSignal = (s: AbortSignal) => (seen.push(table), plain(s));
+      return chain;
+    },
+    rpc(fn: string, args: any) {
+      const b = sb.rpc(fn, args);
+      const plain = b.abortSignal;
+      b.abortSignal = (s: AbortSignal) => (seen.push(fn), plain(s));
+      return b;
+    },
+  };
+  await runMatchFor(wrapped, [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  for (const t of ["match_clue_types", "job_cost_lines", "xero_invoices", "jobs", "v_job_orders", "context_job_evidence_for_bills", "match_clues", "match_apply"]) {
+    assert(seen.includes(t), t);
+  }
+});
+
+Deno.test("two passes over the same bill send the same clues, so a held bill's clues read as unchanged", async () => {
+  const w = world({ lines: billLines(), orders: [sealedOrder] });
+  await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  const [one, two] = applies(w);
+  assertEquals(one.args.p_clues, two.args.p_clues);
+  assert(one.args.p_run_id !== two.args.p_run_id);
+  // All nine keys on every clue, as match_clues_unchanged reads them.
+  for (const c of one.args.p_clues) {
+    assertEquals(Object.keys(c).sort(), ["clue_code", "detail", "division", "job_id", "names_one", "outcome", "root", "seen_value", "seen_where"]);
+  }
 });

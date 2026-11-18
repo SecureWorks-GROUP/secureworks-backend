@@ -26,6 +26,13 @@
 // the kept position stops before it. Every requeue of a run is one batched
 // statement.
 //
+// The budget bounds one slow bill too (director 02:45): each bill's requests
+// share one abort signal set to the time left when the bill starts. A request
+// is never started once it has fired (the match_apply write included), and a
+// request it cuts short counts `over_run_time` and the bill is requeued. A
+// write cut short may still have committed in the database; it is requeued and
+// counted `apply_over_run_time`, never `applied`, and a rerun is safe.
+//
 // A bill with a person's labour on it is never matched here: no clue, no
 // shadow row, no item. It is skipped and counted (`labour_bill`). That is a
 // line of kind installer_bill or employer_super, a line on an installer account
@@ -95,15 +102,27 @@ class ReadFailed extends Error {
   }
 }
 
-async function read<T>(code: string, q: PromiseLike<{ data: T; error: unknown }>): Promise<T> {
+/** A request the bill's signal cut short, or one not started because the signal had fired. */
+export const OVER_TIME = "over_run_time";
+const APPLY_OVER_TIME = "apply_over_run_time";
+
+async function read<T>(code: string, q: PromiseLike<{ data: T; error: unknown }>, signal?: AbortSignal): Promise<T> {
   let res: { data: T; error: unknown };
   try {
     res = await q;
   } catch {
-    throw new ReadFailed(code);
+    throw new ReadFailed(signal?.aborted ? OVER_TIME : code);
   }
-  if (res.error) throw new ReadFailed(code);
+  if (res.error) throw new ReadFailed(signal?.aborted ? OVER_TIME : code);
   return res.data;
+}
+
+/** Attaches the bill's signal to a request, or refuses to start it once the signal has fired. */
+function bound(signal: AbortSignal) {
+  return <B extends { abortSignal: (s: AbortSignal) => B }>(q: B): B => {
+    if (signal.aborted) throw new ReadFailed(OVER_TIME);
+    return q.abortSignal(signal);
+  };
 }
 
 const bump = (m: Record<string, number>, k: string) => (m[k] = (m[k] ?? 0) + 1);
@@ -146,16 +165,18 @@ async function matchOne(
   sb: Sb,
   subjectId: string,
   types: Record<string, ClueType>,
+  signal: AbortSignal,
 ): Promise<{ applied: string } | { skipped: string }> {
+  const on = bound(signal);
   const kind = subjectId.split(":", 1)[0];
   const documentId = subjectId.slice(kind.length + 1);
   if (kind !== "xero_bill" || !documentId) return { skipped: "subject_not_a_bill" };
 
   // job_cost_lines_document_idx
   const lines = await read<Array<Record<string, unknown>>>("read_cost_lines",
-    sb.from("job_cost_lines").select(
+    on(sb.from("job_cost_lines").select(
       "line_key,line_no,kind,description,account_code,xero_tracking_option,amount_ex,state,document_number,document_date,party_id,party_name",
-    ).eq("document_kind", "xero_bill").eq("document_id", documentId).order("line_no", { ascending: true }));
+    ).eq("document_kind", "xero_bill").eq("document_id", documentId).order("line_no", { ascending: true })), signal);
   if (!lines?.length) return { skipped: "no_cost_lines" };
   // A person's labour, alone or beside supplier lines: no read of the bill, no
   // clue, no shadow row, no item.
@@ -168,7 +189,7 @@ async function matchOne(
   const partyId = lines.find((l) => typeof l.party_id === "string" && l.party_id)?.party_id;
   if (partyId) {
     const people = await read<Array<{ id: string }>>("read_trade_user",
-      sb.from("users").select("id").eq("xero_contact_id", partyId).limit(1));
+      on(sb.from("users").select("id").eq("xero_contact_id", partyId).limit(1)), signal);
     if (people?.length) return { skipped: "labour_bill" };
   }
   const counted = lines.filter((l) => l.state != null);
@@ -178,8 +199,8 @@ async function matchOne(
   if (!counted.some((l) => l.state === "needs_person")) return { skipped: "nothing_waiting" };
 
   const bill = await read<Record<string, unknown> | null>("read_bill",
-    sb.from("xero_invoices").select("xero_invoice_id,invoice_number,reference,xero_contact_id,contact_name,invoice_date,sub_total")
-      .eq("xero_invoice_id", documentId).maybeSingle());
+    on(sb.from("xero_invoices").select("xero_invoice_id,invoice_number,reference,xero_contact_id,contact_name,invoice_date,sub_total")
+      .eq("xero_invoice_id", documentId)).maybeSingle(), signal);
   const first = lines[0];
   const money = counted.map((l) => num(l.amount_ex));
   const doc: MatchDocument = {
@@ -207,8 +228,8 @@ async function matchOne(
   let jobs: MatchJob[] = [];
   if (digits.length) {
     const rows = await read<Array<Record<string, unknown>>>("read_jobs",
-      sb.from("jobs").select("id,job_number,status,created_at,site_address,site_suburb,holding:metadata->>do_not_schedule")
-        .or(digits.map((d) => `job_number.ilike.%${d}`).join(",")).limit(50));
+      on(sb.from("jobs").select("id,job_number,status,created_at,site_address,site_suburb,holding:metadata->>do_not_schedule")
+        .or(digits.map((d) => `job_number.ilike.%${d}`).join(",")).limit(50)), signal);
     jobs = (rows ?? []).filter((r) => typeof r.job_number === "string").map((r) => ({
       id: String(r.id),
       job_number: String(r.job_number),
@@ -228,7 +249,7 @@ async function matchOne(
       "order_kind,order_id,order_number,job_id,job_live,party_id,party_name_key,sent_on,cost_ex,from_sealed_scope,matched",
     ).gte("sent_on", dayMinus(doc.document_date, ORDER_WINDOW_DAYS)).lte("sent_on", doc.document_date);
     q = doc.party_id ? q.eq("party_id", doc.party_id) : q.eq("party_name_key", supplierNameKey(doc.party_name));
-    const rows = await read<Array<Record<string, unknown>>>("read_orders", q.limit(200));
+    const rows = await read<Array<Record<string, unknown>>>("read_orders", on(q.limit(200)), signal);
     orders = (rows ?? []).map((r) => ({
       order_kind: r.order_kind as MatchOrder["order_kind"],
       order_id: String(r.order_id),
@@ -255,8 +276,8 @@ async function matchOne(
     const orderJobIds = [...new Set(orders.map((o) => o.job_id).filter((id) => id && !jobs.some((j) => j.id === id)))].slice(0, 50);
     if (orderJobIds.length) {
       const rows = await read<Array<Record<string, unknown>>>("read_order_jobs",
-        sb.from("jobs").select("id,job_number,status,created_at,site_address,site_suburb,holding:metadata->>do_not_schedule")
-          .in("id", orderJobIds));
+        on(sb.from("jobs").select("id,job_number,status,created_at,site_address,site_suburb,holding:metadata->>do_not_schedule")
+          .in("id", orderJobIds)), signal);
       for (const r of rows ?? []) {
         if (typeof r.job_number !== "string") continue;
         jobs.push({
@@ -273,7 +294,7 @@ async function matchOne(
   }
 
   const evidence = await read<BillEvidenceRow[]>("read_bill_evidence",
-    sb.rpc("context_job_evidence_for_bills", { p_bill_ids: [documentId] }));
+    on(sb.rpc("context_job_evidence_for_bills", { p_bill_ids: [documentId] })), signal);
 
   // Other live documents of the same supplier with the same number.
   let others: OtherCostDocument[] = [];
@@ -281,7 +302,7 @@ async function matchOne(
     let q = sb.from("job_cost_lines").select("document_id,document_number,document_date,document_status,party_id,party_name,amount_ex,state")
       .eq("document_kind", "xero_bill").eq("document_number", doc.document_number).neq("document_id", documentId);
     if (doc.party_id) q = q.eq("party_id", doc.party_id);
-    const rows = await read<Array<Record<string, unknown>>>("read_other_documents", q.limit(200));
+    const rows = await read<Array<Record<string, unknown>>>("read_other_documents", on(q.limit(200)), signal);
     const byDoc = new Map<string, Array<Record<string, unknown>>>();
     for (const r of rows ?? []) byDoc.set(String(r.document_id), [...(byDoc.get(String(r.document_id)) ?? []), r]);
     others = [...byDoc.entries()].map(([id, rs]) => {
@@ -308,14 +329,14 @@ async function matchOne(
   // Clues another phase handed in (kept_from set), in id order: match_apply
   // appends them after this run's clues in the same order.
   const kept = await read<Array<Record<string, unknown>>>("read_kept_clues",
-    sb.from("match_clues").select("id,clue_code,class,family,root,outcome,job_id,division,names_one,seen_where,seen_value,detail")
+    on(sb.from("match_clues").select("id,clue_code,class,family,root,outcome,job_id,division,names_one,seen_where,seen_value,detail")
       .eq("subject_kind", "cost_document").eq("subject_id", subjectId).eq("current", true)
-      .not("kept_from", "is", null).order("id", { ascending: true }));
+      .not("kept_from", "is", null).order("id", { ascending: true })), signal);
 
   let rule: Record<string, unknown> | null = null;
   if (doc.party_id) {
     const rows = await read<Array<Record<string, unknown>>>("read_rules",
-      sb.from("match_rules").select("id,kind,division").eq("party_id", doc.party_id).eq("status", "confirmed").limit(2));
+      on(sb.from("match_rules").select("id,kind,division").eq("party_id", doc.party_id).eq("status", "confirmed").limit(2)), signal);
     rule = rows?.length === 1 ? rows[0] : null;
   }
 
@@ -358,11 +379,11 @@ async function matchOne(
   const candidate = all.find((c) => c.outcome === "job" && c.job_id && c.names_one && (c.class === "key" || c.class === "clue"));
   if (candidate?.job_id && doc.party_id) {
     const users = await read<Array<{ id: string; xero_contact_id: string | null }>>("read_trade_user",
-      sb.from("users").select("id,xero_contact_id").eq("xero_contact_id", doc.party_id).limit(2));
+      on(sb.from("users").select("id,xero_contact_id").eq("xero_contact_id", doc.party_id).limit(2)), signal);
     if (users?.length === 1) {
       const rows = await read<Array<Record<string, unknown>>>("read_trade_lines",
-        sb.from("trade_invoice_lines").select("job_id,line_total_ex,work_date,created_at,trade_invoices!inner(user_id)")
-          .eq("job_id", candidate.job_id).eq("trade_invoices.user_id", users[0].id).limit(200));
+        on(sb.from("trade_invoice_lines").select("job_id,line_total_ex,work_date,created_at,trade_invoices!inner(user_id)")
+          .eq("job_id", candidate.job_id).eq("trade_invoices.user_id", users[0].id).limit(200)), signal);
       const same = samePersonStop(doc, { ...users[0], candidate_job_id: candidate.job_id },
         (rows ?? []).map((r) => ({
           user_id: users[0].id,
@@ -375,24 +396,33 @@ async function matchOne(
   }
 
   const result = proposalOnly(decideMatch(all, types, stops));
-  const { data, error } = await sb.rpc("match_apply", {
-    p_subject_kind: "cost_document",
-    p_subject_id: subjectId,
-    p_run_id: crypto.randomUUID(),
-    p_item_kind: "bill",
-    p_clues: fresh.map(clueJson),
-    p_result: result,
-    p_stops: stops,
-    p_summary: {
-      party: doc.party_name,
-      number: doc.document_number,
-      date: doc.document_date,
-      amount_ex: doc.total_ex,
-      lines: doc.lines.length,
-    },
-    p_rule_version: "v1",
-  });
+  // Never start the write once the bill's time is up.
+  if (signal.aborted) throw new ReadFailed(APPLY_OVER_TIME);
+  let applied: { data: unknown; error: unknown };
+  try {
+    applied = await sb.rpc("match_apply", {
+      p_subject_kind: "cost_document",
+      p_subject_id: subjectId,
+      p_run_id: crypto.randomUUID(),
+      p_item_kind: "bill",
+      p_clues: fresh.map(clueJson),
+      p_result: result,
+      p_stops: stops,
+      p_summary: {
+        party: doc.party_name,
+        number: doc.document_number,
+        date: doc.document_date,
+        amount_ex: doc.total_ex,
+        lines: doc.lines.length,
+      },
+      p_rule_version: "v1",
+    }).abortSignal(signal);
+  } catch {
+    throw new ReadFailed(signal.aborted ? APPLY_OVER_TIME : "apply_failed");
+  }
+  const { data, error } = applied;
   if (error) {
+    if (signal.aborted) throw new ReadFailed(APPLY_OVER_TIME);
     const code = /\b(match_[a-z_]+|reconcile_[a-z_]+)\b/.exec(String((error as { message?: unknown }).message ?? ""))?.[1];
     throw new ReadFailed(code ? `apply:${code}` : "apply_failed");
   }
@@ -438,7 +468,8 @@ async function runCore(
   if (!ids.length) return { requeue: out, reached };
   let types: Record<string, ClueType>;
   try {
-    const rows = await read<ClueType[]>("read_clue_types", sb.from("match_clue_types").select("code,class,family,mode"));
+    const rows = await read<ClueType[]>("read_clue_types",
+      sb.from("match_clue_types").select("code,class,family,mode").abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS)));
     types = Object.fromEntries((rows ?? []).map((t) => [t.code, t]));
     if (!Object.keys(types).length) throw new ReadFailed("read_clue_types");
   } catch {
@@ -447,14 +478,20 @@ async function runCore(
     return { requeue: ids.map((id) => ({ id, reason: "read_failed" })), reached };
   }
   for (const [i, id] of ids.entries()) {
-    if (i >= MATCH_RUN_LIMIT || now() > deadline) {
-      out.push({ id, reason: i >= MATCH_RUN_LIMIT ? "over_run_cap" : "over_run_time" });
+    if (i >= MATCH_RUN_LIMIT) {
+      out.push({ id, reason: "over_run_cap" });
+      continue;
+    }
+    const at = now();
+    if (at > deadline) {
+      out.push({ id, reason: OVER_TIME });
       continue;
     }
     report.run++;
     reached.add(id);
     try {
-      const res = await matchOne(sb, id, types);
+      // The bill gets the time left in the run, not a fresh budget.
+      const res = await matchOne(sb, id, types, AbortSignal.timeout(Math.max(0, deadline - at)));
       if ("applied" in res) bump(report.applied, res.applied);
       else bump(report.skipped, res.skipped);
     } catch (e) {
@@ -463,7 +500,10 @@ async function runCore(
       // A data refusal from match_apply would refuse again: not requeued. An
       // unreadable switch is not a refusal and is retried.
       if (!code.startsWith("apply:match_") || code === "apply:match_switch_unreadable") {
-        out.push({ id, reason: code.startsWith("apply") ? "apply_failed" : "read_failed" });
+        const reason = code === OVER_TIME || code === APPLY_OVER_TIME
+          ? OVER_TIME
+          : code.startsWith("apply") ? "apply_failed" : "read_failed";
+        out.push({ id, reason });
       }
     }
   }
