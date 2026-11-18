@@ -121,6 +121,8 @@ export async function acknowledgeTradeInvoiceLine(
         .eq("id", invoice.id)
         .in("status", [...ACKNOWLEDGEABLE_INVOICE_STATUSES])
         .is("xero_bill_id", null)
+        // A pay run's invoice keeps its status until the run pushes it.
+        .is("pay_run_id", null)
         .select("id, status")
         .maybeSingle();
       if (!moveErr && moved?.status) invoiceStatus = moved.status;

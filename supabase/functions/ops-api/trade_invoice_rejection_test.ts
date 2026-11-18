@@ -19,11 +19,12 @@ async function action(client: any, invoiceId = "ZZTEST-invoice") {
     tradeInvoiceHasExternalXeroIdentity: (i: any) => Boolean(i.xero_bill_id || i.xero_pushed_at),
     rejectTradeInvoiceStorage: async (...args: [any, string, string, string]) =>
       (await import("./trade_invoice_rejection.ts")).rejectTradeInvoiceStorage(...args),
+    payRunHeldRefusalFor: (await import("./trade_pay_run_hold.ts")).payRunHeldRefusalFor,
   });
 }
 
 function store(options: { enabled?: boolean; flagError?: boolean; rpcError?: boolean; raced?: boolean; xero?: boolean } = {}) {
-  const invoice: any = { id: "ZZTEST-invoice", status: "pending_ops_review", xero_bill_id: options.xero ? "ZZTEST-bill" : null, xero_pushed_at: null };
+  const invoice: any = { id: "ZZTEST-invoice", status: "pending_ops_review", xero_bill_id: options.xero ? "ZZTEST-bill" : null, xero_pushed_at: null, pay_run_id: null };
   const claims = [{ trade_invoice_id: invoice.id, expense_receipt_id: "ZZTEST-receipt" }];
   let rpcCalls = 0;
   return { invoice, claims, get rpcCalls() { return rpcCalls; },

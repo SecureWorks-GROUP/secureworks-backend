@@ -218,3 +218,77 @@ export async function retryReimbursementClaims<T>(
   }
   throw new Error("Could not settle the reimbursement claims");
 }
+
+// P2-06.6: own-money receipts join the trade's next generated invoice through
+// the same door as an explicit claim (resolveReimbursementExtras), so its
+// checks, amount and no-super rule apply. Runs only with the reimbursement
+// switch on and the inclusive super rule; otherwise no read and no answer key.
+export const OWN_MONEY_SWEEP_LIMIT = 100;
+export type OwnMoneySweep = {
+  // Switch read, handed on so the door does not read it a second time.
+  flagOn: boolean | undefined;
+  // Receipts the sweep adds that the trade did not ask for; null when it did not run.
+  autoIds: Set<string> | null;
+  items: { type: string; expense_receipt_id: string }[];
+};
+export async function ownMoneyReimbursementItems(client: any, input: {
+  userId: string;
+  basis: unknown;
+  requested: any[];
+  replacingDraftId: string | null;
+  // A group share is its own invoice: nothing else joins it.
+  groupShare: boolean;
+}): Promise<OwnMoneySweep> {
+  if (input.groupShare || input.basis !== "inclusive_12_112_v1") {
+    return { flagOn: undefined, autoIds: null, items: [] };
+  }
+  // Same read and rule as the door: a failed switch read is off (main).
+  const { data: flag } = await client.from("feature_flags").select("enabled")
+    .eq("flag_name", REIMBURSEMENT_FLAG).maybeSingle();
+  if (flag?.enabled !== true) return { flagOn: false, autoIds: null, items: [] };
+  // idx_expense_receipts_submitted bounds this to one trade's receipts; newest
+  // first so repaid history never crowds out a new receipt.
+  const { data, error } = await client.from("expense_receipts")
+    .select("id, created_at")
+    .eq("submitted_by", input.userId)
+    .eq("payment_method", "personal_card")
+    .is("xero_bill_id", null)
+    .not("status", "in", "(queried,rejected)")
+    .or("job_id.not.is.null,stock_division.not.is.null")
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(OWN_MONEY_SWEEP_LIMIT);
+  // Never read a failed list as "nothing to pay back".
+  if (error) throw new Error("Could not read your receipts to pay back");
+  const rows = (data || []).filter((row: any) => row?.id);
+  const claimed = await loadClaimedReimbursementReceipts(
+    client, rows.map((row: any) => String(row.id)), input.replacingDraftId,
+  );
+  const asked = new Set(input.requested.filter(isReimbursementItem)
+    .map((item: any) => String(item?.expense_receipt_id || "")));
+  const ids = rows.map((row: any) => String(row.id))
+    .filter((id: string) => !claimed.has(id) && !asked.has(id))
+    .reverse(); // oldest first on the invoice
+  return {
+    flagOn: true,
+    autoIds: new Set(ids),
+    items: ids.map((id: string) => ({ type: REIMBURSEMENT_LINE_TYPE, expense_receipt_id: id })),
+  };
+}
+
+// The answer's skips: a receipt the trade asked for stays in skipped_items; one
+// the sweep added and the door refused goes to not_added. Without a sweep the
+// answer is main's, key for key.
+export function reimbursementSkipAnswer(
+  result: { skipped_items: ReimbursementSkip[] },
+  autoIds: Set<string> | null,
+  more: any[] = [],
+): { skipped_items: any[]; not_added?: ReimbursementSkip[] } {
+  if (!autoIds) return { skipped_items: [...result.skipped_items, ...more] };
+  const isAuto = (skip: ReimbursementSkip) =>
+    skip.expense_receipt_id !== null && autoIds.has(skip.expense_receipt_id);
+  return {
+    skipped_items: [...result.skipped_items.filter((skip) => !isAuto(skip)), ...more],
+    not_added: result.skipped_items.filter(isAuto),
+  };
+}
