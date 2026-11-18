@@ -18,6 +18,10 @@
 // reconcile_matcher_v1 off (as seeded) it writes the clues and one shadow row
 // and raises nothing.
 //
+// A credit from a Xero contact that is a Trade App user is a person's pay
+// (director 01:03): it is skipped (`labour_credit`), with no clue, shadow row
+// or item, as the bill runner skips a labour bill.
+//
 // A failed read is never "no clue" and never "no item": the credit is
 // skipped and counted, or the page runs nothing and keeps its cursor. Logs
 // carry codes and counts only.
@@ -75,6 +79,12 @@ async function creditOne(
       .select("credit_note_number,reference,xero_contact_id,contact_name,credit_note_date,line_items:raw_json->LineItems")
       .eq("org_id", waiting.org_id).eq("xero_credit_note_id", creditId).maybeSingle());
   if (!note) return { skipped: "credit_note_missing" };
+  const partyId = (note.xero_contact_id as string) ?? (waiting.party_id as string) ?? null;
+  if (partyId) {
+    const people = await read<Array<{ id: string }>>("read_trade_user",
+      sb.from("users").select("id").eq("xero_contact_id", partyId).limit(1));
+    if (people?.length) return { skipped: "labour_credit" };
+  }
   const words = (Array.isArray(note.line_items) ? note.line_items : [])
     .map((l: Record<string, unknown>) => (typeof l?.Description === "string" ? l.Description : ""))
     .filter(Boolean).join("\n");

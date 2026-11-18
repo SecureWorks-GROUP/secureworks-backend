@@ -14,6 +14,7 @@ type World = {
   lines?: Record<string, any[]>; // credit id -> its cost lines
   notes?: Record<string, any>; // credit id -> xero_supplier_credit_notes row
   openItems?: string[];
+  tradeUsers?: string[];
   fail?: string;
   applyError?: Record<string, unknown>;
   queries: Array<{ table: string; filters: Record<string, unknown> }>;
@@ -51,6 +52,8 @@ function fake(w: World) {
             const asked = (filters["in:subject_id"] as string[]) ?? [];
             return { data: asked.filter((s) => (w.openItems ?? []).includes(s)).map((subject_id) => ({ subject_id })), error: null };
           }
+          case "users":
+            return { data: (w.tradeUsers ?? []).filter((c) => c === filters.xero_contact_id).map((c) => ({ id: `u-${c}` })), error: null };
           case "jobs":
             return {
               data: [{
@@ -195,4 +198,13 @@ Deno.test("credit_sweep door: only a POST with the exact server key; nothing rea
   const ok = await creditSweepRequest(
     new Request(url, { method: "POST", headers: { authorization: "Bearer server-key" } }), fake(w), "server-key");
   assertEquals([ok.status, ok.body.swept], [200, 1]);
+});
+
+Deno.test("a credit from a Trade App user is a person's pay: never raised; an unreadable user list is counted, not raised", async () => {
+  const w = world({ lines: { c1: [unallocated()] }, notes: { c1: note() }, tradeUsers: ["supplier-1"] });
+  const out = await creditSweep(fake(w));
+  assertEquals([applies(w).length, out.skipped], [0, { labour_credit: 1 }]);
+  const bad = world({ lines: { c1: [unallocated()] }, notes: { c1: note() }, fail: "users" });
+  const r = await creditSweep(fake(bad));
+  assertEquals([applies(bad).length, r.failed], [0, { read_trade_user: 1 }]);
 });
