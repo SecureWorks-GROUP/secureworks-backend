@@ -129,7 +129,7 @@ Deno.test('incomplete with raise: one upsert and one draft_incomplete item', asy
   assertEquals(upserts(f.calls).length, 1)
   assertEquals(f.rpcCalls.length, 1)
   const { fn, args } = f.rpcCalls[0]
-  assertEquals(fn, 'reconcile_item_raise')
+  assertEquals(fn, 'reconcile_item_raise_named')
   assertEquals(args.p_kind, 'draft_incomplete')
   assertEquals(args.p_subject_table, 'xero_draft_register')
   assertEquals(args.p_subject_id, DOC)

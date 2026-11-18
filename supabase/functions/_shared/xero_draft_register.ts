@@ -193,7 +193,9 @@ export async function recordXeroDraft(client: SupabaseLike, input: RecordXeroDra
     }
     let raiseErr: unknown = null
     try {
-      const answer = await client.rpc('reconcile_item_raise', {
+      // The named door (20261118999902, PR 1643): reconcile_item_raise itself
+      // takes its arguments by position, so a named PostgREST call cannot find it.
+      const answer = await client.rpc('reconcile_item_raise_named', {
         p_kind: DRAFT_INCOMPLETE_KIND,
         p_subject_table: 'xero_draft_register',
         p_subject_id: documentId,
