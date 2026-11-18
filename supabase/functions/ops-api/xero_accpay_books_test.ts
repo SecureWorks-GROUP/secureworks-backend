@@ -930,3 +930,174 @@ Deno.test("supplier bill list refuses a provider that ignores the exact contact 
     assertEquals(err.code, "XERO_RESPONSE_INVALID");
   }
 });
+
+function supplierDraftFixture(enabled = true) {
+  const job = "SWF-260002";
+  const org = "00000000-0000-0000-0000-000000000001";
+  const option = "SW - FENCING";
+  const rules = ["supplier_bill", "supplier_credit"].map((kind) => ({
+    source_kind: kind, line_kind: "default", account_code: kind === "supplier_bill" ? "401" : "402",
+  }));
+  const state = { fail: "", options: [option, "SecureBuild"], rules, existingStatus: "DRAFT" };
+  const readTables: string[] = [];
+  const jobQueries: string[][] = [];
+  const client = {
+    from(table: string) {
+      if (table === "xero_invoices") return { upsert: async () => ({ error: null }) };
+      readTables.push(table);
+      const rows = (data: unknown[]) =>
+        table === state.fail ? { error: { code: "READ_FAILED" }, data: null } : { error: null, data };
+      return {
+        select(fields: string) {
+          return {
+            eq(column: string, value: string) {
+              if (table === "feature_flags") {
+                assertEquals([fields, column, value], ["enabled", "flag_name", "xero_draft_standard_v1"]);
+                return { limit: () => rows([{ enabled }]) };
+              }
+              assertEquals([column, value], ["org_id", org]);
+              if (table === "xero_account_rules") return rows(state.rules);
+              if (table === "xero_tracking_options") return {
+                eq(key: string, status: string) {
+                  assertEquals([key, status], ["status", "ACTIVE"]);
+                  return rows(state.options.map((option_name) => ({ option_name })));
+                },
+              };
+              assertEquals([table, fields], ["jobs", "job_number, type"]);
+              return {
+                in(key: string, numbers: string[]) {
+                  assertEquals(key, "job_number");
+                  jobQueries.push(numbers);
+                  return rows([
+                    { job_number: job, type: "fencing" },
+                    { job_number: "SWP-ZZTEST", type: "granny_flat" },
+                  ].filter((row) => numbers.includes(row.job_number)));
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+  const writes: { path: string; method?: string; key?: string; payload: any }[] = [];
+  const deps = {
+    getToken: async () => ({ accessToken: "fixture", tenantId: "fixture" }),
+    xeroGet: async () => ({ Invoices: [{ InvoiceID: "draft", Type: "ACCPAY", Status: state.existingStatus }] }),
+    xeroPost: async (path: string, _a: string, _t: string, payload: any, method?: string, key?: string) => {
+      writes.push({ path, method, key, payload });
+      return payload.CreditNotes
+        ? { CreditNotes: [{ CreditNoteID: "credit", ...payload.CreditNotes[0] }] }
+        : { Invoices: [{ InvoiceID: "draft", ...payload.Invoices[0] }] };
+    },
+  };
+  const body = {
+    xero_invoice_id: "draft", xero_contact_id: "supplier", date: "2026-11-01",
+    idempotency_key: "fixture", job_number: job, line_items: [{ description: "Materials" }],
+  };
+  return { job, option, state, client, deps, writes, readTables, jobQueries, body };
+}
+
+Deno.test("supplier draft switch off preserves the three serialized Xero requests", async () => {
+  const f = supplierDraftFixture(false);
+  const bill = await createSupplierBill(f.client, f.body, f.deps);
+  const edit = await updateSupplierBill(f.client, f.body, f.deps);
+  const credit = await createSupplierCreditNote(f.client, f.body, f.deps);
+  for (const result of [bill, edit, credit]) assertEquals("division_missing_lines" in result, false);
+  const lines = [{ Description: "Materials", Quantity: 1, UnitAmount: 0, AccountCode: "306", TaxType: "NONE" }];
+  const header = { Contact: { ContactID: "supplier" }, Date: "2026-11-01", Status: "DRAFT", LineAmountTypes: "Exclusive", LineItems: lines };
+  const expected = [
+    { path: "/Invoices", method: "PUT", key: "fixture", payload: { Invoices: [{ Type: "ACCPAY", ...header }] } },
+    { path: "/Invoices/draft", method: "POST", payload: { Invoices: [{ InvoiceID: "draft", Type: "ACCPAY", Status: "DRAFT", LineItems: lines, Date: "2026-11-01" }] } },
+    { path: "/CreditNotes", method: "PUT", key: "fixture", payload: { CreditNotes: [{ Type: "ACCPAYCREDIT", ...header }] } },
+  ];
+  assertEquals(JSON.stringify(f.writes), JSON.stringify(expected));
+  assertEquals(f.readTables.filter((t) => t !== "feature_flags"), []);
+});
+
+Deno.test("supplier drafts apply the correct account rule and checked job division for each action", async () => {
+  for (const action of [createSupplierBill, updateSupplierBill, createSupplierCreditNote]) {
+    const f = supplierDraftFixture();
+    const result = await action(f.client, { ...f.body, line_items: [
+      ...f.body.line_items,
+      { job_number: "SWP-ZZTEST", description: "[SWP-ZZTEST] Work", account_code: "405" },
+      { job_number: "SWF-UNKNOWN", description: "Unresolved" },
+      { description: "Other category", tracking: [{ Name: "Region", Option: "Local" }] },
+      ...f.body.line_items,
+    ] }, f.deps);
+    assertEquals(result.division_missing_lines, [3, 4]);
+    assertEquals(f.jobQueries, [[f.job, "SWP-ZZTEST", "SWF-UNKNOWN"]]);
+    const doc = (f.writes[0].payload.Invoices || f.writes[0].payload.CreditNotes)[0];
+    assertEquals(doc.Status, "DRAFT");
+    const [first, second, unknown, other] = doc.LineItems;
+    assertEquals(first.AccountCode, action === createSupplierCreditNote ? "402" : "401");
+    assertEquals(first.Description, "[" + f.job + "] Materials");
+    assertEquals(first.Tracking, [{ Name: "Business Unit", Option: f.option }]);
+    assertEquals(second.Description, "[SWP-ZZTEST] Work");
+    assertEquals(second.AccountCode, "405");
+    assertEquals(second.Tracking, [{ Name: "Business Unit", Option: "SecureBuild" }]);
+    assertEquals(unknown.Tracking, undefined);
+    assertEquals(other.Tracking, [{ Name: "Region", Option: "Local" }]);
+  }
+});
+
+Deno.test("an untagged office draft is returned with one-based missing line numbers", async () => {
+  const f = supplierDraftFixture();
+  const result = await createSupplierBill(f.client, { ...f.body, job_number: null }, f.deps);
+  assertEquals(result.division_missing_lines, [1]);
+  assertEquals(f.writes[0].payload.Invoices[0].LineItems[0].Tracking, undefined);
+  assertEquals(f.jobQueries, []);
+});
+
+Deno.test("a typed inactive division refuses before dispatch and a corrected retry writes once", async () => {
+  const f = supplierDraftFixture();
+  const line = { description: "Materials", tracking: [{ name: "Business Unit", option: "SW - OLD" }] };
+  const body = { ...f.body, line_items: [line] };
+  const err = await assertRejects(() => createSupplierCreditNote(f.client, body, f.deps), SupplierBillError, "SW - OLD");
+  assertEquals([err.status, err.code], [422, "TRACKING_OPTION_NOT_ACTIVE"]);
+  f.state.options = [];
+  const unreadable = await assertRejects(() => createSupplierCreditNote(f.client, body, f.deps), SupplierBillError);
+  assertEquals(unreadable.code, "TRACKING_OPTIONS_UNAVAILABLE");
+  assertEquals(f.writes, []);
+  f.state.options = [f.option];
+  line.tracking[0].option = f.option;
+  const result = await createSupplierCreditNote(f.client, body, f.deps);
+  assertEquals(result.division_missing_lines, []);
+  assertEquals(f.writes.length, 1);
+  assertEquals(f.writes[0].key, f.body.idempotency_key);
+});
+
+Deno.test("missing rule, failed reads and an office-approved bill each refuse before a write", async () => {
+  const f = supplierDraftFixture();
+  f.state.rules = [];
+  const missing = await assertRejects(() => createSupplierBill(f.client, f.body, f.deps), SupplierBillError);
+  assertEquals([missing.status, missing.code], [409, "ACCOUNT_RULE_MISSING"]);
+  for (const table of ["xero_account_rules", "xero_tracking_options", "jobs"]) {
+    f.state.fail = table;
+    const err = await assertRejects(() => createSupplierBill(f.client, f.body, f.deps), SupplierBillError);
+    assertEquals([err.status, err.code], [503, "DRAFT_STANDARD_UNAVAILABLE"]);
+  }
+  f.state.fail = "";
+  f.state.existingStatus = "AUTHORISED";
+  const existing = await assertRejects(() => updateSupplierBill(f.client, {
+    ...f.body, line_items: [{ description: "Materials", account_code: "405" }],
+  }, f.deps), SupplierBillError);
+  assertEquals([existing.status, existing.code], [409, "MUST_STAY_DRAFT"]);
+  assertEquals(f.writes, []);
+});
+
+Deno.test("an inferred division absent from the active list leaves a gap; an active office tag is kept", async () => {
+  const f = supplierDraftFixture();
+  f.state.options = ["SW - PATIOS"];
+  const result = await updateSupplierBill(f.client, {
+    ...f.body,
+    line_items: [
+      ...f.body.line_items,
+      { description: "Office line", tracking: [{ Name: "Business Unit", Option: "SW - PATIOS" }] },
+    ],
+  }, f.deps);
+  assertEquals(result.division_missing_lines, [1]);
+  const [missing, supplied] = f.writes[0].payload.Invoices[0].LineItems;
+  assertEquals(missing.Tracking, undefined);
+  assertEquals(supplied.Tracking, [{ Name: "Business Unit", Option: "SW - PATIOS" }]);
+});
