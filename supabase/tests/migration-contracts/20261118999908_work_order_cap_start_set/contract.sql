@@ -106,6 +106,21 @@ BEGIN
   PERFORM pg_temp.expect_error('TRUNCATE public.work_order_cap_start_changes', 'work_order_cap_start_changes_write_once');
 END $$;
 
+-- Live runs as service_role (ops-api's door call and a hand UPDATE through the API): both are
+-- recorded, naming that role.
+SET LOCAL ROLE service_role;
+SELECT public.set_work_order_cap_start('f1990800-0000-4000-8000-0000000000a1', NULL, DATE '2026-11-24', DATE '2026-11-25', 'ZZTEST as service role');
+UPDATE public.work_order_cap_settings SET cap_start_on = DATE '2026-11-24', updated_at = now() WHERE id = 1;
+RESET ROLE;
+DO $$ BEGIN
+  PERFORM pg_temp.assert_ok((SELECT array_agg(via || ':' || db_role || ':' || new_start ORDER BY id)
+      FROM (SELECT * FROM public.work_order_cap_start_changes ORDER BY id DESC LIMIT 2) t)
+    = ARRAY['approver:service_role:2026-11-25', 'direct_sql:service_role:2026-11-24'],
+    'service role records ' || (SELECT array_agg(via || ':' || db_role ORDER BY id)::text
+      FROM (SELECT * FROM public.work_order_cap_start_changes ORDER BY id DESC LIMIT 2) t));
+  PERFORM pg_temp.assert_ok((SELECT cap_start_on FROM public.work_order_cap_settings WHERE id = 1) = DATE '2026-11-24', 'service role update');
+END $$;
+
 -- The before-switch counts (PR text, run here verbatim). Live may hold a job with no status or
 -- no creation time although the migrations forbid both, so the fixture has one of each.
 ALTER TABLE public.jobs ALTER COLUMN status DROP NOT NULL, ALTER COLUMN created_at DROP NOT NULL;
@@ -127,7 +142,8 @@ INSERT INTO public.work_orders (id, org_id, job_id, wo_number, kind, status, agr
   (gen_random_uuid(), '00000000-0000-0000-0000-000000000001', 'f1990800-0000-4000-8000-000000000007', 'ZZTEST-CAP-WO-7', 'job', 'approved', 100,
    '2026-11-23 15:59:59+00', 'f1990800-0000-4000-8000-0000000000a1', 'ZZTEST sealed');
 -- The counts read only these made-up jobs: every other job is closed for the test.
-UPDATE public.jobs SET status = 'archived' WHERE job_number NOT LIKE 'ZZTEST-CAP-%' AND status IS DISTINCT FROM 'archived';
+UPDATE public.jobs SET status = 'archived'
+ WHERE id::text NOT LIKE 'f1990800-0000-4000-8000-00000000000_' AND status IS DISTINCT FROM 'archived';
 SET LOCAL session_replication_role = origin;
 
 -- query:held-by-status begin
@@ -155,9 +171,10 @@ ORDER BY GROUPING(j.status), j.status NULLS FIRST;
 -- query:from-the-rule begin
 CREATE TEMP VIEW zz_from_the_rule AS
 -- Once the date is saved: what work_order_cap_scope itself says about every open job, split
--- by why. held_no_approved_order must equal the TOTAL row above for the same date.
--- approved_before_start: open jobs whose job work order was approved before the start day;
--- with the hold switch on these lose the cap they have today. Read only.
+-- by why. An approved order always carries an amount (work_orders_approved_sealed_check), so
+-- an in-scope job is held for the office only for having no approved order;
+-- held_no_approved_order must equal the TOTAL row above for the same date. approved_before_start: open jobs whose job work order was approved
+-- before the start day; with the hold switch on these lose the cap they have today. Read only.
 WITH open_jobs AS (
   SELECT j.id FROM public.jobs j
   WHERE j.status IS NULL OR j.status NOT IN ('complete','completed','archived','cancelled','lost')),

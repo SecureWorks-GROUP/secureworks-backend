@@ -491,3 +491,17 @@ Deno.test("guard, cap scope: a failed scope read is 503 work_order_cap_unavailab
     assertEquals([err.status, err.body?.code], [503, "work_order_cap_unavailable"], label);
   }
 });
+
+Deno.test("guard, cap scope: a job with an approved job work order is scoped the same way", async () => {
+  const woDb = (inScope: boolean) => {
+    const db = scopeDb((a) => ({ data: a.p_job_ids.map((id: string) => ({ job_id: id, in_scope: inScope })), error: null }));
+    db.tables.job_budgets = [];
+    db.tables.work_order_customer_variations = [];
+    db.tables.work_orders = [{ id: BUDGET, org_id: ORG, job_id: JOB_A, kind: "job", status: "approved", agreed_labour_ex: 500 }];
+    return db;
+  };
+  const err: any = await assertRejects(() => guard(woDb(true), 500.01), ApiError);
+  assertEquals([err.status, err.body?.code], [409, "work_order_total_over_agreed"]);
+  await guard(woDb(true), 500);
+  await guard(woDb(false), 5000);
+});
