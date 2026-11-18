@@ -301,6 +301,7 @@ write_response() {
   ACTOR_RECORDING_EXPECTED_SHA="$(shasum -a 256 "$ACTOR_RECORDING_MIGRATION" | awk '{print $1}')" \
   JOB_PROFIT_ENGINE_EXPECTED_SHA="$(shasum -a 256 "$JOB_PROFIT_ENGINE_MIGRATION" | awk '{print $1}')" \
   BOOKING_MIGRATIONS_ROOT="$REPO_ROOT/supabase/migrations" \
+  SCHEMA_REQUIREMENTS_FILE="${EDGE_SCHEMA_REQUIREMENTS_FILE:-$MANIFEST}" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -1184,6 +1185,50 @@ with open(sys.argv[1], "w") as f:
         ],
         f,
     )
+
+# Any other ops-api migration the requirements file names gets the same
+# standard "applied, nothing missing" row here. A database change therefore
+# adds its requirements lines and no line to this file. The rows written above
+# stay exactly as they are and always win.
+import re
+requirement_file_re = re.compile(r"^supabase/migrations/([0-9]{14})_([a-z0-9_]+)\.sql$")
+requirements_path = Path(os.environ["SCHEMA_REQUIREMENTS_FILE"])
+with open(sys.argv[1]) as f:
+    written_rows = json.load(f)
+covered_versions = {
+    r["migration_version"] for r in written_rows if r["function_name"] == "ops-api"
+}
+filled_rows = []
+for line_no, raw in enumerate(requirements_path.read_text().splitlines(), 1):
+    line = raw.strip()
+    if not line or line.startswith("#"):
+        continue
+    parts = line.split("|")
+    if len(parts) != 4:
+        raise SystemExit(f"{requirements_path}:{line_no}: expected four pipe-delimited fields")
+    if parts[0] != "ops-api":
+        continue
+    match = requirement_file_re.fullmatch(parts[1])
+    if not match:
+        raise SystemExit(f"{requirements_path}:{line_no}: invalid canonical migration path")
+    version, name = match.groups()
+    if version in covered_versions:
+        continue
+    covered_versions.add(version)
+    migration_path = Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql"
+    if not migration_path.is_file():
+        raise SystemExit(f"{requirements_path}:{line_no}: migration file missing: {parts[1]}")
+    digest = hashlib.sha256(migration_path.read_bytes()).hexdigest()
+    filled_rows.append({
+        "function_name": "ops-api", "migration_version": version,
+        "expected_migration_name": name, "expected_statement_sha256": digest,
+        "actual_migration_version": version, "actual_migration_name": name,
+        "actual_statement_count": 1, "actual_statement_sha256": digest,
+        "missing_markers": [],
+    })
+if filled_rows:
+    with open(sys.argv[1], "w") as f:
+        json.dump(written_rows + filled_rows, f)
 PY
 }
 
@@ -1471,6 +1516,57 @@ PYTEST
   pass "$name"
 }
 
+test_declared_requirement_needs_no_fixture_line() {
+  local name="test_declared_requirement_needs_no_fixture_line"
+  local manifest="$TEST_TMP/requirements-with-one-more.txt"
+  local unfilled="$TEST_TMP/one-more-unfilled.json"
+  local filled="$TEST_TMP/one-more-filled.json"
+  local extra
+  # One real migration that no ops-api requirement names today.
+  extra="$(python3 - "$MANIFEST" "$REPO_ROOT/supabase/migrations" <<'PYTEST'
+import re
+import sys
+from pathlib import Path
+named = set()
+for raw in Path(sys.argv[1]).read_text().splitlines():
+    parts = raw.strip().split("|")
+    if len(parts) == 4 and parts[0] == "ops-api":
+        named.add(parts[1])
+for path in sorted(Path(sys.argv[2]).glob("*.sql")):
+    candidate = f"supabase/migrations/{path.name}"
+    if re.fullmatch(r"supabase/migrations/[0-9]{14}_[a-z0-9_]+\.sql", candidate) and candidate not in named:
+        print(candidate)
+        break
+PYTEST
+)"
+  if [[ -z "$extra" ]]; then
+    fail "$name" "found no migration outside the ops-api requirements to test with"
+    return
+  fi
+  { cat "$MANIFEST"; echo; printf 'ops-api|%s|table|jobs\n' "$extra"; } >"$manifest"
+  local extra_file="${extra##*/}"
+  local extra_label="${extra_file%.sql}"
+
+  # Without a row for the added requirement the gate must still refuse.
+  write_response "$unfilled" "makesafe_attendance_cycles_u2_s1" "$(migration_sha)" '[]'
+  EDGE_SCHEMA_REQUIREMENTS_FILE="$manifest" run_preflight "$unfilled" ops-api
+  if [[ "$PREFLIGHT_RC" -eq 0 ]] || \
+    ! grep -q "ops-api requires $extra_label: no catalog result returned" <<<"$PREFLIGHT_OUTPUT"; then
+    fail "$name" "a requirement with no response row did not refuse: rc=$PREFLIGHT_RC output=$PREFLIGHT_OUTPUT"
+    return
+  fi
+
+  # The response writer reads the requirements file, so the added requirement
+  # gets its row with no edit to this file.
+  EDGE_SCHEMA_REQUIREMENTS_FILE="$manifest" write_response "$filled" "makesafe_attendance_cycles_u2_s1" "$(migration_sha)" '[]'
+  EDGE_SCHEMA_REQUIREMENTS_FILE="$manifest" run_preflight "$filled" ops-api
+  if [[ "$PREFLIGHT_RC" -eq 0 ]]; then
+    pass "$name"
+  else
+    fail "$name" "a requirement named only in the requirements file was not given a row: rc=$PREFLIGHT_RC output=$PREFLIGHT_OUTPUT"
+  fi
+}
+
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
@@ -1489,6 +1585,7 @@ main() {
     test_unrelated_function_without_requirements_passes_without_credentials
     test_fixture_response_requires_explicit_test_mode
     test_read_only_safety_boundary
+    test_declared_requirement_needs_no_fixture_line
   fi
 
   echo

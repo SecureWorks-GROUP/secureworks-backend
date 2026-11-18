@@ -931,6 +931,7 @@ import { acknowledgeTradeInvoiceLine, TradeInvoiceLineAckError } from './trade_i
 import { createOrReuseTradeXeroBill, findLiveTradeBillsByNumber, TradeXeroBillSearchError } from './trade_invoice_xero_existing_bill.ts'
 import { markTradeInvoiceReadyForXero, resolveStuckTradeInvoice, STUCK_TRADE_INVOICE_STATUS, StuckTradeInvoiceError } from './trade_invoice_stuck.ts'
 import { TRADE_INVOICE_ROUTE_ACTIONS, TradeInvoiceStoreError, tradeInvoiceRefusal } from './trade_invoice_refusal.ts'
+import { checkWorkOrderCapBeforeXero } from './work_order_cap_before_xero.ts'
 import { officeSentBackNote, tradeInvoiceOfficeNote } from './trade_invoice_office_note.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
 import { autoGroupFenceJobs, autoGroupPatioJobs, openMissingFenceWorkOrders, openMissingPatioWorkOrders } from './patio_auto_group.ts'
@@ -14670,6 +14671,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               })
             }
 
+            // Follow-up 49 item 3: the job amount guard checks this invoice
+            // before any Xero call. A refusal leaves the draft and makes no bill.
+            const woCapCheck = await checkWorkOrderCapBeforeXero(client, tradeInvoiceId)
+
             // Resolve Xero supplier contact — auto-create only after money truth
             // is complete and the invoice can safely cross the Xero boundary.
             // The shared resolver looks up by email, then by exact name, and
@@ -14677,17 +14682,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // filed a second contact for a trade whose login email differs
             // from the supplier contact.
             const { accessToken: woAt, tenantId: woTi } = workOrderBoundary
-            const woXeroContactId = await resolveTradeXeroSupplierContact(client, {
-              userId: tradeUser.id,
-              name: tradeXeroUser?.name || '',
-              email: tradeXeroUser?.email || tradeXeroUser?.trade_details?.email || '',
-              cachedContactId: tradeXeroUser?.xero_contact_id || null,
-              source: 'submit_work_order_invoice',
-              actor: tradeUser.id,
-              accessToken: woAt,
-              tenantId: woTi,
-            })
-            if (!woXeroContactId) throw new ApiError('Could not create Xero supplier contact', 500)
+            let woXeroContactId: string | null = null
+            try {
+              woXeroContactId = await resolveTradeXeroSupplierContact(client, {
+                userId: tradeUser.id,
+                name: tradeXeroUser?.name || '',
+                email: tradeXeroUser?.email || tradeXeroUser?.trade_details?.email || '',
+                cachedContactId: tradeXeroUser?.xero_contact_id || null,
+                source: 'submit_work_order_invoice',
+                actor: tradeUser.id,
+                accessToken: woAt,
+                tenantId: woTi,
+              })
+              if (!woXeroContactId) throw new ApiError('Could not create Xero supplier contact', 500)
+            } catch (contactError) {
+              if (!woCapCheck.moved) throw contactError
+              // The invoice is already approved with no bill, the state a Xero
+              // miss leaves: answer as one (no bill is attempted below).
+              console.error('[ops-api] WO invoice Xero contact failed after the cap check:', lineSendLogCode(contactError))
+            }
 
             // Push directly to Xero as DRAFT ACCPAY bill
             const tradeName = tradeXeroUser?.name || 'Trade'
@@ -14716,6 +14729,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let createdXeroBillId = ''
             let woPdfAttached = false
             try {
+              if (!woXeroContactId) throw new Error('No Xero supplier contact')
               const { result: xeroResult } = await createTradeXeroBillOnce(client, {
                 accessToken: woAt, tenantId: woTi, tradeInvoiceId: tradeInv.id, payload: xeroPayload,
                 idempotencyKey: woIdempotencyKey, actor: 'submit_work_order_invoice',
@@ -19536,9 +19550,10 @@ export async function _persistWorkOrderInvoice(
 // Unreadable: 503, never read as "nothing billed". Ruling 17c: a job paid
 // hourly up to the maximum its job budget seals is capped here too, at that
 // maximum plus the approver's raises (job_labour_cap.ts); there is no other
-// labour cap refusal. Follow-up 49 item 9(b): with trade_line_hold_v1 on, it
-// caps only the jobs work_order_cap_scope puts under the start date, the same
-// rule as the send's sorter and the database guard; off, every job as before.
+// labour cap refusal. Follow-up 49 item 9(b): with trade_line_hold_v1 on, an
+// approved job work order caps only the jobs work_order_cap_scope puts under
+// the start date, the same rule as the send's sorter and the database guard;
+// off, every job as before. The hourly maximum is never scoped.
 export async function _assertWithinWorkOrderTotal(
   client: any,
   tradeUser: { id: string; orgId: string },
@@ -19576,21 +19591,23 @@ export async function _assertWithinWorkOrderTotal(
           if (e instanceof JobLabourPayReadError) throw new WorkOrderTotalCapReadError()
           throw e
         }
-        const candidates: string[] = [...new Set<string>([
-          ...(approved || []).map((r: any) => String(r.job_id)),
-          ...hourlyCapped,
-        ])]
-        if (candidates.length === 0) return []
-        // Follow-up 49 item 9(b): with trade_line_hold_v1 on, only the jobs
-        // under the cap's start date (work_order_cap_scope); off, every one,
-        // as before. A failed switch or scope read is this guard's 503.
-        let withWorkOrder: string[]
-        try {
-          withWorkOrder = await capScopedJobIds(client, candidates)
-        } catch (e) {
-          if (e instanceof WorkOrderCapScopeUnreadable) throw new WorkOrderTotalCapReadError()
-          throw e
+        const approvedIds: string[] = [...new Set<string>((approved || []).map((r: any) => String(r.job_id)))]
+        // Follow-up 49 item 9(b): with trade_line_hold_v1 on, an approved job
+        // work order caps only the jobs under the cap's start date
+        // (work_order_cap_scope); off, every one, as before. The hourly
+        // maximum (ruling 17c) is never scoped: a job paid hourly up to a
+        // maximum keeps it whatever the start date. A failed switch or scope
+        // read is this guard's 503.
+        let scopedApproved: string[] = []
+        if (approvedIds.length > 0) {
+          try {
+            scopedApproved = await capScopedJobIds(client, approvedIds)
+          } catch (e) {
+            if (e instanceof WorkOrderCapScopeUnreadable) throw new WorkOrderTotalCapReadError()
+            throw e
+          }
         }
+        const withWorkOrder: string[] = [...new Set<string>([...scopedApproved, ...hourlyCapped])]
         if (withWorkOrder.length === 0) return []
         try {
           return (await loadTradeInvoiceJobModes(client, {

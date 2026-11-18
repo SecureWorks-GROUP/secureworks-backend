@@ -89,7 +89,6 @@ fns(id, signature) AS (VALUES
   ('backed_billed', 'public.work_order_backed_billed(uuid[],uuid[])'),
   ('send_totals', 'public.trade_send_totals(uuid)'),
   ('merge', 'public.trade_line_hold_merge_v1(jsonb,jsonb)'),
-  ('persist_v2', 'public.persist_trade_work_order_invoice_v2(jsonb,jsonb,uuid)'),
   ('decide', 'public.decide_held_trade_line(uuid,text,uuid,uuid,jsonb,text)')
 ),
 fn_state AS (
@@ -268,18 +267,19 @@ checks(ord, kind, check_name, passed, evidence, source) AS (
     'reconcile_item_org (20261118073218); ruling C11 (a), #1649; raiseHeldLines subjects'
   FROM subject_state
   UNION ALL
-  SELECT 12, 'required', 'C12 work order door checks the cap before Xero (persist v2)',
-    present AND service_role_runs AND NOT browser_runs,
-    jsonb_build_object('function', signature, 'present', present,
-      'service_role_runs', service_role_runs, 'browser_runs', browser_runs),
-    'FU49 item 3; migration PR A (not on main at writing)'
-  FROM fn_state WHERE id = 'persist_v2'
+  -- FU49 item 3 is code only (#1664): the door moves its draft to approved
+  -- before any Xero contact or bill call, so the guard checks it first. No
+  -- database object carries it, so SQL cannot see it.
+  SELECT 12, 'not_checked', 'C12 work order door checks the cap before Xero (code, #1664)',
+    NULL, jsonb_build_object('how',
+      'git merge-base --is-ancestor <#1664 merge> <ops_api_version commit_sha>'),
+    'FU49 item 3; #1664'
   UNION ALL
   SELECT 13, 'required', 'C13 office can decide a held line',
     present AND service_role_runs AND NOT browser_runs,
     jsonb_build_object('function', signature, 'present', present,
       'service_role_runs', service_role_runs, 'browser_runs', browser_runs),
-    'P1-05.10; migration PR A (not on main at writing)'
+    'P1-05.10; decide_held_trade_line is not on main at writing'
   FROM fn_state WHERE id = 'decide'
   UNION ALL
   SELECT 14, 'required', 'C14 every cap family migration is in the ledger',
