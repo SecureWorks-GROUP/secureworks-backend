@@ -1309,3 +1309,4 @@ ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|constra
 # run, so ops-api must not deploy ahead of the migration.
 ops-api|supabase/migrations/20261118170500_trade_pay_run_release.sql|column|trade_pay_run_invoices.released_at
 ops-api|supabase/migrations/20261118170500_trade_pay_run_release.sql|function|release_trade_pay_run_invoice
+ops-api|supabase/migrations/20261118194000_expense_unbooked_job_mark.sql|column|expense_receipts.unbooked_job_id
