@@ -1,6 +1,6 @@
-import { assertEquals } from 'jsr:@std/assert@1'
+import { assertEquals, assertRejects } from 'jsr:@std/assert@1'
 import { syncTrackingPL } from './index.ts'
-import { divisionSyncOfficeHours, plByDivisionRows } from './pl_by_division.ts'
+import { divisionSyncOfficeHours, plByDivisionRows, storeDivisionMonth } from './pl_by_division.ts'
 
 type AccountRow = ReturnType<typeof plByDivisionRows>[number]
 
@@ -23,8 +23,8 @@ function report(header = divisions) {
       account('a', ['3', '0', '-1.25', '1.75']), account('b', ['0', '4', '', '4']),
       { RowType: 'Row', Cells: [{ Value: 'No account attribute' }] }, summary,
     ] },
-    { RowType: 'Section', Title: 'LESS COST OF SALES', Rows: [account('c', ['0', 'invalid', '2', '2'])] },
-    { RowType: 'Section', Title: 'Gross Profit', Rows: [account('ignored', ['8', '0', '0', '8'])] },
+    { RowType: 'Section', Title: 'LESS COST OF SALES', Rows: [account('c', ['0', '', '2', '2'])] },
+    { RowType: 'Section', Title: 'Gross Profit', Rows: [summary] },
   ] }
 }
 
@@ -104,7 +104,7 @@ function syncFixture() {
     if (state.fault === 'unreadable') return { Reports: [{ Rows: [] }] }
     return { Reports: [state.report] }
   }, () => state.now)
-  return { state, requests, reports, accounts, trims, run }
+  return { state, requests, reports, accounts, trims, run, client }
 }
 
 Deno.test('off, unreadable switch and office hours keep the existing result, totals and Xero requests', async () => {
@@ -114,7 +114,7 @@ Deno.test('off, unreadable switch and office hours keep the existing result, tot
     f.state.fault = mode
     if (mode === 'office') f.state.now = new Date('2026-11-18T02:00:00Z')
     const result = await f.run()
-    assertEquals(Object.keys(result), ['success', 'months_synced', 'options_synced', 'months_failed', 'results'])
+    assertEquals(Object.keys(result), ['success', 'months_synced', 'options_synced', 'months_failed', 'results', 'drafts_checked'])
     assertEquals(result.months_synced, 12)
     assertEquals(f.accounts.size, 0)
     assertEquals(f.trims, [])
@@ -173,4 +173,59 @@ Deno.test('a recognised all-zero report clears the previous month rows', async (
   ] }
   assertEquals((await f.run()).account_rows, 0)
   assertEquals(f.accounts.size, 0)
+})
+
+const totalOnlyHeader = { RowType: 'Header', Cells: [{ Value: '' }, { Value: 'Total' }] }
+const later = new Date(now.getTime() + 1000).toISOString()
+
+Deno.test('a total-only reread trims stale accounts only in the zero-activity month', async () => {
+  for (const lines of [[], [account('a', ['0.00'])]]) {
+    const f = syncFixture()
+    const otherMonth = '2026-10-01'
+    for (const period of [month, otherMonth]) {
+      assertEquals(await storeDivisionMonth(f.client, report(), org, period, now.toISOString()), 4)
+    }
+    const otherRows = [...f.accounts.values()].filter(row => row.month === otherMonth)
+    const empty = { Rows: [totalOnlyHeader, { RowType: 'Section', Title: 'Income', Rows: lines }] }
+    assertEquals(await storeDivisionMonth(f.client, empty, org, month, later), 0)
+    assertEquals([...f.accounts.values()], otherRows)
+    assertEquals(f.trims, [month, otherMonth, month])
+  }
+})
+
+async function assertMonthPreserved(badReport: Parameters<typeof storeDivisionMonth>[1], code: string) {
+  const f = syncFixture()
+  await storeDivisionMonth(f.client, report(), org, month, now.toISOString())
+  const before = [...f.accounts.values()]
+  const error = await assertRejects(() => storeDivisionMonth(f.client, badReport, org, month, later), Error)
+  assertEquals(error.message, code)
+  assertEquals([...f.accounts.values()], before)
+  assertEquals(f.trims, [month])
+}
+
+Deno.test('a total-only account with non-zero or unreadable activity refuses the month', async () => {
+  for (const value of ['-1', 'invalid']) {
+    await assertMonthPreserved({ Rows: [
+      totalOnlyHeader, { RowType: 'Section', Title: 'Income', Rows: [account('a', [value])] },
+    ] }, 'division_report_columns_missing')
+  }
+  await assertMonthPreserved({ Rows: [
+    totalOnlyHeader, { RowType: 'Section', Title: 'Income', Rows: [account('a', [])] },
+  ] }, 'division_report_cells_missing')
+})
+
+Deno.test('a non-finite account cell refuses the whole month', async () => {
+  for (const values of [['0', 'invalid', '0', '0'], ['0', '0', '0', 'Infinity']]) {
+    const badReport = report()
+    badReport.Rows[2].Rows = [account('c', values)]
+    await assertMonthPreserved(badReport, 'division_report_amount_invalid')
+  }
+})
+
+Deno.test('an unknown or untitled section containing an account refuses the whole month', async () => {
+  for (const title of ['Unknown', '']) {
+    const badReport = report()
+    badReport.Rows.push({ RowType: 'Section', Title: title, Rows: [account('d', ['0', '1', '0', '1'])] })
+    await assertMonthPreserved(badReport, 'division_report_section_unknown')
+  }
 })

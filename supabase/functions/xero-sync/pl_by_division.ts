@@ -29,6 +29,10 @@ function accountSection(title: string): Section | undefined {
   if (name.includes('expense')) return 'expenses'
 }
 
+function accountIdFor(row: ReportRow): string | undefined {
+  return row.Cells?.[0]?.Attributes?.find(attr => attr.Id === 'account')?.Value
+}
+
 export function plByDivisionRows(report: { Rows?: ReportRow[] }, orgId: string, monthFirstDay: string, nowIso: string): AccountRow[] {
   const header = report?.Rows?.find(row => row.RowType === 'Header')?.Cells
   if (!header || header.length < 2) throw new Error('division_report_header_missing')
@@ -36,26 +40,37 @@ export function plByDivisionRows(report: { Rows?: ReportRow[] }, orgId: string, 
     name: String(cell.Value ?? '').trim() || 'Unassigned',
     index: i + 1,
   })).filter(column => column.name.toLowerCase() !== 'total')
-  if (!columns.length) throw new Error('division_report_columns_missing')
 
   const rows: AccountRow[] = []
   let hasSection = false
   for (const group of report.Rows!) {
-    if (group.RowType !== 'Section' || !group.Title) continue
-    const section = accountSection(group.Title)
-    if (!section) continue
+    if (group.RowType !== 'Section') continue
+    const section = accountSection(group.Title ?? '')
+    if (!section) {
+      if (group.Rows?.some(line => line.RowType === 'Row' && accountIdFor(line))) {
+        throw new Error('division_report_section_unknown')
+      }
+      continue
+    }
     if (!Array.isArray(group.Rows)) throw new Error('division_report_rows_missing')
     hasSection = true
     for (const line of group.Rows) {
       if (line.RowType !== 'Row') continue
       const cells = line.Cells
       if (!cells?.length) throw new Error('division_report_cells_missing')
-      const accountId = cells[0].Attributes?.find(attr => attr.Id === 'account')?.Value
+      const accountId = accountIdFor(line)
       if (!accountId) continue
+      if (cells.length < 2) throw new Error('division_report_cells_missing')
+      const amounts = cells.slice(1).map(cell => Number(cell.Value ?? NaN))
+      // Xero can omit every tracking column for a month with no activity.
+      if (!columns.length && amounts.some(amount => amount !== 0)) {
+        throw new Error('division_report_columns_missing')
+      }
+      if (amounts.some(amount => !Number.isFinite(amount))) throw new Error('division_report_amount_invalid')
       for (const { name, index } of columns) {
         if (!cells[index]) throw new Error('division_report_cells_missing')
-        const amount = Number(cells[index].Value)
-        if (!Number.isFinite(amount) || amount === 0) continue
+        const amount = amounts[index - 1]
+        if (amount === 0) continue
         rows.push({
           org_id: orgId, month: monthFirstDay, tracking_option: name, section,
           account_id: accountId, account_name: String(cells[0].Value ?? ''),
