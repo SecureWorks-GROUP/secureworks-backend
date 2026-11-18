@@ -5,7 +5,7 @@ import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdWholeJob, isKep
 import { readJobAmountsLeft, type LineHoldFacts } from './trade_line_hold.ts'
 import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine, ownMoneyReimbursementItems, reimbursementSkipAnswer } from './trade_invoice_reimbursement.ts'
 import { ExpenseCaptureError, expenseCaptureFields, expenseNextStep, refuseBilledReimbursement } from './expense_capture_v2.ts'
-import { assertExpenseJobIsCallers, expenseJobIdOf } from './expense_own_job.ts'
+import { assertUnbookedApprovalConfirmed, expenseJobIdOf, expenseUnbookedJobMark } from './expense_own_job.ts'
 import { listExpenseReceipts } from './expense_list.ts'
 import { factReadOn } from './fact_reader_switch.ts'
 import { rejectTradeInvoiceStorage } from './trade_invoice_rejection.ts'
@@ -65088,8 +65088,8 @@ export async function submitExpense(
     submitted_by ||
     null
 
-  // A trade files only against a job they are booked on (same rule as the app).
-  await assertExpenseJobIsCallers(client, {
+  // A receipt on a job its submitter is not booked on saves, marked for the office.
+  const unbookedJobId = await expenseUnbookedJobMark(client, {
     jobId: job_id,
     userId: authCtx?.mode === 'jwt' ? authCtx.user?.id : null,
     staff: authCtx?.mode !== 'jwt' || _opsApiStaffOperatorRole(authCtx?.user?.role),
@@ -65146,6 +65146,8 @@ export async function submitExpense(
     approval_routed_to_user_id: routedUserId,
     ...capture,
   }
+  // Only a marked receipt carries the key, so an unmarked insert is main's.
+  if (unbookedJobId) insertRow.unbooked_job_id = unbookedJobId
 
   const { data: expense, error: insertErr } = await client.from('expense_receipts')
     .insert(insertRow)
@@ -65290,6 +65292,7 @@ export async function submitExpense(
     routed_to: routedTo,
     flow: inferredFlow,
     next_step: expenseNextStep(insertRow),
+    ...(unbookedJobId ? { not_booked_on_job: true } : {}),
   }
 }
 
@@ -65306,7 +65309,7 @@ export async function updateExpense(
   if (!expense_id) throw new ApiError('expense_id required', 400)
 
   const { data: row, error: loadErr } = await client.from('expense_receipts')
-    .select('id, submitted_by, status, receipt_sha256, job_id, stock_division, business_category, payment_method, xero_bill_id, updated_at')
+    .select('id, submitted_by, status, receipt_sha256, job_id, stock_division, business_category, payment_method, xero_bill_id, unbooked_job_id, updated_at')
     .eq('id', expense_id)
     .maybeSingle()
   if (loadErr) throw new ApiError('Expense could not be read.', 503)
@@ -65355,16 +65358,20 @@ export async function updateExpense(
   if (body.stock_division === undefined && !row.stock_division) delete capture.stock_division
   Object.assign(updates, capture)
   const result = { ...row, ...updates }
-  // Moving a receipt onto a job: a trade only onto a job they are booked on.
-  // Checked on the job id that would be written. The job already on the row is
-  // not re-checked, so a resend of it still saves.
-  const writtenJobId = 'job_id' in updates ? expenseJobIdOf(updates.job_id) : null
-  if (writtenJobId && writtenJobId !== expenseJobIdOf(row.job_id)) {
-    await assertExpenseJobIsCallers(client, {
-      jobId: writtenJobId,
-      userId: authCtx?.mode === 'jwt' ? authCtx.user?.id : null,
-      staff: authCtx?.mode !== 'jwt' || _opsApiStaffOperatorRole(authCtx?.user?.role),
-    })
+  // Moving a receipt onto a job its submitter is not booked on marks it for the
+  // office; clearing the job, or the office choosing it, clears the mark. Read
+  // on the job id that would be written. The job already on the row keeps its
+  // mark as it is, so a resend changes nothing.
+  if ('job_id' in updates) {
+    const writtenJobId = expenseJobIdOf(updates.job_id)
+    if (writtenJobId !== expenseJobIdOf(row.job_id)) {
+      const mark = await expenseUnbookedJobMark(client, {
+        jobId: writtenJobId,
+        userId: authCtx?.mode === 'jwt' ? authCtx.user?.id : null,
+        staff: authCtx?.mode !== 'jwt' || _opsApiStaffOperatorRole(authCtx?.user?.role),
+      })
+      if (mark !== (row.unbooked_job_id ?? null)) updates.unbooked_job_id = mark
+    }
   }
   if (body.capture_version === 2 && !result.job_id && !result.stock_division) {
     const { data: flag, error } = await client.from('feature_flags').select('enabled')
@@ -65379,15 +65386,16 @@ export async function updateExpense(
     updates.receipt_sha256 = body.receipt_sha256
   }
 
+  const updatedFields = () => Object.keys(updates).filter(k => k !== 'updated_at' && k !== 'unbooked_job_id')
   if (Object.keys(updates).length === 0) {
-    return { success: true, updated_fields: [], expense_id, next_step: expenseNextStep(row) }
+    return { success: true, updated_fields: [], expense_id, next_step: expenseNextStep(row), ...(row.unbooked_job_id ? { not_booked_on_job: true } : {}) }
   }
 
   updates.updated_at = new Date().toISOString()
   let save = client.from('expense_receipts').update(updates)
     .eq('id', expense_id).eq('updated_at', row.updated_at).eq('status', row.status)
   if (body.flow === 'reimbursement' || body.payment_method === 'personal_card') save = save.is('xero_bill_id', null)
-  const { data: saved, error: saveError } = await save.select('job_id, stock_division, business_category, payment_method').maybeSingle()
+  const { data: saved, error: saveError } = await save.select('job_id, stock_division, business_category, payment_method, unbooked_job_id').maybeSingle()
   if (saveError) throw new ApiError('Expense could not be saved.', 503)
   if (!saved) throw new ApiError('The receipt changed. Reload it and try again.', 409)
 
@@ -65395,11 +65403,11 @@ export async function updateExpense(
     event_type: 'expense.updated',
     entity_type: 'expense_receipt',
     entity_id: expense_id,
-    payload: { updated_fields: Object.keys(updates).filter(k => k !== 'updated_at') },
+    payload: { updated_fields: updatedFields(), ...('unbooked_job_id' in updates ? { not_booked_on_job: Boolean(updates.unbooked_job_id) } : {}) },
     metadata: { auth_mode: authCtx?.mode || 'api_key', operator: authCtx?.user?.id || null },
   })
 
-  return { success: true, expense_id, updated_fields: Object.keys(updates).filter(k => k !== 'updated_at'), next_step: expenseNextStep(saved) }
+  return { success: true, expense_id, updated_fields: updatedFields(), next_step: expenseNextStep(saved), ...(saved.unbooked_job_id ? { not_booked_on_job: true } : {}) }
 }
 
 // suggestJobForExpense — ranks likely jobs for an expense submission.
@@ -65551,7 +65559,7 @@ export async function approveExpense(
 
   // Load the row up front so we can authorise the caller against the routing.
   const { data: existing, error: loadErr } = await client.from('expense_receipts')
-    .select('id, status, approval_routed_to, approval_routed_to_user_id, submitted_by')
+    .select('id, status, approval_routed_to, approval_routed_to_user_id, submitted_by, unbooked_job_id')
     .eq('id', expense_id)
     .maybeSingle()
   if (loadErr) throw loadErr
@@ -65581,6 +65589,9 @@ export async function approveExpense(
   }
   // api_key path: server-to-server (e.g. automated JARVIS). Allowed; approverId stays null.
 
+  // A receipt marked "not booked on this job" is approved only with a deliberate confirm.
+  assertUnbookedApprovalConfirmed(status, existing.unbooked_job_id, body.confirm_unbooked)
+
   const updates: Record<string, any> = {
     status,
     approved_by: approverId,
@@ -65590,7 +65601,19 @@ export async function approveExpense(
   if (status === 'queried' && query_reason) updates.query_reason = String(query_reason).slice(0, 500)
   if (status === 'rejected' && rejection_reason) updates.rejection_reason = String(rejection_reason).slice(0, 500)
 
-  await client.from('expense_receipts').update(updates).eq('id', expense_id)
+  if (status === 'approved') {
+    // Approve exactly the mark that was read: a receipt marked (or re-marked
+    // onto another job) since is refused for a reload, never approved unseen.
+    let approve = client.from('expense_receipts').update(updates).eq('id', expense_id)
+    approve = existing.unbooked_job_id
+      ? approve.eq('unbooked_job_id', existing.unbooked_job_id)
+      : approve.is('unbooked_job_id', null)
+    const { data: approvedRow, error: approveErr } = await approve.select('id').maybeSingle()
+    if (approveErr) throw new ApiError('Expense could not be saved.', 503)
+    if (!approvedRow) throw new ApiError('The receipt changed. Reload it and try again.', 409)
+  } else {
+    await client.from('expense_receipts').update(updates).eq('id', expense_id)
+  }
 
   // Resolve the annotation
   await client.from('ai_annotations')
@@ -65605,6 +65628,7 @@ export async function approveExpense(
     metadata: { operator: approverId, operator_label: approverLabel, auth_mode: authCtx.mode },
     payload: status === 'queried' ? { query_reason: updates.query_reason || null }
            : status === 'rejected' ? { rejection_reason: updates.rejection_reason || null }
+           : existing.unbooked_job_id ? { unbooked_confirmed: true }
            : undefined,
   })
 

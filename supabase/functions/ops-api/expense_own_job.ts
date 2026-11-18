@@ -1,14 +1,16 @@
-// A trade files a receipt only against a job they are booked on.
+// A receipt saved on a job its submitter is not booked on is marked for the
+// office (director 18 Nov 2026: flag, not refuse; a manager or runner buying
+// for another crew must not be pushed onto the wrong job).
 //
-// The Trade App's receipt screen already offers a trade only their own jobs:
-// office roles (admin, owner, ops_manager) pick any job, everyone else picks a
-// job they hold a booking on (their own job_assignments row that is not
-// cancelled and is not a watcher row). This is the same rule on the server, so
-// submit_expense and update_expense refuse a job the caller is not on, whatever
-// the screen sent. It is a correctness check and reads no switch.
+// The booking rule is the Trade App receipt screen's: office roles (admin,
+// owner, ops_manager) and the server key may use any job and are never marked;
+// any other signed-in caller is booked when they hold their own job_assignments
+// row on that job that is not cancelled and is not a ghost or watcher row.
 //
-// A receipt with no job (general business, or a division's stock) is never
-// checked here. A failed read refuses; it never counts as booked.
+// The mark is expense_receipts.unbooked_job_id: the job the receipt was saved
+// on without a confirmed booking. A failed booking read never counts as
+// booked, so it marks too. The receipt always saves. Approving a marked
+// receipt needs a deliberate confirm (approveExpense). Reads no switch.
 import { ExpenseCaptureError } from "./expense_capture_v2.ts";
 
 // Bounded: a trade holds at most one row per job and date.
@@ -22,19 +24,18 @@ export function expenseJobIdOf(value: unknown): string | null {
 }
 
 /**
- * Refuses unless the caller may file a receipt against jobId.
- * `staff` is true for the office (api_key, or a JWT with an office role).
+ * The mark to store for a receipt saved on jobId: jobId when the caller is not
+ * confirmed booked there, null when booked, office, or no job. Never throws.
  * Reads job_assignments by (job_id, user_id), the leading columns of
  * job_assignments_job_user_date_key.
  */
-export async function assertExpenseJobIsCallers(
+export async function expenseUnbookedJobMark(
   client: any,
   input: { jobId: unknown; userId: string | null | undefined; staff: boolean },
-): Promise<void> {
+): Promise<string | null> {
   const jobId = expenseJobIdOf(input.jobId);
-  if (!jobId || input.staff) return;
-  if (!input.userId) throw notYours();
-
+  if (!jobId || input.staff) return null;
+  if (!input.userId) return jobId;
   let res: { data?: unknown; error?: unknown };
   try {
     res = await client.from("job_assignments")
@@ -45,15 +46,37 @@ export async function assertExpenseJobIsCallers(
       .or("status.is.null,status.neq.cancelled")
       .limit(OWN_BOOKING_READ_LIMIT);
   } catch {
-    throw unreadable();
+    console.warn("[ops-api] expense_booking_read_failed", { job_id: jobId });
+    return jobId;
   }
-  if (res?.error || !Array.isArray(res?.data)) throw unreadable();
+  if (res?.error || !Array.isArray(res?.data)) {
+    console.warn("[ops-api] expense_booking_read_failed", { job_id: jobId });
+    return jobId;
+  }
   const booked = (res.data as Array<{ role?: unknown; status?: unknown }>).some(
     (a) =>
       String(a?.role ?? "").toLowerCase() !== "observer" &&
       String(a?.status ?? "").toLowerCase() !== "cancelled",
   );
-  if (!booked) throw notYours();
+  return booked ? null : jobId;
+}
+
+/**
+ * Approving a marked receipt needs body.confirm_unbooked === true, from any
+ * caller (server key included). Query and reject never need it.
+ */
+export function assertUnbookedApprovalConfirmed(
+  status: string,
+  unbookedJobId: unknown,
+  confirm: unknown,
+): void {
+  if (status !== "approved" || !expenseJobIdOf(unbookedJobId)) return;
+  if (confirm === true) return;
+  throw new ExpenseOwnJobError(
+    "expense_unbooked_confirm_needed",
+    "The person who sent this receipt is not booked on its job. Check the job, then confirm to approve.",
+    409,
+  );
 }
 
 // The app's general error reader shows userMessage before the code, so the
@@ -62,20 +85,4 @@ class ExpenseOwnJobError extends ExpenseCaptureError {
   override get body() {
     return { ...super.body, userMessage: this.message };
   }
-}
-
-function notYours() {
-  return new ExpenseOwnJobError(
-    "expense_job_not_yours",
-    "You are not booked on that job. Pick one of your jobs, or ask the office.",
-    403,
-  );
-}
-
-function unreadable() {
-  return new ExpenseOwnJobError(
-    "expense_job_unreadable",
-    "Your jobs could not be checked. Try again.",
-    503,
-  );
 }

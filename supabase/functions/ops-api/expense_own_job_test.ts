@@ -2,11 +2,17 @@ import {
   assertEquals,
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { submitExpense, updateExpense } from "./index.ts";
+import {
+  ApiError,
+  approveExpense,
+  submitExpense,
+  updateExpense,
+} from "./index.ts";
 import { ExpenseCaptureError } from "./expense_capture_v2.ts";
 import {
-  assertExpenseJobIsCallers,
+  assertUnbookedApprovalConfirmed,
   expenseJobIdOf,
+  expenseUnbookedJobMark,
 } from "./expense_own_job.ts";
 
 const expenseId = "ZZTEST-receipt";
@@ -52,10 +58,14 @@ function store(opts: {
     stock_division: null,
     payment_method: "company_card",
     xero_bill_id: null,
+    unbooked_job_id: null,
     ...opts.row,
   };
   const state = {
     failBookings: "" as "" | "error" | "throw" | "shape",
+    failApprove: false,
+    // Mark the row between approve's read and its write.
+    markBeforeApprove: "" as string,
     bookingReads: 0,
     inserts: 0,
     writes: 0,
@@ -106,6 +116,13 @@ function store(opts: {
             return { data: { enabled: Boolean(opts.switchOn) } };
           }
           if (table === "expense_receipts") {
+            if (changes && "approved_at" in changes) {
+              if (state.failApprove) return { data: null, error: { code: "57014" } };
+              if (state.markBeforeApprove) {
+                row.unbooked_job_id = state.markBeforeApprove;
+                state.markBeforeApprove = "";
+              }
+            }
             if (!matches.every(([k, v]) => (row[k] ?? null) === v)) {
               return { data: null };
             }
@@ -146,149 +163,39 @@ function store(opts: {
   return { client, state, read: () => ({ ...row }) };
 }
 
-async function refused(fn: () => Promise<unknown>, status: number, code: string) {
-  const err = await assertRejects(fn, ExpenseCaptureError);
-  const body = err.body as Record<string, unknown>;
-  assertEquals([err.status, body.error], [status, code]);
-  // Words for the app: message and userMessage, never only the code.
-  assertEquals(body.userMessage, body.message);
-  assertEquals(/^[a-z0-9_]+$/.test(String(body.message)), false);
-}
-
 const submitBody = (job_id: unknown) => ({
   job_id,
   no_receipt_reason: "unavailable",
   payment_method: "company_card",
 });
 
-Deno.test("submit: a trade is refused a job they are not booked on, and nothing is saved", async () => {
-  for (const switchOn of [false, true]) {
-    const { client, state } = store({ switchOn });
-    await refused(
-      () => submitExpense(client, submitBody(otherJob), trade),
-      403,
-      "expense_job_not_yours",
-    );
-    assertEquals(state.inserts, 0);
-  }
-});
+// ---- marked: saved on the picked job, carrying the mark ----
 
-Deno.test("submit: a trade on the job saves against it", async () => {
-  const { client, read } = store();
-  await submitExpense(client, submitBody(ownJob), trade);
-  assertEquals(read().job_id, ownJob);
-});
-
-Deno.test("submit: no job (general business) saves without a booking read", async () => {
-  for (const job of [null, undefined, ""]) {
-    const { client, read, state } = store({ bookings: [] });
-    await submitExpense(client, submitBody(job), trade);
-    assertEquals([read().job_id, state.bookingReads], [null, 0]);
-  }
-});
-
-Deno.test("submit: a division's stock with no job saves without a booking read", async () => {
-  const { client, read, state } = store({ bookings: [] });
-  await submitExpense(client, {
-    ...submitBody(null),
-    capture_version: 2,
-    stock_division: "fencing",
-  }, trade);
-  assertEquals([read().job_id, read().stock_division, state.bookingReads], [
-    null,
-    "fencing",
-    0,
-  ]);
-});
-
-Deno.test("submit: the office and the server key file against any job unchecked", async () => {
-  for (const caller of [office, serverKey]) {
-    const { client, read, state } = store({ bookings: [] });
-    await submitExpense(client, submitBody(otherJob), caller);
-    assertEquals([read().job_id, state.bookingReads], [otherJob, 0]);
-  }
-});
-
-Deno.test("submit: a division manager needs their own booking too, as on the phone", async () => {
-  const { client } = store();
-  await refused(
-    () => submitExpense(client, submitBody(otherJob), manager),
-    403,
-    "expense_job_not_yours",
-  );
-  await submitExpense(client, submitBody(ownJob), manager);
-});
-
-Deno.test("update: moving a receipt onto someone else's job is refused and the row is unchanged", async () => {
+Deno.test("marked: a trade's receipt on a job they are not booked on saves there, marked", async () => {
   for (const switchOn of [false, true]) {
     const { client, read, state } = store({ switchOn });
-    const before = read();
-    await refused(
-      () => updateExpense(client, { expense_id: expenseId, job_id: otherJob }, trade),
-      403,
-      "expense_job_not_yours",
-    );
-    assertEquals([read(), state.writes], [before, 0]);
+    const res = await submitExpense(client, submitBody(otherJob), trade);
+    assertEquals([state.inserts, read().job_id, read().unbooked_job_id], [1, otherJob, otherJob]);
+    assertEquals((res as Record<string, unknown>).not_booked_on_job, true);
   }
 });
 
-Deno.test("update: moving a receipt onto the trade's own job saves", async () => {
+Deno.test("marked: moving a receipt onto someone else's job saves and marks it", async () => {
   const { client, read } = store();
-  const res = await updateExpense(client, {
-    expense_id: expenseId,
-    job_id: ownJob,
-    capture_version: 2,
-  }, trade);
-  assertEquals([res.success, read().job_id, res.next_step], [
-    true,
-    ownJob,
-    "saved_against_job",
-  ]);
+  const res = await updateExpense(client, { expense_id: expenseId, job_id: otherJob }, trade);
+  assertEquals([res.success, read().job_id, read().unbooked_job_id], [true, otherJob, otherJob]);
+  assertEquals((res as Record<string, unknown>).not_booked_on_job, true);
+  // The mark is not reported as a field the caller changed.
+  assertEquals(res.updated_fields, ["job_id"]);
 });
 
-Deno.test("update: clearing the job (general business) saves without a booking read", async () => {
-  const { client, read, state } = store({ row: { job_id: ownJob }, bookings: [] });
-  await updateExpense(client, {
-    expense_id: expenseId,
-    job_id: null,
-    business_category: "vehicle",
-  }, trade);
-  assertEquals([read().job_id, state.bookingReads], [null, 0]);
+Deno.test("marked: a division manager buying for another crew saves, marked", async () => {
+  const { client, read } = store();
+  await submitExpense(client, submitBody(otherJob), manager);
+  assertEquals(read().unbooked_job_id, otherJob);
 });
 
-Deno.test("update: the job already on the receipt is not re-checked, so a resend still saves", async () => {
-  // e.g. the office put it on that job by hand, or the booking ended later.
-  const { client, read, state } = store({ row: { job_id: otherJob } });
-  await updateExpense(client, {
-    expense_id: expenseId,
-    job_id: otherJob,
-    vendor_name: "ZZTEST",
-  }, trade);
-  assertEquals([read().vendor_name, state.bookingReads], ["ZZTEST", 0]);
-});
-
-Deno.test("update: a job id sent beside a stock pick is not written, so it is not checked", async () => {
-  const { client, read, state } = store({ bookings: [] });
-  await updateExpense(client, {
-    expense_id: expenseId,
-    job_id: otherJob,
-    stock_division: "fencing",
-    capture_version: 2,
-  }, trade);
-  assertEquals([read().job_id, read().stock_division, state.bookingReads], [
-    null,
-    "fencing",
-    0,
-  ]);
-});
-
-Deno.test("update: the office may move a trade's receipt onto any job", async () => {
-  const { client, read } = store({ bookings: [] });
-  await updateExpense(client, { expense_id: expenseId, job_id: otherJob }, office);
-  assertEquals(read().job_id, otherJob);
-});
-
-Deno.test("cancelled, watcher and ghost rows are not a booking", async () => {
+Deno.test("marked: cancelled, watcher and ghost rows are not a booking", async () => {
   for (
     const b of [
       { status: "cancelled", role: "lead_installer" },
@@ -296,56 +203,181 @@ Deno.test("cancelled, watcher and ghost rows are not a booking", async () => {
       { status: "scheduled", role: "lead_installer", is_ghost: true },
     ]
   ) {
-    const { client, state } = store({
+    const { client, read } = store({
       bookings: [{ job_id: otherJob, user_id: tradeId, ...b }],
     });
-    await refused(
-      () => submitExpense(client, submitBody(otherJob), trade),
-      403,
-      "expense_job_not_yours",
-    );
-    assertEquals(state.inserts, 0);
+    await submitExpense(client, submitBody(otherJob), trade);
+    assertEquals(read().unbooked_job_id, otherJob);
   }
-  // A null status (legacy row) is still a booking.
+});
+
+Deno.test("marked: a failed booking read saves the receipt and marks it, never counted as booked", async () => {
+  for (const fail of ["error", "throw", "shape"] as const) {
+    const { client, state, read } = store();
+    state.failBookings = fail;
+    await submitExpense(client, submitBody(ownJob), trade);
+    assertEquals([state.inserts, read().job_id, read().unbooked_job_id], [1, ownJob, ownJob]);
+  }
+});
+
+Deno.test("marked: a JWT caller with no user id is marked", async () => {
+  const { client } = store();
+  assertEquals(
+    await expenseUnbookedJobMark(client, { jobId: ownJob, userId: null, staff: false }),
+    ownJob,
+  );
+});
+
+// ---- unmarked ----
+
+Deno.test("unmarked: a trade on the job saves against it, with main's insert and answer", async () => {
+  const { client, read } = store({ row: { unbooked_job_id: undefined } });
+  const res = await submitExpense(client, submitBody(ownJob), trade);
+  assertEquals(read().job_id, ownJob);
+  assertEquals("unbooked_job_id" in read(), false);
+  assertEquals("not_booked_on_job" in res, false);
+});
+
+Deno.test("unmarked: a null-status booking (legacy row) is a booking", async () => {
   const { client, read } = store({
     bookings: [{ job_id: otherJob, user_id: tradeId, status: null, role: null }],
   });
   await submitExpense(client, submitBody(otherJob), trade);
-  assertEquals(read().job_id, otherJob);
+  assertEquals(read().unbooked_job_id ?? null, null);
 });
 
-Deno.test("a failed booking read refuses with 503 and saves nothing; a retry after it clears saves", async () => {
-  for (const fail of ["error", "throw", "shape"] as const) {
-    const { client, state, read } = store();
-    state.failBookings = fail;
-    await refused(
-      () => submitExpense(client, submitBody(ownJob), trade),
-      503,
-      "expense_job_unreadable",
-    );
-    await refused(
-      () => updateExpense(client, { expense_id: expenseId, job_id: ownJob }, trade),
-      503,
-      "expense_job_unreadable",
-    );
-    assertEquals([state.inserts, state.writes], [0, 0]);
-    state.failBookings = "";
-    await updateExpense(client, { expense_id: expenseId, job_id: ownJob }, trade);
-    assertEquals(read().job_id, ownJob);
+Deno.test("unmarked: the office and the server key file on any job, no read", async () => {
+  for (const caller of [office, serverKey]) {
+    const { client, read, state } = store({ bookings: [] });
+    await submitExpense(client, submitBody(otherJob), caller);
+    assertEquals([read().job_id, read().unbooked_job_id ?? null, state.bookingReads], [otherJob, null, 0]);
   }
 });
 
-Deno.test("a JWT caller with no user id is refused a job", async () => {
-  const { client } = store();
-  await refused(
-    () =>
-      assertExpenseJobIsCallers(client, { jobId: ownJob, userId: null, staff: false }),
-    403,
-    "expense_job_not_yours",
+Deno.test("unmarked: moving onto the trade's own job clears an earlier mark", async () => {
+  const { client, read } = store({ row: { job_id: otherJob, unbooked_job_id: otherJob } });
+  const res = await updateExpense(client, { expense_id: expenseId, job_id: ownJob, capture_version: 2 }, trade);
+  assertEquals([read().job_id, read().unbooked_job_id, res.next_step], [ownJob, null, "saved_against_job"]);
+  assertEquals("not_booked_on_job" in res, false);
+});
+
+Deno.test("unmarked: the office moving a receipt onto any job clears the mark", async () => {
+  const { client, read } = store({ row: { job_id: otherJob, unbooked_job_id: otherJob }, bookings: [] });
+  await updateExpense(client, { expense_id: expenseId, job_id: ownJob }, office);
+  assertEquals([read().job_id, read().unbooked_job_id], [ownJob, null]);
+});
+
+Deno.test("resend: the job already on the receipt keeps its mark as it is, no read", async () => {
+  for (const mark of [null, otherJob]) {
+    const { client, read, state } = store({ row: { job_id: otherJob, unbooked_job_id: mark } });
+    await updateExpense(client, { expense_id: expenseId, job_id: otherJob, vendor_name: "ZZTEST" }, trade);
+    assertEquals([read().vendor_name, read().unbooked_job_id, state.bookingReads], ["ZZTEST", mark, 0]);
+  }
+});
+
+// ---- no job ----
+
+Deno.test("no job: general business saves unmarked without a booking read", async () => {
+  for (const job of [null, undefined, ""]) {
+    const { client, read, state } = store({ bookings: [] });
+    await submitExpense(client, submitBody(job), trade);
+    assertEquals([read().job_id, read().unbooked_job_id ?? null, state.bookingReads], [null, null, 0]);
+  }
+});
+
+Deno.test("no job: a division's stock saves unmarked; a job id beside it is not written or read", async () => {
+  const { client, read, state } = store({ bookings: [] });
+  await submitExpense(client, { ...submitBody(otherJob), capture_version: 2, stock_division: "fencing" }, trade);
+  assertEquals(
+    [read().job_id, read().stock_division, read().unbooked_job_id ?? null, state.bookingReads],
+    [null, "fencing", null, 0],
+  );
+  const moved = store({ bookings: [] });
+  await updateExpense(moved.client, {
+    expense_id: expenseId,
+    job_id: otherJob,
+    stock_division: "fencing",
+    capture_version: 2,
+  }, trade);
+  assertEquals(
+    [moved.read().job_id, moved.read().unbooked_job_id, moved.state.bookingReads],
+    [null, null, 0],
   );
 });
 
-Deno.test("job id reading", () => {
+Deno.test("no job: clearing the job clears the mark without a read", async () => {
+  const { client, read, state } = store({ row: { job_id: otherJob, unbooked_job_id: otherJob }, bookings: [] });
+  await updateExpense(client, { expense_id: expenseId, job_id: null, business_category: "vehicle" }, trade);
+  assertEquals([read().job_id, read().unbooked_job_id, state.bookingReads], [null, null, 0]);
+});
+
+// ---- approval of a marked receipt needs a deliberate confirm ----
+
+Deno.test("approve: a marked receipt is refused without confirm, from any caller, and is unchanged", async () => {
+  for (const caller of [office, serverKey]) {
+    const { client, read, state } = store({ row: { job_id: otherJob, unbooked_job_id: otherJob } });
+    const before = read();
+    for (const confirm of [undefined, false, "true", 1]) {
+      const err = await assertRejects(
+        () => approveExpense(client, { expense_id: expenseId, confirm_unbooked: confirm }, caller),
+        ExpenseCaptureError,
+      );
+      const body = err.body as Record<string, unknown>;
+      assertEquals([err.status, body.error], [409, "expense_unbooked_confirm_needed"]);
+      assertEquals(body.userMessage, body.message);
+    }
+    assertEquals([read(), state.writes], [before, 0]);
+  }
+});
+
+Deno.test("approve: a marked receipt approves with confirm_unbooked true, keeping its mark", async () => {
+  const { client, read } = store({ row: { job_id: otherJob, unbooked_job_id: otherJob } });
+  const res = await approveExpense(client, { expense_id: expenseId, confirm_unbooked: true }, office);
+  assertEquals([res.status, read().status, read().unbooked_job_id], ["approved", "approved", otherJob]);
+});
+
+Deno.test("approve: an unmarked receipt approves as on main, no confirm needed", async () => {
+  const { client, read } = store({ row: { job_id: ownJob } });
+  const res = await approveExpense(client, { expense_id: expenseId }, office);
+  assertEquals([res.success, res.status, read().status], [true, "approved", "approved"]);
+});
+
+Deno.test("approve: query and reject on a marked receipt need no confirm", async () => {
+  for (const intent of ["queried", "rejected"]) {
+    const { client, read } = store({ row: { job_id: otherJob, unbooked_job_id: otherJob } });
+    await approveExpense(client, { expense_id: expenseId, intent }, office);
+    assertEquals(read().status, intent);
+  }
+});
+
+Deno.test("approve: a receipt marked after the office read it is refused for a reload, never approved unseen", async () => {
+  const { client, read, state } = store({ row: { job_id: otherJob } });
+  state.markBeforeApprove = otherJob;
+  const err = await assertRejects(
+    () => approveExpense(client, { expense_id: expenseId }, office),
+    ApiError,
+  );
+  assertEquals(err.status, 409);
+  assertEquals(read().status, "pending");
+  // Retried after the reload, with the confirm, it approves.
+  await approveExpense(client, { expense_id: expenseId, confirm_unbooked: true }, office);
+  assertEquals(read().status, "approved");
+});
+
+Deno.test("approve: a failed approve write is a 503, never a success", async () => {
+  const { client, state } = store({ row: { job_id: ownJob } });
+  state.failApprove = true;
+  const err = await assertRejects(
+    () => approveExpense(client, { expense_id: expenseId }, office),
+    ApiError,
+  );
+  assertEquals(err.status, 503);
+});
+
+Deno.test("confirm rule and job id reading", () => {
+  assertUnbookedApprovalConfirmed("approved", null, undefined);
+  assertUnbookedApprovalConfirmed("queried", otherJob, undefined);
+  assertUnbookedApprovalConfirmed("approved", otherJob, true);
   assertEquals(
     [null, undefined, "", ownJob, ` ${ownJob}`].map(expenseJobIdOf),
     [null, null, null, ownJob, ` ${ownJob}`],
