@@ -101,6 +101,46 @@ export interface CreditRunReport {
 }
 const emptyCreditReport = (): CreditRunReport => ({ run: 0, applied: {}, skipped: {}, failed: {} });
 
+/**
+ * The bills a credit's lines follow (by document, or by a followed line), less
+ * a removed line, as the Reconcile list reads them (20261118195900). "labour"
+ * when one has an installer_bill line or a line on a labour account,
+ * "hidden" when one has a line on an account hidden from Reconcile, ours or
+ * Xero's (a zero line is not a cost line), else null. Reads nothing when the
+ * credit follows nothing; a failed read throws, so the credit is counted failed.
+ */
+export async function followedBillSkip(
+  sb: Sb,
+  orgId: string,
+  lines: Array<Record<string, unknown>>,
+  accounts: PeopleAccounts,
+): Promise<"labour" | "hidden" | null> {
+  const live = lines.filter((l) => l.not_counted_reason !== "line_removed");
+  const bills = new Set(live.filter((l) => l.follows_document_kind === "xero_bill" && typeof l.follows_document_id === "string")
+    .map((l) => String(l.follows_document_id)));
+  const followLines = [...new Set(live.map((l) => l.follows_line_id).filter((v): v is string => typeof v === "string" && !!v))];
+  if (followLines.length) {
+    // job_cost_lines primary key
+    const rows = await read<Array<Record<string, unknown>>>("read_followed_lines",
+      sb.from("job_cost_lines").select("document_kind,document_id").eq("org_id", orgId).in("id", followLines));
+    for (const r of rows ?? []) if (r.document_kind === "xero_bill" && typeof r.document_id === "string") bills.add(r.document_id);
+  }
+  if (!bills.size) return null;
+  const ids = [...bills];
+  // job_cost_lines_document_idx
+  const billLines = await read<Array<Record<string, unknown>>>("read_followed_bill_lines",
+    sb.from("job_cost_lines").select("kind,account_code").eq("org_id", orgId)
+      .eq("document_kind", "xero_bill").in("document_id", ids));
+  // installer_bill only, as the list's follow clause reads it: a super line takes
+  // its parent's account, which may be on no hidden account (director 04:38).
+  if ((billLines ?? []).some((l) => l.kind === "installer_bill")) return "labour";
+  const xero = await read<Array<{ line_items?: unknown }>>("read_followed_bill",
+    sb.from("xero_invoices").select("line_items").eq("org_id", orgId).in("xero_invoice_id", ids));
+  const xeroCodes = (xero ?? []).flatMap((b) =>
+    Array.isArray(b.line_items) ? (b.line_items as Array<Record<string, unknown>>).map((l) => l?.AccountCode) : []);
+  return hiddenSkip(accounts, [...(billLines ?? []).map((l) => l.account_code), ...xeroCodes]);
+}
+
 async function creditOne(
   sb: Sb,
   creditId: string,
@@ -109,7 +149,7 @@ async function creditOne(
   const subjectId = `xero_credit_note:${creditId}`;
   // job_cost_lines_document_idx
   const lines = await read<Array<Record<string, unknown>>>("read_credit_lines",
-    sb.from("job_cost_lines").select("org_id,line_key,amount_ex,state,needs_reason,account_code,document_number,document_date,party_id,party_name")
+    sb.from("job_cost_lines").select("org_id,line_key,amount_ex,state,needs_reason,account_code,document_number,document_date,party_id,party_name,follows_document_kind,follows_document_id,follows_line_id,not_counted_reason")
       .eq("document_kind", "xero_credit_note").eq("document_id", creditId));
   const counted = (lines ?? []).filter((l) => l.state != null);
   if (!counted.length) return { skipped: "no_counted_lines" };
@@ -127,6 +167,10 @@ async function creditOne(
   // A hidden account (301, 306, 475) on any line, ours or Xero's: never proposed.
   const hidden = hiddenSkip(accounts, [...(lines ?? []).map((l) => l.account_code), ...xeroLines.map((l) => l?.AccountCode)]);
   if (hidden) return { skipped: hidden === "labour" ? "labour_credit" : "hidden_account_credit" };
+  // A credit that follows a bill the matcher never proposes is not proposed
+  // either: the bill's lines, ours or Xero's (Carbon, director 04:21).
+  const followed = await followedBillSkip(sb, String(waiting.org_id), lines ?? [], accounts);
+  if (followed) return { skipped: followed === "labour" ? "labour_credit" : "hidden_account_credit" };
   const partyId = (note.xero_contact_id as string) ?? (waiting.party_id as string) ?? null;
   if (partyId) {
     const people = await read<Array<{ id: string }>>("read_trade_user",

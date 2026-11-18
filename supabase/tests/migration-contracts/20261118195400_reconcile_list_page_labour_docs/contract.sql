@@ -1,6 +1,8 @@
 BEGIN;
 SET LOCAL statement_timeout = '90s';
 -- A later body (people accounts) is live on the full stack: stand this one back up first.
+-- 20261118195900 replaces these bodies; stand them back first.
+\ir ../../../rollbacks/20261118195900_reconcile_hidden_xero_lines_down.sql
 \ir ../../../rollbacks/20261118195700_reconcile_people_accounts_down.sql
 -- Applies twice: the guard accepts this migration's own bodies.
 \ir ../../../migrations/20261118195400_reconcile_list_page_labour_docs.sql
