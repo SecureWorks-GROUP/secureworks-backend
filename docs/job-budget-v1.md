@@ -375,7 +375,14 @@ order fill are exactly as before.
   billed line is the trade's own; on a job another trade billed on, the entry
   carries `amount_hidden: true` and neither figure, and the words are only
   "This invoice is more than the agreed work order total. Ask the office."
-  (`WORK_ORDER_CAP_WORDS`, director ruling 18 Nov 2026). A maximum that
+  (`WORK_ORDER_CAP_WORDS`, director ruling 18 Nov 2026). The same rule holds
+  the two other places a trade sees what a job has left, with
+  `trade_line_hold_v1` on: `my_hours` gives `job_left_ex` null,
+  `job_left_hidden: true` and `job_left_words`, and a held line's words say
+  "this line is more than this job's work order has left" with no amount, its
+  `hold_detail.left_ex` and `allowed_ex` null and `left_hidden: true` (`LEFT_HIDDEN_WORDS`,
+  `trade_line_hold.ts`; the owner read is `readJobsBilledOnlyBy`, and a failed
+  owner read hides the amount). A maximum that
   cannot be read is `capped_unreadable` with a zero limit and the budget
   check's code in `unreadable_reason`: `labour_hourly_invalid` (no `hourly`,
   `{}`, any property missing or not a number, a rate or hours not above zero,

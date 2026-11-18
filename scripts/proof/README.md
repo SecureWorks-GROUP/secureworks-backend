@@ -83,7 +83,7 @@ overall row. Evidence is object names, counts, codes and dates; no people, no pa
 
 | File | Switch | Kinds of row |
 | --- | --- | --- |
-| `cap-switch-preconditions.sql` | `trade_line_hold_v1` (the cap and the held-line send) | C01-C14 required, F01-F02 fixture, F03 after send, N01-N03 not checked |
+| `cap-switch-preconditions.sql` | `trade_line_hold_v1` (the cap and the held-line send) | C01-C15 required, F01-F02 fixture, F03 after send, N01-N03 not checked |
 | `pay-run-switch-preconditions.sql` | `trade_pay_run_v1` (the weekly pay run) | P01-P09 required, P15 follow-up, F01 fixture, N01-N06 not checked |
 
 - `required`: must PASS before the switch goes on.

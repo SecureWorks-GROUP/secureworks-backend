@@ -20,6 +20,7 @@
 START TRANSACTION READ ONLY;
 
 SELECT to_regclass('public.trade_pay_settings') IS NOT NULL AS has_pay_settings,
+       to_regclass('public.work_order_cap_settings') IS NOT NULL AS has_cap_settings,
        to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS has_ledger,
        to_regclass('public.reconcile_items') IS NOT NULL
          AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
@@ -31,6 +32,11 @@ SELECT to_regclass('public.trade_pay_settings') IS NOT NULL AS has_pay_settings,
 \set pay_settings_rows 'SELECT inclusive_super_from, true AS readable FROM public.trade_pay_settings WHERE id = 1'
 \else
 \set pay_settings_rows 'SELECT NULL::date AS inclusive_super_from, false AS readable'
+\endif
+\if :has_cap_settings
+\set cap_settings_rows 'SELECT cap_start_on, true AS readable FROM public.work_order_cap_settings WHERE id = 1'
+\else
+\set cap_settings_rows 'SELECT NULL::date AS cap_start_on, false AS readable'
 \endif
 \if :has_held_reads
 \set held_rows 'SELECT l.id::text AS line_id, j.org_id, EXISTS (SELECT 1 FROM public.reconcile_items r WHERE r.kind = ''pay_line_held'' AND r.subject_table = ''trade_invoice_lines'' AND r.subject_id = l.id::text AND r.org_id = j.org_id) AS landed, true AS readable FROM public.trade_invoice_lines l JOIN public.jobs j ON j.id = l.job_id JOIN fixture_job f ON f.id = j.id WHERE l.hold_reason IS NOT NULL'
@@ -49,6 +55,7 @@ flags AS (
   WHERE flag_name IN ('trade_line_hold_v1', 'trade_pay_inclusive_super_v1')
 ),
 settings AS (:pay_settings_rows),
+cap_settings AS (:cap_settings_rows),
 ledger AS (:ledger_rows),
 perth AS (SELECT (now() AT TIME ZONE 'Australia/Perth')::date AS today),
 -- Columns the hold writes (20261117173901, 20261117172401).
@@ -288,6 +295,16 @@ checks(ord, kind, check_name, passed, evidence, source) AS (
       'versions', (SELECT count(*) FROM family), 'missing', coalesce(missing, '{}')),
     'supabase_migrations.schema_migrations'
   FROM ledger_state
+  UNION ALL
+  -- With no start date every job is out of the cap's scope
+  -- (work_order_cap_scope), so the switch would hold and cap nothing.
+  SELECT 15, 'required', 'C15 work order cap start date is set',
+    coalesce(c.readable, false) AND c.cap_start_on IS NOT NULL,
+    jsonb_build_object('settings_readable', coalesce(c.readable, false),
+      'settings_row', c.readable IS NOT NULL, 'cap_start_on', c.cap_start_on,
+      'today_perth', (SELECT today FROM perth)),
+    '20261118193817 (work_order_cap_settings, work_order_cap_scope); set only by set_work_order_cap_start'
+  FROM (SELECT 1) one LEFT JOIN cap_settings c ON true
   UNION ALL
   SELECT 20, 'fixture', 'F01 exactly one ZZTEST job with that number',
     (SELECT count(*) FROM fixture_job) = 1,

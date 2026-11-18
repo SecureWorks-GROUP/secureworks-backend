@@ -22,6 +22,7 @@ import {
   _opsApiRequestHandlerForTest,
   myHours,
 } from "./index.ts";
+import { LEFT_HIDDEN_WORDS } from "./trade_line_hold.ts";
 import {
   decideTradeInvoiceMode,
   isWorkOrderInvoiceItem,
@@ -344,7 +345,7 @@ const WEEK_END = "2026-11-08";
 
 const scopeReads = { n: 0 };
 function hoursClient(
-  world: { failJobs?: boolean; lineHold?: boolean; billedOnFence?: number; failBilled?: boolean; outOfScope?: string[]; failScope?: boolean } = {},
+  world: { failJobs?: boolean; lineHold?: boolean; billedOnFence?: number; failBilled?: boolean; outOfScope?: string[]; failScope?: boolean; fenceBilledBy?: string[] } = {},
 ) {
   const card = (id: string, jobId: string, type: string) => ({
     id,
@@ -377,6 +378,11 @@ function hoursClient(
       ? [{ flag_name: "trade_line_hold_v1", enabled: true }, { flag_name: "trade_pay_inclusive_super_v1", enabled: true }]
       : [],
     trade_pay_settings: world.lineHold ? [{ id: 1, inclusive_super_from: "2026-01-05" }] : [],
+    // Billed lines on the fencing job, one per trade named (made-up amounts).
+    trade_invoice_lines: (world.fenceBilledBy ?? []).map((user_id, i) => ({
+      id: `line-${i}`, trade_invoice_id: `inv-${i}`, job_id: FENCE, line_type: "labour", line_total_ex: 100,
+      trade_invoices: { id: `inv-${i}`, user_id, status: "approved" },
+    })),
   };
   return {
     rpc: (name: string, args?: any) => {
@@ -496,6 +502,22 @@ Deno.test("my_hours, held-line rule on: each card says what its job has left, an
   assertEquals(cards["card-fence"].job_capped, true);
 });
 
+Deno.test("cap left: my_hours shows a job's amount left only when every billed line on it is the trade's own", async () => {
+  // Trade A billed alone: A sees the figure.
+  const alone: any = await myHours(hoursClient({ lineHold: true, billedOnFence: 850.5, fenceBilledBy: [TRADE] }), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  const a = alone.assignments.find((c: any) => c.id === "card-fence");
+  assertEquals([a.job_left_ex, a.job_left_hidden, a.job_left_words], [1000, false, null]);
+  // Trade B billed on the same job too: A sees words, no amount.
+  const shared: any = await myHours(hoursClient({ lineHold: true, billedOnFence: 850.5, fenceBilledBy: [TRADE, "ZZTEST-TRADE-B"] }), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
+  const s = shared.assignments.find((c: any) => c.id === "card-fence");
+  assertEquals([s.job_left_ex, s.job_left_hidden, s.job_left_words], [null, true, LEFT_HIDDEN_WORDS.my_hours]);
+  assertEquals(s.job_capped, true, "still capped; only the figure is withheld");
+  assert(!JSON.stringify(s).includes("1000"), "no remainder anywhere on the card");
+  // A job with no approved amount says nothing either way.
+  const m = shared.assignments.find((c: any) => c.id === "card-makesafe");
+  assertEquals([m.job_left_ex, m.job_left_hidden, m.job_left_words], [null, false, null]);
+});
+
 Deno.test("FU49-9b my_hours, held-line rule on: a job outside the cap's start date has nothing left to show and job_capped false", async () => {
   const out: any = await myHours(hoursClient({ lineHold: true, billedOnFence: 850.5, outOfScope: [FENCE] }), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
   assert(!("job_left_unavailable" in out));
@@ -519,7 +541,10 @@ Deno.test("my_hours, held-line rule off: no line_hold and no job_left_ex", async
   scopeReads.n = 0;
   const out: any = await myHours(hoursClient(), TRADE, new URLSearchParams({ week_ending: WEEK_END }));
   assert(!("line_hold" in out) && !("job_left_unavailable" in out));
-  for (const a of out.assignments) assert(!("job_left_ex" in a) && !("job_capped" in a));
+  for (const a of out.assignments) {
+    assert(!("job_left_ex" in a) && !("job_capped" in a));
+    assert(!("job_left_hidden" in a) && !("job_left_words" in a));
+  }
   assertEquals(scopeReads.n, 0, "switch off reads no cap scope");
 });
 
