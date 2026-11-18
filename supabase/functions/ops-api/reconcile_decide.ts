@@ -11,11 +11,20 @@
 //   POST ?action=reconcile_undo  { decision_id }
 //     -> RPC reconcile_undo (P2-03.4).
 //
-// Behind feature_flags.reconcile_decide_v1 (ships off; missing or unreadable
-// is off). The person is reconDecisionUser(caller): only a verified staff
+// Behind feature_flags.reconcile_decide_v1 (ships off; a missing row is off;
+// an unreadable switch refuses 503 and changes nothing). The person is reconDecisionUser(caller): only a verified staff
 // session has one. A server key, the routine and an agent are refused 403
 // before the switch or the body is read. No body field or header names the
 // actor. Every message a caller can see is in RECONCILE_DECIDE_WORDS.
+//
+// Supplier credit notes are first-class: a credit is a cost document like a
+// bill (item kind `credit`, subject `xero_credit_note:<id>`, its lines
+// negative). place, split and overhead or division_stock apply to it the same
+// way; reconcile_decide checks every split part has its line's sign. A credit
+// waiting on an undecided bill (needs_reason follows_undecided) can be decided
+// directly: the person's decision is recorded on the credit's own lines, and
+// job_cost_lines_refollow never overwrites a person-decided line when the bill
+// is decided later.
 // Logs carry codes and ids only, never an amount or a document's words.
 
 import { reconDecisionUser } from "./recon_decisions.ts";
@@ -35,6 +44,8 @@ export class ReconcileDecideError extends Error {
 /** Every refusal the two doors give, its status and its words. */
 export const RECONCILE_DECIDE_WORDS: Record<string, [number, string]> = {
   // The door.
+  method_not_allowed: [405, "This door only accepts a POST."],
+  operator_org_required: [403, "Organisation access required."],
   person_session_required: [
     403,
     "A decision is made by a signed-in staff member, not a server key.",
@@ -235,7 +246,7 @@ export function reconcileUndoInput(body: unknown): number {
   return Number.isSafeInteger(id) && id > 0 ? id : bad();
 }
 
-/** Missing or unreadable is off. */
+/** A missing row is off; an unreadable switch refuses 503. */
 async function decideSwitchOn(client: Client): Promise<boolean> {
   let read: { data: unknown; error: unknown };
   try {

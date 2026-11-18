@@ -261,8 +261,30 @@ Deno.test("undo: calls reconcile_undo with the session user; newer decision is 4
 
 Deno.test("words: every message is plain, with no code, underscore, dollar or em dash", () => {
   for (const [code, [status, words]] of Object.entries(RECONCILE_DECIDE_WORDS)) {
-    assert([400, 403, 404, 409, 500, 503].includes(status), code);
+    assert([400, 403, 404, 405, 409, 500, 503].includes(status), code);
     assert(!/[_$]|\u2014/.test(words), `${code}: ${words}`);
     assert(!words.includes("reconcile"), code);
   }
+});
+
+Deno.test("credit notes: a credit item is decided like a bill, negative parts sent as they are", async () => {
+  // A supplier credit waiting on an undecided bill: the person places it
+  // directly; reconcile_decide records it on the credit's own lines.
+  const placed = world({ kind: "credit" });
+  await reconcileDecide(fake(placed) as any, { ...place, accepted_suggestion: false }, staff);
+  assertEquals([placed.rpcs[0].fn, placed.rpcs[0].args.p_action], ["reconcile_decide", "place"]);
+  const split = world({ kind: "credit" });
+  const parts = [
+    { line_id: LINE, target: "job", job_id: JOB_A, amount_ex: -60 },
+    { line_id: LINE, target: "job", job_id: JOB_B, amount_ex: -40 },
+  ];
+  await reconcileDecide(fake(split) as any, { ...place, action: "split", parts }, staff);
+  assertEquals(split.rpcs[0].args.p_parts, parts);
+  const filed = world({ kind: "credit" });
+  await reconcileDecide(fake(filed) as any, { item_id: ITEM, shown_hash: "abc", action: "overhead" }, staff);
+  assertEquals(filed.rpcs[0].args.p_action, "overhead");
+  // A part of the wrong sign is the database's refusal, in plain words.
+  const wrong = world({ kind: "credit", rpcError: { code: "P0001", message: "reconcile_parts_do_not_add_up" } });
+  const err = await refused(reconcileDecide(fake(wrong) as any, { ...place, action: "split", parts }, staff));
+  assertEquals([err.status, err.message], [409, "The parts do not add up to the line."]);
 });

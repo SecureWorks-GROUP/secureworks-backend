@@ -1,6 +1,7 @@
 -- P2-03.7 (Follow-up 66): the switch for the Reconcile decide and undo doors.
 -- Ships off; only the director turns it on. Inserts one row and changes
--- nothing else. ops-api reads a missing or unreadable row as off.
+-- nothing else. ops-api reads a missing row as off and refuses (503) when the
+-- switch cannot be read.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 

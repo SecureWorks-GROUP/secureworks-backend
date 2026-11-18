@@ -622,7 +622,7 @@ import { linkSiteJobs, SiteLinkError } from './site_links.ts'
 import { ledgerPersonEdit, LedgerPersonEditError } from './ledger_person_edit.ts'
 import { contextJobMail, ContextJobReconError, reconJobItems } from './context_job_reconciliation.ts'
 import { reconDailyList, reconRecordDecision, ReconDecisionError } from './recon_decisions.ts'
-import { ReconcileDecideError, reconcileDecide, reconcileUndo } from './reconcile_decide.ts'
+import { ReconcileDecideError, reconcileDecide, reconcileDecideRefusal, reconcileUndo } from './reconcile_decide.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
 import {
   approvedSendSealSecret,
@@ -9512,14 +9512,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // which ships off. Not on the routine, agent-read or trade lists.
       case 'reconcile_decide':
       case 'reconcile_undo': {
-        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
-        if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
         const reconcileCaller = {
           authMode,
           userId: authMode === 'jwt' ? authUser?.id : null,
           isStaff: authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role),
         }
         try {
+          if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) throw reconcileDecideRefusal('operator_org_required')
+          if (req.method !== 'POST') throw reconcileDecideRefusal('method_not_allowed')
           return json(action === 'reconcile_decide'
             ? await reconcileDecide(client, body, reconcileCaller)
             : await reconcileUndo(client, body, reconcileCaller))
