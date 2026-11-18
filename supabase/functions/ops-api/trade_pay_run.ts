@@ -25,6 +25,7 @@
 import { buildPayView } from "./trade_pay_view.ts";
 import {
   reimbursementLinesTotalEx,
+  TRADE_INVOICE_EMPLOYER_SUPER_BASIS,
   validatePersistedTradeInvoiceMoney,
 } from "./trade_invoice_money.ts";
 
@@ -495,27 +496,37 @@ function stopsOf(list: unknown): Stop[] | null {
   return out;
 }
 
+/**
+ * The note check v2 gives an hourly line on a job whose work order has no
+ * agreed amount (director ruling 15:54: a note, shown and counted, never a
+ * stop). The director turns it into a stop later in the check itself.
+ */
+export const HOURLY_NO_AGREED_AMOUNT_NOTE = "hourly_no_agreed_amount";
+
+type V2Entry = { verdict: string; stops: Stop[]; notes: Stop[]; trade_name: string };
+
 function validV2(
   data: any,
   stage: string,
-): Map<string, { verdict: string; stops: Stop[]; trade_name: string }> {
+): Map<string, V2Entry> {
   if (
     !data || typeof data !== "object" || data.rule !== "trade-pay-check-v2" ||
     data.stage !== stage || !Array.isArray(data.invoices)
   ) throw unreadable("pay-run check v2");
-  const out = new Map<
-    string,
-    { verdict: string; stops: Stop[]; trade_name: string }
-  >();
+  const out = new Map<string, V2Entry>();
   for (const inv of data.invoices) {
     const stops = stopsOf(inv?.stops);
+    // Every v2 answer carries its notes (an empty list when none); missing
+    // notes are an answer this read cannot trust, never "no notes".
+    const notes = stopsOf(inv?.notes);
     if (
-      !inv || typeof inv.invoice_id !== "string" || !stops ||
+      !inv || typeof inv.invoice_id !== "string" || !stops || !notes ||
       inv.verdict !== (stops.length > 0 ? "stopped" : "clean")
     ) throw unreadable("pay-run check v2");
     out.set(inv.invoice_id, {
       verdict: inv.verdict,
       stops,
+      notes,
       trade_name: typeof inv.trade_name === "string"
         ? inv.trade_name
         : "A trade",
@@ -596,11 +607,51 @@ const NOT_WAITING_FOR_RUN: Stop = {
   code: "not_waiting_for_run",
   words: "This invoice is not waiting for the pay run yet (the trade or the office still has it). Check it by hand.",
 };
+// cl-1622-crew-in-run, ruling (1): an all-in crew bill (employer super) is
+// released and pushed with its whole crew, never by the run.
+const CREW_RELEASE_PATH: Stop = {
+  code: "crew_release_path",
+  words:
+    "This is an all-in crew bill. It is paid when the whole crew is released, not in the pay run.",
+};
 
 const MONEY_UNREADABLE: Stop = {
   code: "money_unreadable",
   words: "This invoice's pay figures do not add up. Check it by hand.",
 };
+
+/** Invoices counted per note code, whatever their verdict, codes in name
+ * order. A note never stops an invoice; this keeps each noted group a plain
+ * number on the run. */
+export function notedByCode(
+  items: readonly { notes: readonly Stop[] }[],
+): { code: string; invoices: number }[] {
+  const by = new Map<string, number>();
+  for (const item of items) {
+    for (const code of new Set(item.notes.map((x) => x.code))) {
+      by.set(code, (by.get(code) ?? 0) + 1);
+    }
+  }
+  return [...by.entries()]
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([code, invoices]) => ({ code, invoices }));
+}
+
+/** Stopped invoices counted per stop code, codes in name order. */
+export function stoppedByCode(
+  items: readonly { verdict: string; stops: readonly Stop[] }[],
+): { code: string; invoices: number }[] {
+  const by = new Map<string, number>();
+  for (const item of items) {
+    if (item.verdict !== "stopped") continue;
+    for (const code of new Set(item.stops.map((x) => x.code))) {
+      by.set(code, (by.get(code) ?? 0) + 1);
+    }
+  }
+  return [...by.entries()]
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([code, invoices]) => ({ code, invoices }));
+}
 
 export async function readPayRun(
   reads: PayRunReads,
@@ -692,6 +743,7 @@ export async function readPayRun(
     money: PayRunMoney | null;
     verdict: "clean" | "stopped";
     stops: Stop[];
+    notes: Stop[];
     xero_bill_id: string | null;
     pushed: boolean;
   };
@@ -700,9 +752,11 @@ export async function readPayRun(
     const payWeek = invoicePayWeek(row);
     const found = v2.get(id);
     let stops: Stop[];
+    let notes: Stop[] = [];
     let tradeName = "A trade";
     if (found) {
       stops = [...found.stops];
+      notes = [...found.notes];
       tradeName = found.trade_name;
     } else if (payWeek && payWeek < fromWeek) {
       stops = [OLDER_THAN_WINDOW];
@@ -712,6 +766,14 @@ export async function readPayRun(
     }
     if (!run && !PAY_RUN_STAMP_STATUSES.includes(String(row.status ?? ""))) {
       stops.push(NOT_WAITING_FOR_RUN);
+    }
+    // Option A: an invoice this run approved keeps its press status until the
+    // run pushes it, so the check's "not approved yet" is not a stop for it.
+    if (run && String(row.pay_run_id ?? "") === String(run.id)) {
+      stops = stops.filter((s) => s.code !== "invoice_not_approved");
+    }
+    if (row.super_basis === TRADE_INVOICE_EMPLOYER_SUPER_BASIS) {
+      stops.push(CREW_RELEASE_PATH);
     }
     let money: PayRunMoney | null = null;
     try {
@@ -729,6 +791,7 @@ export async function readPayRun(
       money,
       verdict: stops.length > 0 ? "stopped" : "clean",
       stops,
+      notes,
       xero_bill_id: row.xero_bill_id ?? null,
       pushed: run ? pushedAt.get(id) != null : Boolean(row.xero_bill_id),
     };
@@ -800,6 +863,14 @@ export async function readPayRun(
       clean: clean.length,
       stopped: items.length - clean.length,
       late: late.length,
+      // Every stopped group named with its invoice count (for example an open
+      // job with no work order, or a work order with no agreed amount), so no
+      // group is lost inside the total. An invoice with two stops counts once
+      // under each.
+      stopped_by_code: stoppedByCode(items),
+      // Every noted group, clean or stopped (for example an hourly line on a
+      // job whose work order has no agreed amount). A note does not stop.
+      noted_by_code: notedByCode(items),
     },
     totals: {
       total_inc_super: sum((m) => m.total_inc_super),
@@ -841,6 +912,7 @@ export async function readPayRun(
         into_bank: i.money?.into_bank ?? null,
         verdict: i.verdict,
         stops: i.stops,
+        notes: i.notes,
         xero_bill_id: i.xero_bill_id,
         pushed: i.pushed,
       })),
@@ -1052,6 +1124,16 @@ function runDifference(standing: unknown): number | null {
   return fromCents(Math.abs(cents(expected) - cents(actual)));
 }
 
+/** An empty week cannot close: a run with no clean invoice pays nobody and
+ * would lock the week (cl-1622-fix). */
+export const PAY_RUN_NOTHING_CLEAN_CODE = "pay_run_nothing_clean";
+const nothingClean = () =>
+  new TradePayRunError(
+    PAY_RUN_NOTHING_CLEAN_CODE,
+    "No invoice in this week is ready to pay, so the pay run cannot be approved.",
+    409,
+  );
+
 const RPC_REFUSALS: Record<string, () => TradePayRunError> = {
   pay_run_not_approver: notApprover,
   pay_run_already_approved: () =>
@@ -1061,6 +1143,7 @@ const RPC_REFUSALS: Record<string, () => TradePayRunError> = {
       409,
     ),
   pay_run_changed_since_shown: changedSinceShown,
+  pay_run_nothing_clean: nothingClean,
   pay_run_week_invalid: () =>
     new TradePayRunError(
       "pay_run_week_invalid",
@@ -1184,6 +1267,8 @@ export async function approvePayRun(
   const cleanIds = (fresh.invoices as any[]).filter((i) =>
     i.verdict === "clean"
   ).map((i) => String(i.invoice_id));
+  // Refused before any write; the database refuses it too.
+  if (cleanIds.length === 0) throw nothingClean();
   const stoppedRows = new Map<string, Record<string, any>>();
   if (stopped.length > 0) {
     for (
@@ -1504,6 +1589,29 @@ export type PayRunPushDeps = {
   >;
   /** The invoice's stamp, status, bill and stored pay figures, or null. */
   invoiceForPush(invoiceId: string): Promise<Record<string, any> | null>;
+  /**
+   * Moves a run-held invoice from the status it kept at the press
+   * (pending_ops_review or queried) to approved, the status the one-invoice
+   * push takes; only while the run holds it and it has no bill. True when the
+   * invoice is approved after the call.
+   */
+  readyForRunPush(runId: string, invoiceId: string): Promise<boolean>;
+  /**
+   * Claims the run row for one press (claim_trade_pay_run_push, database
+   * clock). Returns the claim's stamp, or null when another press holds a
+   * live claim or the row is pushed. Throws 503 when the claim cannot be made.
+   */
+  claimPush(
+    runId: string,
+    invoiceId: string,
+    actor: string,
+  ): Promise<string | null>;
+  /** Gives back this press's own claim (matched on its stamp). Best effort. */
+  releasePush(
+    runId: string,
+    invoiceId: string,
+    claimedAt: string,
+  ): Promise<void>;
   /** The existing one-invoice push. Throws the push's own error. */
   push(invoiceId: string, runId: string): Promise<Record<string, unknown>>;
   /** Records the push on the run row; true when this call wrote it. */
@@ -1636,23 +1744,84 @@ export async function pushPayRunInvoice(
   // The invoice must still pay what the run recorded, to the cent. A figure
   // that cannot be read refuses; a changed one (for example a repayment
   // re-checked since the press) is never sent to Xero.
-  const nowPays = storedRunPays(inv);
   const runPays = num(row.pays);
-  if (nowPays === null || runPays === null) {
-    throw unreadable("the invoice's pay figures");
-  }
-  if (cents(nowPays) !== cents(runPays)) {
+  const assertRunPays = (candidate: Record<string, unknown>) => {
+    const nowPays = storedRunPays(candidate);
+    if (nowPays === null || runPays === null) {
+      throw unreadable("the invoice's pay figures");
+    }
+    if (cents(nowPays) !== cents(runPays)) {
+      deps.log({
+        at: "push_pay_run_invoice",
+        outcome: "pays_changed",
+        run_id: run.id,
+        invoice_id: invoiceId,
+      });
+      throw new TradePayRunError(
+        "pay_run_pays_changed",
+        "This invoice no longer pays what the run approved. It is not pushed; the office needs to check it.",
+        409,
+      );
+    }
+  };
+  // Checked before the move, so a change already made never moves the invoice.
+  assertRunPays(inv);
+  // Director 15:22 (b): one press at a time per invoice. The claim is a row
+  // on trade_pay_run_invoices stamped by the database clock; a second press
+  // while it is live is refused and calls nothing, so two presses never rely
+  // on Xero's duplicate guard alone. A refusal before the Xero call gives the
+  // claim back. Once Xero is called the outcome may be unknown, so the claim
+  // is kept and lapses after ten minutes (claim_trade_pay_run_push), so it is
+  // never stuck for good.
+  const claimedAt = await deps.claimPush(run.id, invoiceId, actor);
+  if (!claimedAt) {
     deps.log({
       at: "push_pay_run_invoice",
-      outcome: "pays_changed",
+      outcome: "push_in_progress",
       run_id: run.id,
       invoice_id: invoiceId,
     });
     throw new TradePayRunError(
-      "pay_run_pays_changed",
-      "This invoice no longer pays what the run approved. It is not pushed; the office needs to check it.",
+      "pay_run_push_in_progress",
+      "This invoice is already being pushed. Wait a few minutes, then open the pay run again.",
       409,
     );
+  }
+  try {
+    await moveForRunPush();
+  } catch (e) {
+    await deps.releasePush(run.id, invoiceId, claimedAt).catch(() => {
+      deps.log({
+        at: "push_pay_run_invoice",
+        outcome: "claim_release_failed",
+        run_id: run.id,
+        invoice_id: invoiceId,
+      });
+    });
+    throw e;
+  }
+  async function moveForRunPush() {
+    // Option A: the run's invoice kept its press status. The run's push moves it
+    // to approved first (the repayment check runs on that move), then reads the
+    // figures again and checks them once more.
+    if (String(inv!.status ?? "") !== "approved") {
+      if (!(await deps.readyForRunPush(run.id, invoiceId))) {
+        throw new TradePayRunError(
+          "invoice_changed",
+          "This invoice changed since the run was approved. Open the pay run again.",
+          409,
+        );
+      }
+      const again = await deps.invoiceForPush(invoiceId);
+      if (!again || String(again.pay_run_id ?? "") !== run.id) {
+        throw new TradePayRunError(
+          "invoice_not_in_run",
+          "That invoice is not in this pay run.",
+          409,
+        );
+      }
+      assertRunPays(again);
+    }
   }
 
   let pushed: Record<string, unknown>;
@@ -1754,7 +1923,6 @@ export async function markPayRunSuperPaid(
 
 /** The real reads and writes, through the service client. */
 export function payRunPushDepsFromClient(
-  // deno-lint-ignore no-explicit-any
   client: any,
   switchOn: () => Promise<boolean>,
   push: (invoiceId: string, runId: string) => Promise<Record<string, unknown>>,
@@ -1795,6 +1963,37 @@ export function payRunPushDepsFromClient(
         ).eq("id", invoiceId).maybeSingle();
       if (error) throw unreadable("the invoice");
       return data ?? null;
+    },
+    async claimPush(runId, invoiceId, actor) {
+      // trade_pay_run_invoices_pkey; the database clock decides the lease.
+      const { data, error } = await client.rpc("claim_trade_pay_run_push", {
+        p_run_id: runId,
+        p_invoice_id: invoiceId,
+        p_actor: actor,
+      });
+      if (error) throw writeFailed("the push claim");
+      return typeof data === "string" && data !== "" ? data : null;
+    },
+    async releasePush(runId, invoiceId, claimedAt) {
+      const { error } = await client.rpc("release_trade_pay_run_push", {
+        p_run_id: runId,
+        p_invoice_id: invoiceId,
+        p_claimed_at: claimedAt,
+      });
+      if (error) throw writeFailed("the push claim");
+    },
+    async readyForRunPush(runId, invoiceId) {
+      // trade_invoices_pkey; only the run's own held invoice moves.
+      const { data, error } = await client.from("trade_invoices")
+        .update({ status: "approved" })
+        .eq("id", invoiceId)
+        .eq("pay_run_id", runId)
+        .in("status", ["pending_ops_review", "queried"])
+        .is("xero_bill_id", null)
+        .select("id, status")
+        .maybeSingle();
+      if (error) throw writeFailed("the invoice status");
+      return data?.status === "approved";
     },
     push,
     async markPushed(runId, invoiceId, billId) {

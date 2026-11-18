@@ -22,6 +22,7 @@ import {
   type PayRunReads,
   payRunReadsFromClient,
   payRunWeek,
+  HOURLY_NO_AGREED_AMOUNT_NOTE,
   readPayRun,
   type ReconcileRaise,
   type ReconcileWithdraw,
@@ -76,18 +77,24 @@ function invoice(n: number, extra: Record<string, unknown> = {}) {
   };
 }
 
-function v2Entry(row: any, stops: Array<{ code: string; words: string }> = []) {
+function v2Entry(
+  row: any,
+  stops: Array<{ code: string; words: string }> = [],
+  notes: Array<{ code: string; words: string }> = [],
+) {
   return {
     invoice_id: row.id,
     trade_name: `ZZTEST Trade ${row.invoice_number.slice(-1)}`,
     verdict: stops.length ? "stopped" : "clean",
     stops,
+    notes,
   };
 }
 
 type World = {
   rows: any[];
   v2Stops?: Record<string, Array<{ code: string; words: string }>>;
+  v2Notes?: Record<string, Array<{ code: string; words: string }>>;
   v2Omit?: string[];
   standingStops?: Record<string, Array<{ code: string; words: string }>>;
   runBlocked?: boolean;
@@ -126,7 +133,7 @@ function reads(w: World, calls: Record<string, any[]> = {}): PayRunReads {
         stage: p.p_stage,
         invoices: w.rows
           .filter((r) => !(w.v2Omit ?? []).includes(r.id))
-          .map((r) => v2Entry(r, w.v2Stops?.[r.id] ?? [])),
+          .map((r) => v2Entry(r, w.v2Stops?.[r.id] ?? [], w.v2Notes?.[r.id] ?? [])),
       });
     },
     standing: (p) => {
@@ -182,6 +189,51 @@ function run(
   });
 }
 
+// Director ruling 15:54: an hourly line on a job whose work order has no
+// agreed amount is a note. It is shown and counted on the run and stops
+// nothing.
+const HOURLY_NOTE = [{
+  code: HOURLY_NO_AGREED_AMOUNT_NOTE,
+  words: "ZZTEST hours not checked against an agreed amount",
+}];
+
+Deno.test("pay run: the hourly no-agreed-amount note is shown and counted, and does not stop", async () => {
+  const rows = [1, 2, 3].map((n) => invoice(n));
+  const out: any = await run({
+    rows,
+    v2Stops: { [id(3)]: STOP },
+    v2Notes: { [id(1)]: HOURLY_NOTE, [id(3)]: HOURLY_NOTE },
+  });
+  // Invoice 1 carries the note and stays clean; its money is in the totals.
+  assertEquals(out.counts.clean, 2);
+  assertEquals(out.counts.stopped, 1);
+  assertEquals(out.counts.stopped_by_code, [{ code: "work_order_over_agreed", invoices: 1 }]);
+  // Counted whatever the verdict, so the whole group is one plain number.
+  assertEquals(out.counts.noted_by_code, [{ code: HOURLY_NO_AGREED_AMOUNT_NOTE, invoices: 2 }]);
+  const one = out.invoices.find((i: any) => i.invoice_id === id(1));
+  assertEquals(one.verdict, "clean");
+  assertEquals(one.stops, []);
+  assertEquals(one.notes, HOURLY_NOTE);
+  const clean = await run({ rows: [1, 2].map((n) => invoice(n)) });
+  assertEquals(out.totals, clean.totals as any, "the noted invoice is paid like any clean one");
+});
+
+Deno.test("pay run: a check v2 answer without notes is unreadable, never read as no notes", async () => {
+  const rows = [invoice(1)];
+  const bad = reads({ rows });
+  bad.checkV2 = (p: any) =>
+    Promise.resolve({
+      rule: "trade-pay-check-v2",
+      stage: p.p_stage,
+      invoices: [{ invoice_id: id(1), trade_name: "ZZTEST", verdict: "clean", stops: [] }],
+    });
+  const err = await assertRejects(
+    () => readPayRun(bad, { orgId: ORG, weekStart: WEEK, actorUserId: APPROVER, now: NOW }),
+    TradePayRunError,
+  );
+  assertEquals([err.status, err.code], [503, "pay_run_unreadable"]);
+});
+
 Deno.test("pay run: three clean and one stopped give the counts and totals to the cent", async () => {
   const rows = [1, 2, 3, 4].map((n) => invoice(n));
   const calls: Record<string, any[]> = {};
@@ -190,7 +242,7 @@ Deno.test("pay run: three clean and one stopped give the counts and totals to th
     APPROVER,
     calls,
   );
-  assertEquals(out.counts, { clean: 3, stopped: 1, late: 0 });
+  assertEquals(out.counts, { clean: 3, stopped: 1, late: 0, stopped_by_code: [{ code: "work_order_over_agreed", invoices: 1 }], noted_by_code: [] });
   assertEquals(out.totals, {
     total_inc_super: 6720,
     paid_to_you: 6000,
@@ -232,7 +284,7 @@ Deno.test("pay run: a standing check stop takes the invoice out of the totals an
     words: "ZZTEST super",
   }];
   const out: any = await run({ rows, standingStops: { [id(2)]: stop } });
-  assertEquals(out.counts, { clean: 3, stopped: 1, late: 0 });
+  assertEquals(out.counts, { clean: 3, stopped: 1, late: 0, stopped_by_code: [{ code: "standing_super_is_12_over_112", invoices: 1 }], noted_by_code: [] });
   const two = out.invoices.find((i: any) => i.invoice_id === id(2));
   assertEquals(two.verdict, "stopped");
   assertEquals(two.stops, stop);
@@ -378,7 +430,7 @@ Deno.test("pay run: every failed read is 503, never a smaller week", async () =>
       rule: "trade-pay-check-v2",
       stage: "before_xero",
       invoices: [
-        { invoice_id: id(1), verdict: "clean", stops: STOP },
+        { invoice_id: id(1), verdict: "clean", stops: STOP, notes: [] },
         v2Entry(rows[1]),
       ],
     });
@@ -423,7 +475,7 @@ Deno.test("pay run: an invoice older than eight weeks is stopped by hand", async
     words:
       "This invoice is for a week more than 8 weeks ago. Check it by hand.",
   }]);
-  assertEquals(out.counts, { clean: 1, stopped: 1, late: 0 });
+  assertEquals(out.counts, { clean: 1, stopped: 1, late: 0, stopped_by_code: [{ code: "older_than_run_window", invoices: 1 }], noted_by_code: [] });
 });
 
 Deno.test("pay run: late invoices are counted and shown, an earlier week sent late joins", async () => {
@@ -438,7 +490,7 @@ Deno.test("pay run: late invoices are counted and shown, an earlier week sent la
     submitted_at: "2026-11-21T01:00:00Z",
   });
   const out: any = await run({ rows: [late, onTime, earlier, next] });
-  assertEquals(out.counts, { clean: 2, stopped: 0, late: 1 });
+  assertEquals(out.counts, { clean: 2, stopped: 0, late: 1, stopped_by_code: [], noted_by_code: [] });
   assertEquals(out.late_invoices.map((i: any) => i.invoice_id), [id(1)]);
   assertEquals(out.invoices.map((i: any) => i.invoice_id).sort(), [
     id(2),
@@ -560,6 +612,55 @@ Deno.test("pay run: the read's stamp statuses are the newest migration's stamp s
   assert(stamp, "a migration defines approve_trade_pay_run");
   const fromSql = stamp.split(",").map((x) => x.trim().replace(/^'|'$/g, "")).sort();
   assertEquals(fromSql, [...PAY_RUN_STAMP_STATUSES].sort());
+});
+
+Deno.test("pay run: option A, after the run its own unpushed invoice is not stopped as 'not approved'", async () => {
+  const notApproved = { code: "invoice_not_approved", words: "ZZTEST not approved" };
+  const notInXero = { code: "not_in_xero", words: "ZZTEST no bill" };
+  const rows = [
+    // Stamped by this run, waiting for its push: keeps its press status.
+    invoice(1, { pay_run_id: "run-1", status: "pending_ops_review" }),
+    // In the run's rows but stamped by another run: not this run's approval.
+    invoice(2, { pay_run_id: "run-9", status: "pending_ops_review" }),
+  ];
+  const out: any = await run({
+    rows,
+    run: { id: "run-1", week_start: WEEK },
+    runInvoices: [{ invoice_id: id(1), pushed_at: null }, { invoice_id: id(2), pushed_at: null }],
+    v2Stops: { [id(1)]: [notApproved, notInXero], [id(2)]: [notApproved, notInXero] },
+  }, APPROVER);
+  const byId = new Map(out.invoices.map((i: any) => [i.invoice_id, i]));
+  assertEquals((byId.get(id(1)) as any).stops.map((x: any) => x.code), ["not_in_xero"]);
+  assertEquals((byId.get(id(2)) as any).stops.map((x: any) => x.code), ["invoice_not_approved", "not_in_xero"]);
+});
+
+Deno.test("pay run: an all-in crew bill is stopped (crew release path), never clean, before the run", async () => {
+  const out: any = await run({
+    rows: [invoice(1), invoice(2, { super_basis: "employer_12_v2" })],
+  }, APPROVER);
+  const crew = out.invoices.find((i: any) => i.invoice_id === id(2));
+  assertEquals(crew.verdict, "stopped");
+  // Its made-up figures need not fit the employer basis; the crew stop is
+  // what keeps it out of the run.
+  assert(crew.stops.some((x: any) => x.code === "crew_release_path"));
+  assertEquals(out.invoices.find((i: any) => i.invoice_id === id(1)).verdict, "clean");
+});
+
+Deno.test("pay run: every stopped group is counted by its code, never lost in the total", async () => {
+  const noWo = { code: "work_order_missing", words: "ZZTEST no work order" };
+  const noAgreed = { code: "work_order_not_agreed", words: "ZZTEST no agreed amount" };
+  const out: any = await run({
+    rows: [invoice(1), invoice(2), invoice(3), invoice(4)],
+    v2Stops: { [id(2)]: [noWo], [id(3)]: [noWo, noAgreed], [id(4)]: [noAgreed] },
+  }, APPROVER);
+  assertEquals(out.counts.stopped, 3);
+  assertEquals(out.counts.stopped_by_code, [
+    { code: "work_order_missing", invoices: 2 },
+    { code: "work_order_not_agreed", invoices: 2 },
+  ]);
+  // Stopped invoices stay in the list, first, with their words.
+  assertEquals(out.invoices.slice(0, 3).map((i: any) => i.verdict), ["stopped", "stopped", "stopped"]);
+  assert(out.invoices.some((i: any) => i.stops.some((x: any) => x.words === "ZZTEST no agreed amount")));
 });
 
 Deno.test("pay run: held lines are summed by reason and not in the run", async () => {
@@ -1075,6 +1176,18 @@ Deno.test("approve pay run: the switch off gives 409 and nothing is read or writ
   assertEquals(calls.approve.length, 0);
 });
 
+Deno.test("approve pay run: an empty week cannot close (409, nothing written, the week stays open)", async () => {
+  // No invoice at all, and every invoice stopped: neither reaches the database.
+  const stoppedOnly: ApproveWorld = { rows: [invoice(1, { net_pay: null })] };
+  for (const w of [{ rows: [] } as ApproveWorld, stoppedOnly]) {
+    const calls = newCalls();
+    const hash = await shownHash(w);
+    await refusedWith(press(w, calls, { hash }), "pay_run_nothing_clean", 409);
+    assertEquals(calls.approve.length, 0);
+    assertEquals(calls.raise.length, 0);
+  }
+});
+
 Deno.test("approve pay run: a week that changed since it was shown is 409 and writes nothing", async () => {
   const w: ApproveWorld = { rows: [1, 2, 3].map((n) => invoice(n)) };
   const hash = await shownHash(w);
@@ -1277,6 +1390,7 @@ Deno.test("approve pay run: the database's own refusals map to the ticket's answ
     ["pay_run_not_approver", "pay_run_not_approver", 403],
     ["pay_run_already_approved", "pay_run_already_approved", 409],
     ["pay_run_changed_since_shown", "pay_run_changed_since_shown", 409],
+    ["pay_run_nothing_clean", "pay_run_nothing_clean", 409],
     ["pay_run_standing_check_failed", "pay_run_standing_check_failed", 409],
     ["pay_run_snapshot_invalid", "pay_run_snapshot_invalid", 503],
     ["pay_run_figures_unreadable", "pay_run_figures_unreadable", 503],
