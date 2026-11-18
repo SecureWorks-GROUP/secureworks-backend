@@ -103,7 +103,7 @@ const emptyCreditReport = (): CreditRunReport => ({ run: 0, applied: {}, skipped
 
 /**
  * The bills a credit's lines follow (by document, or by a followed line), less
- * a removed line, as the Reconcile list reads them (20261119999920). "labour"
+ * a removed line, as the Reconcile list reads them (20261118195900). "labour"
  * when one has an installer_bill line or a line on a labour account,
  * "hidden" when one has a line on an account hidden from Reconcile, ours or
  * Xero's (a zero line is not a cost line), else null. Reads nothing when the

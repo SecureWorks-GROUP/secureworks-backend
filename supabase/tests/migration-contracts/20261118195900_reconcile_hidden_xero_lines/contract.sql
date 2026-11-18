@@ -9,8 +9,8 @@ CREATE FUNCTION pg_temp.md5_of(sig text) RETURNS text LANGUAGE sql AS $$
 $$;
 
 -- Applies twice: the guard accepts this migration's own bodies.
-\ir ../../../migrations/20261119999920_reconcile_hidden_xero_lines.sql
-\ir ../../../migrations/20261119999920_reconcile_hidden_xero_lines.sql
+\ir ../../../migrations/20261118195900_reconcile_hidden_xero_lines.sql
+\ir ../../../migrations/20261118195900_reconcile_hidden_xero_lines.sql
 DO $$ BEGIN
   PERFORM pg_temp.assert_ok(pg_temp.md5_of('public.reconcile_list_page(uuid,text[],integer,jsonb)') = '8ed89b415795afccc6125069d17fc8d4'
     AND pg_temp.md5_of('public.reconcile_list_counts(uuid)') = 'f2f7862006108b3134140ee7fb1cf872'
@@ -89,14 +89,14 @@ GRANT EXECUTE ON FUNCTION pg_temp.listed(), pg_temp.counted() TO service_role;
 GRANT SELECT ON zz_before TO service_role;
 
 -- Before: 20261118195700's bodies read our cost lines only, so all ten list.
-\ir ../../../rollbacks/20261119999920_reconcile_hidden_xero_lines_down.sql
+\ir ../../../rollbacks/20261118195900_reconcile_hidden_xero_lines_down.sql
 CREATE TEMP TABLE zz_old AS SELECT pg_temp.listed() AS listed, pg_temp.counted() AS counted;
 GRANT SELECT ON zz_old TO service_role;
 DO $$ BEGIN
   PERFORM pg_temp.assert_ok((SELECT cardinality(listed) FROM zz_old) = 10, 'before: every item listed: ' || (SELECT listed::text FROM zz_old));
   PERFORM pg_temp.assert_ok(to_regprocedure('public.reconcile_item_xero_hidden(uuid,text,text)') IS NULL, 'rollback drops the helper');
 END $$;
-\ir ../../../migrations/20261119999920_reconcile_hidden_xero_lines.sql
+\ir ../../../migrations/20261118195900_reconcile_hidden_xero_lines.sql
 
 SET LOCAL ROLE service_role;
 DO $$ BEGIN
@@ -123,15 +123,15 @@ END $$;
 UPDATE public.people_account_codes SET hidden_from_reconcile = true WHERE account_code = '475';
 
 -- Rollback, re-run of the rollback, apply again.
-\ir ../../../rollbacks/20261119999920_reconcile_hidden_xero_lines_down.sql
+\ir ../../../rollbacks/20261118195900_reconcile_hidden_xero_lines_down.sql
 DO $$ BEGIN
   PERFORM pg_temp.assert_ok(pg_temp.md5_of('public.reconcile_list_page(uuid,text[],integer,jsonb)') = '21429cddb4dcbda92d5f36083fdf453a'
     AND pg_temp.md5_of('public.reconcile_list_counts(uuid)') = '40f09ca674d5313c3500100114400280'
     AND obj_description('public.reconcile_list_page(uuid,text[],integer,jsonb)'::regprocedure, 'pg_proc')
       NOT LIKE '%Xero''s own record%', 'rollback returns 20261118195700''s bodies and comment');
 END $$;
-\ir ../../../rollbacks/20261119999920_reconcile_hidden_xero_lines_down.sql
-\ir ../../../migrations/20261119999920_reconcile_hidden_xero_lines.sql
+\ir ../../../rollbacks/20261118195900_reconcile_hidden_xero_lines_down.sql
+\ir ../../../migrations/20261118195900_reconcile_hidden_xero_lines.sql
 DO $$ BEGIN
   PERFORM pg_temp.assert_ok(pg_temp.md5_of('public.reconcile_list_page(uuid,text[],integer,jsonb)') = '8ed89b415795afccc6125069d17fc8d4'
     AND has_function_privilege('service_role', 'public.reconcile_list_counts(uuid)', 'EXECUTE'), 'apply again after a rollback');

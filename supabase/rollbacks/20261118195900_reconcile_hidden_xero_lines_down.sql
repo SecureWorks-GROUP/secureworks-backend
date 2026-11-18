@@ -1,4 +1,4 @@
--- Rollback of 20261119999920_reconcile_hidden_xero_lines (PLACEHOLDER version): puts
+-- Rollback of 20261118195900_reconcile_hidden_xero_lines (PLACEHOLDER version): puts
 -- back 20261118195700's bodies of reconcile_list_page and reconcile_list_counts,
 -- byte for byte, then drops reconcile_item_xero_hidden. Changes no row. A
 -- re-run (bodies already 20261118195700's, helper gone) changes nothing; any
