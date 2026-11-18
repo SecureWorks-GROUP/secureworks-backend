@@ -19574,6 +19574,7 @@ export async function _assertWithinWorkOrderTotal(
       lines,
       excludeLineIds,
       force,
+      viewerId: tradeUser.id,
       loadModes: async (jobIds) => {
         // Only a job with an approved job work order carrying its agreed
         // labour, or one whose job budget pays hourly up to a maximum (ruling
