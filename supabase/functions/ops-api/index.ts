@@ -65642,8 +65642,9 @@ export async function approveExpense(
   }
   // api_key path: server-to-server (e.g. automated JARVIS). Allowed; approverId stays null.
 
-  // A receipt marked "not booked on this job" is approved only with a deliberate confirm.
-  assertUnbookedApprovalConfirmed(status, existing.unbooked_job_id, body.confirm_unbooked)
+  // A receipt marked "not booked on this job" is approved only by a signed-in person
+  // with a deliberate confirm; the server key (Jarvis) gets a plain refusal.
+  assertUnbookedApprovalConfirmed(status, existing.unbooked_job_id, body.confirm_unbooked, authCtx.mode === 'jwt')
 
   const updates: Record<string, any> = {
     status,
