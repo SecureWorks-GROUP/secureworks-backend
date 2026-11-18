@@ -11,7 +11,7 @@ SELECT to_regprocedure('public.reconcile_item_raise(text,text,text,uuid[],jsonb,
 SELECT to_regprocedure('public.reconcile_item_raise_named(text,text,text,uuid[],jsonb,jsonb,text,uuid)') IS NULL
   AS named_contract_needs_wrapper \gset
 \if :named_contract_needs_wrapper
-\ir ../../../migrations/20261118999902_reconcile_item_raise_named.sql
+\ir ../../../migrations/20261118170200_reconcile_item_raise_named.sql
 \endif
 SET LOCAL statement_timeout = '120s';
 

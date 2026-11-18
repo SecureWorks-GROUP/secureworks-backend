@@ -1392,7 +1392,7 @@ export function payRunApproveDepsFromClient(
       return { data, error };
     },
     // reconcile_item_raise takes its arguments by position (P2-03.2), so a
-    // named PostgREST call goes through its named door (20261118999902).
+    // named PostgREST call goes through its named door (20261118170200).
     raise: (item) =>
       rpcOrThrow("reconcile_item_raise_named", {
         p_kind: item.kind,

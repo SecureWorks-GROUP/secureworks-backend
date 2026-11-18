@@ -496,7 +496,7 @@ export async function raiseHeldLines(
   let raised = 0, failed = 0;
   const call = async (args: Record<string, unknown>) => {
     try {
-      // The named door (20261118999902): reconcile_item_raise itself takes
+      // The named door (20261118170200): reconcile_item_raise itself takes
       // its arguments by position, so a named PostgREST call cannot find it.
       const { error } = await client.rpc("reconcile_item_raise_named", args);
       if (error) throw error;

@@ -1,4 +1,4 @@
--- Rollback for 20261118999902: drop the named wrapper only. The two
+-- Rollback for 20261118170200: drop the named wrapper only. The two
 -- reconcile_item_raise overloads are untouched by the forward migration and
 -- stay as they are. Callers then fail with PGRST202 again (best effort, logged).
 SET LOCAL lock_timeout = '5s';
