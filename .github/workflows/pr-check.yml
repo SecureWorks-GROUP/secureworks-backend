@@ -586,6 +586,15 @@ jobs:
       # invoice changes in any figure or field. Drives the real ops-api request
       # handler with every database call answered by a fetch stub, plus the
       # money and audit PDF suites the deduction is built on.
+      # Receipt capture and the not-booked-on-this-job mark (cl-receipt-ownjob).
+      # Every database call is a stub; no switch is turned on. --no-check: the
+      # behaviour only; index.ts types are covered by the deno check step.
+      - name: Test receipt capture and the not-booked-on-this-job mark
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/ops-api/expense_capture_v2_test.ts \
+            supabase/functions/ops-api/expense_own_job_test.ts
+
       - name: Test trade recurring deductions
         run: |
           deno test --allow-env --allow-net=127.0.0.1 --allow-read \
