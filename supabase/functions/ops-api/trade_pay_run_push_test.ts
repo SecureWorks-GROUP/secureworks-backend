@@ -9,12 +9,14 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   markPayRunSuperPaid,
+  type PayBackReceipt,
   type PayRunPushDeps,
   payRunPushDepsFromClient,
   type PayRunRunRow,
   pushPayRunInvoice,
   TradePayRunError,
 } from "./trade_pay_run.ts";
+import { PAY_BACK_RECEIPT_RULE_CASES } from "./trade_pay_run_receipt_rule_cases.ts";
 import {
   _opsApiActionNeedsStaffRole,
   AGENT_READ_ALLOWED_ACTIONS,
@@ -52,7 +54,7 @@ type World = {
   /** The push claim RPC fails. */
   claim?: "fail";
   /** The invoice's pay-back receipts read now, or a failed read. */
-  receipts?: Record<string, { status: unknown; unbooked_job_id: unknown }[]> | "fail";
+  receipts?: Record<string, PayBackReceipt[]> | "fail";
 };
 
 function makeDeps(w: World) {
@@ -120,7 +122,13 @@ function makeDeps(w: World) {
       if (w.receipts === "fail") {
         return Promise.reject(new TradePayRunError("pay_run_unreadable", "x", 503));
       }
-      return Promise.resolve((w.receipts ?? {})[id] ?? []);
+      // A receipt the test does not give an image path has one; the image
+      // tests give a blank path on purpose.
+      return Promise.resolve(
+        ((w.receipts ?? {})[id] ?? []).map((r) =>
+          "receipt_storage_path" in r ? r : { ...r, receipt_storage_path: "ZZTEST/receipt.png" }
+        ),
+      );
     },
     readyForRunPush: (_r, id) => {
       calls.ready.push(id);
@@ -417,21 +425,121 @@ Deno.test("push: a pay-back receipt the office queried or rejected, marked or no
   }
 });
 
-Deno.test("push: a marked receipt the office confirmed, or an unmarked one not queried or rejected, is pushed as before", async () => {
+Deno.test("push: a receipt approved or pushed to Xero, marked or not, is pushed as before", async () => {
   for (const receipt of [
     { status: "approved", unbooked_job_id: "0c400000-0000-4000-8000-0000000000aa" },
     { status: "pushed_to_xero", unbooked_job_id: "0c400000-0000-4000-8000-0000000000aa" },
     { status: "approved", unbooked_job_id: null },
     { status: "pushed_to_xero", unbooked_job_id: null },
-    // Not covered here: an unmarked receipt still pending (its line carries
-    // the office review hold at submit, which the run's check stops on).
-    { status: "pending", unbooked_job_id: null },
   ]) {
     const { deps, calls } = makeDeps({ rows: twoClean(), receipts: { [INV_A]: [receipt] } });
     const out: any = await press(deps, INV_A);
     assertEquals(out.ok, true);
     assertEquals(calls.push, [INV_A]);
   }
+});
+
+// ── SEC-465 allow-list (director 23:14), the same rows as the check's contract ──
+// supabase/tests/migration-contracts/20261118194800_trade_pay_run_receipt_allow_list
+// (zz_matrix): the push refuses exactly where the check stops, with the matching reason.
+const MARK = "0c400000-0000-4000-8000-0000000000aa";
+// Ruling B (director 18 Nov 23:46): one office approval is enough. The cases
+// are trade_pay_run_receipt_rule_cases.ts, which the parity test ties to the
+// check contract's zz_matrix.
+const SAME_STOPS = PAY_BACK_RECEIPT_RULE_CASES;
+
+Deno.test("same stops: the push refuses exactly where the check stops, an unknown or new status included", async () => {
+  for (const [status, marked, lineApproved, checkStops, code] of SAME_STOPS) {
+    const label = `status ${status} marked ${marked} line approved ${lineApproved}`;
+    // The check stops the invoice exactly when the push refuses it.
+    assertEquals(checkStops.length > 0, code !== null, label);
+    const { deps, calls } = makeDeps({
+      rows: twoClean(),
+      receipts: {
+        [INV_A]: [
+          { status: "approved", unbooked_job_id: null },
+          { status, unbooked_job_id: marked ? MARK : null, line_approved: lineApproved },
+        ],
+      },
+    });
+    if (code === null) {
+      const out: any = await press(deps, INV_A);
+      assertEquals([out.ok, calls.push], [true, [INV_A]], label);
+    } else {
+      await refused(press(deps, INV_A), code, 409);
+      assertEquals([calls.push.length, calls.claims.length, calls.ready.length], [0, 0, 0], label);
+    }
+  }
+});
+
+Deno.test("allow-list: a pay-back line with no receipt, or a receipt that is gone, is refused as not approved", async () => {
+  const { deps, calls } = makeDeps({
+    rows: twoClean(),
+    receipts: { [INV_A]: [{ status: "approved", unbooked_job_id: null }, { status: null, unbooked_job_id: null, missing: true }] },
+  });
+  await refused(press(deps, INV_A), "pay_run_receipt_not_approved", 409);
+  assertEquals([calls.push.length, calls.claims.length], [0, 0]);
+  // A deleted receipt stops even when the office approved its line.
+  const approvedLine = makeDeps({
+    rows: twoClean(),
+    receipts: { [INV_A]: [{ status: null, unbooked_job_id: null, line_approved: true, missing: true }] },
+  });
+  await refused(press(approvedLine.deps, INV_A), "pay_run_receipt_not_approved", 409);
+  // An invoice with no pay-back line has nothing to allow and pushes as before.
+  const none = makeDeps({ rows: twoClean(), receipts: { [INV_A]: [] } });
+  assertEquals(((await press(none.deps, INV_A)) as any).ok, true);
+});
+
+Deno.test("image: a passing receipt whose stored image is blank now is refused at the push, before any claim", async () => {
+  for (const path of [null, "", "   "]) {
+    for (const receipt of [
+      { status: "approved", unbooked_job_id: null },
+      { status: "pushed_to_xero", unbooked_job_id: MARK },
+      { status: "pending", unbooked_job_id: null, line_approved: true },
+    ]) {
+      const { deps, calls } = makeDeps({
+        rows: twoClean(),
+        receipts: { [INV_A]: [{ status: "approved", unbooked_job_id: null }, { ...receipt, receipt_storage_path: path }] },
+      });
+      const err = await assertRejects(() => press(deps, INV_A), TradePayRunError);
+      assertEquals([err.code, err.status], ["pay_run_receipt_no_image", 409], `${receipt.status} ${JSON.stringify(path)}`);
+      assertEquals(
+        err.message,
+        "A pay-back receipt on this invoice has no stored receipt image, so the invoice is not pushed. Store the receipt image, or take the invoice out of the run.",
+      );
+      assertEquals([calls.push.length, calls.claims.length, calls.ready.length], [0, 0, 0]);
+    }
+  }
+  // A refusal before it wins: a queried receipt with no image is refused as queried.
+  const { deps } = makeDeps({
+    rows: twoClean(),
+    receipts: { [INV_A]: [{ status: "queried", unbooked_job_id: null, receipt_storage_path: "" }] },
+  });
+  await refused(press(deps, INV_A), "pay_run_receipt_queried_or_rejected", 409);
+  // The same receipt with its image stored again pushes.
+  const back = makeDeps({
+    rows: twoClean(),
+    receipts: { [INV_A]: [{ status: "approved", unbooked_job_id: null, receipt_storage_path: "ZZTEST/receipt.png" }] },
+  });
+  assertEquals(((await press(back.deps, INV_A)) as any).ok, true);
+});
+
+Deno.test("queried or rejected: the words name the next step, without \"again\" (under ruling B the receipt may never have been approved)", async () => {
+  const { deps } = makeDeps({ rows: twoClean(), receipts: { [INV_A]: [{ status: "queried", unbooked_job_id: null, line_approved: true }] } });
+  const err = await assertRejects(() => press(deps, INV_A), TradePayRunError);
+  assertEquals(
+    err.message,
+    "The office has queried or rejected a pay-back receipt on this invoice, so it is not pushed. Approve the receipt, or take the invoice out of the run.",
+  );
+});
+
+Deno.test("allow-list: the words name the next step", async () => {
+  const { deps } = makeDeps({ rows: twoClean(), receipts: { [INV_A]: [{ status: "pending", unbooked_job_id: null }] } });
+  const err = await assertRejects(() => press(deps, INV_A), TradePayRunError);
+  assertEquals(
+    err.message,
+    "A pay-back receipt on this invoice is not approved by the office, or cannot be found, so the invoice is not pushed. Approve the receipt, or take the invoice out of the run.",
+  );
 });
 
 Deno.test("push: an invoice refused for a receipt can be pressed again once the receipt is approved", async () => {
@@ -453,8 +561,18 @@ Deno.test("push: pay-back receipts that cannot be read refuse 503, never push", 
 Deno.test("writes: the push reads the invoice's pay-back lines, then their receipts by id", async () => {
   const seen: string[] = [];
   const answers: Record<string, any> = {
-    trade_invoice_lines: { data: [{ expense_receipt_id: "r1" }, { expense_receipt_id: "r1" }, { expense_receipt_id: null }], error: null },
-    expense_receipts: { data: [{ id: "r1", status: "queried", unbooked_job_id: "j1" }], error: null },
+    trade_invoice_lines: {
+      data: [
+        { expense_receipt_id: "r1", office_review_status: "approved" },
+        { expense_receipt_id: "r1", office_review_status: "awaiting" },
+        { expense_receipt_id: "r2", office_review_status: "approved" },
+      ],
+      error: null,
+    },
+    expense_receipts: {
+      data: [{ id: "r1", status: "queried", unbooked_job_id: "j1", receipt_storage_path: "ZZTEST/r1.png" }],
+      error: null,
+    },
   };
   const client = {
     from(table: string) {
@@ -468,14 +586,27 @@ Deno.test("writes: the push reads the invoice's pay-back lines, then their recei
     },
   };
   const deps = payRunPushDepsFromClient(client, () => Promise.resolve(true), () => Promise.resolve({}));
-  assertEquals(await deps.payBackReceipts(INV_A), [{ status: "queried", unbooked_job_id: "j1" }]);
+  // One per pay-back line, with whether the office approved that line; r2's
+  // row is gone, so it reads missing (refused, never "none").
+  assertEquals(await deps.payBackReceipts(INV_A), [
+    { status: "queried", unbooked_job_id: "j1", line_approved: true, receipt_storage_path: "ZZTEST/r1.png" },
+    { status: "queried", unbooked_job_id: "j1", line_approved: false, receipt_storage_path: "ZZTEST/r1.png" },
+    { status: null, unbooked_job_id: null, line_approved: true, missing: true },
+  ]);
   assertEquals(seen, [
-    "trade_invoice_lines.select(expense_receipt_id)",
+    "trade_invoice_lines.select(expense_receipt_id, office_review_status)",
     `trade_invoice_lines.eq(trade_invoice_id,${INV_A})`,
     "trade_invoice_lines.eq(line_type,reimbursement)",
-    "expense_receipts.select(id, status, unbooked_job_id)",
-    "expense_receipts.in(id,r1)",
+    "expense_receipts.select(id, status, unbooked_job_id, receipt_storage_path)",
+    "expense_receipts.in(id,r1|r2)",
   ]);
+  // A pay-back line with no receipt id reads missing, without a receipt read.
+  answers.trade_invoice_lines = { data: [{ expense_receipt_id: null, office_review_status: "approved" }], error: null };
+  const before = seen.length;
+  assertEquals(await deps.payBackReceipts(INV_A), [
+    { status: null, unbooked_job_id: null, line_approved: true, missing: true },
+  ]);
+  assertEquals(seen.slice(before).some((q) => q.startsWith("expense_receipts")), false);
   answers.trade_invoice_lines = { data: null, error: { message: "x" } };
   await refused(deps.payBackReceipts(INV_A), "pay_run_unreadable", 503);
   answers.trade_invoice_lines = { data: [], error: null };
@@ -983,6 +1114,11 @@ async function realPress(world: { switchOn: boolean }) {
       }]);
     }
     if (table === "trade_invoice_lines") {
+      // The invoice has no pay-back line: the push's receipt read asks for
+      // line_type reimbursement and finds none.
+      if (url.searchParams.get("line_type") === "eq.reimbursement") {
+        return reply([]);
+      }
       return reply([{
         id: LINE,
         trade_invoice_id: SAVED,
