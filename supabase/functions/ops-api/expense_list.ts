@@ -7,7 +7,7 @@ import {
 // Crew Expenses, receipt upload recovery and weekly review use these fields.
 // Office readers retain their existing full response below.
 const CREW_COLUMNS =
-  "id, submitted_by, job_id, created_at, vendor_name, receipt_date, total_amount, gst_amount, line_items, payment_method, receipt_storage_path, receipt_photo_url, no_receipt_reason, status, query_reason, rejection_reason, xero_bill_id, jobs:job_id(client_name, job_number)";
+  "id, submitted_by, job_id, created_at, vendor_name, receipt_date, total_amount, gst_amount, line_items, payment_method, receipt_storage_path, receipt_photo_url, no_receipt_reason, status, unbooked_job_id, query_reason, rejection_reason, xero_bill_id, jobs:job_id(client_name, job_number)";
 
 export async function listExpenseReceipts(
   client: any,
