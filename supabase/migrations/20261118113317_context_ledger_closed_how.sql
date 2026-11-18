@@ -1,5 +1,5 @@
 -- P4-02.10: record on each closed or declined ledger note how it was closed.
--- Merge adds the nullable column, the agreed word-closes table, and functions only.
+-- Merge adds the nullable column, its NOT VALID check constraint, the agreed word-closes table, and functions only.
 -- No business-table trigger, schedule, switch change, or historical row write runs on merge;
 -- context_ledger_closed_how_install() installs the trigger and runs the set-based backfill.
 -- All six functions are new on main, so plain CREATE FUNCTION refuses an unexpected body.
@@ -9,6 +9,7 @@ SET LOCAL statement_timeout = '120s';
 ALTER TABLE public.context_ledger_items
   ADD COLUMN IF NOT EXISTS closed_how text;
 
+-- Rule 29: NOT VALID skips scanning existing context_ledger_items under ACCESS EXCLUSIVE while enforcing new and updated rows.
 DO $closed_how_check$ /* constraint block */ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
@@ -17,7 +18,8 @@ DO $closed_how_check$ /* constraint block */ BEGIN
   ) THEN
     ALTER TABLE public.context_ledger_items
       ADD CONSTRAINT context_ledger_items_closed_how_check
-      CHECK (closed_how IS NULL OR closed_how IN ('record', 'words_two_models', 'words_one_model', 'person'));
+      CHECK (closed_how IS NULL OR closed_how IN ('record', 'words_two_models', 'words_one_model', 'person'))
+      NOT VALID;
   END IF;
 END $closed_how_check$;
 

@@ -4,8 +4,8 @@ SELECT to_regprocedure('public.context_ledger_closed_how_stamp(uuid)') IS NULL
   OR to_regprocedure('public.context_ledger_closed_how_install()') IS NULL
   OR to_regclass('public.context_ledger_word_closes') IS NULL AS closed_how_needs_reapply \gset
 \if :closed_how_needs_reapply
-\ir ../../../rollbacks/20261118105244_context_ledger_closed_how_down.sql
-\ir ../../../migrations/20261118105244_context_ledger_closed_how.sql
+\ir ../../../rollbacks/20261118113317_context_ledger_closed_how_down.sql
+\ir ../../../migrations/20261118113317_context_ledger_closed_how.sql
 \endif
 
 BEGIN;
@@ -19,7 +19,8 @@ BEGIN
   END IF;
 END $$;
 
--- 1. Merge safety: migration itself must not install a trigger on context_ledger_transitions.
+-- 1. Merge safety: migration itself must not install a trigger on context_ledger_transitions,
+--    and the check constraint on existing context_ledger_items must be added NOT VALID (Rule 29).
 SELECT pg_temp.zztest_assert(
   NOT EXISTS (
     SELECT 1 FROM pg_trigger
@@ -28,6 +29,16 @@ SELECT pg_temp.zztest_assert(
       AND NOT tgisinternal
   ),
   'migration installed trigger on merge'
+);
+
+SELECT pg_temp.zztest_assert(
+  EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'public.context_ledger_items'::regclass
+      AND conname = 'context_ledger_items_closed_how_check'
+      AND NOT convalidated
+  ),
+  'context_ledger_items_closed_how_check missing or added without NOT VALID'
 );
 
 -- 2. RLS and role privileges: service_role only; browser roles denied.
