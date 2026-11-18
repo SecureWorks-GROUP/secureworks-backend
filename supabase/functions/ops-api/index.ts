@@ -958,6 +958,7 @@ import {
   type GroupCaller,
   enrollClockGroupParticipant, nameGroupWorkOrderCrew, leaveGroupClaim, searchTradesForClaim,
 } from './group_work_order.ts'
+import { confirmGroupWorkOrderHours, decideGroupSplit } from './group_claim.ts'
 import { requestWorkOrderAmount, sendOutlookWorkOrderRequest } from './work_order_request.ts'
 import { signatureImageTag } from '../_shared/signature_image.ts'
 import {
@@ -5333,6 +5334,9 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'sign_group_work_order',
   'submit_group_work_order_hours',
   'delete_group_work_order_hours',
+  'confirm_group_work_order_hours',
+  'approve_group_split',
+  'dispute_group_split',
   'group_work_order_my_share',
   'my_group_work_orders',
   'capture_group_client_signoff',
@@ -13246,6 +13250,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'submit_group_work_order_hours':
       case 'delete_group_work_order_hours':
       case 'my_group_work_orders':
+      case 'confirm_group_work_order_hours':
+      case 'approve_group_split':
+      case 'dispute_group_split':
       case 'group_work_order_my_share':
       case 'capture_group_client_signoff':
       case 'freeze_group_work_order':
@@ -13454,7 +13461,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           case 'submit_group_work_order_hours':
           case 'delete_group_work_order_hours':
           case 'my_group_work_orders':
-      case 'group_work_order_my_share':
+          case 'confirm_group_work_order_hours':
+          case 'approve_group_split':
+          case 'dispute_group_split':
+          case 'group_work_order_my_share':
           case 'capture_group_client_signoff':
           case 'freeze_group_work_order':
           case 'group_work_order_preview_client_link': {
@@ -13483,6 +13493,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             }
             if (action === 'sign_group_work_order') {
               return await groupWorkOrderJson(signGroupWorkOrderCrew(client, groupCaller, groupPayload))
+            }
+            if (action === 'confirm_group_work_order_hours' || action === 'approve_group_split' || action === 'dispute_group_split') {
+              if (req.method !== 'POST') return json({ error: 'POST required' }, 405)
+              return await groupWorkOrderJson(action === 'confirm_group_work_order_hours'
+                ? confirmGroupWorkOrderHours(client, groupCaller.userId, groupPayload)
+                : decideGroupSplit(client, groupCaller.userId, groupPayload, action === 'approve_group_split' ? 'approve' : 'dispute'))
             }
             if (action === 'submit_group_work_order_hours') {
               return await groupWorkOrderJson(submitGroupWorkOrderHours(client, groupCaller, groupPayload))
