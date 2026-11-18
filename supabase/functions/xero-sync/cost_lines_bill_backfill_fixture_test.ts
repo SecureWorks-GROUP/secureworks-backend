@@ -8,7 +8,7 @@ import { billCostDocument } from "./cost_lines.ts";
 
 const FIXTURE = new URL("./cost_lines_bill_backfill_fixture.json", import.meta.url);
 const CONTRACT = new URL(
-  "../../tests/migration-contracts/20261118999900_job_cost_lines_bill_backfill/contract.sql",
+  "../../tests/migration-contracts/20261118195100_job_cost_lines_bill_backfill/contract.sql",
   import.meta.url,
 );
 
