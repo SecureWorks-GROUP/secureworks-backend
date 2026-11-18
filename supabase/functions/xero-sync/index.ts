@@ -44,6 +44,7 @@ import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { syncSupplierCreditNotes } from './supplier_credit_notes.ts'
 import { checkDraftsApproved } from './draft_approval_check.ts'
 import { billCostDocument, collectBillCostDocument } from './cost_lines.ts'
+import { readBillMirrorVerdicts } from './trade_bill_mirror_rule.ts'
 import { handleCostLinesBackfill } from './cost_lines_backfill.ts'
 import { syncCustomerAllocations } from './customer_allocations.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
@@ -772,7 +773,8 @@ async function syncInvoices(sb: any) {
   const costLinesErrors: string[] = []
   let costLinesOn = false
   let costEmployerSuperOn = false
-  const costMirrorBillIds = new Set<string>()
+  // Bills not written because only a trade invoice with no organisation holds them.
+  let costMirrorStops = 0
   try {
     const { data, error } = await sb.from('feature_flags').select('enabled')
       .eq('flag_name', 'job_cost_lines_sync_v1').maybeSingle()
@@ -783,15 +785,6 @@ async function syncInvoices(sb: any) {
         .eq('flag_name', 'job_cost_employer_super_v1').maybeSingle()
       if (superError) throw superError
       costEmployerSuperOn = superFlag?.enabled === true
-      // Page the one mirror read so the PostgREST row ceiling cannot admit a mirror.
-      for (let start = 0;; start += 1000) {
-        const { data: mirrors, error: mirrorError } = await sb.from('trade_invoices')
-          .select('xero_bill_id').eq('org_id', DEFAULT_ORG_ID).not('xero_bill_id', 'is', null)
-          .order('id').range(start, start + 999)
-        if (mirrorError || !Array.isArray(mirrors)) throw mirrorError ?? new Error('Mirror read unavailable')
-        for (const row of mirrors) costMirrorBillIds.add(row.xero_bill_id)
-        if (mirrors.length < 1000) break
-      }
     }
   } catch (e) {
     costLinesOn = false
@@ -851,6 +844,9 @@ async function syncInvoices(sb: any) {
       }
 
       const costDocuments: NonNullable<ReturnType<typeof billCostDocument>>[] = []
+      // Supplier bills this page upserted; their cost documents are built after
+      // the page, once the mirror rule has answered for all of them.
+      const costBills: any[] = []
       // Upsert each invoice — preserve existing job_id linkage
       for (const inv of invoices) {
         // Check if this invoice already has a job link (set by createInvoice)
@@ -902,11 +898,7 @@ async function syncInvoices(sb: any) {
           console.error(`Failed to upsert invoice ${inv.InvoiceNumber}:`, error.message)
         } else {
           totalSynced++
-          if (costLinesOn) {
-            collectBillCostDocument(record, {
-              orgId: DEFAULT_ORG_ID, mirrorBillIds: costMirrorBillIds, employerSuperOn: costEmployerSuperOn,
-            }, costDocuments, costLinesErrors)
-          }
+          if (costLinesOn && record.invoice_type === 'ACCPAY') costBills.push(record)
 
           // Auto-link invoice to job via SW reference number in Reference field.
           // Matches patterns like SWP-25001, SWF-25002, SW1615, etc.
@@ -1195,6 +1187,23 @@ async function syncInvoices(sb: any) {
         }
       }
 
+      if (costBills.length) {
+        // The one mirror rule (trade_bill_mirror_rule.ts), one call a page. An
+        // unreadable answer writes no cost lines for this page: never "not a mirror".
+        try {
+          const verdicts = await readBillMirrorVerdicts(sb, DEFAULT_ORG_ID, costBills.map((r) => r.xero_invoice_id))
+          for (const record of costBills) {
+            if (verdicts.stopped.has(record.xero_invoice_id)) { costMirrorStops++; continue }
+            collectBillCostDocument(record, {
+              orgId: DEFAULT_ORG_ID, mirrorBillIds: verdicts.mirrors, employerSuperOn: costEmployerSuperOn,
+            }, costDocuments, costLinesErrors)
+          }
+        } catch (e) {
+          const message = (e as Error).message
+          costLinesErrors.push(message)
+          console.error('[xero-sync] Bill mirror rule failed:', message)
+        }
+      }
       if (costDocuments.length) {
         try {
           const { data, error } = await sb.rpc('job_cost_lines_upsert_documents', { p_docs: costDocuments })
@@ -1387,11 +1396,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, cost_lines: { lines_written: costLinesWritten }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
+    payload: { synced: totalSynced, cost_lines: { lines_written: costLinesWritten, mirrors_stopped: costMirrorStops }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, cost_lines: { lines_written: costLinesWritten }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
+  return { success: true, synced: totalSynced, cost_lines: { lines_written: costLinesWritten, mirrors_stopped: costMirrorStops }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
 }
 
 
