@@ -206,8 +206,8 @@ function billedFromLines(
 }
 
 /**
- * What is already billed on each job, by the one count every cap uses
- * (billedFromLines). Throws WorkOrderTotalCapReadError on a failed read.
+ * With held lines enabled, the database guard and the live cap read the
+ * same billed total. An unreadable or incomplete result refuses the check.
  */
 export async function readBilledOnJobs(
   client: any,
@@ -216,13 +216,36 @@ export async function readBilledOnJobs(
 ): Promise<Map<string, number>> {
   const ids = [...new Set(jobIds.map(String).filter(Boolean))];
   if (ids.length === 0) return new Map();
-  let lines: Awaited<ReturnType<typeof readJobTradeLines>>;
   try {
-    lines = await readJobTradeLines(client, ids);
+    const flag = await client.from("feature_flags").select("enabled")
+      .eq("flag_name", "trade_line_hold_v1");
+    if (flag.error || !Array.isArray(flag.data)) throw new WorkOrderTotalCapReadError();
+    if (flag.data[0]?.enabled !== true) {
+      return billedFromLines(await readJobTradeLines(client, ids), opts.excludeLineIds);
+    }
+
+    const totals = new Map<string, number>();
+    for (let i = 0; i < ids.length; i += 25) {
+      const batch = ids.slice(i, i + 25);
+      const result = await client.rpc("work_order_backed_billed", {
+        p_job_ids: batch,
+        p_exclude_line_ids: opts.excludeLineIds ?? [],
+      });
+      if (result.error || !Array.isArray(result.data) || result.data.length !== batch.length) {
+        throw new WorkOrderTotalCapReadError();
+      }
+      for (const row of result.data) {
+        if (!batch.includes(row?.job_id) || totals.has(row.job_id) ||
+          typeof row.billed_ex !== "number" || !Number.isFinite(row.billed_ex)) {
+          throw new WorkOrderTotalCapReadError();
+        }
+        totals.set(row.job_id, row.billed_ex);
+      }
+    }
+    return totals;
   } catch {
     throw new WorkOrderTotalCapReadError();
   }
-  return billedFromLines(lines, opts.excludeLineIds);
 }
 
 /**
@@ -240,12 +263,12 @@ export async function readWorkOrderCapFacts(
 ): Promise<{ jobs: WorkOrderCapJob[]; billedEx: Map<string, number> }> {
   if (jobs.length === 0) return { jobs: [], billedEx: new Map() };
   const ids = jobs.map((j) => j.jobId);
-  let lines: Awaited<ReturnType<typeof readJobTradeLines>>;
+  let billedEx: Map<string, number>;
   let variations: any[];
   let changes: any[];
   try {
-    [lines, variations, changes] = await Promise.all([
-      readJobTradeLines(client, ids),
+    [billedEx, variations, changes] = await Promise.all([
+      readBilledOnJobs(client, ids, opts),
       readCustomerVariations(client, ids),
       (async () => {
         const rows: any[] = [];
@@ -265,7 +288,6 @@ export async function readWorkOrderCapFacts(
   } catch {
     throw new WorkOrderTotalCapReadError();
   }
-  const billedEx = billedFromLines(lines, opts.excludeLineIds);
   const capJobs = jobs.map((j) => {
     const added = variations
       .filter((v) =>

@@ -489,7 +489,7 @@ async function officeAction(action: string, invoice: Record<string, unknown>) {
   }
 }
 
-const HOLDING = { id: "6c2f0a52-0000-4000-8000-0000000fe777", status: "pending_ops_review", invoice_kind: "held", xero_bill_id: null, user: { id: TRADE_ID, name: "Fixture Trade" } };
+const HOLDING = { id: "6c2f0a52-0000-4000-8000-0000000fe777", status: "pending_ops_review", invoice_kind: "held", xero_bill_id: null, pay_run_id: null, user: { id: TRADE_ID, name: "Fixture Trade" } };
 
 handlerTest("line hold: pushing the holding invoice to Xero is refused before any write", async () => {
   const out = await officeAction("push_trade_invoice_to_xero", HOLDING);
