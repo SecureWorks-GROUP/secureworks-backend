@@ -622,6 +622,7 @@ import { linkSiteJobs, SiteLinkError } from './site_links.ts'
 import { ledgerPersonEdit, LedgerPersonEditError } from './ledger_person_edit.ts'
 import { contextJobMail, ContextJobReconError, reconJobItems } from './context_job_reconciliation.ts'
 import { reconDailyList, reconRecordDecision, ReconDecisionError } from './recon_decisions.ts'
+import { ReconcileListError, reconcileList, reconcileListRefusal } from './reconcile_list.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
 import {
   approvedSendSealSecret,
@@ -9480,6 +9481,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json(await ledgerPersonEdit(client, body, { authMode, userId: authMode === 'jwt' ? authUser?.id : null }))
         } catch (error) {
           if (error instanceof LedgerPersonEditError) return json({ error: error.message, code: error.code, ...error.detail }, error.status)
+          throw error
+        }
+      }
+      // ── Reconcile cost list (P2-03.6, Follow-up 66 lift): the "Cost lines to
+      // place" screen's read. GET only, writes nothing. A signed-in staff
+      // session only: a server key, the routine, an agent and a trade are
+      // refused 403 before any row is read (reconcile_list.ts). Behind
+      // reconcile_list_v1, which ships off. Not on the routine, agent-read or
+      // trade lists.
+      case 'reconcile_list': {
+        try {
+          if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) throw reconcileListRefusal('operator_org_required')
+          if (req.method !== 'GET') throw reconcileListRefusal('method_not_allowed')
+          return json(await reconcileList(client, url.searchParams, {
+            authMode,
+            userId: authMode === 'jwt' ? authUser?.id : null,
+            isStaff: authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role),
+            orgId: DEFAULT_ORG_ID,
+          }))
+        } catch (error) {
+          if (error instanceof ReconcileListError) return json({ ok: false, error: error.code, code: error.code, message: error.message, userMessage: error.message }, error.status)
           throw error
         }
       }
