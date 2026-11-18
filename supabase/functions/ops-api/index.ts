@@ -879,6 +879,7 @@ import {
   updateJobWorkOrderDraft,
 } from './job_work_orders.ts'
 import { readJobWorkOrderGaps } from './job_work_order_gaps.ts'
+import { confirmJobWorkOrderLabour, listJobWorkOrderLabourConfirm } from './job_work_order_labour_confirm.ts'
 import { loadWorkOrderClaimCheck, withClaimWarnings } from './work_order_claim_check.ts'
 import {
   CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG,
@@ -10902,6 +10903,23 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const actor = officeJobWorkOrderActor(authMode, authUser)
         actor.orgId = authMode === 'api_key' ? DEFAULT_ORG_ID : actor.orgId
         return json(await runJobWorkOrder(() => readJobWorkOrderGaps(client, req.method, actor)))
+      }
+      // FU49 9(a): open jobs whose draft job work order has no agreed labour,
+      // each with its sealed budget amount as a proposal, and the one office
+      // press that confirms it (job_work_order_labour_confirm_v1, seeded off).
+      case 'list_job_work_order_labour_confirm': {
+        if (req.method !== 'GET') {
+          return json({ error: 'list_job_work_order_labour_confirm is GET only', code: 'method_not_allowed' }, 405)
+        }
+        const actor = officeJobWorkOrderActor(authMode, authUser)
+        actor.orgId = authMode === 'api_key' ? DEFAULT_ORG_ID : actor.orgId
+        return json(await runJobWorkOrder(() => listJobWorkOrderLabourConfirm(client, url.searchParams, actor)))
+      }
+      case 'confirm_job_work_order_labour': {
+        if (req.method !== 'POST') {
+          return json({ error: 'confirm_job_work_order_labour is POST only', code: 'method_not_allowed' }, 405)
+        }
+        return json(await runJobWorkOrder(() => confirmJobWorkOrderLabour(client, body, officeJobWorkOrderActor(authMode, authUser))))
       }
       case 'list_office_job_work_orders': {
         if (req.method !== 'GET') {
