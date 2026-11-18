@@ -189,6 +189,12 @@ dispatch_v2_set_delivery_date        # probe=source-only
 #    production by a smoke run. ──
 dispatch_v2_tray_attachment_open     # probe=source-only
 
+# ── Ops screen Dispatch tab v2: Read now (docs/dispatch-v2-board-contract.md,
+#    section 3j). Reads Outlook and runs the supplier reply scan now: a staff
+#    press with side effects (mail capture), source-only, never fired at
+#    production by a smoke run. ──
+dispatch_v2_read_now                 # probe=source-only
+
 # ── Ops screen Dispatch tab v2: a supplier order's material stage set by hand
 #    (docs/dispatch-v2-board-contract.md, section 3b). A staff write:
 #    source-only, never fired at production by a smoke run. ──
