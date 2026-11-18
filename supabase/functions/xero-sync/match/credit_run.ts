@@ -349,7 +349,7 @@ export async function syncMatchStep(
 ): Promise<SyncMatchStepReport> {
   const now = opts.now ?? Date.now;
   const deadline = opts.on ? now() + (opts.budgetMs ?? MATCH_RUN_BUDGET_MS) : 0;
-  const bills = await syncMatchRun(sb, { on: opts.on, changed: opts.changed, now, deadline });
+  const bills = await syncMatchRun(sb, { on: opts.on, changed: opts.changed, now, deadline, budgetMs: opts.budgetMs });
   const credits = await syncCreditRun(sb, { on: opts.on, room: MATCH_RUN_LIMIT - bills.run, deadline, now });
   return { ...bills, credits };
 }

@@ -2,6 +2,11 @@
 BEGIN;
 -- 20261118196000 patches this body; take its switch check out before re-applying.
 \ir ../../../rollbacks/20261118196000_reconcile_decide_switch_in_database_down.sql
+-- P2-02.8 patches match_apply on top of this one: unwind it first.
+SELECT to_regprocedure('public.match_clues_unchanged(text,text,jsonb,text)') IS NOT NULL AS held_installed \gset
+\if :held_installed
+\ir ../../../rollbacks/20261118195800_match_apply_held_unchanged_down.sql
+\endif
 \ir ../../../migrations/20261118195300_reconcile_undo.sql
 CREATE TEMP TABLE undo_checks(label text);
 CREATE FUNCTION pg_temp.check_it(ok boolean,label text) RETURNS void LANGUAGE plpgsql AS $$
