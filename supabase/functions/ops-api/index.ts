@@ -5,6 +5,7 @@ import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdWholeJob, isKep
 import { readJobAmountsLeft, type LineHoldFacts } from './trade_line_hold.ts'
 import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine, ownMoneyReimbursementItems, reimbursementSkipAnswer } from './trade_invoice_reimbursement.ts'
 import { ExpenseCaptureError, expenseCaptureFields, expenseNextStep, refuseBilledReimbursement } from './expense_capture_v2.ts'
+import { assertExpenseJobIsCallers, expenseJobIdOf } from './expense_own_job.ts'
 import { listExpenseReceipts } from './expense_list.ts'
 import { factReadOn } from './fact_reader_switch.ts'
 import { rejectTradeInvoiceStorage } from './trade_invoice_rejection.ts'
@@ -65087,6 +65088,13 @@ export async function submitExpense(
     submitted_by ||
     null
 
+  // A trade files only against a job they are booked on (same rule as the app).
+  await assertExpenseJobIsCallers(client, {
+    jobId: job_id,
+    userId: authCtx?.mode === 'jwt' ? authCtx.user?.id : null,
+    staff: authCtx?.mode !== 'jwt' || _opsApiStaffOperatorRole(authCtx?.user?.role),
+  })
+
   let submitterName: string | null = null
   let submitterRole: string | null = (authCtx?.user?.role || null) as string | null
   if (submitterId) {
@@ -65347,6 +65355,17 @@ export async function updateExpense(
   if (body.stock_division === undefined && !row.stock_division) delete capture.stock_division
   Object.assign(updates, capture)
   const result = { ...row, ...updates }
+  // Moving a receipt onto a job: a trade only onto a job they are booked on.
+  // Checked on the job id that would be written. The job already on the row is
+  // not re-checked, so a resend of it still saves.
+  const writtenJobId = 'job_id' in updates ? expenseJobIdOf(updates.job_id) : null
+  if (writtenJobId && writtenJobId !== expenseJobIdOf(row.job_id)) {
+    await assertExpenseJobIsCallers(client, {
+      jobId: writtenJobId,
+      userId: authCtx?.mode === 'jwt' ? authCtx.user?.id : null,
+      staff: authCtx?.mode !== 'jwt' || _opsApiStaffOperatorRole(authCtx?.user?.role),
+    })
+  }
   if (body.capture_version === 2 && !result.job_id && !result.stock_division) {
     const { data: flag, error } = await client.from('feature_flags').select('enabled')
       .eq('flag_name', 'spend_capture_v2').maybeSingle()
