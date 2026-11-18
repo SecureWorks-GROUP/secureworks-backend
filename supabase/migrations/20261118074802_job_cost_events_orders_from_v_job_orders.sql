@@ -12,10 +12,11 @@ SET LOCAL statement_timeout = '120s';
 -- v_job_orders.matched is true: the job_cost_lines CHECK makes state IS NOT
 -- NULL the same test as not_counted_reason IS NULL.
 -- c98dd14a: main after P2-03.1 (live read d8ccd9fe was taken before it merged).
--- 90b424e4: this migration's own result, so a re-apply changes nothing.
--- A Dispatch order closes only when a counted line naming it has a part on the
--- order's own job (the cost the actual arm adds). v_job_orders.matched alone is
--- not enough: a needs_person line matches but puts no cost on the job.
+-- 799c11c9: this migration's own result, so a re-apply changes nothing.
+-- A Dispatch order closes only when a counted line naming it has a nonzero part
+-- on the order's own job (the cost the actual arm adds). v_job_orders.matched
+-- alone is not enough: a needs_person line matches but puts no cost on the job,
+-- and a split that puts 0 on the job adds no cost there either.
 -- job_cost_lines_order_idx finds the lines; job_cost_line_parts is read by its
 -- (line_id, part_no) unique index.
 DO $view$
@@ -38,20 +39,26 @@ DECLARE d text;
   AND NOT EXISTS(SELECT 1 FROM public.job_cost_lines l
    JOIN public.job_cost_line_parts p ON p.line_id=l.id
    WHERE l.order_kind=o.order_kind AND l.order_id=o.order_id AND l.state IS NOT NULL
-    AND p.target='job' AND p.job_id=o.job_id)$arm$;
+    AND p.target='job' AND p.job_id=o.job_id AND p.amount_ex<>0)$arm$;
   EXECUTE 'CREATE OR REPLACE VIEW public.v_job_cost_events_lines AS '||d;
- ELSIF md5(d)<>'90b424e43450a35382e013b01a0d2462' THEN
+ ELSIF md5(d)<>'799c11c9580df8050043872a43b993c9' THEN
   RAISE EXCEPTION 'P2-10.2: cost line reader pre-image differs';
  END IF;
 END $view$;
 REVOKE ALL ON public.v_job_cost_events_lines FROM PUBLIC,anon,authenticated;
 GRANT SELECT ON public.v_job_cost_events_lines TO service_role;
 
+-- Each function is created when absent, left alone when it already holds this
+-- body (a re-apply), and refused when it holds any other body.
+
 -- Open bill items of one supplier, for a re-match after its order is sent.
 -- reconcile_items_list_idx (status,kind) reads the open bill list; each item's
 -- lines come through job_cost_lines_document_idx (document_kind,document_id).
 -- Bounded by the open bill list, never by the supplier's whole history.
-CREATE OR REPLACE FUNCTION public.dispatch_order_rematch_subjects(p_org_id uuid,p_party_id text,p_name_key text)
+DO $g$
+/* block */ BEGIN
+ IF to_regprocedure('public.dispatch_order_rematch_subjects(uuid,text,text)') IS NULL THEN
+  EXECUTE $create$CREATE FUNCTION public.dispatch_order_rematch_subjects(p_org_id uuid,p_party_id text,p_name_key text)
 RETURNS SETOF text LANGUAGE sql STABLE AS $fn$
  SELECT DISTINCT ri.subject_id
  FROM public.reconcile_items ri
@@ -63,11 +70,18 @@ RETURNS SETOF text LANGUAGE sql STABLE AS $fn$
   AND ri.org_id=p_org_id AND strpos(ri.subject_id,':')>0
   AND ((p_party_id IS NOT NULL AND p_party_id<>'' AND l.party_id=p_party_id)
    OR (p_name_key<>'' AND public.supplier_name_key(l.party_name)=p_name_key))
-$fn$;
+$fn$$create$;
+ ELSIF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.dispatch_order_rematch_subjects(uuid,text,text)'::regprocedure)<>'891a48e6e9f70519c8f327776246575e' THEN
+  RAISE EXCEPTION 'P2-10.2: dispatch_order_rematch_subjects pre-image differs';
+ END IF;
+END $g$;
 
 -- Never waits on a lock and never fails the order write: each step has its
 -- own 1ms lock wait and its own exception block, and only warns.
-CREATE OR REPLACE FUNCTION public.dispatch_order_commitment_trg() RETURNS trigger
+DO $g$
+/* block */ BEGIN
+ IF to_regprocedure('public.dispatch_order_commitment_trg()') IS NULL THEN
+  EXECUTE $create$CREATE FUNCTION public.dispatch_order_commitment_trg() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $fn$
 DECLARE prior_timeout text:=current_setting('lock_timeout'); v_party text;
 /* block */ BEGIN
@@ -96,21 +110,39 @@ DECLARE prior_timeout text:=current_setting('lock_timeout'); v_party text;
 EXCEPTION WHEN OTHERS THEN
  RAISE WARNING 'order commitment invalidation unavailable: %',SQLSTATE;
  RETURN NULL;
-END $fn$;
+END $fn$$create$;
+ ELSIF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.dispatch_order_commitment_trg()'::regprocedure)<>'f47705471224b19d50576d859ea99f72' THEN
+  RAISE EXCEPTION 'P2-10.2: dispatch_order_commitment_trg pre-image differs';
+ END IF;
+END $g$;
 
-CREATE OR REPLACE FUNCTION public.install_dispatch_order_commitment() RETURNS void
+DO $g$
+/* block */ BEGIN
+ IF to_regprocedure('public.install_dispatch_order_commitment()') IS NULL THEN
+  EXECUTE $create$CREATE FUNCTION public.install_dispatch_order_commitment() RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $fn$
 /* block */ BEGIN
  DROP TRIGGER IF EXISTS dispatch_order_commitment ON public.dispatch_supplier_order_emails;
  CREATE TRIGGER dispatch_order_commitment
  AFTER INSERT OR UPDATE OF status,order_cost ON public.dispatch_supplier_order_emails
  FOR EACH ROW EXECUTE FUNCTION public.dispatch_order_commitment_trg();
-END $fn$;
-CREATE OR REPLACE FUNCTION public.remove_dispatch_order_commitment() RETURNS void
+END $fn$$create$;
+ ELSIF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.install_dispatch_order_commitment()'::regprocedure)<>'d3d6722d28e811a05c89d6dd57c723b0' THEN
+  RAISE EXCEPTION 'P2-10.2: install_dispatch_order_commitment pre-image differs';
+ END IF;
+END $g$;
+DO $g$
+/* block */ BEGIN
+ IF to_regprocedure('public.remove_dispatch_order_commitment()') IS NULL THEN
+  EXECUTE $create$CREATE FUNCTION public.remove_dispatch_order_commitment() RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $fn$
 /* block */ BEGIN
  DROP TRIGGER IF EXISTS dispatch_order_commitment ON public.dispatch_supplier_order_emails;
-END $fn$;
+END $fn$$create$;
+ ELSIF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.remove_dispatch_order_commitment()'::regprocedure)<>'d8c52f4c0a4e82417ecd5ecc03143d23' THEN
+  RAISE EXCEPTION 'P2-10.2: remove_dispatch_order_commitment pre-image differs';
+ END IF;
+END $g$;
 
 REVOKE ALL ON FUNCTION public.dispatch_order_rematch_subjects(uuid,text,text),
  public.dispatch_order_commitment_trg(),public.install_dispatch_order_commitment(),

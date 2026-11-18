@@ -41,6 +41,67 @@ CREATE TEMP TABLE main_line_rows AS SELECT to_jsonb(e) r FROM public.v_job_cost_
 \ir ../../../migrations/20261118074802_job_cost_events_orders_from_v_job_orders.sql
 -- A re-apply is a no-op.
 \ir ../../../migrations/20261118074802_job_cost_events_orders_from_v_job_orders.sql
+DO $fnskip$ BEGIN
+ IF (SELECT array_agg(md5(prosrc) ORDER BY proname) FROM pg_proc WHERE oid IN (
+  'public.dispatch_order_commitment_trg()'::regprocedure,'public.dispatch_order_rematch_subjects(uuid,text,text)'::regprocedure,
+  'public.install_dispatch_order_commitment()'::regprocedure,'public.remove_dispatch_order_commitment()'::regprocedure))
+  IS DISTINCT FROM ARRAY['f47705471224b19d50576d859ea99f72','891a48e6e9f70519c8f327776246575e',
+  'd3d6722d28e811a05c89d6dd57c723b0','d8c52f4c0a4e82417ecd5ecc03143d23'] THEN
+  RAISE EXCEPTION 'P2-10.2 function bodies differ after re-apply'; END IF;
+END $fnskip$;
+-- A function holding any other body stops the migration and is never
+-- overwritten. ON_ERROR_ROLLBACK keeps the transaction open past the refusal,
+-- so the last error is the guard's own; it is kept in psql variables across
+-- the rollback to the savepoint.
+CREATE TEMP TABLE fn_drift(fn text,msg text,still_drifted boolean);
+SAVEPOINT fn_drift_dispatch_order_rematch_subjects;
+CREATE OR REPLACE FUNCTION public.dispatch_order_rematch_subjects(p_org_id uuid,p_party_id text,p_name_key text) RETURNS SETOF text LANGUAGE sql STABLE AS $d$ SELECT NULL::text $d$;
+\set LAST_ERROR_MESSAGE ''
+\set ON_ERROR_STOP 0
+\set ON_ERROR_ROLLBACK on
+\ir ../../../migrations/20261118074802_job_cost_events_orders_from_v_job_orders.sql
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP 1
+SELECT :'LAST_ERROR_MESSAGE' AS drift_msg,(SELECT length(prosrc)<40 FROM pg_proc WHERE oid='public.dispatch_order_rematch_subjects(uuid,text,text)'::regprocedure) AS drift_kept \gset
+ROLLBACK TO fn_drift_dispatch_order_rematch_subjects;
+INSERT INTO fn_drift VALUES('dispatch_order_rematch_subjects',:'drift_msg',:'drift_kept'::boolean);
+SAVEPOINT fn_drift_dispatch_order_commitment_trg;
+CREATE OR REPLACE FUNCTION public.dispatch_order_commitment_trg() RETURNS trigger LANGUAGE plpgsql AS $d$ BEGIN RETURN NULL; END $d$;
+\set LAST_ERROR_MESSAGE ''
+\set ON_ERROR_STOP 0
+\set ON_ERROR_ROLLBACK on
+\ir ../../../migrations/20261118074802_job_cost_events_orders_from_v_job_orders.sql
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP 1
+SELECT :'LAST_ERROR_MESSAGE' AS drift_msg,(SELECT length(prosrc)<40 FROM pg_proc WHERE oid='public.dispatch_order_commitment_trg()'::regprocedure) AS drift_kept \gset
+ROLLBACK TO fn_drift_dispatch_order_commitment_trg;
+INSERT INTO fn_drift VALUES('dispatch_order_commitment_trg',:'drift_msg',:'drift_kept'::boolean);
+SAVEPOINT fn_drift_install_dispatch_order_commitment;
+CREATE OR REPLACE FUNCTION public.install_dispatch_order_commitment() RETURNS void LANGUAGE plpgsql AS $d$ BEGIN RETURN; END $d$;
+\set LAST_ERROR_MESSAGE ''
+\set ON_ERROR_STOP 0
+\set ON_ERROR_ROLLBACK on
+\ir ../../../migrations/20261118074802_job_cost_events_orders_from_v_job_orders.sql
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP 1
+SELECT :'LAST_ERROR_MESSAGE' AS drift_msg,(SELECT length(prosrc)<40 FROM pg_proc WHERE oid='public.install_dispatch_order_commitment()'::regprocedure) AS drift_kept \gset
+ROLLBACK TO fn_drift_install_dispatch_order_commitment;
+INSERT INTO fn_drift VALUES('install_dispatch_order_commitment',:'drift_msg',:'drift_kept'::boolean);
+SAVEPOINT fn_drift_remove_dispatch_order_commitment;
+CREATE OR REPLACE FUNCTION public.remove_dispatch_order_commitment() RETURNS void LANGUAGE plpgsql AS $d$ BEGIN RETURN; END $d$;
+\set LAST_ERROR_MESSAGE ''
+\set ON_ERROR_STOP 0
+\set ON_ERROR_ROLLBACK on
+\ir ../../../migrations/20261118074802_job_cost_events_orders_from_v_job_orders.sql
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP 1
+SELECT :'LAST_ERROR_MESSAGE' AS drift_msg,(SELECT length(prosrc)<40 FROM pg_proc WHERE oid='public.remove_dispatch_order_commitment()'::regprocedure) AS drift_kept \gset
+ROLLBACK TO fn_drift_remove_dispatch_order_commitment;
+INSERT INTO fn_drift VALUES('remove_dispatch_order_commitment',:'drift_msg',:'drift_kept'::boolean);
+DO $fnguard$ BEGIN
+ IF (SELECT count(*) FROM fn_drift WHERE msg='P2-10.2: '||fn||' pre-image differs' AND still_drifted)<>4 THEN
+  RAISE EXCEPTION 'P2-10.2 function guards must refuse another body: %',(SELECT jsonb_agg(to_jsonb(f)) FROM fn_drift f); END IF;
+END $fnguard$;
 
 CREATE FUNCTION pg_temp.expect_failure(command text, expected text) RETURNS void
 LANGUAGE plpgsql AS $expect$
@@ -56,7 +117,7 @@ END $expect$;
 -- Switch off: every reader of v_job_cost_events gets main's rows and main's view.
 -- The line reader keeps every main row and only adds dispatch order rows.
 DO $off$ BEGIN
- IF md5(pg_get_viewdef('public.v_job_cost_events_lines'::regclass,true))<>'90b424e43450a35382e013b01a0d2462' THEN
+ IF md5(pg_get_viewdef('public.v_job_cost_events_lines'::regclass,true))<>'799c11c9580df8050043872a43b993c9' THEN
   RAISE EXCEPTION 'P2-10.2 post-image differs'; END IF;
  IF pg_get_viewdef('public.v_job_cost_events'::regclass,true)<>(SELECT def FROM parent_definition) THEN
   RAISE EXCEPTION 'P2-10.2 parent reader changed'; END IF;
@@ -328,6 +389,29 @@ DO $allocplan$ DECLARE plan jsonb; BEGIN
   WHERE node->>'Node Type' IN ('Index Scan','Index Only Scan','Bitmap Heap Scan') AND (node->>'Actual Loops')::numeric>0) THEN
   RAISE EXCEPTION 'P2-10.2 allocation probe must use an index: %',plan; END IF;
 END $allocplan$;
+-- A 2000 bill split 0 to job A and 2000 to job B puts no cost on A: O1 stays
+-- committed at 2000 on A. A split with a nonzero part on A closes it.
+DELETE FROM public.job_cost_line_parts WHERE line_id='10210000-0000-4000-8000-000000000071';
+UPDATE public.job_cost_lines SET state='split' WHERE id='10210000-0000-4000-8000-000000000071';
+INSERT INTO public.job_cost_line_parts(line_id,part_no,target,job_id,lane,amount_ex) VALUES
+ ('10210000-0000-4000-8000-000000000071',1,'job','10210000-0000-4000-8000-00000000000a','materials',0),
+ ('10210000-0000-4000-8000-000000000071',2,'job','10210000-0000-4000-8000-00000000000b','materials',2000);
+DO $zerosplit$ BEGIN
+ IF (SELECT coalesce(sum(amount_ex),0) FROM public.v_job_cost_events
+  WHERE job_id='10210000-0000-4000-8000-00000000000a' AND source_id='10210000-0000-4000-8000-000000000001'
+   AND source='po_committed' AND NOT is_actual)<>2000
+ OR (SELECT coalesce(sum(amount_ex),0) FROM public.v_job_cost_events
+  WHERE job_id='10210000-0000-4000-8000-00000000000a' AND is_actual)<>0 THEN
+  RAISE EXCEPTION 'P2-10.2 a 0 allocation on the order''s job must keep it committed at 2000 with 0 actual'; END IF;
+END $zerosplit$;
+UPDATE public.job_cost_line_parts SET amount_ex=500 WHERE line_id='10210000-0000-4000-8000-000000000071' AND part_no=1;
+UPDATE public.job_cost_line_parts SET amount_ex=1500 WHERE line_id='10210000-0000-4000-8000-000000000071' AND part_no=2;
+DO $partsplit$ BEGIN
+ IF EXISTS(SELECT 1 FROM public.v_job_cost_events WHERE source_id='10210000-0000-4000-8000-000000000001')
+ OR (SELECT coalesce(sum(amount_ex),0) FROM public.v_job_cost_events
+  WHERE job_id='10210000-0000-4000-8000-00000000000a' AND is_actual)<>500 THEN
+  RAISE EXCEPTION 'P2-10.2 a nonzero allocation on the order''s job must close it and count once'; END IF;
+END $partsplit$;
 ROLLBACK TO alloc_fixture;
 
 SELECT 'PASS P2-10.2: dispatch orders committed until counted, unknown cost NULL, matched purchase orders close, off parity, guarded queue and mark';
