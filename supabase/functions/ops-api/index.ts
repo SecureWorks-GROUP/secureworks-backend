@@ -64343,8 +64343,8 @@ export function buildXeroExpenseBillBody(expense: any): any {
 // We refuse the push, persist the reasons on the row, and emit a business event.
 // The row stays in 'approved' state so the user can fix and retry.
 export function preflightExpense(expense: any): { ok: boolean; reasons: string[] } {
-  if (expense.payment_method !== 'cash') {
-    throw new ExpenseCaptureError('expense_not_billable', 'Only a company cash receipt becomes a bill.')
+  if (expense.payment_method === 'company_card') {
+    throw new ExpenseCaptureError('expense_not_billable', 'Company-card receipts do not become Xero bills.')
   }
   const reasons: string[] = []
 
@@ -64378,6 +64378,9 @@ export function preflightExpense(expense: any): { ok: boolean; reasons: string[]
   // Classification — required for Xero AccountCode mapping and later bank-rec.
   if (!expense.category || expense.category === 'unknown') {
     reasons.push('category required')
+  }
+  if (!expense.payment_method || expense.payment_method === 'unknown') {
+    reasons.push('payment_method required')
   }
   if (!expense.gst_status || expense.gst_status === 'unknown') {
     reasons.push('gst_status required')

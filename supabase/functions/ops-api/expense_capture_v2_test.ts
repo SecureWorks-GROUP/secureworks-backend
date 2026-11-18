@@ -271,40 +271,30 @@ Deno.test("a receipt already billed refuses both ways to request reimbursement",
   assertEquals(read(), before);
 });
 
-Deno.test("non-cash and unclassified receipts refuse before Xero even with all switches off", async () => {
-  for (
-    const payment_method of [
-      "company_card",
-      "personal_card",
-      "supplier_invoice",
-      "unknown",
-      null,
-    ]
-  ) {
-    const { client, state } = store({ payment_method, job_id: job });
-    state.enabled = false;
-    let requests = 0;
-    const fakeFetch = () => {
-      requests++;
-      throw new Error("unexpected transport");
-    };
-    const push = () =>
-      pushExpenseToXero(client, { expense_id: expenseId }, staff, fakeFetch);
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const err = await assertRejects(push, ExpenseCaptureError);
-      assertEquals([err.status, err.code, err.message], [
-        409,
-        "expense_not_billable",
-        "Only a company cash receipt becomes a bill.",
-      ]);
-    }
-    assertEquals([state.tokenReads, requests], [0, 0]);
+Deno.test("company-card receipts refuse before Xero even with all switches off", async () => {
+  const { client, state } = store({ payment_method: "company_card", job_id: job });
+  state.enabled = false;
+  let requests = 0;
+  const fakeFetch = () => {
+    requests++;
+    throw new Error("unexpected transport");
+  };
+  const push = () =>
+    pushExpenseToXero(client, { expense_id: expenseId }, staff, fakeFetch);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const err = await assertRejects(push, ExpenseCaptureError);
+    assertEquals([err.status, err.code, err.message], [
+      409,
+      "expense_not_billable",
+      "Company-card receipts do not become Xero bills.",
+    ]);
   }
+  assertEquals([state.tokenReads, requests], [0, 0]);
 });
 
-Deno.test("cash sends one original draft payload and records the bill", async () => {
+async function assertOriginalDraftBill(payment_method: string) {
   const { client, state, read } = store({
-    payment_method: "cash",
+    payment_method,
     job_id: job,
   });
   state.enabled = false;
@@ -351,7 +341,13 @@ Deno.test("cash sends one original draft payload and records the bill", async ()
     "pushed_to_xero",
     "ZZTEST-bill",
   ]);
-});
+}
+
+Deno.test("cash sends one original draft payload and records the bill", () =>
+  assertOriginalDraftBill("cash"));
+
+Deno.test("personal card sends one original draft payload with all switches off", () =>
+  assertOriginalDraftBill("personal_card"));
 
 Deno.test("office approval of a company-card receipt records approval without a bill", async () => {
   const { client, state, read } = store({ status: "pending" });

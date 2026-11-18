@@ -6,9 +6,8 @@
 //   - preflightExpense: junk OCR data is rejected before Xero is called.
 //
 // Exercise the production helpers without starting the server.
-import { assertEquals, assert, assertStringIncludes, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts"
+import { assertEquals, assert, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts"
 import { buildXeroExpenseBillBody, preflightExpense } from "./index.ts"
-import { ExpenseCaptureError } from "./expense_capture_v2.ts"
 
 // Fixture builders
 // ────────────────────────────────────────────────────────────────────────────
@@ -26,7 +25,7 @@ function validExpense(overrides: Record<string, any> = {}): any {
     ],
     receipt_sha256: 'a'.repeat(64),
     category: 'materials',
-    payment_method: 'cash',
+    payment_method: 'personal_card',
     gst_status: 'included',
     job_id: 'job-uuid-1',
     business_category: null,
@@ -136,9 +135,10 @@ Deno.test("preflight — unknown category fails", () => {
 })
 
 Deno.test("preflight — unknown payment_method fails", () => {
-  const refusal = assertThrows(() => preflightExpense(validExpense({ payment_method: 'unknown' })), ExpenseCaptureError)
-  assertEquals(refusal.status, 409)
-  assertEquals(refusal.code, 'expense_not_billable')
+  for (const payment_method of ['unknown', null]) {
+    const result = preflightExpense(validExpense({ payment_method }))
+    assertEquals(result, { ok: false, reasons: ['payment_method required'] })
+  }
 })
 
 Deno.test("preflight — unknown gst_status fails", () => {
@@ -192,7 +192,7 @@ Deno.test("preflight — multiple violations are all reported", () => {
     total_amount: 0,
     receipt_date: null,
     category: 'unknown',
-    payment_method: 'cash',
+    payment_method: 'unknown',
     gst_status: 'unknown',
   })
   assertEquals(result.ok, false)
