@@ -87,6 +87,8 @@ fn_state AS (
   FROM fns f LEFT JOIN pg_catalog.pg_proc p ON p.oid = to_regprocedure(f.signature)
 ),
 -- PostgREST calls a function by argument name. trade_pay_run.ts sends these.
+-- The raise counts through reconcile_item_raise itself or its named door
+-- reconcile_item_raise_named (#1643).
 calls(fn, sent) AS (VALUES
   ('reconcile_item_raise', ARRAY['p_kind','p_subject_table','p_subject_id',
     'p_job_ids','p_suggestion','p_evidence','p_raised_by']::text[]),
@@ -98,11 +100,13 @@ call_state AS (
     coalesce(bool_or(p.proargnames IS NOT NULL
       AND (p.proargnames[1:p.pronargs])::text[] @> c.sent
       AND c.sent @> (p.proargnames[1:p.pronargs - p.pronargdefaults])::text[]), false) AS by_name,
-    coalesce(jsonb_agg(jsonb_build_object('args', p.pronargs, 'names', p.proargnames))
-      FILTER (WHERE p.oid IS NOT NULL), '[]') AS overload_arg_names
+    coalesce(jsonb_agg(jsonb_build_object('function', p.proname, 'args', p.pronargs,
+      'names', p.proargnames)) FILTER (WHERE p.oid IS NOT NULL), '[]') AS overload_arg_names
   FROM calls c
   LEFT JOIN pg_catalog.pg_proc p
-    ON p.pronamespace = 'public'::regnamespace AND p.proname = c.fn
+    ON p.pronamespace = 'public'::regnamespace
+      AND (p.proname = c.fn
+        OR (c.fn = 'reconcile_item_raise' AND p.proname = 'reconcile_item_raise_named'))
   GROUP BY c.fn, c.sent
 ),
 -- pay_run_stopped is raised on subject trade_pay_run_weeks; reconcile_item_org
@@ -174,12 +178,12 @@ checks(ord, kind, check_name, passed, evidence, source) AS (
   UNION ALL
   SELECT CASE fn WHEN 'reconcile_item_raise' THEN 6 ELSE 7 END, 'required',
     CASE fn WHEN 'reconcile_item_raise'
-      THEN 'P06 reconcile_item_raise callable by argument name'
+      THEN 'P06 reconcile_item_raise (or its named door) callable by argument name'
       ELSE 'P07 reconcile_item_withdraw callable by argument name' END,
     by_name,
     jsonb_build_object('overloads', overloads, 'names_sent', sent,
       'overload_arg_names', overload_arg_names),
-    'trade_pay_run.ts raise/withdraw; follow-up P1-10.3 item 1'
+    'trade_pay_run.ts raise/withdraw; follow-up P1-10.3 item 1; #1643'
   FROM call_state
   UNION ALL
   SELECT 8, 'required', 'P08 pay_run_stopped subject trade_pay_run_weeks resolves an organisation',

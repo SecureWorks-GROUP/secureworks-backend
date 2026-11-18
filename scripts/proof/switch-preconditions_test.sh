@@ -80,7 +80,7 @@ save pay-bare.txt "$pay"
 for id in C01 C04 C05 C09; do expect "$cap" "$id" PASS; done
 # No repository migration gives trade_invoice_lines an org_id, so a
 # pay_line_held raise cannot resolve its organisation (C11).
-for id in C02 C03 C06 C07 C08 C10 C11 C12 C13 C14 F01 F02; do expect "$cap" "$id" FAIL; done
+for id in C02 C03 C06 C07 C08 C10 C11 C12 C13 C14 F01 F02 F03; do expect "$cap" "$id" FAIL; done
 for id in N01 N02 N03; do expect "$cap" "$id" "NOT CHECKED HERE"; done
 expect_overall "$cap" FAIL
 for id in P01 P02 P03 P04 P07; do expect "$pay" "$id" PASS; done
@@ -112,24 +112,38 @@ INSERT INTO supabase_migrations.schema_migrations(version)
   SELECT v FROM unnest(ARRAY['20261117020000','20261117172401','20261117173901','20261117174103',
     '20261118043357','20261118060051','20261118063223','20261118070639','20261118073218',
     '20261118115852','20261118122207','20261118122208','20261118122209','20261118153101']) v;
--- Stand-ins for migration PR A and the P1-10.3 named entry point.
+-- A ZZTEST held line, as a held send leaves it.
+SET session_replication_role = replica;
+INSERT INTO public.trade_invoices(id, org_id, invoice_kind, status, invoice_number)
+  VALUES ('00000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-000000000001', 'held', 'pending_ops_review', 'ZZTEST-PROOF-H1');
+INSERT INTO public.trade_invoice_lines(id, trade_invoice_id, job_id, line_type, line_total_ex, hold_reason, office_review_status)
+  VALUES ('00000000-0000-0000-0000-0000000000e1', '00000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-0000000000b1',
+    'materials', 10, 'no_work_order', 'awaiting');
+SET session_replication_role = origin;
+-- Stand-in for #1643's named door (exact signature), then the raise a held
+-- send makes through it with the holding invoice's organisation (#1649).
+CREATE FUNCTION public.reconcile_item_raise_named(p_kind text, p_subject_table text, p_subject_id text,
+  p_job_ids uuid[], p_suggestion jsonb, p_evidence jsonb, p_raised_by text, p_org_id uuid DEFAULT NULL)
+  RETURNS uuid LANGUAGE sql AS
+  'SELECT public.reconcile_item_raise(p_kind, p_subject_table, p_subject_id, p_job_ids, p_suggestion, p_evidence, p_raised_by, p_org_id)';
+REVOKE ALL ON FUNCTION public.reconcile_item_raise_named(text,text,text,uuid[],jsonb,jsonb,text,uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.reconcile_item_raise_named(text,text,text,uuid[],jsonb,jsonb,text,uuid) TO service_role;
+SELECT public.reconcile_item_raise_named(p_kind => 'pay_line_held', p_subject_table => 'trade_invoice_lines',
+  p_subject_id => '00000000-0000-0000-0000-0000000000e1', p_job_ids => ARRAY['00000000-0000-0000-0000-0000000000b1']::uuid[],
+  p_suggestion => '{}'::jsonb, p_evidence => '{"reason":"no_work_order","amount_ex":10}'::jsonb,
+  p_raised_by => 'phase1:work_order_gate', p_org_id => '00000000-0000-0000-0000-000000000001');
+-- Stand-ins for migration PR A.
 CREATE FUNCTION public.persist_trade_work_order_invoice_v2(p_invoice jsonb, p_lines jsonb, p_requested_prior_draft_id uuid)
   RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid';
 CREATE FUNCTION public.decide_held_trade_line(p_line_id uuid, p_decision text, p_actor uuid, p_org_id uuid, p_changes jsonb, p_reason text)
   RETURNS jsonb LANGUAGE sql AS 'SELECT NULL::jsonb';
-CREATE FUNCTION public.reconcile_item_raise(p_kind text, p_subject_table text, p_subject_id text, p_job_ids uuid[],
-  p_suggestion jsonb, p_evidence jsonb, p_raised_by text, p_org_hint uuid DEFAULT NULL, p_named boolean DEFAULT true)
-  RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid';
 REVOKE ALL ON FUNCTION public.persist_trade_work_order_invoice_v2(jsonb,jsonb,uuid),
-  public.decide_held_trade_line(uuid,text,uuid,uuid,jsonb,text),
-  public.reconcile_item_raise(text,text,text,uuid[],jsonb,jsonb,text,uuid,boolean)
+  public.decide_held_trade_line(uuid,text,uuid,uuid,jsonb,text)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.persist_trade_work_order_invoice_v2(jsonb,jsonb,uuid),
-  public.decide_held_trade_line(uuid,text,uuid,uuid,jsonb,text),
-  public.reconcile_item_raise(text,text,text,uuid[],jsonb,jsonb,text,uuid,boolean)
+  public.decide_held_trade_line(uuid,text,uuid,uuid,jsonb,text)
   TO service_role;
 CREATE TABLE public.trade_pay_run_weeks(id text PRIMARY KEY, org_id uuid NOT NULL);
-ALTER TABLE public.trade_invoice_lines ADD COLUMN org_id uuid;
 SQL
 
 echo "== every precondition filled"
@@ -139,7 +153,7 @@ pay=$(run_script pay-run-switch-preconditions.sql)
 [ "$(state_digest)" = "$before" ] || { echo "FAIL: a script changed state" >&2; failures=$((failures + 1)); }
 save cap-filled.txt "$cap"
 save pay-filled.txt "$pay"
-for id in C01 C02 C03 C04 C05 C06 C07 C08 C09 C10 C11 C12 C13 C14 F01 F02; do expect "$cap" "$id" PASS; done
+for id in C01 C02 C03 C04 C05 C06 C07 C08 C09 C10 C11 C12 C13 C14 F01 F02 F03; do expect "$cap" "$id" PASS; done
 expect_overall "$cap" PASS
 for id in P01 P02 P03 P04 P05 P06 P07 P08 P09 F01; do expect "$pay" "$id" PASS; done
 expect "$pay" P15 FAIL
@@ -176,6 +190,17 @@ take_away "ALTER TABLE public.trade_pay_settings RENAME TO trade_pay_settings_aw
 take_away "ALTER TABLE supabase_migrations.schema_migrations RENAME TO schema_migrations_away" \
   "ALTER TABLE supabase_migrations.schema_migrations_away RENAME TO schema_migrations" \
   cap-switch-preconditions.sql C14
+# Without #1643's door the raise is positional only and trade_invoice_lines has
+# no org_id: C10 and C11 fail together.
+take_away "ALTER FUNCTION public.reconcile_item_raise_named(text,text,text,uuid[],jsonb,jsonb,text,uuid) RENAME TO zz_door_away" \
+  "ALTER FUNCTION public.zz_door_away(text,text,text,uuid[],jsonb,jsonb,text,uuid) RENAME TO reconcile_item_raise_named" \
+  cap-switch-preconditions.sql C11
+# F03 is read after a send and is not counted: it fails alone, overall stays PASS.
+psql "$URL" -X -q -v ON_ERROR_STOP=1 -c "UPDATE public.reconcile_items SET subject_id = 'zz-away' WHERE subject_id = '00000000-0000-0000-0000-0000000000e1'" >/dev/null
+out=$(run_script cap-switch-preconditions.sql)
+expect "$out" F03 FAIL
+expect_overall "$out" PASS
+psql "$URL" -X -q -v ON_ERROR_STOP=1 -c "UPDATE public.reconcile_items SET subject_id = '00000000-0000-0000-0000-0000000000e1' WHERE subject_id = 'zz-away'" >/dev/null
 
 if [ "$failures" -ne 0 ]; then
   echo "switch preconditions proof: $failures failure(s)" >&2

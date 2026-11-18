@@ -6,24 +6,36 @@
 -- Output: one row per check, then one overall row.
 --   kind required    : must PASS before the switch goes on.
 --   kind fixture     : the ZZTEST job is ready for the proof (not the switch).
+--   kind after_send  : read after a ZZTEST send with a held line; not counted,
+--                      since no held line exists while the switch is off.
 --   kind not_checked : SQL cannot see it; the director checks it by hand.
 -- Evidence is names, counts, codes and dates only: no names of people, no pay.
 -- Sources: migrations 20261117020000, 20261117172401, 20261117173901,
 -- 20261117174103, 20261118060051, 20261118070639, 20261118073218,
 -- 20261118122207, 20261118122208, 20261118122209, 20261118153101;
+-- #1643 (reconcile_item_raise_named), #1649 (director ruling C11 (a));
 -- ops-api trade_line_send.ts (lineHoldSendApplies, raiseHeldLines),
 -- trade_pay_rule.ts (readTradePayRule, tradePayBasisFor); follow-up FU49.
 
 START TRANSACTION READ ONLY;
 
 SELECT to_regclass('public.trade_pay_settings') IS NOT NULL AS has_pay_settings,
-       to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS has_ledger
+       to_regclass('supabase_migrations.schema_migrations') IS NOT NULL AS has_ledger,
+       to_regclass('public.reconcile_items') IS NOT NULL
+         AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+           WHERE a.attrelid = to_regclass('public.trade_invoice_lines')
+             AND a.attname = 'hold_reason' AND NOT a.attisdropped) AS has_held_reads
 \gset
 
 \if :has_pay_settings
 \set pay_settings_rows 'SELECT inclusive_super_from, true AS readable FROM public.trade_pay_settings WHERE id = 1'
 \else
 \set pay_settings_rows 'SELECT NULL::date AS inclusive_super_from, false AS readable'
+\endif
+\if :has_held_reads
+\set held_rows 'SELECT l.id::text AS line_id, j.org_id, EXISTS (SELECT 1 FROM public.reconcile_items r WHERE r.kind = ''pay_line_held'' AND r.subject_table = ''trade_invoice_lines'' AND r.subject_id = l.id::text AND r.org_id = j.org_id) AS landed, true AS readable FROM public.trade_invoice_lines l JOIN public.jobs j ON j.id = l.job_id JOIN fixture_job f ON f.id = j.id WHERE l.hold_reason IS NOT NULL'
+\else
+\set held_rows 'SELECT NULL::text AS line_id, NULL::uuid AS org_id, false AS landed, false AS readable'
 \endif
 \if :has_ledger
 \set ledger_rows 'SELECT version::text AS version, true AS readable FROM supabase_migrations.schema_migrations'
@@ -114,18 +126,28 @@ trigger_state AS (
     ON t.tgrelid = to_regclass('public.' || g.rel) AND t.tgname = g.tgname
       AND NOT t.tgisinternal
 ),
--- PostgREST calls a function by argument name. raiseHeldLines sends these.
+-- PostgREST calls a function by argument name. raiseHeldLines sends these,
+-- through reconcile_item_raise itself or its named door (#1643).
 raise_names AS (
   SELECT ARRAY['p_kind','p_subject_table','p_subject_id','p_job_ids',
     'p_suggestion','p_evidence','p_raised_by']::text[] AS sent
 ),
 raise_overloads AS (
-  SELECT p.pronargs, p.proargnames,
+  SELECT p.proname, p.pronargs, p.proargnames,
+    'p_org_id' = ANY (p.proargnames) AS takes_org,
+    has_function_privilege('service_role', p.oid, 'EXECUTE') AS service_role_runs,
     p.proargnames IS NOT NULL
       AND (p.proargnames[1:p.pronargs])::text[] @> r.sent
       AND r.sent @> (p.proargnames[1:p.pronargs - p.pronargdefaults])::text[] AS by_name
   FROM pg_catalog.pg_proc p CROSS JOIN raise_names r
-  WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'reconcile_item_raise'
+  WHERE p.pronamespace = 'public'::regnamespace
+    AND p.proname IN ('reconcile_item_raise', 'reconcile_item_raise_named')
+),
+-- Ruling C11 (a): trade_invoice_lines has no org_id, so a held line's raise
+-- passes the holding invoice's organisation as p_org_id (#1649).
+org_hint AS (
+  SELECT coalesce(bool_or(by_name AND takes_org AND service_role_runs), false) AS door
+  FROM raise_overloads
 ),
 -- reconcile_item_org resolves a subject only through a table with a uuid
 -- org_id and a single-column primary key (20261118073218).
@@ -137,7 +159,8 @@ subject_state AS (
         AND NOT a.attisdropped AND a.atttypid = 'uuid'::regtype) AS has_org,
     EXISTS (SELECT 1 FROM pg_catalog.pg_index i
       WHERE i.indrelid = to_regclass('public.' || s.rel) AND i.indisprimary
-        AND i.indnkeyatts = 1) AS single_key
+        AND i.indnkeyatts = 1) AS single_key,
+    s.rel = 'trade_invoice_lines' AND (SELECT door FROM org_hint) AS org_hint
   FROM subjects s
 ),
 family(version) AS (VALUES
@@ -154,6 +177,13 @@ ledger_state AS (
 fixture_job AS (
   SELECT j.id FROM public.jobs j
   WHERE j.job_number = :'job_number' AND j.job_number LIKE 'ZZTEST%'
+),
+held AS (:held_rows),
+held_state AS (
+  SELECT bool_or(readable) AS readable,
+    count(line_id) AS held_lines,
+    count(line_id) FILTER (WHERE landed) AS raised
+  FROM held
 ),
 fixture_orders AS (
   SELECT count(*) AS approved_orders,
@@ -221,20 +251,21 @@ checks(ord, kind, check_name, passed, evidence, source) AS (
     '20261117173901, 20261118122208, 20261118153101'
   FROM fn_state WHERE id IN ('backed_room', 'backed_billed', 'send_totals', 'merge')
   UNION ALL
-  SELECT 10, 'required', 'C10 reconcile_item_raise callable by argument name',
-    coalesce(bool_or(by_name), false),
+  SELECT 10, 'required', 'C10 reconcile_item_raise (or its named door) callable by argument name',
+    coalesce(bool_or(by_name AND service_role_runs), false),
     jsonb_build_object('overloads', count(*), 'names_sent',
       (SELECT sent FROM raise_names),
       'overload_arg_names', coalesce(jsonb_agg(jsonb_build_object(
-        'args', pronargs, 'names', proargnames, 'by_name', by_name)), '[]')),
-    'trade_line_send.ts raiseHeldLines; follow-up P1-10.3 item 1 (positional only)'
+        'function', proname, 'args', pronargs, 'names', proargnames,
+        'by_name', by_name, 'service_role_runs', service_role_runs)), '[]')),
+    'trade_line_send.ts raiseHeldLines; follow-up P1-10.3 item 1; #1643'
   FROM raise_overloads
   UNION ALL
-  SELECT 11, 'required', 'C11 held line raise subjects resolve an organisation',
-    bool_and(has_org AND single_key),
+  SELECT 11, 'required', 'C11 held line raise subjects resolve an organisation (own org_id, or the org hint)',
+    bool_and(single_key AND (has_org OR org_hint)),
     jsonb_agg(jsonb_build_object('table', rel, 'uuid_org_id', has_org,
-      'single_column_key', single_key) ORDER BY rel),
-    'reconcile_item_org (20261118073218); raiseHeldLines subjects'
+      'single_column_key', single_key, 'org_hint_door', org_hint) ORDER BY rel),
+    'reconcile_item_org (20261118073218); ruling C11 (a), #1649; raiseHeldLines subjects'
   FROM subject_state
   UNION ALL
   SELECT 12, 'required', 'C12 work order door checks the cap before Xero (persist v2)',
@@ -271,7 +302,18 @@ checks(ord, kind, check_name, passed, evidence, source) AS (
     '20261012130000 (work_orders kind job)'
   FROM fixture_orders o
   UNION ALL
-  SELECT 30, 'not_checked', 'N01 deployed ops-api carries the cap code and the FU49 door',
+  SELECT 25, 'after_send', 'F03 a raise lands for a ZZTEST held line',
+    coalesce(readable, false) AND held_lines > 0 AND raised = held_lines,
+    jsonb_build_object('readable', coalesce(readable, false),
+      'held_lines', held_lines, 'raised', raised,
+      'state', CASE WHEN NOT coalesce(readable, false) THEN 'tables missing'
+        WHEN held_lines = 0 THEN 'no held line yet: send one ZZTEST held line first'
+        WHEN raised = held_lines THEN 'every held line has its office item'
+        ELSE 'held lines without an office item' END),
+    'raiseHeldLines (pay_line_held); director ruling C11 (a)'
+  FROM held_state
+  UNION ALL
+  SELECT 30, 'not_checked', 'N01 deployed ops-api carries the cap code, the FU49 door and the C11 org hint (#1649)',
     NULL, jsonb_build_object('how',
       'ops_api_version commit_sha, then git merge-base --is-ancestor <merge> <commit_sha>'),
     'AGENTS.md: measure the deployed thing'
@@ -295,7 +337,8 @@ SELECT 99, 'overall', 'trade_line_hold_v1 preconditions (SQL-visible only)',
   jsonb_build_object(
     'required_failed', count(*) FILTER (WHERE kind = 'required' AND passed IS NOT TRUE),
     'fixture_failed', count(*) FILTER (WHERE kind = 'fixture' AND passed IS NOT TRUE),
-    'not_checked_here', count(*) FILTER (WHERE kind = 'not_checked')),
+    'not_checked_here', count(*) FILTER (WHERE kind = 'not_checked'),
+    'after_send_failed', count(*) FILTER (WHERE kind = 'after_send' AND passed IS NOT TRUE)),
   'PASS here never means safe to switch: the not_checked rows need the director'
 FROM checks
 ORDER BY ord;
