@@ -127,8 +127,9 @@ SELECT pg_temp.zz_assert(:'zz_answer'::jsonb = :'zz_main_answer'::jsonb,
 SELECT pg_temp.zz_assert((SELECT i->>'verdict' FROM jsonb_array_elements(:'zz_main_queried'::jsonb->'invoices') i
        WHERE i->>'invoice_number' = 'ZZTEST-NB-1') = 'clean', 'earlier body passed a queried receipt as clean');
 
--- The matrix (ruling B, 23:46). The same rows are in trade_pay_run_push_test.ts ("same stops"): the
--- invoice is stopped exactly where the push refuses, with the matching reasons.
+-- The matrix (ruling B, 23:46). Its rows are trade_pay_run_receipt_rule_cases.ts, held to this
+-- table in every column by trade_pay_run_receipt_rule_parity_test.ts; the push test runs the
+-- same cases through the push, so the invoice is stopped exactly where the push refuses.
 CREATE TEMP TABLE zz_matrix(status text, marked boolean, line_approved boolean, want text[]) ON COMMIT DROP;
 INSERT INTO zz_matrix VALUES
  -- passes: approved or pushed_to_xero, marked or not, line approved or not
@@ -162,7 +163,15 @@ INSERT INTO zz_matrix VALUES
  ('zz_new_status',true,false,'{reimbursement_not_booked_unconfirmed}'),
  (NULL,true,false,'{reimbursement_not_booked_unconfirmed}'),
  ('queried',true,false,'{reimbursement_not_booked_unconfirmed,reimbursement_queried_or_rejected}'),
- ('rejected',true,true,'{reimbursement_not_booked_unconfirmed,reimbursement_queried_or_rejected}');
+ ('rejected',true,true,'{reimbursement_not_booked_unconfirmed,reimbursement_queried_or_rejected}'),
+ -- stops: a tab or newline around a status is kept (btrim trims spaces only), so it is no known status
+ (E'\tqueried',false,false,'{reimbursement_receipt_not_approved}'),
+ (E'rejected\n',false,true,'{reimbursement_receipt_not_approved}'),
+ (E'approved\t',false,false,'{reimbursement_receipt_not_approved}'),
+ (E'\npending',false,true,'{reimbursement_receipt_not_approved}'),
+ (E'pending_extraction\t',false,true,'{reimbursement_receipt_not_approved}'),
+ (E'\tqueried',true,false,'{reimbursement_not_booked_unconfirmed}'),
+ (E'approved\n',true,false,'{reimbursement_not_booked_unconfirmed}');
 DO $$ DECLARE m record; got text[]; BEGIN
   FOR m IN SELECT * FROM zz_matrix LOOP
     UPDATE public.expense_receipts SET status = m.status,
