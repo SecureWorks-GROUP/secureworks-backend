@@ -96,7 +96,7 @@ export function proposalOnly(result: MatchResult): Record<string, unknown> {
 const dayMinus = (day: string, days: number) =>
   new Date(Date.parse(day.slice(0, 10) + "T00:00:00Z") - days * 86_400_000).toISOString().slice(0, 10);
 
-function clueJson(c: Clue) {
+export function clueJson(c: Clue) {
   return {
     clue_code: c.clue_code,
     root: c.root,

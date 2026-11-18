@@ -61,6 +61,7 @@ import { builderReferenceAnnotation, decideBuilderReference, loadBuilderReferenc
 import { parseBankSummary } from './bank_summary.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { MATCH_RUN_BUDGET_MS, matchPending, matchSweepRequest, runMatchFor } from './match/match_run.ts'
+import { creditSweepRequest } from './match/credit_run.ts'
 import {
   buildMaterialsFactRow,
   buildQueueRow,
@@ -247,6 +248,15 @@ if (import.meta.main) serve(async (req: Request) => {
         // key; the caller passes back `next` as `?after=` until `done`.
         // Proposals only, behind reconcile_matcher_v1.
         const out = await matchSweepRequest(req, sb, SUPABASE_SERVICE_KEY)
+        return json(out.body, out.status)
+      }
+      case 'credit_sweep': {
+        // Supplier credit notes left unallocated (reason credit_not_allocated),
+        // with no open Reconcile item, 50 a call. A credit that follows a bill
+        // rides its bill and is never swept. POST with the exact service key;
+        // pass back `next` as `?after=` until `done`. Proposals only, behind
+        // reconcile_matcher_v1 (match/credit_run.ts).
+        const out = await creditSweepRequest(req, sb, SUPABASE_SERVICE_KEY)
         return json(out.body, out.status)
       }
       case 'sync_reports':
