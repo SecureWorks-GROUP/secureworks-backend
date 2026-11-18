@@ -45,12 +45,66 @@ type World = {
   upserts?: Array<{ table: string; rows: any; timed: boolean }>;
   // A slow request: `abort` answers only when its signal fires (as the client does);
   // `late` ignores the signal and answers after `ms`.
-  slow?: { target: string; ms: number; mode: "abort" | "late" };
+  slow?: { target: string; ms: number; mode: "abort" | "late"; only?: string };
+  // A read Postgres ends at its statement_timeout (57014), by table or function name.
+  timeout?: string;
+  // match_slow_bills rows, kept across calls like the table.
+  slowBills?: Array<{ subject_id: string; cuts: number; reason: string; parked_at?: string | null }>;
 };
 
+// match_bill_read's named reads, by the table (or function) each reads.
+const BILL_READ_TABLE: Record<string, string> = {
+  cost_lines: "job_cost_lines",
+  trade_user: "users",
+  bill: "xero_invoices",
+  jobs_by_number: "jobs",
+  order_jobs: "jobs",
+  orders: "v_job_orders",
+  evidence: "context_job_evidence_for_bills",
+  other_documents: "job_cost_lines",
+  kept_clues: "match_clues",
+  rules: "match_rules",
+  trade_lines: "trade_invoice_lines",
+};
+const JOB_ROW = {
+  id: "11111111-1111-4111-8111-111111111111",
+  job_number: "SWF-26123",
+  status: "accepted",
+  created_at: "2026-10-01T00:00:00Z",
+  site_address: null,
+  site_suburb: null,
+  holding: null,
+};
+
+// The rows match_bill_read answers in this world.
+function billReadRows(w: World, name: string, args: any): any[] {
+  switch (name) {
+    case "cost_lines":
+      return w.lines?.[String(args.document_id)] ?? [];
+    case "trade_user":
+      return (w.tradeUsers ?? []).filter((c) => c === args.party_id).map((c) => ({ id: `u-${c}`, xero_contact_id: c }));
+    case "bill":
+      return [{
+        xero_invoice_id: args.document_id,
+        invoice_number: "INV-9",
+        reference: "SWF-26123",
+        xero_contact_id: "supplier-1",
+        contact_name: "Supplier",
+        invoice_date: "2026-11-10",
+      }];
+    case "jobs_by_number":
+    case "order_jobs":
+      return [JOB_ROW];
+    case "orders":
+      return w.orders ?? [];
+    default:
+      return [];
+  }
+}
+
 // Answers a request now, or slowly as the world says.
-function answer(w: World, target: string, signal: AbortSignal | null, result: () => any): Promise<any> {
-  if (w.slow?.target !== target) return Promise.resolve(result());
+function answer(w: World, target: string, signal: AbortSignal | null, result: () => any, doc?: string): Promise<any> {
+  if (w.slow?.target !== target || (w.slow.only !== undefined && w.slow.only !== doc)) return Promise.resolve(result());
   const slow = w.slow;
   return new Promise((done) => {
     const timer = setTimeout(() => done(result()), slow.ms);
@@ -78,7 +132,20 @@ function fake(w: World) {
         if (op === "upsert") {
           (w.upserts ??= []).push({ table, rows: upserted, timed });
           if (table === "xero_sync_state") w.backlogAt = { cursor_at: upserted.cursor_at, note: upserted.note };
+          if (table === "match_slow_bills") {
+            for (const r of upserted) {
+              w.slowBills = [...(w.slowBills ?? []).filter((b) => b.subject_id !== r.subject_id), r];
+            }
+          }
           return { data: null, error: null };
+        }
+        if (table === "match_slow_bills") {
+          const asked = (filters["in:subject_id"] as string[]) ?? [];
+          if (op === "delete") {
+            w.slowBills = (w.slowBills ?? []).filter((b) => !asked.includes(b.subject_id));
+            return { data: null, error: null };
+          }
+          return { data: (w.slowBills ?? []).filter((b) => asked.includes(b.subject_id)), error: null };
         }
         switch (table) {
           case "feature_flags":
@@ -196,6 +263,21 @@ function fake(w: World) {
     // As the client: rpc returns a builder that takes a signal and is awaited.
     rpc(fn: string, args: any) {
       w.rpcs.push({ fn, args });
+      if (fn === "match_bill_read") {
+        const table = BILL_READ_TABLE[args.p_read];
+        let signal: AbortSignal | null = null;
+        const result = () => {
+          w.queries.push({ table, op: "select" });
+          if (w.fail === table) return { data: null, error: { code: "XX000" } };
+          if (w.timeout === table) return { data: null, error: { code: "57014", message: "canceling statement due to statement timeout" } };
+          return { data: billReadRows(w, args.p_read, args.p_args), error: null };
+        };
+        const builder: any = {
+          abortSignal: (s: AbortSignal) => ((signal = s), builder),
+          then: (res: any, rej: any) => answer(w, table, signal, result, args.p_args?.document_id).then(res, rej),
+        };
+        return builder;
+      }
       const result = () => {
         if (fn === "match_apply") {
           return w.applyError ? { data: null, error: w.applyError } : { data: { applied: "shadow" }, error: null };
@@ -356,9 +438,13 @@ Deno.test("a failed evidence read requeues; a match_apply refusal is counted and
   const off = world({ lines: billLines(), applyError: { code: "P0001", message: "match_switch_unreadable" } });
   const r3 = await runMatchFor(fake(off), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
   assertEquals(r3.requeued, 1);
+  // A write Postgres ended at its statement limit rolled back: a cut, requeued.
   const odd = world({ lines: billLines(), applyError: { code: "57014", message: "canceling statement" } });
   const r4 = await runMatchFor(fake(odd), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
-  assertEquals([r4.failed, r4.requeued], [{ apply_failed: 1 }, 1]);
+  assertEquals([r4.failed, r4.requeued], [{ over_run_time: 1 }, 1]);
+  const other = world({ lines: billLines(), applyError: { code: "XX000", message: "something else" } });
+  const r5 = await runMatchFor(fake(other), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  assertEquals([r5.failed, r5.requeued], [{ apply_failed: 1 }, 1]);
 });
 
 Deno.test("match_pending never takes a queued credit off the queue", async () => {
@@ -708,14 +794,26 @@ Deno.test("every request of a bill carries the bill's signal; the clue types rea
     rpc(fn: string, args: any) {
       const b = sb.rpc(fn, args);
       const plain = b.abortSignal;
-      b.abortSignal = (s: AbortSignal) => (seen.push(fn), plain(s));
+      b.abortSignal = (s: AbortSignal) => (seen.push(fn === "match_bill_read" ? `read:${args.p_read}` : fn), plain(s));
       return b;
     },
   };
   await runMatchFor(wrapped, [`xero_bill:${BILL}`], { ruleVersion: "v1" });
-  for (const t of ["match_clue_types", "job_cost_lines", "xero_invoices", "jobs", "v_job_orders", "context_job_evidence_for_bills", "match_clues", "match_apply"]) {
-    assert(seen.includes(t), t);
-  }
+  for (
+    const t of [
+      "match_clue_types",
+      "match_slow_bills",
+      "read:cost_lines",
+      "read:bill",
+      "read:jobs_by_number",
+      "read:orders",
+      "read:evidence",
+      "read:kept_clues",
+      "match_apply",
+    ]
+  ) assert(seen.includes(t), t);
+  // Every one of the bill's reads goes through match_bill_read (its 5 s statement limit).
+  assert(!w.rpcs.some((r) => r.fn !== "match_bill_read" && r.fn !== "match_apply"));
 });
 
 Deno.test("two passes over the same bill send the same clues, so a held bill's clues read as unchanged", async () => {
@@ -729,4 +827,113 @@ Deno.test("two passes over the same bill send the same clues, so a held bill's c
   for (const c of one.args.p_clues) {
     assertEquals(Object.keys(c).sort(), ["clue_code", "detail", "division", "job_id", "names_one", "outcome", "root", "seen_value", "seen_where"]);
   }
+});
+
+// Parking (design read 03:26): bill "a" is slow on its evidence read; "b" is quick.
+const slowA = (over: Partial<World> = {}) =>
+  world({
+    lines: Object.assign({}, billLines("a"), billLines("b")),
+    slow: { target: "context_job_evidence_for_bills", ms: 60_000, mode: "abort", only: "a" },
+    ...over,
+  });
+
+Deno.test("parking: two cuts that started with the whole budget park the bill; the next run passes over it and the bills behind it run", async () => {
+  const w = slowA();
+  const one = await runMatchFor(fake(w), ["xero_bill:a", "xero_bill:b"], { ruleVersion: "v1", budgetMs: 120 });
+  assertEquals([one.failed, one.parked], [{ over_run_time: 1 }, 0]);
+  assertEquals(w.slowBills?.map((b) => [b.subject_id, b.cuts, b.reason]), [["xero_bill:a", 1, "slow_bill_cut"]]);
+  assertEquals(requeues(w)[0].rows.map((r: any) => r.subject_id), ["xero_bill:a", "xero_bill:b"]);
+  w.upserts = [];
+  const two = await runMatchFor(fake(w), ["xero_bill:a", "xero_bill:b"], { ruleVersion: "v1", budgetMs: 120 });
+  assertEquals(two.parked, 1, "the second cut parks it, with a named reason");
+  assertEquals(w.slowBills?.map((b) => [b.subject_id, b.cuts, b.reason, !!b.parked_at]), [["xero_bill:a", 2, "parked_slow_bill", true]]);
+  assertEquals(requeues(w)[0].rows.map((r: any) => r.subject_id), ["xero_bill:b"], "a parked bill is not requeued");
+  w.upserts = [];
+  const three = await runMatchFor(fake(w), ["xero_bill:a", "xero_bill:b"], { ruleVersion: "v1", budgetMs: 120 });
+  assertEquals(three.skipped, { parked_slow_bill: 1 });
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:b"], "the bill behind it runs");
+  assertEquals(requeues(w).length, 0);
+});
+
+Deno.test("parking: a cut on a bill that started with less than half the budget is not counted", async () => {
+  // The clock: the run starts at 0 with 1000 ms; "a" starts at 900, with 100 ms left.
+  const times = [0, 0, 900];
+  const w = slowA();
+  const r = await runMatchFor(fake(w), ["xero_bill:b", "xero_bill:a"], { ruleVersion: "v1", budgetMs: 1000, now: () => times.shift() ?? 900 });
+  assertEquals(r.failed, { over_run_time: 1 });
+  assertEquals(w.slowBills ?? [], [], "not its fault: no count");
+  assertEquals(requeues(w)[0].rows.map((x: any) => [x.subject_id, x.reason]), [["xero_bill:a", "over_run_time"]]);
+});
+
+Deno.test("parking: a statement Postgres ended at its 5 s limit is a cut and counts", async () => {
+  const w = world({ lines: billLines("a"), timeout: "context_job_evidence_for_bills" });
+  const r = await runMatchFor(fake(w), ["xero_bill:a"], { ruleVersion: "v1" });
+  assertEquals(r.failed, { over_run_time: 1 });
+  assertEquals(w.slowBills?.map((b) => b.cuts), [1]);
+  assertEquals(applies(w).length, 0);
+});
+
+Deno.test("parking: the queue and the backlog pass over a parked bill; the sync runs it again once its lines change, and clears it", async () => {
+  const parked = [{ subject_id: "xero_bill:a", cuts: 2, reason: "parked_slow_bill", parked_at: "2026-11-18T00:00:00Z" }];
+  // Queued: taken off the queue, passed over, not requeued.
+  const q = world({ lines: billLines("a"), queue: [{ subject_kind: "cost_document", subject_id: "xero_bill:a" }], slowBills: [...parked] });
+  const out = await syncMatchRun(fake(q), { on: true, changed: [] });
+  assertEquals([applies(q).length, out.skipped, requeues(q).length], [0, { parked_slow_bill: 1 }, 0]);
+  assertEquals(q.slowBills?.length, 1, "still parked");
+  // Backlog: passed over, and the position moves past it.
+  const b = world({
+    lines: Object.assign({}, billLines("a"), billLines("b")),
+    waiting: [waitingAt("a", 1), waitingAt("b", 2)],
+    backlogAt: { cursor_at: at(0), note: "x0" },
+    slowBills: [...parked],
+  });
+  const bo = await syncMatchRun(fake(b), { on: true, changed: [] });
+  assertEquals(applies(b).map((x) => x.args.p_subject_id), ["xero_bill:b"]);
+  assertEquals(bo.skipped, { parked_slow_bill: 1 });
+  assertEquals(b.backlogAt, { cursor_at: null, note: null }, "the position reached the end past the parked bill");
+  // Changed: it runs, and its count is cleared.
+  const c = world({ lines: billLines("a"), slowBills: [...parked] });
+  const co = await syncMatchRun(fake(c), { on: true, changed: ["xero_bill:a"] });
+  assertEquals([applies(c).length, co.skipped], [1, {}]);
+  assertEquals(c.slowBills, []);
+  // match_pending and match_sweep pass over it too.
+  const m = world({ lines: billLines("a"), queue: [{ subject_kind: "cost_document", subject_id: "xero_bill:a" }], slowBills: [...parked] });
+  await matchPending(fake(m));
+  const s = world({ lines: billLines("a"), waiting: waitingBills(["a"]), slowBills: [...parked] });
+  await matchSweep(fake(s));
+  assertEquals([applies(m).length, applies(s).length], [0, 0]);
+});
+
+Deno.test("parking: a clean run clears a bill's count; a changed bill past the run cap is cleared too", async () => {
+  const w = world({ lines: billLines("a"), slowBills: [{ subject_id: "xero_bill:a", cuts: 1, reason: "slow_bill_cut" }] });
+  await runMatchFor(fake(w), ["xero_bill:a"], { ruleVersion: "v1" });
+  assertEquals(w.slowBills, []);
+  const many = Array.from({ length: 51 }, (_, i) => `xero_bill:c${String(i).padStart(2, "0")}`);
+  const capped = world({ slowBills: [{ subject_id: many[50], cuts: 2, reason: "parked_slow_bill", parked_at: "x" }] });
+  const out = await syncMatchRun(fake(capped), { on: true, changed: many });
+  assertEquals(capped.slowBills, [], "its retry from the queue will not be passed over");
+  assert(requeues(capped)[0].rows.some((r: any) => r.subject_id === many[50] && r.reason === "over_run_cap"));
+  assertEquals(out.changed, 50);
+});
+
+Deno.test("parking: a failed park read or write loses no bill", async () => {
+  // Read fails: nothing but the changed bills runs; the rest are requeued, the backlog position stays.
+  const pos = { cursor_at: at(0), note: "x0" };
+  const r = world({
+    lines: Object.assign({}, billLines("a"), billLines("q"), billLines("k")),
+    queue: [{ subject_kind: "cost_document", subject_id: "xero_bill:q" }],
+    waiting: [waitingAt("k", 1)],
+    backlogAt: { ...pos },
+    fail: "match_slow_bills",
+  });
+  const out = await syncMatchRun(fake(r), { on: true, changed: ["xero_bill:a"] });
+  assertEquals(applies(r).map((x) => x.args.p_subject_id), ["xero_bill:a"]);
+  assertEquals(out.failed.read_slow_bills, 1);
+  assertEquals(requeues(r)[0].rows.map((x: any) => [x.subject_id, x.reason]), [["xero_bill:q", "read_failed"]]);
+  assertEquals(r.backlogAt, pos, "the backlog bill was not reached: the position stays");
+  // Write fails on the second cut: the bill is requeued, not parked.
+  const wf = slowA({ slowBills: [{ subject_id: "xero_bill:a", cuts: 1, reason: "slow_bill_cut" }], fail: "match_slow_bills:upsert" });
+  const o2 = await runMatchFor(fake(wf), ["xero_bill:a"], { ruleVersion: "v1", budgetMs: 120 });
+  assertEquals([o2.parked, o2.failed.slow_bill_write_failed], [0, 1]);
+  assertEquals(requeues(wf)[0].rows.map((x: any) => [x.subject_id, x.reason]), [["xero_bill:a", "over_run_time"]]);
 });

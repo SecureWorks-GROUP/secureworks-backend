@@ -33,6 +33,15 @@
 // write cut short may still have committed in the database; it is requeued and
 // counted `apply_over_run_time`, never `applied`, and a rerun is safe.
 //
+// The bill's reads go through match_bill_read (design read 03:26): one
+// service-only function of fixed named reads with SET statement_timeout 5s,
+// which PostgREST hoists onto the request, so a slow read ends in the database
+// at 5 s, not only in the worker. A statement timeout (57014) is a cut too. A
+// bill cut while it started with more than half the run's budget is counted in
+// match_slow_bills; at two such cuts it is parked (`parked_slow_bill`, counted
+// in `parked` and then in `skipped`) and passed over by every path until the
+// sync reports its lines changed. A clean run clears the count.
+//
 // A bill with a person's labour on it is never matched here: no clue, no
 // shadow row, no item. It is skipped and counted (`labour_bill`). That is a
 // line of kind installer_bill or employer_super, a line on an installer account
@@ -92,6 +101,8 @@ export interface MatchRunReport {
   run: number;
   applied: Record<string, number>;
   requeued: number;
+  /** Bills parked this run after their second cut (`parked_slow_bill`). */
+  parked: number;
   skipped: Record<string, number>;
   failed: Record<string, number>;
 }
@@ -105,6 +116,15 @@ class ReadFailed extends Error {
 /** A request the bill's signal cut short, or one not started because the signal had fired. */
 export const OVER_TIME = "over_run_time";
 const APPLY_OVER_TIME = "apply_over_run_time";
+/** A bill parked after two cuts; passed over until the sync reports its lines changed. */
+export const PARKED_SLOW_BILL = "parked_slow_bill";
+/** A cut counts towards parking only when the bill started with more than this share of the run's budget. */
+export const MATCH_SLOW_START_SHARE = 0.5;
+/** Cuts that park a bill. */
+export const MATCH_SLOW_PARK_CUTS = 2;
+
+/** Postgres ended the statement at its statement_timeout (match_bill_read's 5 s). */
+const statementTimedOut = (error: unknown) => (error as { code?: unknown } | null)?.code === "57014";
 
 async function read<T>(code: string, q: PromiseLike<{ data: T; error: unknown }>, signal?: AbortSignal): Promise<T> {
   let res: { data: T; error: unknown };
@@ -113,7 +133,7 @@ async function read<T>(code: string, q: PromiseLike<{ data: T; error: unknown }>
   } catch {
     throw new ReadFailed(signal?.aborted ? OVER_TIME : code);
   }
-  if (res.error) throw new ReadFailed(signal?.aborted ? OVER_TIME : code);
+  if (res.error) throw new ReadFailed(signal?.aborted || statementTimedOut(res.error) ? OVER_TIME : code);
   return res.data;
 }
 
@@ -126,6 +146,15 @@ function bound(signal: AbortSignal) {
 }
 
 const bump = (m: Record<string, number>, k: string) => (m[k] = (m[k] ?? 0) + 1);
+
+type Row = Record<string, unknown>;
+
+/** One of the bill's fixed reads, through match_bill_read, carrying the bill's signal. */
+function billReader(sb: Sb, signal: AbortSignal) {
+  const on = bound(signal);
+  return (code: string, name: string, args: Record<string, unknown>): Promise<Row[]> =>
+    read<Row[]>(code, on(sb.rpc("match_bill_read", { p_read: name, p_args: args })), signal);
+}
 
 /** Pure. The matcher proposes; it never places. */
 export function proposalOnly(result: MatchResult): Record<string, unknown> {
@@ -167,16 +196,12 @@ async function matchOne(
   types: Record<string, ClueType>,
   signal: AbortSignal,
 ): Promise<{ applied: string } | { skipped: string }> {
-  const on = bound(signal);
+  const billRead = billReader(sb, signal);
   const kind = subjectId.split(":", 1)[0];
   const documentId = subjectId.slice(kind.length + 1);
   if (kind !== "xero_bill" || !documentId) return { skipped: "subject_not_a_bill" };
 
-  // job_cost_lines_document_idx
-  const lines = await read<Array<Record<string, unknown>>>("read_cost_lines",
-    on(sb.from("job_cost_lines").select(
-      "line_key,line_no,kind,description,account_code,xero_tracking_option,amount_ex,state,document_number,document_date,party_id,party_name",
-    ).eq("document_kind", "xero_bill").eq("document_id", documentId).order("line_no", { ascending: true })), signal);
+  const lines = await billRead("read_cost_lines", "cost_lines", { document_id: documentId });
   if (!lines?.length) return { skipped: "no_cost_lines" };
   // A person's labour, alone or beside supplier lines: no read of the bill, no
   // clue, no shadow row, no item.
@@ -188,8 +213,7 @@ async function matchOne(
   // A Trade App user's own bill is their pay (users is small; no index needed).
   const partyId = lines.find((l) => typeof l.party_id === "string" && l.party_id)?.party_id;
   if (partyId) {
-    const people = await read<Array<{ id: string }>>("read_trade_user",
-      on(sb.from("users").select("id").eq("xero_contact_id", partyId).limit(1)), signal);
+    const people = await billRead("read_trade_user", "trade_user", { party_id: partyId });
     if (people?.length) return { skipped: "labour_bill" };
   }
   const counted = lines.filter((l) => l.state != null);
@@ -198,9 +222,7 @@ async function matchOne(
   // split or filed is left alone: no item is raised over it.
   if (!counted.some((l) => l.state === "needs_person")) return { skipped: "nothing_waiting" };
 
-  const bill = await read<Record<string, unknown> | null>("read_bill",
-    on(sb.from("xero_invoices").select("xero_invoice_id,invoice_number,reference,xero_contact_id,contact_name,invoice_date,sub_total")
-      .eq("xero_invoice_id", documentId)).maybeSingle(), signal);
+  const bill = (await billRead("read_bill", "bill", { document_id: documentId }))?.[0] ?? null;
   const first = lines[0];
   const money = counted.map((l) => num(l.amount_ex));
   const doc: MatchDocument = {
@@ -227,9 +249,7 @@ async function matchOne(
   const digits = [...new Set(jobNumbersIn(texts).map((n) => n.replace(/\D/g, "")).filter(Boolean))].slice(0, 10);
   let jobs: MatchJob[] = [];
   if (digits.length) {
-    const rows = await read<Array<Record<string, unknown>>>("read_jobs",
-      on(sb.from("jobs").select("id,job_number,status,created_at,site_address,site_suburb,holding:metadata->>do_not_schedule")
-        .or(digits.map((d) => `job_number.ilike.%${d}`).join(",")).limit(50)), signal);
+    const rows = await billRead("read_jobs", "jobs_by_number", { digits });
     jobs = (rows ?? []).filter((r) => typeof r.job_number === "string").map((r) => ({
       id: String(r.id),
       job_number: String(r.job_number),
@@ -245,11 +265,11 @@ async function matchOne(
   let orders: MatchOrder[] = [];
   let namedOrders: NamedOrder[] = [];
   if (doc.document_date && (doc.party_id || supplierNameKey(doc.party_name))) {
-    let q = sb.from("v_job_orders").select(
-      "order_kind,order_id,order_number,job_id,job_live,party_id,party_name_key,sent_on,cost_ex,from_sealed_scope,matched",
-    ).gte("sent_on", dayMinus(doc.document_date, ORDER_WINDOW_DAYS)).lte("sent_on", doc.document_date);
-    q = doc.party_id ? q.eq("party_id", doc.party_id) : q.eq("party_name_key", supplierNameKey(doc.party_name));
-    const rows = await read<Array<Record<string, unknown>>>("read_orders", on(q.limit(200)), signal);
+    const rows = await billRead("read_orders", "orders", {
+      from: dayMinus(doc.document_date, ORDER_WINDOW_DAYS),
+      to: doc.document_date,
+      ...(doc.party_id ? { party_id: doc.party_id } : { party_name_key: supplierNameKey(doc.party_name) }),
+    });
     orders = (rows ?? []).map((r) => ({
       order_kind: r.order_kind as MatchOrder["order_kind"],
       order_id: String(r.order_id),
@@ -275,9 +295,7 @@ async function matchOne(
     // The order's job facts (live, holding) for the order-number clue.
     const orderJobIds = [...new Set(orders.map((o) => o.job_id).filter((id) => id && !jobs.some((j) => j.id === id)))].slice(0, 50);
     if (orderJobIds.length) {
-      const rows = await read<Array<Record<string, unknown>>>("read_order_jobs",
-        on(sb.from("jobs").select("id,job_number,status,created_at,site_address,site_suburb,holding:metadata->>do_not_schedule")
-          .in("id", orderJobIds)), signal);
+      const rows = await billRead("read_order_jobs", "order_jobs", { job_ids: orderJobIds });
       for (const r of rows ?? []) {
         if (typeof r.job_number !== "string") continue;
         jobs.push({
@@ -293,16 +311,16 @@ async function matchOne(
     }
   }
 
-  const evidence = await read<BillEvidenceRow[]>("read_bill_evidence",
-    on(sb.rpc("context_job_evidence_for_bills", { p_bill_ids: [documentId] })), signal);
+  const evidence = await billRead("read_bill_evidence", "evidence", { document_id: documentId }) as unknown as BillEvidenceRow[];
 
   // Other live documents of the same supplier with the same number.
   let others: OtherCostDocument[] = [];
   if (doc.document_number) {
-    let q = sb.from("job_cost_lines").select("document_id,document_number,document_date,document_status,party_id,party_name,amount_ex,state")
-      .eq("document_kind", "xero_bill").eq("document_number", doc.document_number).neq("document_id", documentId);
-    if (doc.party_id) q = q.eq("party_id", doc.party_id);
-    const rows = await read<Array<Record<string, unknown>>>("read_other_documents", on(q.limit(200)), signal);
+    const rows = await billRead("read_other_documents", "other_documents", {
+      document_number: doc.document_number,
+      document_id: documentId,
+      ...(doc.party_id ? { party_id: doc.party_id } : {}),
+    });
     const byDoc = new Map<string, Array<Record<string, unknown>>>();
     for (const r of rows ?? []) byDoc.set(String(r.document_id), [...(byDoc.get(String(r.document_id)) ?? []), r]);
     others = [...byDoc.entries()].map(([id, rs]) => {
@@ -328,15 +346,11 @@ async function matchOne(
 
   // Clues another phase handed in (kept_from set), in id order: match_apply
   // appends them after this run's clues in the same order.
-  const kept = await read<Array<Record<string, unknown>>>("read_kept_clues",
-    on(sb.from("match_clues").select("id,clue_code,class,family,root,outcome,job_id,division,names_one,seen_where,seen_value,detail")
-      .eq("subject_kind", "cost_document").eq("subject_id", subjectId).eq("current", true)
-      .not("kept_from", "is", null).order("id", { ascending: true })), signal);
+  const kept = await billRead("read_kept_clues", "kept_clues", { subject_id: subjectId });
 
   let rule: Record<string, unknown> | null = null;
   if (doc.party_id) {
-    const rows = await read<Array<Record<string, unknown>>>("read_rules",
-      on(sb.from("match_rules").select("id,kind,division").eq("party_id", doc.party_id).eq("status", "confirmed").limit(2)), signal);
+    const rows = await billRead("read_rules", "rules", { party_id: doc.party_id });
     rule = rows?.length === 1 ? rows[0] : null;
   }
 
@@ -378,12 +392,11 @@ async function matchOne(
   if (dup) stops.push(dup);
   const candidate = all.find((c) => c.outcome === "job" && c.job_id && c.names_one && (c.class === "key" || c.class === "clue"));
   if (candidate?.job_id && doc.party_id) {
-    const users = await read<Array<{ id: string; xero_contact_id: string | null }>>("read_trade_user",
-      on(sb.from("users").select("id,xero_contact_id").eq("xero_contact_id", doc.party_id).limit(2)), signal);
+    const users = await billRead("read_trade_user", "trade_user", { party_id: doc.party_id }) as Array<
+      { id: string; xero_contact_id: string | null }
+    >;
     if (users?.length === 1) {
-      const rows = await read<Array<Record<string, unknown>>>("read_trade_lines",
-        on(sb.from("trade_invoice_lines").select("job_id,line_total_ex,work_date,created_at,trade_invoices!inner(user_id)")
-          .eq("job_id", candidate.job_id).eq("trade_invoices.user_id", users[0].id).limit(200)), signal);
+      const rows = await billRead("read_trade_lines", "trade_lines", { job_id: candidate.job_id, user_id: users[0].id });
       const same = samePersonStop(doc, { ...users[0], candidate_job_id: candidate.job_id },
         (rows ?? []).map((r) => ({
           user_id: users[0].id,
@@ -423,6 +436,8 @@ async function matchOne(
   const { data, error } = applied;
   if (error) {
     if (signal.aborted) throw new ReadFailed(APPLY_OVER_TIME);
+    // Ended by Postgres: the write rolled back, nothing committed.
+    if (statementTimedOut(error)) throw new ReadFailed(OVER_TIME);
     const code = /\b(match_[a-z_]+|reconcile_[a-z_]+)\b/.exec(String((error as { message?: unknown }).message ?? ""))?.[1];
     throw new ReadFailed(code ? `apply:${code}` : "apply_failed");
   }
@@ -452,9 +467,72 @@ async function requeueAll(sb: Sb, rows: Requeue[], report: MatchRunReport): Prom
   }
 }
 
+type SlowRow = { subject_id: string; cuts: number; reason: string };
+/** What a run learned about slow bills: counts to write, parks, and counts to clear. */
+type SlowPlan = { cut: Map<string, number>; clear: Set<string> };
+
+/**
+ * The slow-bill rows of these subjects (match_slow_bills primary key), in
+ * chunks so a request stays short. Throws on a failed read.
+ */
+async function readSlowBills(sb: Sb, ids: string[]): Promise<Map<string, SlowRow>> {
+  const out = new Map<string, SlowRow>();
+  for (let i = 0; i < ids.length; i += MATCH_BACKLOG_CHUNK) {
+    const rows = await timedRead<SlowRow[]>("read_slow_bills",
+      sb.from("match_slow_bills").select("subject_id,cuts,reason").eq("subject_kind", "cost_document")
+        .in("subject_id", ids.slice(i, i + MATCH_BACKLOG_CHUNK)));
+    for (const r of rows ?? []) out.set(r.subject_id, r);
+  }
+  return out;
+}
+
+/**
+ * Writes the run's slow-bill counts and parks (one upsert) and clears (one
+ * delete). A park that could not be written is requeued instead, so no bill is
+ * lost; a failed write is counted, never thrown.
+ */
+async function settleSlowBills(sb: Sb, slow: SlowPlan, requeue: Requeue[], report: MatchRunReport): Promise<void> {
+  if (slow.cut.size) {
+    const at = new Date().toISOString();
+    const rows = [...slow.cut].map(([subject_id, cuts]) => ({
+      subject_kind: "cost_document",
+      subject_id,
+      cuts,
+      reason: cuts >= MATCH_SLOW_PARK_CUTS ? PARKED_SLOW_BILL : "slow_bill_cut",
+      last_cut_at: at,
+      parked_at: cuts >= MATCH_SLOW_PARK_CUTS ? at : null,
+    }));
+    const parks = rows.filter((r) => r.cuts >= MATCH_SLOW_PARK_CUTS).map((r) => r.subject_id);
+    let written = false;
+    try {
+      const { error } = await sb.from("match_slow_bills").upsert(rows, { onConflict: "subject_kind,subject_id" })
+        .abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS));
+      written = !error;
+    } catch {
+      written = false;
+    }
+    if (written) report.parked += parks.length;
+    else {
+      report.failed.slow_bill_write_failed = (report.failed.slow_bill_write_failed ?? 0) + rows.length;
+      for (const id of parks) requeue.push({ id, reason: OVER_TIME });
+    }
+  }
+  if (slow.clear.size) {
+    try {
+      const { error } = await sb.from("match_slow_bills").delete().eq("subject_kind", "cost_document")
+        .in("subject_id", [...slow.clear]).abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS));
+      if (error) report.failed.slow_bill_clear_failed = (report.failed.slow_bill_clear_failed ?? 0) + slow.clear.size;
+    } catch {
+      report.failed.slow_bill_clear_failed = (report.failed.slow_bill_clear_failed ?? 0) + slow.clear.size;
+    }
+  }
+}
+
 /**
  * Runs the bills before the deadline; returns what must be requeued (never
- * writing it) and the bills it reached.
+ * writing it), the bills it reached, and what it learned about slow bills.
+ * `fresh` are bills the sync reports changed: never passed over as parked, and
+ * their slow-bill count is cleared.
  */
 async function runCore(
   sb: Sb,
@@ -462,10 +540,18 @@ async function runCore(
   deadline: number,
   now: () => number,
   report: MatchRunReport,
-): Promise<{ requeue: Requeue[]; reached: Set<string> }> {
+  opts: { budgetMs: number; fresh?: Set<string> },
+): Promise<{ requeue: Requeue[]; reached: Set<string>; slow: SlowPlan }> {
   const out: Requeue[] = [];
   const reached = new Set<string>();
-  if (!ids.length) return { requeue: out, reached };
+  const fresh = opts.fresh ?? new Set<string>();
+  const slow: SlowPlan = { cut: new Map(), clear: new Set() };
+  if (!ids.length && !fresh.size) return { requeue: out, reached, slow };
+  if (!ids.length) {
+    // Changed bills past the run cap: only their counts are cleared.
+    for (const id of fresh) slow.clear.add(id);
+    return { requeue: out, reached, slow };
+  }
   let types: Record<string, ClueType>;
   try {
     const rows = await read<ClueType[]>("read_clue_types",
@@ -475,11 +561,35 @@ async function runCore(
   } catch {
     bump(report.failed, "read_clue_types");
     console.error("[match_run] clue types unreadable");
-    return { requeue: ids.map((id) => ({ id, reason: "read_failed" })), reached };
+    // A changed bill's count is still cleared, so its retry is not passed over.
+    for (const id of fresh) slow.clear.add(id);
+    return { requeue: ids.map((id) => ({ id, reason: "read_failed" })), reached, slow };
   }
+  // Which bills are parked or counted. A failed read is never "not parked":
+  // only the changed bills run, the rest wait (requeued; a backlog bill stays
+  // past the kept position).
+  let slowRows: Map<string, SlowRow> | null = null;
+  try {
+    slowRows = await readSlowBills(sb, [...new Set([...ids, ...fresh])]);
+  } catch {
+    bump(report.failed, "read_slow_bills");
+    for (const id of fresh) slow.clear.add(id);
+  }
+  if (slowRows) for (const id of fresh) if (slowRows.has(id)) slow.clear.add(id);
   for (const [i, id] of ids.entries()) {
     if (i >= MATCH_RUN_LIMIT) {
       out.push({ id, reason: "over_run_cap" });
+      continue;
+    }
+    if (!slowRows && !fresh.has(id)) {
+      out.push({ id, reason: "read_failed" });
+      continue;
+    }
+    const known = fresh.has(id) ? undefined : slowRows?.get(id);
+    if (known?.reason === PARKED_SLOW_BILL) {
+      // Reached, so a backlog position moves past it; never requeued.
+      bump(report.skipped, PARKED_SLOW_BILL);
+      reached.add(id);
       continue;
     }
     const at = now();
@@ -494,9 +604,18 @@ async function runCore(
       const res = await matchOne(sb, id, types, AbortSignal.timeout(Math.max(0, deadline - at)));
       if ("applied" in res) bump(report.applied, res.applied);
       else bump(report.skipped, res.skipped);
+      if (known) slow.clear.add(id);
     } catch (e) {
       const code = e instanceof ReadFailed ? e.code : "threw";
       bump(report.failed, code);
+      // A cut counts only when the bill started with most of the budget: a
+      // bill that started late was cut by the bills before it.
+      if ((code === OVER_TIME || code === APPLY_OVER_TIME) && deadline - at > opts.budgetMs * MATCH_SLOW_START_SHARE) {
+        const cuts = (fresh.has(id) ? 0 : known?.cuts ?? 0) + 1;
+        slow.cut.set(id, cuts);
+        slow.clear.delete(id);
+        if (cuts >= MATCH_SLOW_PARK_CUTS) continue; // parked when written; requeued if the write fails
+      }
       // A data refusal from match_apply would refuse again: not requeued. An
       // unreadable switch is not a refusal and is retried.
       if (!code.startsWith("apply:match_") || code === "apply:match_switch_unreadable") {
@@ -507,10 +626,10 @@ async function runCore(
       }
     }
   }
-  return { requeue: out, reached };
+  return { requeue: out, reached, slow };
 }
 
-const emptyReport = (): MatchRunReport => ({ run: 0, applied: {}, requeued: 0, skipped: {}, failed: {} });
+const emptyReport = (): MatchRunReport => ({ run: 0, applied: {}, requeued: 0, parked: 0, skipped: {}, failed: {} });
 const subjectsOf = (ids: unknown[]) =>
   [...new Set(ids.filter((s): s is string => typeof s === "string" && s.includes(":")))];
 
@@ -523,7 +642,9 @@ export async function runMatchFor(
   const ids = subjectsOf(subjectIds);
   if (!ids.length) return report;
   const now = opts.now ?? Date.now;
-  const { requeue } = await runCore(sb, ids, now() + (opts.budgetMs ?? MATCH_RUN_BUDGET_MS), now, report);
+  const budgetMs = opts.budgetMs ?? MATCH_RUN_BUDGET_MS;
+  const { requeue, slow } = await runCore(sb, ids, now() + budgetMs, now, report, { budgetMs });
+  await settleSlowBills(sb, slow, requeue, report);
   await requeueAll(sb, requeue, report);
   if (Object.keys(report.failed).length) console.error("[match_run] failures", JSON.stringify(report.failed));
   return report;
@@ -685,7 +806,8 @@ export async function syncMatchRun(
   const report: SyncMatchReport = { ...emptyReport(), switch: opts.on ? "on" : "off", changed: 0, queued: 0, backlog: 0, errors: [] };
   if (!opts.on) return report;
   const now = opts.now ?? Date.now;
-  const deadline = now() + (opts.budgetMs ?? MATCH_RUN_BUDGET_MS);
+  const budgetMs = opts.budgetMs ?? MATCH_RUN_BUDGET_MS;
+  const deadline = now() + budgetMs;
   const changed = subjectsOf(opts.changed).filter((s) => s.startsWith("xero_bill:"));
   const run = changed.slice(0, MATCH_RUN_LIMIT);
   const requeue: Requeue[] = changed.slice(MATCH_RUN_LIMIT).map((id) => ({ id, reason: "over_run_cap" }));
@@ -723,7 +845,7 @@ export async function syncMatchRun(
     run.push(...plan.picks.map((p) => p.subject));
   }
 
-  const { requeue: failed, reached } = await runCore(sb, run, deadline, now, report);
+  const { requeue: failed, reached, slow } = await runCore(sb, run, deadline, now, report, { budgetMs, fresh: new Set(changed) });
   // A backlog bill the budget did not reach is not requeued: the position
   // stops before it, so the next run starts there.
   const backlogSubjects = new Set((plan?.picks ?? []).map((p) => p.subject));
@@ -743,6 +865,7 @@ export async function syncMatchRun(
       }
     }
   }
+  await settleSlowBills(sb, slow, requeue, report);
   await requeueAll(sb, requeue, report);
   if (Object.keys(report.failed).length || report.errors.length) {
     console.error("[match_run] sync step", JSON.stringify({ failed: report.failed, errors: report.errors }));

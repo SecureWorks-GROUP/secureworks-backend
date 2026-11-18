@@ -154,5 +154,72 @@ BEGIN
    'current clues read on the subject index');
 END $plan$;
 
+-- The runner's reads: pinned 5 s statement limit, service only, each read's columns.
+SELECT pg_temp.check_it(
+  (SELECT md5(prosrc)='950c83b44a9aaa1fd7db6468c29e7ea3' AND proconfig @> ARRAY['statement_timeout=5s','search_path=""']
+     AND provolatile='s' AND NOT prosecdef FROM pg_proc WHERE oid='public.match_bill_read(text,jsonb)'::regprocedure),
+  'match_bill_read: body, 5 s statement limit, empty search path, stable, invoker');
+SELECT pg_temp.check_it(has_function_privilege('service_role','public.match_bill_read(text,jsonb)','execute')
+  AND NOT has_function_privilege('authenticated','public.match_bill_read(text,jsonb)','execute')
+  AND NOT has_function_privilege('anon','public.match_bill_read(text,jsonb)','execute'),'match_bill_read is service only');
+DO $reads$
+DECLARE r jsonb; ok boolean;
+BEGIN
+ r := public.match_bill_read('cost_lines',jsonb_build_object('document_id','ZZTEST-0305-free'));
+ PERFORM pg_temp.check_it(jsonb_array_length(r)=1 AND r->0->>'line_key'='1'
+   AND (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(r->0) k)
+     = ARRAY['account_code','amount_ex','description','document_date','document_number','kind','line_key','line_no',
+             'party_id','party_name','state','xero_tracking_option'],'cost_lines: the bill''s lines and the runner''s columns');
+ r := public.match_bill_read('jobs_by_number',jsonb_build_object('digits',jsonb_build_array('0305','x1')));
+ PERFORM pg_temp.check_it(jsonb_array_length(r)=1 AND r->0->>'job_number'='ZZTEST-0305'
+   AND r->0 ? 'holding' AND NOT r->0 ? 'metadata','jobs_by_number: ends-with digits, no other text, holding only');
+ r := public.match_bill_read('order_jobs',jsonb_build_object('job_ids',jsonb_build_array('03050000-0000-4000-8000-000000000004')));
+ PERFORM pg_temp.check_it(jsonb_array_length(r)=1 AND r->0->>'id'='03050000-0000-4000-8000-000000000004','order_jobs by id');
+ PERFORM pg_temp.check_it(public.match_bill_read('bill',jsonb_build_object('document_id','ZZTEST-none'))='[]'
+   AND public.match_bill_read('orders',jsonb_build_object('from','2026-10-01','to','2026-11-10','party_id','ZZTEST-p'))='[]'
+   AND public.match_bill_read('orders',jsonb_build_object('from','2026-10-01','to','2026-11-10','party_name_key','zztest'))='[]'
+   AND public.match_bill_read('other_documents',jsonb_build_object('document_number','ZZTEST-9','document_id','x'))='[]'
+   AND public.match_bill_read('kept_clues',jsonb_build_object('subject_id',pg_temp.subject('free')))='[]'
+   AND public.match_bill_read('rules',jsonb_build_object('party_id','ZZTEST-p'))='[]'
+   AND public.match_bill_read('trade_user',jsonb_build_object('party_id','ZZTEST-p'))='[]'
+   AND public.match_bill_read('trade_lines',jsonb_build_object('job_id','03050000-0000-4000-8000-000000000004',
+         'user_id','03050000-0000-4000-8000-000000000001'))='[]'
+   AND jsonb_typeof(public.match_bill_read('evidence',jsonb_build_object('document_id','ZZTEST-0305-free')))='array',
+   'every other read answers an array, empty when nothing matches');
+ BEGIN
+   PERFORM public.match_bill_read('jobs_everything','{}');
+   ok := false;
+ EXCEPTION WHEN raise_exception THEN ok := SQLERRM LIKE 'match_bill_read_unknown%';
+ END;
+ PERFORM pg_temp.check_it(ok,'an unknown read name raises');
+END $reads$;
+
+-- The slow-bills table: service only, row security on, a park always has its reason and time.
+SELECT pg_temp.check_it((SELECT relrowsecurity FROM pg_class WHERE oid='public.match_slow_bills'::regclass)
+  AND has_table_privilege('service_role','public.match_slow_bills','insert,update,delete,select')
+  AND NOT has_table_privilege('authenticated','public.match_slow_bills','select')
+  AND NOT has_table_privilege('anon','public.match_slow_bills','select'),'match_slow_bills is service only, row security on');
+INSERT INTO public.match_slow_bills(subject_kind,subject_id,cuts,reason) VALUES ('cost_document',pg_temp.subject('free'),1,'slow_bill_cut');
+INSERT INTO public.match_slow_bills(subject_kind,subject_id,cuts,reason,parked_at) VALUES ('cost_document',pg_temp.subject('off'),2,'parked_slow_bill',now());
+DO $park$
+DECLARE bad int := 0;
+BEGIN
+ BEGIN INSERT INTO public.match_slow_bills VALUES ('cost_document','xero_bill:a',2,'slow_bill_cut',now(),now());
+ EXCEPTION WHEN check_violation THEN bad := bad+1; END;
+ BEGIN INSERT INTO public.match_slow_bills VALUES ('cost_document','xero_bill:b',2,'parked_slow_bill',now(),NULL);
+ EXCEPTION WHEN check_violation THEN bad := bad+1; END;
+ BEGIN INSERT INTO public.match_slow_bills VALUES ('cost_document','xero_bill:c',3,'parked_slow_bill',now(),now());
+ EXCEPTION WHEN check_violation THEN bad := bad+1; END;
+ PERFORM pg_temp.check_it(bad=3,'a park needs two cuts, its reason and its time; never more than two');
+END $park$;
+
+DO $plan2$
+DECLARE plan json;
+BEGIN
+ EXECUTE 'EXPLAIN (FORMAT JSON) SELECT subject_id,cuts,reason FROM public.match_slow_bills WHERE subject_kind=''cost_document'''
+   ||' AND subject_id IN (''xero_bill:ZZTEST-0305-free'',''xero_bill:ZZTEST-0305-off'')' INTO plan;
+ PERFORM pg_temp.check_it(plan::text !~ 'Seq Scan' AND plan::text ~ 'match_slow_bills_pkey','slow bills read on the primary key');
+END $plan2$;
+
 SELECT 'PASS P2-02.8: '||count(*)||' checks' FROM held_checks;
 ROLLBACK;

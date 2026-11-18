@@ -1,4 +1,5 @@
--- Rollback of P2-02.8: match_apply back to main's (20261118195300's) body, the helper dropped.
+-- Rollback of P2-02.8: match_apply back to main's (20261118195300's) body; the helper, the read
+-- function and the slow-bills table dropped (its rows are runner bookkeeping only).
 -- Guarded on the live bodies: this migration's, or main's when it never applied.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
@@ -10,6 +11,10 @@ DECLARE sig regprocedure := 'public.match_apply(text,text,uuid,text,jsonb,jsonb,
   SELECT md5(prosrc) INTO helper FROM pg_proc WHERE oid = to_regprocedure('public.match_clues_unchanged(text,text,jsonb,text)');
   IF helper IS NOT NULL AND helper <> 'f228062ecc1a3a69e266533282028e5e' THEN
     RAISE EXCEPTION 'match_apply_held_unchanged down: match_clues_unchanged body changed';
+  END IF;
+  SELECT md5(prosrc) INTO helper FROM pg_proc WHERE oid = to_regprocedure('public.match_bill_read(text,jsonb)');
+  IF helper IS NOT NULL AND helper <> '950c83b44a9aaa1fd7db6468c29e7ea3' THEN
+    RAISE EXCEPTION 'match_apply_held_unchanged down: match_bill_read body changed';
   END IF;
   SELECT md5(prosrc), pg_get_functiondef(oid) INTO STRICT h, def FROM pg_proc WHERE oid = sig;
   IF h = 'a63d82c7f7a24ea5a99c0933bec7352a' THEN
@@ -33,3 +38,5 @@ $old$);
 END $guard$;
 
 DROP FUNCTION IF EXISTS public.match_clues_unchanged(text,text,jsonb,text);
+DROP FUNCTION IF EXISTS public.match_bill_read(text,jsonb);
+DROP TABLE IF EXISTS public.match_slow_bills;
