@@ -1,0 +1,1 @@
+-- Uses the registered group split, crew sources and claim schema.
