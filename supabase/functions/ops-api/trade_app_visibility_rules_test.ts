@@ -181,6 +181,10 @@ function accessClient(): any {
           this._neq[_col] = _val;
           return builder;
         },
+        or(filter: string) {
+          this._or = filter;
+          return builder;
+        },
         limit: () => builder,
         async maybeSingle() {
           if (table === "jobs") {
@@ -193,7 +197,10 @@ function accessClient(): any {
               a.user_id === this._eq?.user_id &&
               a.status !== (this._neq?.status ?? "__none__") &&
               (this._eq?.is_ghost === undefined ||
-                (a.is_ghost ?? false) === this._eq.is_ghost)
+                (a.is_ghost ?? false) === this._eq.is_ghost) &&
+              (this._or === undefined ||
+                (a as any).added_by !== "self" ||
+                (a as any).self_added_status === "accepted")
             );
             return { data: row || null, error: null };
           }
