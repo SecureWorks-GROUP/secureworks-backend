@@ -102,9 +102,21 @@ export async function tradeRepaymentsAction(
       day.toISOString().slice(0, 10) !== week || day.getUTCDay() !== 1 ||
       day < today
     ) return invalid("first_week_start");
-    const account = typeof body.xero_account_code === "string"
+    const typed = typeof body.xero_account_code === "string"
       ? body.xero_account_code.trim()
       : "";
+    // P1-06.6: with no account in the body, use the bookkeeper's repayment
+    // account, read only now that the caller is a pay run approver.
+    let account = typed;
+    if (!account) {
+      const saved = await client.from("trade_pay_settings").select(
+        "repayment_account_code",
+      ).eq("id", 1).maybeSingle();
+      if (saved.error) throw new Error("Could not read repayment account");
+      account = typeof saved.data?.repayment_account_code === "string"
+        ? saved.data.repayment_account_code.trim()
+        : "";
+    }
     if (!account) return invalid("xero_account_code");
     const person = await client.from("users").select("id").eq(
       "id",

@@ -1,4 +1,4 @@
--- Rollback of 20261118113759_trade_pay_runs.
+-- Rollback of 20261118115852_trade_pay_runs.
 --
 -- One statement, so it refuses whole or runs whole. Refuses while any pay run
 -- is recorded (those rows are the record of who approved which invoices), and
