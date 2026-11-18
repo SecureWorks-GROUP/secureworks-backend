@@ -931,6 +931,7 @@ import { acknowledgeTradeInvoiceLine, TradeInvoiceLineAckError } from './trade_i
 import { createOrReuseTradeXeroBill, findLiveTradeBillsByNumber, TradeXeroBillSearchError } from './trade_invoice_xero_existing_bill.ts'
 import { markTradeInvoiceReadyForXero, resolveStuckTradeInvoice, STUCK_TRADE_INVOICE_STATUS, StuckTradeInvoiceError } from './trade_invoice_stuck.ts'
 import { TRADE_INVOICE_ROUTE_ACTIONS, TradeInvoiceStoreError, tradeInvoiceRefusal } from './trade_invoice_refusal.ts'
+import { checkWorkOrderCapBeforeXero } from './work_order_cap_before_xero.ts'
 import { officeSentBackNote, tradeInvoiceOfficeNote } from './trade_invoice_office_note.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
 import { autoGroupFenceJobs, autoGroupPatioJobs, openMissingFenceWorkOrders, openMissingPatioWorkOrders } from './patio_auto_group.ts'
@@ -14670,6 +14671,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               })
             }
 
+            // Follow-up 49 item 3: the job amount guard checks this invoice
+            // before any Xero call. A refusal leaves the draft and makes no bill.
+            const woCapCheck = await checkWorkOrderCapBeforeXero(client, tradeInvoiceId)
+
             // Resolve Xero supplier contact — auto-create only after money truth
             // is complete and the invoice can safely cross the Xero boundary.
             // The shared resolver looks up by email, then by exact name, and
@@ -14677,17 +14682,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // filed a second contact for a trade whose login email differs
             // from the supplier contact.
             const { accessToken: woAt, tenantId: woTi } = workOrderBoundary
-            const woXeroContactId = await resolveTradeXeroSupplierContact(client, {
-              userId: tradeUser.id,
-              name: tradeXeroUser?.name || '',
-              email: tradeXeroUser?.email || tradeXeroUser?.trade_details?.email || '',
-              cachedContactId: tradeXeroUser?.xero_contact_id || null,
-              source: 'submit_work_order_invoice',
-              actor: tradeUser.id,
-              accessToken: woAt,
-              tenantId: woTi,
-            })
-            if (!woXeroContactId) throw new ApiError('Could not create Xero supplier contact', 500)
+            let woXeroContactId: string | null = null
+            try {
+              woXeroContactId = await resolveTradeXeroSupplierContact(client, {
+                userId: tradeUser.id,
+                name: tradeXeroUser?.name || '',
+                email: tradeXeroUser?.email || tradeXeroUser?.trade_details?.email || '',
+                cachedContactId: tradeXeroUser?.xero_contact_id || null,
+                source: 'submit_work_order_invoice',
+                actor: tradeUser.id,
+                accessToken: woAt,
+                tenantId: woTi,
+              })
+              if (!woXeroContactId) throw new ApiError('Could not create Xero supplier contact', 500)
+            } catch (contactError) {
+              if (!woCapCheck.moved) throw contactError
+              // The invoice is already approved with no bill, the state a Xero
+              // miss leaves: answer as one (no bill is attempted below).
+              console.error('[ops-api] WO invoice Xero contact failed after the cap check:', lineSendLogCode(contactError))
+            }
 
             // Push directly to Xero as DRAFT ACCPAY bill
             const tradeName = tradeXeroUser?.name || 'Trade'
@@ -14716,6 +14729,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let createdXeroBillId = ''
             let woPdfAttached = false
             try {
+              if (!woXeroContactId) throw new Error('No Xero supplier contact')
               const { result: xeroResult } = await createTradeXeroBillOnce(client, {
                 accessToken: woAt, tenantId: woTi, tradeInvoiceId: tradeInv.id, payload: xeroPayload,
                 idempotencyKey: woIdempotencyKey, actor: 'submit_work_order_invoice',

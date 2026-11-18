@@ -51,6 +51,8 @@ type World = {
   afterReady?: Record<string, any>;
   /** The push claim RPC fails. */
   claim?: "fail";
+  /** The invoice's pay-back receipts read now, or a failed read. */
+  receipts?: Record<string, { status: unknown; unbooked_job_id: unknown }[]> | "fail";
 };
 
 function makeDeps(w: World) {
@@ -113,6 +115,12 @@ function makeDeps(w: World) {
           }
           : null,
       );
+    },
+    payBackReceipts: (id) => {
+      if (w.receipts === "fail") {
+        return Promise.reject(new TradePayRunError("pay_run_unreadable", "x", 503));
+      }
+      return Promise.resolve((w.receipts ?? {})[id] ?? []);
     },
     readyForRunPush: (_r, id) => {
       calls.ready.push(id);
@@ -378,6 +386,74 @@ Deno.test("push: an invoice that no longer pays what the run recorded is 409, ne
   });
   await refused(press(deps, INV_A), "pay_run_pays_changed", 409);
   assertEquals(calls.push.length, 0);
+});
+
+// ── A pay-back receipt the office has not confirmed (director 21:45) ──────
+
+Deno.test("push: a pay-back receipt marked not booked and not confirmed now is 409, never pushed, no claim taken", async () => {
+  // Confirmed at the press; the office queried it after the run was approved.
+  for (const status of ["queried", "rejected", "pending", null]) {
+    const { deps, calls } = makeDeps({
+      rows: twoClean(),
+      receipts: { [INV_A]: [{ status, unbooked_job_id: "0c400000-0000-4000-8000-0000000000aa" }] },
+    });
+    await refused(press(deps, INV_A), "pay_run_receipt_not_confirmed", 409);
+    assertEquals([calls.push.length, calls.claims.length, calls.ready.length], [0, 0, 0]);
+  }
+});
+
+Deno.test("push: a marked receipt the office confirmed, or an unmarked one, is pushed as before", async () => {
+  for (const receipt of [
+    { status: "approved", unbooked_job_id: "0c400000-0000-4000-8000-0000000000aa" },
+    { status: "pushed_to_xero", unbooked_job_id: "0c400000-0000-4000-8000-0000000000aa" },
+    { status: "queried", unbooked_job_id: null },
+  ]) {
+    const { deps, calls } = makeDeps({ rows: twoClean(), receipts: { [INV_A]: [receipt] } });
+    const out: any = await press(deps, INV_A);
+    assertEquals(out.ok, true);
+    assertEquals(calls.push, [INV_A]);
+  }
+});
+
+Deno.test("push: pay-back receipts that cannot be read refuse 503, never push", async () => {
+  const { deps, calls } = makeDeps({ rows: twoClean(), receipts: "fail" });
+  await refused(press(deps, INV_A), "pay_run_unreadable", 503);
+  assertEquals([calls.push.length, calls.claims.length], [0, 0]);
+});
+
+Deno.test("writes: the push reads the invoice's pay-back lines, then their receipts by id", async () => {
+  const seen: string[] = [];
+  const answers: Record<string, any> = {
+    trade_invoice_lines: { data: [{ expense_receipt_id: "r1" }, { expense_receipt_id: "r1" }, { expense_receipt_id: null }], error: null },
+    expense_receipts: { data: [{ id: "r1", status: "queried", unbooked_job_id: "j1" }], error: null },
+  };
+  const client = {
+    from(table: string) {
+      const q: any = {
+        select(cols: string) { seen.push(`${table}.select(${cols})`); return q; },
+        eq(c: string, v: unknown) { seen.push(`${table}.eq(${c},${v})`); return q; },
+        in(c: string, v: unknown[]) { seen.push(`${table}.in(${c},${v.join("|")})`); return q; },
+        then(r: any, j: any) { return Promise.resolve(answers[table]).then(r, j); },
+      };
+      return q;
+    },
+  };
+  const deps = payRunPushDepsFromClient(client, () => Promise.resolve(true), () => Promise.resolve({}));
+  assertEquals(await deps.payBackReceipts(INV_A), [{ status: "queried", unbooked_job_id: "j1" }]);
+  assertEquals(seen, [
+    "trade_invoice_lines.select(expense_receipt_id)",
+    `trade_invoice_lines.eq(trade_invoice_id,${INV_A})`,
+    "trade_invoice_lines.eq(line_type,reimbursement)",
+    "expense_receipts.select(id, status, unbooked_job_id)",
+    "expense_receipts.in(id,r1)",
+  ]);
+  answers.trade_invoice_lines = { data: null, error: { message: "x" } };
+  await refused(deps.payBackReceipts(INV_A), "pay_run_unreadable", 503);
+  answers.trade_invoice_lines = { data: [], error: null };
+  assertEquals(await deps.payBackReceipts(INV_A), []);
+  answers.trade_invoice_lines = { data: [{ expense_receipt_id: "r1" }], error: null };
+  answers.expense_receipts = { data: null, error: { message: "x" } };
+  await refused(deps.payBackReceipts(INV_A), "pay_run_unreadable", 503);
 });
 
 // ── Option A: the run's push moves its own held invoice ───────────────────

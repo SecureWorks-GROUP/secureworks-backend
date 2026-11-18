@@ -94,6 +94,7 @@ function makeWorld() {
     runInvoice: () =>
       Promise.resolve({ ...db.row }),
     invoiceForPush: () => Promise.resolve({ ...db.invoice }),
+    payBackReceipts: () => Promise.resolve([]),
     readyForRunPush: () => {
       if (
         db.invoice.pay_run_id !== RUN ||
