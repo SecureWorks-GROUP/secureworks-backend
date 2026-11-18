@@ -1915,11 +1915,125 @@ email is still put on the job. Each file saved writes one `job_events` row,
 
 ### 3i.4 Not in this build
 
-- **Reading the scans to suggest a job (Q4).** A scanned PDF has no
-  `context_document_texts` row, so there are no words to match on. It needs a
-  reader (OCR) first. A follow-up.
+- **Reading the scans to suggest a job (Q4).** Built as item 16b: see 3j.
 - A later order confirmation of the same email (3e.2) may still save the same
   PDF again as a crew-visible copy: the 3e.2 path checks its own claims only.
+
+## 3j. The tray reads its PDFs and suggests a job (item 16b, approved by Shaun 18 Nov 2026)
+
+A supplier often answers with a scan (a delivery docket, an order
+confirmation) and nothing in the email says which job it is. The tray now has
+each kept PDF or picture on an email in Emails to sort read once, and shows
+what was printed on it: "Read from the PDF: 13 Woodall Ct, Ref SWP-26100". The
+most likely job goes first under "Could be". **A suggestion only:** nothing in
+3j puts an email on a job, changes a job, writes an order or sends anything.
+Staff still press the job.
+
+Code: `supabase/functions/ops-api/dispatch_v2_tray_pdf_read.ts`. Migration:
+`20261118160000_dispatch_v2_tray_pdf_read.sql` (two functions, no table, no
+backfill). Rollback: `supabase/rollbacks/20261118160000_dispatch_v2_tray_pdf_read_down.sql`.
+
+### 3j.1 Who reads the file, and what it costs
+
+The document reader the business already runs (gap plan B-5 and B-5b): a PDF
+with words in it is read for its text layer (`context-document-text`); a scan
+is read by the subscription picture reader (`context-document-vision`, the
+Jarvis worker, at most 5 pages a file, `images_cut` beyond that). No new
+service, API key, Railway service or paid call (paid AI policy P4-08.7). The
+reads come out of the reader's own daily limits (`context_document_vision_policy`:
+100 documents a day by default, and only while under half the shared 400 calls
+a day), and stop when its flags (`context_document_text_v1`,
+`context_document_vision_v1`) or lanes (capture, extraction) are off.
+
+### 3j.2 Asking for the reads: the reply scan
+
+Each `dispatch_v2_replies_scan` run (every 5 minutes) calls
+`dispatch_v2_tray_pdf_read_request(4)`. It files a
+`context_document_text_requests` row (`requested_by` `dispatch tray (item 16b)`)
+for each tray file not yet asked for or read:
+
+- the emails Emails to sort shows by default: an order desk's `unmatched`
+  email, or any `needs_confirmation` one. Accounts and marketing mail (behind
+  "show other") is never read;
+- the email is on no job (an email on a job is read by the normal job reader);
+- the file is kept (`stored`), a PDF, JPEG or PNG, 1 byte to 5 MB;
+- not asked for or read already under its own id, or under another attachment
+  with the same `sha256` (the same file on two emails is read once).
+
+Newest email first, at most 4 a run (10 a call whatever is passed) and **12 in
+any rolling hour**. The scan's answer gains
+`tray_pdf_reads: {"ok": true, "requested": <n>}`; a failure is
+`{"ok": false, "requested": 0}` and never fails the scan. The file is then read
+on no job (`doctext:no_job:<sha256>`, marked automated, never placed), as
+named requests have been since 20261104130000.
+
+### 3j.3 The tray read: `pdf_read` on each email
+
+`dispatch_v2_replies_unmatched` answers as 3i.1, plus `pdf_reads_read: "ok" |
+"failed"` and on each email:
+
+```json
+{
+  "pdf_read": {
+    "state": "read",
+    "line": "Read from the PDF: 15 McMahon Way, Kardinya, Ref SWP-26595",
+    "files_read": 1,
+    "found": { "job_numbers": ["SWP-26595"], "supplier_refs": [] },
+    "suggested_job_ids": ["<jobs.id>"]
+  },
+  "candidates": [
+    { "job_id": "<jobs.id>", "job_number": "SWP-26595", "order_id": null,
+      "supplier_name": "Ampelite", "reason": "Read from the PDF: 15 McMahon Way, Kardinya, Ref SWP-26595",
+      "from_pdf": true, "score": 170 },
+    { "...": "the tray's own candidates, as before" }
+  ]
+}
+```
+
+- `state`: `read` (words from at least one file), `reading` (asked for or due
+  to be, not read yet), `no_words` (read, nothing legible), `cannot_read` (a
+  format or size the reader does not take), `none` (no PDF or picture it
+  takes; `line` is null and the screen shows nothing).
+- `line` for `read` with no job found: "Read from the PDF: no job number,
+  address or client name we know".
+- `candidates`: the PDF's jobs first (at most 3, `from_pdf: true`), keeping
+  the tray's `order_id` when the tray already had that job; then the tray's
+  own candidates without repeats. `job_id`, `state` and `rung` of the email are
+  never changed.
+- `pdf_reads_read: "failed"`: every `pdf_read` is null and the candidates are
+  as before.
+- The words come from `dispatch_v2_tray_pdf_reads(attachment_ids)` (read only,
+  service role): the first 8,000 characters of the reader's words, by the
+  attachment's id, else another attachment with the same `sha256`.
+
+### 3j.4 How the words point at a job
+
+| Sign in the words | Score | Printed as |
+|---|---|---|
+| Our job number (SWF-, SWP-, SWR-, hyphen optional) that is a real job, any status | 100 | `Ref SWP-26100` |
+| A supplier number (5+ digits) Dispatch learned against exactly one job | 60 | `Order 11041521` |
+| A live job's street number and street name together (street type left out) | 60 | `13 Woodall Ct` |
+| That job's suburb, beside the street | +10 | `High Wycombe` |
+| The client's first and last name | 30 | `Angus Roxburgh` |
+| The client's surname, only beside another sign | +10 | `Roxburgh` |
+
+A job is suggested from 30 up. Live jobs: not cancelled, archived, lost, a
+draft or an old-system record, with a site address. The reader's own header
+line (it names the file) is never matched. On an equal score: the job the tray
+already has an open order from the sender on, then a job going ahead (accepted
+through in progress), then a quote. Two jobs at one address (13 Woodall Ct has
+SWP-26100 and SWP-26992) both show, the one with the open order first.
+
+Measured on 91 supplier PDFs already matched to a job (18 Nov 2026): the
+street rule found the right job on 34, never missed it when it hit, and the
+only other jobs it found were second jobs at the same address.
+
+### 3j.5 Not in this build
+
+- Files over 5 MB, Word and Excel files, and scans the reader does not take
+  (some fax-encoded PDFs come back `not_supported`).
+- Emails already matched, hidden, or on a job: not asked for.
+- No new switch: the reader's own flags and lanes turn it off.
 
 ## 4. Dispatch purchase orders are refused by the old paths (slice 4)
 

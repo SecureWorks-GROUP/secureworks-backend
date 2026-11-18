@@ -438,6 +438,12 @@ import {
   saveTrayAttachmentsToJob,
   TrayAttachmentError,
 } from './dispatch_v2_tray_attachments.ts'
+// Item 16b (contract section 3j): the tray reads its PDFs and suggests a job.
+import {
+  addTrayPdfReads,
+  postgrestTrayPdfStore,
+  requestTrayPdfReads,
+} from './dispatch_v2_tray_pdf_read.ts'
 // Dispatch v2 slices 5 and 6: draft list, supplier boxes and supplier order
 // emails sent from admin@ through send-outlook-email.
 import {
@@ -7973,7 +7979,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           // only. Neither changes the answer's other fields; a failure here
           // never fails the read or the press.
           if (action === 'dispatch_v2_replies_unmatched') {
-            return json(await addTrayAttachments(postgrestTrayAttachmentStore(client), DEFAULT_ORG_ID, repliesAnswer))
+            // Item 16b (section 3j): then what the reader read on each file,
+            // and the job it points at first under Could be. A suggestion
+            // only; a failure leaves the tray as it was.
+            const withFiles = await addTrayAttachments(postgrestTrayAttachmentStore(client), DEFAULT_ORG_ID, repliesAnswer)
+            return json(await addTrayPdfReads(postgrestTrayPdfStore(client), DEFAULT_ORG_ID, withFiles))
           }
           if (action === 'dispatch_v2_replies_assign' && repliesAnswer?.ok === true && repliesAnswer?.email?.job_id) {
             repliesAnswer.documents = await saveTrayAttachmentsToJob(postgrestTrayAttachmentStore(client), {
@@ -8210,7 +8220,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             orgId: DEFAULT_ORG_ID,
             now: new Date().toISOString(),
           })
-          return json({ ...scanned, order_documents: orderDocuments })
+          // Item 16b (section 3j): ask the document reader to read the tray's
+          // new PDFs and pictures (at most 4 a run, 12 an hour). Never throws.
+          const pdfReads = await requestTrayPdfReads(postgrestTrayPdfStore(client))
+          return json({ ...scanned, order_documents: orderDocuments, tray_pdf_reads: pdfReads })
         } catch (e) {
           if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
           throw e
