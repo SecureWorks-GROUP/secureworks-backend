@@ -3,6 +3,7 @@
 -- exactly (org_id, xero_document_id), which its upsert names as onConflict.
 \set zz_check 'draft_register.register_table'
 \ir ../session.sql
+\if :zz_ok
 WITH want(col) AS (
   SELECT unnest(ARRAY['id','org_id','xero_document_id','document_type','source_kind','source_id','register_row',
     'job_ids','drafted_at','lines_fingerprint','has_account_codes','has_division_tags','has_job_reference',
@@ -25,3 +26,4 @@ SELECT :'zz_check' AS "check",
        jsonb_build_object('table_found', to_regclass('public.xero_draft_register') IS NOT NULL,
                           'missing_columns', (SELECT coalesce(jsonb_agg(col), '[]') FROM missing),
                           'unique_org_document', (SELECT ok FROM uniq))::text AS evidence;
+\endif

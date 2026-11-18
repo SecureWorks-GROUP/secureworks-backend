@@ -72,3 +72,10 @@ psql -X -v ON_ERROR_STOP=1 \
 Migration sources are named in each SQL file. Future shapes follow the frozen
 17 Nov specs: pay 2.1, matching 2.2, agents P4-02.2/T1. Compare the prerequisite
 migrations with those specs before running; deployment has not been observed.
+
+## Switch checks
+
+`switch-checks/` holds one read-only file per precondition for turning on
+`job_story_stored_profit_v1` (the stored reader) and `xero_draft_standard_v1`
+(the draft register, PR 1641). Unlike the files above, four stored-reader
+files call stable application reads; `switch-checks/README.md` names them.

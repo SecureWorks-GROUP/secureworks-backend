@@ -73,10 +73,10 @@ that time; 08 and 09 PASS again.
 | `03-register-access.sql` | row security on, no anon or authenticated privilege, service_role can select, insert, update |
 | `04-register-empty.sql` | switch off and no register row in any organisation |
 | `05-account-rules.sql` | a `default` account rule for each of the four source kinds (codes not printed) |
-| `06-rules-confirmed.sql` | every account rule confirmed (who is not printed) |
+| `06-rules-confirmed.sql` | every account rule confirmed (who is not printed). The migration seeds today's codes unconfirmed, so this FAILs until the bookkeeper confirms them |
 | `07-division-options.sql` | every stock division an ACTIVE option, copied in the last 36 hours |
 | `08-raise-kind.sql` | the Reconcile kind `draft_incomplete` exists |
-| `09-raise-door.sql` | a `reconcile_item_raise` with the eight argument names the writer sends, executable by service_role. **FAILs on main today**: both versions take unnamed parameters, so PostgREST cannot find one (PGRST202); drafts record, nothing is raised. Open PR 1643 adds a named door |
+| `09-raise-door.sql` | `reconcile_item_raise_named` (PR 1643) exists with the eight argument names PR 1641 sends, in order; service_role may run it, anon and authenticated may not. **FAILs on main today**: without it the raise answers PGRST202, the draft is recorded and nothing is raised |
 | `10-first-draft-readback.sql` | after the first ZZTEST draft with the switch on, given `xero_document_id`: one row, on the job, type fits its register row, fingerprint shape, flags agree with problems, approval columns consistent, and an office draft with problems has its one open item |
 
 Not observable by SQL, so not checked here: the Job Profit page showing
@@ -107,3 +107,7 @@ PROOF_DISPOSABLE_ACK=I-confirm-this-is-disposable-local-postgres \
 PROOF_TEMPLATE_DATABASE=<database holding every registered migration> \
   bash scripts/proof/switch-checks/test-local.sh
 ```
+
+The local test runs every check on the ready state, the guard refusals, and
+at least one mutation per check that must turn it to FAIL (and PASS controls
+for checks 10 and 11 and the named raise door): 61 runs.

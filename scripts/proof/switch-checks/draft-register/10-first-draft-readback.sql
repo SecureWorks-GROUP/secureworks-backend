@@ -10,11 +10,8 @@
 -- FAILs here on its item, by design. Evidence carries no amount.
 \set zz_check 'draft_register.first_draft_readback'
 \ir ../session.sql
+\if :zz_ok
 \if :{?xero_document_id}
-\else
-SELECT :'zz_check' AS "check", 'FAIL' AS result, '{"guard":"psql variable xero_document_id not given"}' AS evidence
-\quit
-\endif
 WITH r AS (
   SELECT * FROM public.xero_draft_register
   WHERE org_id = :'zz_org_id' AND xero_document_id = :'xero_document_id'
@@ -53,3 +50,7 @@ SELECT :'zz_check' AS "check",
                           'approved_seen_at', v.approved_seen_at, 'approval_consistent', v.approval_consistent,
                           'open_draft_incomplete_items', v.open_items, 'item_as_expected', v.item_as_expected)::text AS evidence
 FROM v;
+\else
+SELECT :'zz_check' AS "check", 'FAIL' AS result, '{"guard":"psql variable xero_document_id not given"}' AS evidence;
+\endif
+\endif

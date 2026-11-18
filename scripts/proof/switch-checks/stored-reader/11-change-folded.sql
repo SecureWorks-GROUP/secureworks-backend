@@ -5,11 +5,8 @@
 -- and the store answers with that snapshot's time. One statement.
 \set zz_check 'stored_reader.change_folded'
 \ir ../session.sql
+\if :zz_ok
 \if :{?changed_at}
-\else
-SELECT :'zz_check' AS "check", 'FAIL' AS result, '{"guard":"psql variable changed_at not given"}' AS evidence
-\quit
-\endif
 WITH x AS (
   SELECT :'changed_at'::timestamptz AS changed_at,
          (SELECT max(m.marked_at) FROM public.job_change_mark_events m WHERE m.job_id = :'zz_job_id'
@@ -28,3 +25,7 @@ SELECT :'zz_check' AS "check",
                           'refresh_started_at', x.refresh_started_at, 'computed_at', x.computed_at,
                           'as_at', x.as_at)::text AS evidence
 FROM x;
+\else
+SELECT :'zz_check' AS "check", 'FAIL' AS result, '{"guard":"psql variable changed_at not given"}' AS evidence;
+\endif
+\endif

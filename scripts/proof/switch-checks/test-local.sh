@@ -43,6 +43,8 @@ check() {
   out=$(psql "$(url "$db")" -X -q -At -F '|' -v job_number=ZZTEST-PROOF-1 "$@" -f "$HERE/$file" 2>&1) || true
   got=$(printf '%s\n' "$out" | tail -1 | cut -d'|' -f2)
   runs=$((runs + 1))
+  # Exactly one row, so a guard's FAIL can never be followed by a PASS.
+  [ "$(printf '%s\n' "$out" | grep -c .)" -eq 1 ] || got="more than one row"
   if [ "$want" = ANY ] && { [ "$got" = PASS ] || [ "$got" = FAIL ]; }; then
     echo "ok   [$label] $file -> $got"
   elif [ "$got" = "$want" ]; then
@@ -74,12 +76,19 @@ for f in 01-switch-off 02-register-table 03-register-access 04-register-empty 05
          06-rules-confirmed 07-division-options 08-raise-kind; do
   check "$READY" "draft-register/$f.sql" PASS ready
 done
-check "$READY" draft-register/09-raise-door.sql FAIL "known gap on main"
+check "$READY" draft-register/09-raise-door.sql FAIL "no named door on main"
 check "$READY" draft-register/10-first-draft-readback.sql FAIL "no draft yet" -v xero_document_id=ZZTEST-DOC-1
 
 echo "== guards"
 check "$READY" stored-reader/01-switch-off.sql FAIL "not a ZZTEST job" -v job_number=MB-2
-mutated "CREATE ROLE zz_plain LOGIN; GRANT USAGE ON SCHEMA public TO zz_plain; GRANT SELECT ON public.jobs, public.feature_flags TO zz_plain;" \
+check "$READY" draft-register/04-register-empty.sql FAIL "not a ZZTEST job" -v job_number=MB-2
+out=$(psql "$(url "$READY")" -X -q -At -F '|' -f "$HERE/stored-reader/01-switch-off.sql" 2>&1) || true
+runs=$((runs + 1))
+case "$out" in
+  *'|FAIL|'*'job_number not given'*) [ "$(printf '%s\n' "$out" | grep -c .)" -eq 1 ] && echo "ok   [no job_number] guard -> FAIL" || { failures=$((failures + 1)); echo "FAIL [no job_number] more than one row: $out"; } ;;
+  *) failures=$((failures + 1)); echo "FAIL [no job_number] guard did not refuse: $out" ;;
+esac
+mutated "DROP ROLE IF EXISTS zz_plain; CREATE ROLE zz_plain LOGIN; GRANT USAGE ON SCHEMA public TO zz_plain; GRANT SELECT ON public.jobs, public.feature_flags TO zz_plain;" \
   stored-reader/01-switch-off.sql PASS "setup for plain role"
 out=$(psql "$(printf '%s' "$(url "$CASE")" | sed 's#//[^@]*@#//zz_plain@#')" -X -q -At -F '|' -v job_number=ZZTEST-PROOF-1 \
   -f "$HERE/stored-reader/07-nothing-waiting.sql" 2>&1 | tail -1) || true
@@ -122,10 +131,12 @@ mutated "ALTER TABLE public.job_profit_stored DISABLE TRIGGER USER; UPDATE publi
 check "$READY" stored-reader/11-change-folded.sql FAIL "change after the refresh" -v changed_at="$(date -u '+%Y-%m-%d %H:%M:%S+00')"
 mutated "UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'xero_draft_standard_v1';" \
   draft-register/01-switch-off.sql FAIL "draft switch on"
-mutated "DROP INDEX IF EXISTS public.zz_none; ALTER TABLE public.xero_draft_register DROP COLUMN problems;" \
+mutated "ALTER TABLE public.xero_draft_register DROP COLUMN problems;" \
   draft-register/02-register-table.sql FAIL "column gone"
 mutated "GRANT SELECT ON public.xero_draft_register TO authenticated;" \
   draft-register/03-register-access.sql FAIL "browser can read"
+mutated "GRANT TRUNCATE ON public.xero_draft_register TO anon;" \
+  draft-register/03-register-access.sql FAIL "browser can truncate"
 mutated "INSERT INTO public.xero_draft_register(org_id, xero_document_id, document_type, source_kind, register_row, lines_fingerprint, has_account_codes, has_division_tags, has_job_reference, has_source_document) VALUES ('00000000-0000-0000-0000-000000000001', 'ZZTEST-DOC-0', 'ACCPAY', 'trade_invoice', 'X6', repeat('a', 64), true, true, true, true);" \
   draft-register/04-register-empty.sql FAIL "row written while off"
 mutated "DELETE FROM public.xero_account_rules WHERE org_id = '00000000-0000-0000-0000-000000000001' AND source_kind = 'supplier_credit';" \
@@ -138,8 +149,13 @@ mutated "UPDATE public.xero_tracking_options SET synced_at = now() - interval '3
   draft-register/07-division-options.sql FAIL "options stale"
 mutated "DELETE FROM public.reconcile_item_kinds WHERE kind = 'draft_incomplete';" \
   draft-register/08-raise-kind.sql FAIL "kind gone"
-mutated "CREATE FUNCTION public.reconcile_item_raise(p_kind text, p_subject_table text, p_subject_id text, p_job_ids uuid[], p_suggestion jsonb, p_evidence jsonb, p_raised_by text, p_org_id uuid, p_named boolean) RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid';" \
-  draft-register/09-raise-door.sql FAIL "nine names is not the door"
+NAMED="CREATE FUNCTION public.reconcile_item_raise_named(p_kind text, p_subject_table text, p_subject_id text, p_job_ids uuid[], p_suggestion jsonb, p_evidence jsonb, p_raised_by text, p_org_id uuid DEFAULT NULL) RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid'; REVOKE ALL ON FUNCTION public.reconcile_item_raise_named(text, text, text, uuid[], jsonb, jsonb, text, uuid) FROM PUBLIC, anon, authenticated"
+mutated "$NAMED; GRANT EXECUTE ON FUNCTION public.reconcile_item_raise_named(text, text, text, uuid[], jsonb, jsonb, text, uuid) TO service_role;" \
+  draft-register/09-raise-door.sql PASS "named door as in PR 1643"
+mutated "$NAMED; GRANT EXECUTE ON FUNCTION public.reconcile_item_raise_named(text, text, text, uuid[], jsonb, jsonb, text, uuid) TO service_role, authenticated;" \
+  draft-register/09-raise-door.sql FAIL "door open to authenticated"
+mutated "CREATE FUNCTION public.reconcile_item_raise_named(text, text, text, uuid[], jsonb, jsonb, text, uuid) RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid'; GRANT EXECUTE ON FUNCTION public.reconcile_item_raise_named(text, text, text, uuid[], jsonb, jsonb, text, uuid) TO service_role;" \
+  draft-register/09-raise-door.sql FAIL "unnamed parameters"
 
 echo "== first draft readback"
 REG="INSERT INTO public.xero_draft_register(org_id, xero_document_id, document_type, source_kind, register_row, job_ids, lines_fingerprint, has_account_codes, has_division_tags, has_job_reference, has_source_document, problems) SELECT '00000000-0000-0000-0000-000000000001', 'ZZTEST-DOC-1'"

@@ -6,6 +6,7 @@
 -- differing keys, never an amount.
 \set zz_check 'stored_reader.stored_equals_live'
 \ir ../session.sql
+\if :zz_ok
 WITH x AS (
   SELECT public.job_story_stored_profit_as_at(:'zz_job_id', now()) AS as_at,
          public.context_job_story_book_stored(:'zz_job_id', now()) AS stored,
@@ -25,3 +26,4 @@ SELECT :'zz_check' AS "check",
                               FULL JOIN jsonb_each(coalesce(x.live, '{}')) l USING (key)
                               WHERE s.value IS DISTINCT FROM l.value))::text AS evidence
 FROM x;
+\endif

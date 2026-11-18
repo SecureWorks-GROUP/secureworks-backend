@@ -5,6 +5,7 @@
 -- standard's rules and options for its organisation. Made-up values only.
 \set ON_ERROR_STOP on
 SET TimeZone = 'UTC';
+SET statement_timeout = '60s';
 SELECT public.install_context_story_book_speed();
 \ir ../../../../supabase/tests/migration-contracts/20261118024514_context_story_book_speed/fixtures.sql
 UPDATE public.jobs SET job_number = 'ZZTEST-PROOF-1' WHERE job_number = 'MB-1';
@@ -33,6 +34,9 @@ INSERT INTO public.xero_account_rules(org_id, source_kind, line_kind, account_co
 SELECT '00000000-0000-0000-0000-000000000001', k, 'default', '000', 'ZZTEST role', now()
 FROM unnest(ARRAY['trade_invoice', 'expense_receipt', 'supplier_bill', 'supplier_credit']) k
 ON CONFLICT DO NOTHING;
+-- The migration seeds today's codes unconfirmed; the ready state has them confirmed.
+UPDATE public.xero_account_rules SET confirmed_by = 'ZZTEST role', confirmed_at = now()
+WHERE org_id = '00000000-0000-0000-0000-000000000001' AND confirmed_at IS NULL;
 INSERT INTO public.xero_tracking_options(org_id, category_id, category_name, option_id, option_name, status, synced_at)
 SELECT '00000000-0000-0000-0000-000000000001', 'ZZTEST-CAT', 'Business Unit', 'ZZTEST-OPT-' || n, name, 'ACTIVE', now()
 FROM unnest(ARRAY['SW - PATIOS', 'SW - FENCING', 'SW - DECKING', 'SW - PRIVATE ROOFING', 'SW - MAKESAFE',

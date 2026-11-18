@@ -6,6 +6,7 @@
 -- FAIL as "not scheduled".
 \set zz_check 'stored_reader.refresh_timer'
 \ir ../session.sql
+\if :zz_ok
 SELECT to_regclass('cron.job') IS NOT NULL AND to_regclass('cron.job_run_details') IS NOT NULL AS zz_cron
 \gset
 \if :zz_cron
@@ -31,4 +32,5 @@ SELECT :'zz_check' AS "check",
                           'note', 'pg_cron row security can hide another role''s job')::text AS evidence;
 \else
 SELECT :'zz_check' AS "check", 'FAIL' AS result, '{"guard":"cron.job or cron.job_run_details not readable"}' AS evidence;
+\endif
 \endif

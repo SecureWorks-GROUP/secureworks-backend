@@ -5,6 +5,7 @@
 -- The same tests as job_story_stored_profit_as_at, shown one by one.
 \set zz_check 'stored_reader.nothing_waiting'
 \ir ../session.sql
+\if :zz_ok
 WITH k AS (
   SELECT refresh_started_at FROM public.job_story_stored_profit_counts WHERE job_id = :'zz_job_id'
 ), n AS (
@@ -24,3 +25,4 @@ SELECT :'zz_check' AS "check",
                           'queued', n.queued, 'dirty', n.dirty, 'newer_marks', n.newer_marks,
                           'newer_folded_marks', n.newer_folded_marks)::text AS evidence
 FROM n;
+\endif

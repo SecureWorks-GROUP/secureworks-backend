@@ -5,6 +5,7 @@
 -- are in both sides alike.
 \set zz_check 'stored_reader.faster'
 \ir ../session.sql
+\if :zz_ok
 SELECT clock_timestamp() AS zz_a0 \gset
 SELECT public.context_job_story_book_stored(:'zz_job_id', now()) IS NOT NULL
        AND public.job_story_stored_profit_as_at(:'zz_job_id', now()) IS NOT NULL AS zz_s1 \gset
@@ -37,3 +38,4 @@ SELECT :'zz_check' AS "check",
                           'stored_answered_every_round', t.stored_answered,
                           'live_answered_every_round', t.live_answered)::text AS evidence
 FROM t;
+\endif

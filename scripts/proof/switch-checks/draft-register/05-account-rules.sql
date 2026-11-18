@@ -4,6 +4,7 @@
 -- the line kinds each source kind has, never an account code.
 \set zz_check 'draft_register.account_rules'
 \ir ../session.sql
+\if :zz_ok
 WITH k(source_kind) AS (VALUES ('trade_invoice'), ('expense_receipt'), ('supplier_bill'), ('supplier_credit')),
 per AS (
   SELECT k.source_kind,
@@ -16,3 +17,4 @@ SELECT :'zz_check' AS "check",
        CASE WHEN (SELECT bool_and(coalesce(has_default, false)) FROM per) THEN 'PASS' ELSE 'FAIL' END AS result,
        jsonb_build_object('by_source_kind', (SELECT jsonb_object_agg(source_kind,
                             jsonb_build_object('line_kinds', line_kinds, 'has_default', coalesce(has_default, false))) FROM per))::text AS evidence;
+\endif

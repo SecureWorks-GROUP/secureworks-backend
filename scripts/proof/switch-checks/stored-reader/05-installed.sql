@@ -5,6 +5,7 @@
 -- Reads pg_proc and pg_trigger only; the install function is not called.
 \set zz_check 'stored_reader.installed'
 \ir ../session.sql
+\if :zz_ok
 WITH body AS (
   SELECT
     (SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure('public.context_job_story_book(uuid,timestamptz)')) AS book,
@@ -25,3 +26,4 @@ SELECT :'zz_check' AS "check",
                           'staff_read_is_stamped_body', b.txt IS NOT NULL AND b.txt = b.stamped,
                           'counts_trigger', t.counts_trigger, 'rearm_trigger', t.rearm_trigger)::text AS evidence
 FROM body b CROSS JOIN trg t;
+\endif

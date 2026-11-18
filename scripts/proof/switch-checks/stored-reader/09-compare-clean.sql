@@ -7,6 +7,7 @@
 -- Evidence carries counts and column names only, never an amount.
 \set zz_check 'stored_reader.compare_clean'
 \ir ../session.sql
+\if :zz_ok
 WITH s AS (SELECT to_jsonb(p) AS j FROM public.job_profit_stored p WHERE p.job_id = :'zz_job_id'),
 v AS (SELECT to_jsonb(q) AS j FROM public.v_job_profit q WHERE q.job_id = :'zz_job_id'),
 stored_cols AS (
@@ -41,3 +42,4 @@ SELECT :'zz_check' AS "check",
                           'differing_columns', (SELECT coalesce(jsonb_agg(key ORDER BY key), '[]') FROM diff),
                           'events', (SELECT jsonb_object_agg(lane, jsonb_build_object('view', view_n, 'stored', stored_n,
                                        'sums_equal', sums_equal)) FROM ev))::text AS evidence;
+\endif

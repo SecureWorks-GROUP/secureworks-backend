@@ -1,8 +1,10 @@
 -- Draft register, check 3: only the server writes it. Row security is on,
--- anon and authenticated hold no privilege on it, and service_role can read,
+-- anon and authenticated hold no privilege on it (TRUNCATE included: row
+-- security does not cover it), and service_role can read,
 -- insert and update (the upsert). A role that does not exist reads as FAIL.
 \set zz_check 'draft_register.register_access'
 \ir ../session.sql
+\if :zz_ok
 WITH r AS (
   SELECT
     (SELECT relrowsecurity FROM pg_class WHERE oid = to_regclass('public.xero_draft_register')) AS rls,
@@ -10,8 +12,8 @@ WITH r AS (
 ), p AS (
   SELECT r.*,
     CASE WHEN r.roles_found THEN
-      has_table_privilege('anon', 'public.xero_draft_register', 'SELECT,INSERT,UPDATE,DELETE')
-      OR has_table_privilege('authenticated', 'public.xero_draft_register', 'SELECT,INSERT,UPDATE,DELETE') END AS browser_any,
+      has_table_privilege('anon', 'public.xero_draft_register', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      OR has_table_privilege('authenticated', 'public.xero_draft_register', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') END AS browser_any,
     CASE WHEN r.roles_found THEN
       has_table_privilege('service_role', 'public.xero_draft_register', 'SELECT')
       AND has_table_privilege('service_role', 'public.xero_draft_register', 'INSERT')
@@ -25,3 +27,4 @@ SELECT :'zz_check' AS "check",
                           'anon_or_authenticated_privilege', p.browser_any,
                           'service_role_select_insert_update', p.server_writes)::text AS evidence
 FROM p;
+\endif

@@ -3,6 +3,7 @@
 -- switch. Evidence is counts by register row only.
 \set zz_check 'draft_register.register_empty_while_off'
 \ir ../session.sql
+\if :zz_ok
 SELECT :'zz_check' AS "check",
        CASE WHEN f.enabled IS FALSE AND (SELECT count(*) FROM public.xero_draft_register) = 0
             THEN 'PASS' ELSE 'FAIL' END AS result,
@@ -13,3 +14,4 @@ SELECT :'zz_check' AS "check",
                                                     GROUP BY register_row) g))::text AS evidence
 FROM (SELECT 1) anchor
 LEFT JOIN public.feature_flags f ON f.flag_name = 'xero_draft_standard_v1';
+\endif

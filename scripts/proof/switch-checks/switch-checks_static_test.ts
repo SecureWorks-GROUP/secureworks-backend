@@ -42,6 +42,10 @@ Deno.test('every check includes the shared session first and names itself by fol
     const prefix = f.folder.replace('-', '_')
     assert(new RegExp(`^\\\\set zz_check '${prefix}\\.[a-z_]+'$`).test(lines[0]), `${f.name}: first line names the check`)
     assertEquals(lines[1], '\\ir ../session.sql', `${f.name}: second line includes the session`)
+    // The body runs only when the session's guards all held.
+    assertEquals(lines[2], '\\if :zz_ok', `${f.name}: body sits inside \\if :zz_ok`)
+    assertEquals(lines[lines.length - 1], '\\endif', `${f.name}: ends the \\if :zz_ok block`)
+    assert(!/\\q(uit)?\b/.test(f.text), `${f.name}: no \\quit (it would end only an include)`)
   }
 })
 
@@ -66,11 +70,17 @@ Deno.test('the session is read only, sees every row and takes one ZZTEST job', a
   assert(text.includes('r.rolsuper OR r.rolbypassrls'))
   assertEquals(text.match(/LIKE 'ZZTEST%'/g)?.length, 2)
   assert(text.includes(') = 1 AS zz_one_job'))
-  for (const guard of [':zz_read_only', ':zz_sees_all', ':zz_one_job']) {
+  // zz_ok starts false and is set true only inside every guard.
+  assert(text.indexOf('\\set zz_ok false') < text.indexOf('\\set zz_ok true'))
+  assertEquals(text.match(/\\set zz_ok true/g)?.length, 1)
+  const inner = text.indexOf('\\set zz_ok true')
+  for (const guard of [':{?job_number}', ':zz_read_only', ':zz_sees_all', ':zz_one_job']) {
     const at = text.indexOf(`\\if ${guard}`)
-    assert(at > 0, `guard ${guard}`)
-    assert(text.slice(at).split('\\endif')[0].includes('\\quit'), `${guard} stops the file`)
+    assert(at > 0 && at < inner, `guard ${guard} wraps zz_ok`)
   }
+  // Each refusal prints its row: the query is ended before the next meta line.
+  assertEquals(text.match(/'FAIL' AS result/g)?.length, 4)
+  for (const m of text.matchAll(/'FAIL' AS result[^\\]*/g)) assert(m[0].trimEnd().endsWith(';'), 'FAIL row is sent')
   // The only SET is the read-only one; nothing else writes.
   assertEquals(sql.match(/\bSET\b/gi)?.length, 1)
   assert(!writeWords.test(sql.replace('SET default_transaction_read_only = on;', '')))

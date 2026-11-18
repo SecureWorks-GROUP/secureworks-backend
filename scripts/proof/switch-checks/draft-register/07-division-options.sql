@@ -6,6 +6,7 @@
 -- required: a job of those kinds is tagged only when Xero has the option.
 \set zz_check 'draft_register.division_options'
 \ir ../session.sql
+\if :zz_ok
 WITH want(name) AS (VALUES ('SW - PATIOS'), ('SW - FENCING'), ('SW - DECKING'), ('SW - PRIVATE ROOFING'),
                            ('SW - MAKESAFE'), ('SW - INSURANCE WORK'), ('SW - RESTORATION'), ('SW Group')),
 active AS (
@@ -22,3 +23,4 @@ SELECT :'zz_check' AS "check",
                           'newest_sync', (SELECT newest FROM fresh),
                           'private_renovations_active', EXISTS (SELECT 1 FROM active WHERE option_name = 'Private Renovations'),
                           'securebuild_active', EXISTS (SELECT 1 FROM active WHERE option_name = 'SecureBuild'))::text AS evidence;
+\endif

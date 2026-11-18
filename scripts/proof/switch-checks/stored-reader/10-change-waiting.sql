@@ -7,6 +7,7 @@
 -- make the change again and run this sooner. One statement.
 \set zz_check 'stored_reader.change_waiting'
 \ir ../session.sql
+\if :zz_ok
 WITH k AS (
   SELECT refresh_started_at FROM public.job_story_stored_profit_counts WHERE job_id = :'zz_job_id'
 ), n AS (
@@ -24,3 +25,4 @@ SELECT :'zz_check' AS "check",
                                           WHEN n.as_at IS NOT NULL THEN 'stored answer while a change waits'
                                           ELSE 'live book while a change waits' END)::text AS evidence
 FROM n;
+\endif

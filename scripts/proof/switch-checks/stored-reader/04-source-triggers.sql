@@ -4,6 +4,7 @@
 -- job_story_stored_profit_setup.
 \set zz_check 'stored_reader.source_triggers'
 \ir ../session.sql
+\if :zz_ok
 WITH t(name, ord) AS (
   SELECT * FROM unnest(ARRAY['job_materials_facts','trade_invoice_lines','trade_invoices','purchase_orders',
     'job_budgets','xero_invoices','xero_supplier_credit_note_allocations','jobs','work_orders',
@@ -17,3 +18,4 @@ SELECT :'zz_check' AS "check",
        jsonb_build_object('enabled', (SELECT count(*) FROM found WHERE mode IN ('O', 'A')),
                           'not_enabled', (SELECT coalesce(jsonb_agg(jsonb_build_object('table', name, 'mode', mode) ORDER BY ord), '[]')
                                           FROM found WHERE mode IS NULL OR mode NOT IN ('O', 'A')))::text AS evidence;
+\endif
