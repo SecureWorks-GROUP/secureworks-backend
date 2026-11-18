@@ -41,6 +41,7 @@ SQL
  # cl-1622-fix: whatever happened above, leave the successor's body live if it was.
  if [ "${successor_live:-f}" = t ] && [ "$(db -At -c "SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('public.approve_trade_pay_run(uuid,date,uuid,jsonb)')")" != dc17fd7b51c2916054ede4801eb8ead1 ]; then
   db -q -1 -f "$successor"
+  if [ "${check_successors_live:-f}" = t ]; then db -q -1 -f "$successor_check_up"; fi
  fi
 }
 trap cleanup EXIT
@@ -54,9 +55,13 @@ SQL
 # back first, and this migration is re-applied once ordering 1 is done.
 successor="$here/../../../migrations/20261118163000_trade_pay_run_holds_status.sql"
 successor_down="$here/../../../rollbacks/20261118163000_trade_pay_run_holds_status_down.sql"
+# Later check bodies on 20261118163000's are rolled back first (newest first).
+successor_check_down="$here/../20261118163000_trade_pay_run_holds_status/roll_back_check_successors.sql"
+successor_check_up="$here/../20261118163000_trade_pay_run_holds_status/reapply_check_successors.sql"
+check_successors_live=$(db -At -c "SELECT coalesce((SELECT md5(prosrc) NOT IN ('7bf3b7dbccc9c5ef8656b6c43e3e9a0b', 'c36b18bc0c4c4bc4b1ffed9021717664') FROM pg_proc WHERE oid = to_regprocedure('public.trade_pay_run_check_v2(date,integer,uuid,text)')), false)")
 successor_live=$(db -At -c "SELECT coalesce((SELECT md5(prosrc) = 'dc17fd7b51c2916054ede4801eb8ead1' FROM pg_proc WHERE oid = to_regprocedure('public.approve_trade_pay_run(uuid,date,uuid,jsonb)')), false)")
 successor_first() {
- if [ "$successor_live" = t ]; then printf "\\i '%s'\n" "$successor_down"; fi
+ if [ "$successor_live" = t ]; then printf "\\i '%s'\n\\i '%s'\n" "$successor_check_down" "$successor_down"; fi
 }
 approve_sql() {
  printf "SELECT public.approve_trade_pay_run('%s', '%s', '%s', '{\"check_rule\":\"v2\",\"invoices\":[]}');" "$org" "$1" "$actor"
@@ -100,6 +105,7 @@ END \$c\$;
 DELETE FROM public.trade_pay_runs WHERE org_id = '$org';
 SQL
 if [ "$successor_live" = t ]; then db -q -1 -f "$successor"; fi # the trap does this too on an early exit
+if [ "$successor_live" = t ] && [ "$check_successors_live" = t ]; then db -q -1 -f "$successor_check_up"; fi
 echo 'PASS: ordering 1, the rollback waits for a running approval, sees its run and refuses'
 
 # ── 2. rollback first ──────────────────────────────────────────────────────

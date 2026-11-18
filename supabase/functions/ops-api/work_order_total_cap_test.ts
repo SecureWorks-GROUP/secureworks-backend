@@ -12,6 +12,7 @@ import {
   isHourlyCappedMode,
   readBilledOnJobs,
   readWorkOrderCapFacts,
+  WORK_ORDER_CAP_WORDS,
   withWorkOrderCaps,
   WorkOrderTotalCapReadError,
   workOrderTotalCapRefusal,
@@ -326,6 +327,7 @@ Deno.test("check: a new line over what is left is refused; a hourly job is never
     lines: [line("1", "approved", "work order", 1500)],
   });
   const over = await checkWorkOrderTotalCap(client, {
+    viewerId: "u",
     lines: [{ job_id: JOB, line_type: "decking", line_total_ex: 600 }],
     loadModes: () => Promise.resolve([MODE]),
     jobRefs: refs,
@@ -336,6 +338,7 @@ Deno.test("check: a new line over what is left is refused; a hourly job is never
     most_this_invoice_ex: 500,
   }]);
   const hourly = await checkWorkOrderTotalCap(client, {
+    viewerId: "u",
     lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 9999 }],
     loadModes: () => Promise.resolve([{ ...MODE, invoice_mode: "hourly" }]),
     jobRefs: refs,
@@ -343,6 +346,7 @@ Deno.test("check: a new line over what is left is refused; a hourly job is never
   assertEquals(hourly, null);
   let read = false;
   await checkWorkOrderTotalCap(client, {
+    viewerId: "u",
     lines: [{ job_id: JOB, line_type: "commission", line_total_ex: 9999 }],
     loadModes: () => {
       read = true;
@@ -361,6 +365,7 @@ Deno.test("check: a lead's adjust replaces the line's old amount, never adds to 
     ],
   });
   const same = await checkWorkOrderTotalCap(client, {
+    viewerId: "u",
     lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 400 }],
     loadModes: () => Promise.resolve([MODE]),
     jobRefs: refs,
@@ -368,6 +373,7 @@ Deno.test("check: a lead's adjust replaces the line's old amount, never adds to 
   });
   assertEquals(same, null);
   const raised = await checkWorkOrderTotalCap(client, {
+    viewerId: "u",
     lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 5000 }],
     loadModes: () => Promise.resolve([MODE]),
     jobRefs: refs,
@@ -400,6 +406,7 @@ Deno.test("check: a deduction raised to 0 is checked; without force it would sli
     "unforced: 0 is never checked",
   );
   const forced = await checkWorkOrderTotalCap(client, {
+    viewerId: "u",
     ...raised,
     force: true,
   });
@@ -512,6 +519,7 @@ Deno.test("hourly: within the sealed maximum passes; one cent over is refused by
     ],
   });
   const ok = await checkWorkOrderTotalCap(client, {
+    viewerId: "u",
     lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 400 }],
     loadModes: () => Promise.resolve([HOURLY]),
     loadHourlyLimits: limitsOf(900),
@@ -519,6 +527,7 @@ Deno.test("hourly: within the sealed maximum passes; one cent over is refused by
   });
   assertEquals(ok, null, "a draft and commission hold nothing");
   const over = await checkWorkOrderTotalCap(client, {
+    viewerId: "u",
     lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 400.01 }],
     loadModes: () => Promise.resolve([HOURLY]),
     loadHourlyLimits: limitsOf(900),
@@ -546,6 +555,7 @@ Deno.test("hourly: within the sealed maximum passes; one cent over is refused by
 Deno.test("hourly: a trade's own higher rate never raises the maximum; hours over at any rate are refused by dollars", async () => {
   // Sealed 10 hours at $80 = $800; the trade bills 9 hours at $95 = $855.
   const r = await checkWorkOrderTotalCap(fakeClient({ lines: [] }), {
+    viewerId: "u",
     lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 9 * 95 }],
     loadModes: () => Promise.resolve([HOURLY]),
     loadHourlyLimits: limitsOf(800),
@@ -569,6 +579,7 @@ Deno.test("hourly: counted like the work order cap; every line but commission, d
     650,
   );
   const adjust = await checkWorkOrderTotalCap(client, {
+    viewerId: "u",
     lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 250 }],
     loadModes: () => Promise.resolve([HOURLY]),
     loadHourlyLimits: limitsOf(900),
@@ -581,6 +592,7 @@ Deno.test("hourly: counted like the work order cap; every line but commission, d
     "650 billed plus the changed line's 250 is the 900 maximum",
   );
   const raisedDeduction = await checkWorkOrderTotalCap(client, {
+    viewerId: "u",
     lines: [{
       job_id: JOB,
       line_type: "crew_work_order_deduction",
@@ -612,6 +624,7 @@ Deno.test("hourly: an unreadable maximum or billed read refuses as unreadable, n
   await assertRejects(
     () =>
       checkWorkOrderTotalCap(client, {
+    viewerId: "u",
         ...base,
         loadHourlyLimits: () => Promise.resolve(new Map()),
       }),
@@ -623,6 +636,7 @@ Deno.test("hourly: an unreadable maximum or billed read refuses as unreadable, n
     await assertRejects(
       () =>
         checkWorkOrderTotalCap(client, {
+    viewerId: "u",
           ...base,
           loadHourlyLimits: limitsOf(bad),
         }),
@@ -632,6 +646,7 @@ Deno.test("hourly: an unreadable maximum or billed read refuses as unreadable, n
   await assertRejects(
     () =>
       checkWorkOrderTotalCap(client, {
+    viewerId: "u",
         ...base,
         loadHourlyLimits: () =>
           Promise.reject(new WorkOrderTotalCapReadError()),
@@ -641,6 +656,7 @@ Deno.test("hourly: an unreadable maximum or billed read refuses as unreadable, n
   await assertRejects(
     () =>
       checkWorkOrderTotalCap(fakeClient({ fail: "trade_invoice_lines" }), {
+    viewerId: "u",
         ...base,
         loadHourlyLimits: limitsOf(900),
       }),
@@ -654,6 +670,7 @@ Deno.test("hourly: only the hourly_capped reason is capped; a plain hourly job r
   assert(!isHourlyCappedMode({ ...HOURLY, invoice_mode: "work_order" }));
   let asked = false;
   const r = await checkWorkOrderTotalCap(fakeClient({ lines: [] }), {
+    viewerId: "u",
     lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 99999 }],
     loadModes: () =>
       Promise.resolve([{ ...HOURLY, invoice_mode_reason: "other_job" }]),
@@ -670,6 +687,7 @@ Deno.test("hourly: a work order job beside it keeps the work order's own limit a
   const JOB2 = "00000000-0000-4000-8000-000000000002";
   const client = fakeClient({ lines: [] });
   const r = await checkWorkOrderTotalCap(client, {
+    viewerId: "u",
     lines: [
       { job_id: JOB, line_type: "work order", line_total_ex: 2001 },
       { job_id: JOB2, line_type: "labour", line_total_ex: 801 },
@@ -736,6 +754,7 @@ Deno.test("ZZTEST changed work order: cap follows the change to the cent and rea
   const client = fakeClient({ changes: [{ work_order_id: WO, delta_ex: 224 }],
     lines: [line("ZZTEST-line", "approved", "labour", 1120)] });
   const check = (amount: number) => checkWorkOrderTotalCap(client, {
+    viewerId: "u",
     lines: [{ job_id: JOB, line_type: "labour", line_total_ex: amount }],
     loadModes: async () => [{ job_id: JOB, invoice_mode: "work_order", work_order_agreed_ex: 1120, job_work_order_id: WO }],
     jobRefs: async () => new Map([[JOB, "ZZTEST-P2"]]),
@@ -763,6 +782,7 @@ Deno.test("hold switch uses the database guard's billed total and excludes an ed
     },
   };
   const check = (amount: number) => checkWorkOrderTotalCap(client, {
+    viewerId: "u",
     loadModes: async () => [{ ...MODE, work_order_agreed_ex: 5 }],
     jobRefs: refs,
     lines: [{ job_id: JOB, line_type: "labour", line_total_ex: amount }],
@@ -865,4 +885,88 @@ Deno.test("list: in_cap_scope only with the hold switch on; off reads no scope; 
     },
   };
   assertEquals((await withWorkOrderCaps(flagFails, listing())).cap_read, "failed");
+});
+
+// Director ruling, 18 Nov 2026: the remainder is the allowance less what every
+// trade billed, so it is shown only on a job where every billed line is the
+// trade's own. Made-up amounts; roles only.
+function tradeLine(id: string, userId: string, amount: number) {
+  return { ...line(id, "approved", "labour", amount), trade_invoices: { id: "inv-" + id, user_id: userId, status: "approved" } };
+}
+
+Deno.test("shared job: the figure shows only when every billed line is the trade's own", async () => {
+  const send = (lines: any[], viewerId: string | undefined) =>
+    checkWorkOrderTotalCap(fakeClient({ lines }), {
+      viewerId,
+      lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 900 }],
+      loadModes: () => Promise.resolve([MODE]),
+      jobRefs: refs,
+    });
+  // Two trades on one job. Trade A billed alone so far: A sees the figure.
+  const own = await send([tradeLine("a1", "trade-a", 1500)], "trade-a");
+  assertEquals(own?.jobs, [{ job: "SWF-1", job_id: JOB, most_this_invoice_ex: 500 }]);
+  assert(own?.message.includes("$500.00"));
+  // Trade B billed on it too: neither trade sees a figure.
+  const lines = [tradeLine("a1", "trade-a", 1000), tradeLine("b1", "trade-b", 500)];
+  for (const viewer of ["trade-a", "trade-b"]) {
+    const shared = await send(lines, viewer);
+    assertEquals(shared?.code, "work_order_total_over_agreed");
+    assertEquals(shared?.jobs, [{ job: "SWF-1", job_id: JOB, amount_hidden: true }]);
+    assertEquals(shared?.message, "This invoice is more than the agreed work order total. Ask the office.");
+    assert(!/\$|\d/.test(shared?.message ?? ""), "no figure in the words");
+  }
+  // A draft or rejected invoice of another trade holds nothing and hides nothing.
+  const draftOther = await send([
+    tradeLine("a1", "trade-a", 1500),
+    { ...line("b1", "draft", "labour", 500), trade_invoices: { id: "inv-b1", user_id: "trade-b", status: "draft" } },
+  ], "trade-a");
+  assertEquals(draftOther?.jobs[0].most_this_invoice_ex, 500);
+  // Nothing billed yet and within the allowance: no refusal at all.
+  assertEquals(await send([], "trade-a"), null);
+  // No viewer named: never a figure.
+  assertEquals((await send([tradeLine("a1", "trade-a", 1500)], undefined))?.jobs[0].amount_hidden, true);
+});
+
+Deno.test("shared job: an unreadable owner read hides the figure, never shows it on a guess", async () => {
+  let calls = 0;
+  const base = fakeClient({ lines: [tradeLine("a1", "trade-a", 1500)] });
+  const flaky = {
+    from(table: string) {
+      if (table === "trade_invoice_lines" && ++calls > 1) {
+        return fakeClient({ fail: "trade_invoice_lines" }).from(table);
+      }
+      return base.from(table);
+    },
+  };
+  const r = await checkWorkOrderTotalCap(flaky, {
+    viewerId: "trade-a",
+    lines: [{ job_id: JOB, line_type: "labour", line_total_ex: 900 }],
+    loadModes: () => Promise.resolve([MODE]),
+    jobRefs: refs,
+  });
+  assertEquals(r?.jobs, [{ job: "SWF-1", job_id: JOB, amount_hidden: true }]);
+});
+
+Deno.test("words: one label table; the shared-job words carry no figure, no code, no name", () => {
+  assertEquals(WORK_ORDER_CAP_WORDS.shared_job, "This invoice is more than the agreed work order total. Ask the office.");
+  for (const words of [
+    WORK_ORDER_CAP_WORDS.shared_job,
+    WORK_ORDER_CAP_WORDS.room("SWF-1", "$1.00"),
+    WORK_ORDER_CAP_WORDS.billed_in_full("SWF-1"),
+    WORK_ORDER_CAP_WORDS.hourly_room("SWF-1", "$2.00", "$1.00"),
+    WORK_ORDER_CAP_WORDS.hourly_billed_in_full("SWF-1", "$2.00"),
+  ]) {
+    assert(!/_|\u2014/.test(words), words);
+  }
+  // Two hidden jobs say the figureless sentence once.
+  const r = workOrderTotalCapRefusal({
+    jobs: [
+      { jobId: "j1", ref: "SWF-1", allowedEx: 100 },
+      { jobId: "j2", ref: "SWF-2", allowedEx: 100 },
+    ],
+    billedEx: new Map([["j1", 100], ["j2", 100]]),
+    incomingEx: new Map([["j1", 10], ["j2", 10]]),
+    amountShown: () => false,
+  });
+  assertEquals(r?.message, WORK_ORDER_CAP_WORDS.shared_job);
 });

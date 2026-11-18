@@ -23,6 +23,7 @@
 // ════════════════════════════════════════════════════════════
 
 import { buildPayView } from "./trade_pay_view.ts";
+import { expenseHeldNotBooked } from "./expense_own_job.ts";
 import {
   reimbursementLinesTotalEx,
   TRADE_INVOICE_EMPLOYER_SUPER_BASIS,
@@ -684,21 +685,13 @@ export function xeroBillFoundStop(
     })
     .filter((n) => n !== "");
   if (named.length === 0) return null;
-  const at = new Date(String(found.checked_at ?? ""));
-  const day = Number.isNaN(at.getTime()) ? "" : ` on ${
-    at.toLocaleDateString("en-AU", {
-      timeZone: "Australia/Perth",
-      day: "numeric",
-      month: "short",
-    })
-  }`;
+  // Director ruling (B), 18 Nov 21:54: these words exactly; more than one bill
+  // is listed in the same place, comma separated.
   return {
     code: "xero_bill_found_at_release",
-    words: `Xero already has ${
-      named.length === 1 ? "a bill" : "bills"
-    } for this invoice: ${
+    words: `Xero has a bill with this number or reference: ${
       named.join(", ")
-    }, found when an approver tried to take it out of the run${day}. It stays in the run: match the bill to the invoice by hand.`,
+    }. Check it before releasing.`,
   };
 }
 
@@ -1709,6 +1702,13 @@ export type PayRunPushDeps = {
   /** The invoice's stamp, status, bill and stored pay figures, or null. */
   invoiceForPush(invoiceId: string): Promise<Record<string, any> | null>;
   /**
+   * The receipts of the invoice's pay-back lines (status and the not-booked
+   * mark), read now. Throws 503 when they cannot be read.
+   */
+  payBackReceipts(
+    invoiceId: string,
+  ): Promise<{ status: unknown; unbooked_job_id: unknown }[]>;
+  /**
    * Moves a run-held invoice from the status it kept at the press
    * (pending_ops_review or queried) to approved, the status the one-invoice
    * push takes; only while the run holds it and it has no bill. True when the
@@ -1859,6 +1859,24 @@ export async function pushPayRunInvoice(
       recorded_existing_bill: true,
       pdf_attached: null,
     });
+  }
+  // Director 18 Nov 21:45: the run's verdict was read at the press, and the
+  // office can still query or reject a receipt after it. A pay-back receipt
+  // marked not booked on its job and not confirmed now is never sent to Xero
+  // (the same held rule as the check's reimbursement_not_booked_unconfirmed).
+  const receipts = await deps.payBackReceipts(invoiceId);
+  if (receipts.some((r) => expenseHeldNotBooked(r))) {
+    deps.log({
+      at: "push_pay_run_invoice",
+      outcome: "receipt_not_confirmed",
+      run_id: run.id,
+      invoice_id: invoiceId,
+    });
+    throw new TradePayRunError(
+      "pay_run_receipt_not_confirmed",
+      "A pay-back receipt on this invoice is from someone not booked on its job, and the office has not confirmed it, so the invoice is not pushed.",
+      409,
+    );
   }
   // The invoice must still pay what the run recorded, to the cent. A figure
   // that cannot be read refuses; a changed one (for example a repayment
@@ -2082,6 +2100,30 @@ export function payRunPushDepsFromClient(
         ).eq("id", invoiceId).maybeSingle();
       if (error) throw unreadable("the invoice");
       return data ?? null;
+    },
+    async payBackReceipts(invoiceId) {
+      // idx_inv_lines_invoice (trade_invoice_id), then expense_receipts_pkey.
+      const { data: lines, error } = await client.from("trade_invoice_lines")
+        .select("expense_receipt_id")
+        .eq("trade_invoice_id", invoiceId)
+        .eq("line_type", "reimbursement");
+      if (error) throw unreadable("the invoice's pay-back lines");
+      const ids = [
+        ...new Set(
+          (lines || [])
+            .map((l: any) => String(l?.expense_receipt_id ?? "").trim())
+            .filter((id: string) => id !== ""),
+        ),
+      ];
+      if (ids.length === 0) return [];
+      const { data: receipts, error: receiptError } = await client.from(
+        "expense_receipts",
+      ).select("id, status, unbooked_job_id").in("id", ids);
+      if (receiptError) throw unreadable("the pay-back receipts");
+      return (receipts || []).map((r: any) => ({
+        status: r?.status ?? null,
+        unbooked_job_id: r?.unbooked_job_id ?? null,
+      }));
     },
     async claimPush(runId, invoiceId, actor) {
       // trade_pay_run_invoices_pkey; the database clock decides the lease.

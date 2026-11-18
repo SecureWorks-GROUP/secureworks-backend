@@ -5,6 +5,7 @@ BEGIN;
 SELECT coalesce((SELECT md5(prosrc) = 'dc17fd7b51c2916054ede4801eb8ead1' FROM pg_proc
   WHERE oid = to_regprocedure('public.approve_trade_pay_run(uuid,date,uuid,jsonb)')), false) AS holds_status_live \gset
 \if :holds_status_live
+\ir ../20261118163000_trade_pay_run_holds_status/roll_back_check_successors.sql
 \ir ../../../rollbacks/20261118163000_trade_pay_run_holds_status_down.sql
 \endif
 -- Rule 17: re-apply what this contract asserts on. A stand-in for phase 2's

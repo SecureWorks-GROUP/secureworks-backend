@@ -19575,6 +19575,7 @@ export async function _assertWithinWorkOrderTotal(
       lines,
       excludeLineIds,
       force,
+      viewerId: tradeUser.id,
       loadModes: async (jobIds) => {
         // Only a job with an approved job work order carrying its agreed
         // labour, or one whose job budget pays hourly up to a maximum (ruling
@@ -19617,6 +19618,10 @@ export async function _assertWithinWorkOrderTotal(
             jobVertical: _jobVertical,
             normaliseManagedVerticals: _normalizeManagedVerticals,
           })).jobs
+            // A job read back as work-order mode is held to its total only
+            // when its approved order is in the scope (the pay read may move
+            // between the two reads; the hourly maximum is untouched).
+            .filter((m) => m.invoice_mode !== 'work_order' || scopedApproved.includes(m.job_id))
         } catch (e) {
           if (e instanceof TradeInvoiceModeReadError) throw new WorkOrderTotalCapReadError()
           throw e

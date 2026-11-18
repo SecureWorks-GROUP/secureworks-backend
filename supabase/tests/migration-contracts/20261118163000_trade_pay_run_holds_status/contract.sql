@@ -9,6 +9,8 @@
 --        release reads).
 BEGIN;
 SET LOCAL statement_timeout = '120s';
+-- Later check bodies first (this transaction is rolled back).
+\ir roll_back_check_successors.sql
 -- Rule 17: re-apply what this contract asserts on.
 \ir ../../../migrations/20261118163000_trade_pay_run_holds_status.sql
 \ir ../../../migrations/20261118163000_trade_pay_run_holds_status.sql

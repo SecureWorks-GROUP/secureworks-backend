@@ -371,7 +371,11 @@ order fill are exactly as before.
   On an hourly job the job entry carries `limit: "hourly_maximum"` and
   `hourly_maximum_ex` (that whole limit), and the message names the most the
   work order pays the crew and the most this invoice may still bill (never
-  another trade's figure). A maximum that
+  another trade's figure). Those figures are shown only on a job where every
+  billed line is the trade's own; on a job another trade billed on, the entry
+  carries `amount_hidden: true` and neither figure, and the words are only
+  "This invoice is more than the agreed work order total. Ask the office."
+  (`WORK_ORDER_CAP_WORDS`, director ruling 18 Nov 2026). A maximum that
   cannot be read is `capped_unreadable` with a zero limit and the budget
   check's code in `unreadable_reason`: `labour_hourly_invalid` (no `hourly`,
   `{}`, any property missing or not a number, a rate or hours not above zero,
