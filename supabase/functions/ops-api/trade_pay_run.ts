@@ -2220,24 +2220,24 @@ export const PAY_RUN_RELEASE_REFUSALS: Record<
   pay_run_xero_check_unnamed: {
     code: "pay_run_xero_check_unnamed",
     status: 400,
-    words: "The Xero check must name the pay run approver who checked.",
+    words: "The Xero search made at this press did not check out, so nothing was released. Press again.",
   },
   pay_run_xero_check_not_approver: {
     code: "pay_run_xero_check_not_approver",
     status: 403,
-    words: "The Xero check must be by a pay run approver.",
+    words: "The Xero search made at this press did not check out, so nothing was released. Press again.",
   },
   pay_run_xero_check_stale: {
     code: "pay_run_xero_check_stale",
     status: 409,
     words:
-      "The Xero check is older than the moment the earlier push lapsed. Look in Xero again now and record that check.",
+      "The Xero search made at this press did not check out, so nothing was released. Press again.",
   },
   pay_run_xero_check_invalid: {
     code: "pay_run_xero_check_invalid",
     status: 400,
     words:
-      "The Xero check must say plainly that the invoice is not in Xero (in_xero: false) and carry the time it was checked, not in the future.",
+      "The Xero search made at this press did not check out, so nothing was released. Press again.",
   },
   pay_run_invoice_billed: {
     code: "pay_run_invoice_billed",
