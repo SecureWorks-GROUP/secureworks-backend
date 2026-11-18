@@ -1576,7 +1576,7 @@ import {
 import { readXeroDrafts, XeroDraftsError } from './xero_drafts_read.ts'
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
-import { TradePayRunError, TradePayRunRefusal, PAY_RUN_SWITCH, approvePayRun, payRunApproveDepsFromClient, payRunReadsFromClient, readPayRun } from './trade_pay_run.ts'
+import { TradePayRunError, TradePayRunRefusal, PAY_RUN_SWITCH, approvePayRun, markPayRunSuperPaid, payRunApproveDepsFromClient, payRunPushDepsFromClient, payRunReadsFromClient, pushPayRunInvoice, readPayRun } from './trade_pay_run.ts'
 // Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
 import { PAY_FIGURES_APPROVER_ACTIONS, payFiguresApproverRefusal } from './pay_figures_approver.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
@@ -10104,6 +10104,42 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }))
         } catch (err) {
           if (err instanceof TradePayRunCheckError) throw new ApiError(err.message, err.status)
+          throw err
+        }
+      }
+
+      // Push an approved run (P1-10.5). POST { run_id, invoice_id } pushes one
+      // clean invoice of the run through the existing one-invoice push (a DRAFT
+      // bill, never authorised or paid; no crewmate's bill). POST { run_id }
+      // marks the run's super paid once every clean invoice is pushed. Behind
+      // trade_pay_run_v1 (409 while off); a signed-in approver only.
+      case 'push_pay_run_invoice':
+      case 'mark_pay_run_super_paid': {
+        if (req.method !== 'POST') {
+          return json({ ok: false, error: 'method_not_allowed', message: `${action} requires POST` }, 405)
+        }
+        try {
+          const pushDeps = payRunPushDepsFromClient(
+            client,
+            () => readFlag(client, PAY_RUN_SWITCH),
+            (invoiceId, runId) => pushTradeInvoiceToXeroAction(
+              client,
+              { invoice_id: invoiceId },
+              `ops-api:push_pay_run_invoice:${runId}`,
+            ),
+          )
+          const pressOpts = {
+            orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
+            runId: body?.run_id,
+            actorUserId: requestActor.source === 'jwt' && authMode === 'jwt' ? (authUser?.id || null) : null,
+          }
+          return json(action === 'push_pay_run_invoice'
+            ? await pushPayRunInvoice(pushDeps, { ...pressOpts, invoiceId: body?.invoice_id })
+            : await markPayRunSuperPaid(pushDeps, pressOpts))
+        } catch (err) {
+          if (err instanceof TradePayRunError) {
+            return json({ ok: false, error: err.code, message: err.message }, err.status)
+          }
           throw err
         }
       }
