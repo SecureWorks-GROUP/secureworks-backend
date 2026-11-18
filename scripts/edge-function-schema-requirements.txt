@@ -1317,3 +1317,7 @@ ops-api|supabase/migrations/20261118194000_expense_unbooked_job_mark.sql|column|
 # through the function, so ops-api must not deploy ahead of the migration.
 ops-api|supabase/migrations/20261118194200_trade_pay_run_xero_found.sql|column|trade_pay_run_invoices.release_xero_found
 ops-api|supabase/migrations/20261118194200_trade_pay_run_xero_found.sql|function|record_trade_pay_run_xero_found
+# P2-03.6: ops-api reconcile_list reads one page and the per-kind counts
+# through these two functions (the switch off answers before either is called).
+ops-api|supabase/migrations/20261118195200_reconcile_list_page.sql|function|reconcile_list_page
+ops-api|supabase/migrations/20261118195200_reconcile_list_page.sql|function|reconcile_list_counts
