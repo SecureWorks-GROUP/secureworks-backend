@@ -1586,6 +1586,7 @@ import {
 // TP-01 Xero tie-out (20261029121500): staff read, bills by month and bucket.
 import { readXeroDrafts, XeroDraftsError } from './xero_drafts_read.ts'
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
+import { EffortStatsUnreadable, readPayEffortStats } from './pay_effort_stats.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
 import { TradePayRunError, TradePayRunRefusal, PAY_RUN_SWITCH, approvePayRun, markPayRunSuperPaid, payRunApproveDepsFromClient, payRunPushDepsFromClient, payRunReadsFromClient, payRunReleaseDepsFromClient, pushPayRunInvoice, readPayRun, releasePayRunInvoice } from './trade_pay_run.ts'
 // Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
@@ -2563,6 +2564,7 @@ async function noteTradeRecurringDeductionNotTaken(
 function presentTradeInvoice<T extends Record<string, unknown>>(
   rawInvoice: T,
   payViewOptions?: Pick<PayViewOptions, 'taxSetAsidePercent' | 'repayment'>,
+  officeSuggestions = false,
 ): T & { trade_payable: number | null } & Record<string, unknown> {
   // A bill voided or deleted in Xero says so on every read.
   const invoice = { ...rawInvoice, ...presentTradeInvoiceBillOutcome(rawInvoice) } as T
@@ -2577,9 +2579,9 @@ function presentTradeInvoice<T extends Record<string, unknown>>(
       to_be_paid: Number(invoice.to_be_paid_ex),
     }
     if (!Array.isArray(invoice.lines)) return { ...presented, ...headerShape }
-    const normalizedLines = [...invoice.lines]
+    const orderedLines = [...invoice.lines]
       .sort((left: any, right: any) => Number(left?.line_position ?? 0) - Number(right?.line_position ?? 0))
-      .map((line: any): WeeklyInvoiceLine => ({
+    const normalizedLines = orderedLines.map((line: any): WeeklyInvoiceLine => ({
         line_type: String(line.line_type || ''),
         description: String(line.description || ''),
         quantity: Number(line.quantity),
@@ -2608,7 +2610,9 @@ function presentTradeInvoice<T extends Record<string, unknown>>(
     }
     return {
       ...presented,
-      lines: normalizedLines,
+      lines: officeSuggestions ? normalizedLines.map((line, i) => ({
+        ...line, suggested: orderedLines[i].suggested, changed_from_suggestion: orderedLines[i].changed_from_suggestion,
+      })) : normalizedLines,
       ...weeklyInvoiceResponse(calculated),
     }
   } catch (error) {
@@ -10165,6 +10169,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // approves the clean bills in one batch. Read only; pay run approvers
       // only (pay_figures_approver.ts, checked before dispatch). Contract:
       // docs/trade-pay-run-check-v1.md.
+      case 'pay_effort_stats': {
+        if (req.method !== 'GET') throw new ApiError('method_not_allowed', 405)
+        if (authMode !== 'jwt' || !_opsApiStaffOperatorRole(authUser?.role)) throw new ApiError('staff_required', 403)
+        try {
+          return json(await readPayEffortStats(client, url.searchParams.get('weeks'), authUser?.orgId || null))
+        } catch (err) {
+          if (err instanceof EffortStatsUnreadable) throw new ApiError(err.message, 503, { ok: false, code: err.message, error: err.message })
+          if (err instanceof TradePayRunCheckError) throw new ApiError(err.message, err.status)
+          throw err
+        }
+      }
+
       case 'trade_pay_run_check': {
         try {
           return json(await readTradePayRunCheck(client, {
@@ -13745,7 +13761,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 jobVertical: _jobVertical,
                 normaliseManagedVerticals: _normalizeManagedVerticals,
               })
-              return json({ ok: true, jobs: modes.jobs, not_found: modes.not_found })
+              const jobs = await withAgreedLabourForAllocatedJobsOnly(client, modes.jobs, tradeUser.id, isDispatcher, tradeJobAccess)
+              return json({ ok: true, jobs, not_found: modes.not_found })
             } catch (error) {
               if (error instanceof TradeInvoiceModeReadError) {
                 console.error('[ops-api] trade_invoice_job_modes: unreadable:', error.message)
@@ -45489,15 +45506,17 @@ export function tradeViewerQuoteVisibleForJob(
   return managed.includes(_jobVertical(job))
 }
 
-// Colleagues' PAY — `trade_rates.hourly_rate`, the per-person hours and the cost
-// derived from them — is a narrower question than the quote, and the open-pool
-// tier is the reason it needs its own rule. `makesafe_open` is a REPORT door: it
-// admits ANY signed-in trade to ANY make-safe job before a named assignment
-// exists (isMakesafeAccessJobForClient asks only whether the job is a make-safe,
-// never whether it is open to this caller). That is the right trade for filing a
-// field report and the wrong one for a payroll read, so it is refused wherever a
-// response carries another trade's rate. Office, division manager of the job's
-// vertical, and an allocated crew member on the job all pass.
+// Who may open the labour door (`trade_labour_budget`) at all. `makesafe_open`
+// is a REPORT door: it admits ANY signed-in trade to ANY make-safe job before a
+// named assignment exists (isMakesafeAccessJobForClient asks only whether the
+// job is a make-safe, never whether it is open to this caller). That is the
+// right trade for filing a field report and the wrong one for a labour read, so
+// it is refused here. Office, division manager of the job's vertical, and an
+// allocated crew member on the job pass the door, but only office and division
+// manager receive money: the labour budget, any rate, any cost and the
+// remainder (ruling 17: the budget reaches no trade surface). An allocated
+// trade gets hours and shift counts only, and trade_rates is never read for
+// that tier (tradeLabourBudget).
 export function tradeLabourCostVisibleForTier(tier: TradeJobAccessTier): boolean {
   return tier === 'office' || tier === 'division_manager' || tier === 'allocated'
 }
@@ -59352,9 +59371,9 @@ const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, note
 // presentTradeInvoice throws MONEY_SPLIT_INVALID on a legacy row whose split
 // does not reconcile. One such row is live; it used to 500 the whole list.
 // Degrade that row to "figures unavailable" and keep the rest.
-function presentTradeInvoiceSafe(inv: any, payViewOptions?: Pick<PayViewOptions, 'taxSetAsidePercent' | 'repayment'>): any {
+function presentTradeInvoiceSafe(inv: any, payViewOptions?: Pick<PayViewOptions, 'taxSetAsidePercent' | 'repayment'>, officeSuggestions = false): any {
   try {
-    return presentTradeInvoice(inv, payViewOptions)
+    return presentTradeInvoice(inv, payViewOptions, officeSuggestions)
   } catch (error) {
     const code = (error as any)?.code || (error as any)?.message || 'MONEY_SPLIT_INVALID'
     console.warn('[ops-api] trade invoice ' + inv?.id + ' figures unavailable: ' + code)
@@ -59598,7 +59617,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
 
   return {
     invoices: mergeTradeBillRows(weekly.data || [], noWeek.data || [], stuckRows.slice(0, STUCK_TRADE_BILLS_CAP))
-      .map((invoice: any) => presentTradeInvoiceSafe(invoice)),
+      .map((invoice: any) => presentTradeInvoiceSafe(invoice, undefined, true)),
     rates: currentRates.map(({ created_by, set_by, ...rate }: any) => ({
       ...rate, ...tradeRateSetter({ ...rate, created_by, set_by }),
     })),
@@ -59612,7 +59631,7 @@ export const _listTradeInvoicesForTest = listTradeInvoices
 /** Most stuck invoices (no Xero bill) one Trade Bills read adds. */
 export const STUCK_TRADE_BILLS_CAP = 200
 
-const TRADE_BILLS_COLUMNS = 'id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, super_base_ex, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, xero_bill_status, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)'
+const TRADE_BILLS_COLUMNS = 'id, accepted_untouched, auto_sent, confirm_seconds, office_sent_back_at, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, super_base_ex, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, xero_bill_status, xero_bill_total, xero_adjustments_ex, xero_adjustment_lines, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, suggested, changed_from_suggestion, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)'
 
 /** Weekly and no-week invoices in one list, newest first by week, else by day made. */
 export function mergeTradeBillRows(weekly: any[], noWeek: any[], stuck: any[] = []): any[] {
@@ -59808,6 +59827,10 @@ async function tradeLabourBudget(
   if (!tradeLabourCostVisibleForTier(accessDecision.tier)) {
     throw new Error('You are not assigned to this job')
   }
+  // Ruling 17: an allocated trade sees hours, never money. Answered before any
+  // purchase order, quote or trade_rates read, so no figure is loaded for this
+  // tier and a crewmate's missing rate cannot fail the hours card.
+  if (accessDecision.tier === 'allocated') return tradeLabourHoursOnly(client, jobId)
   const quoteVisible = tradeQuoteVisibleForTier(accessDecision.tier)
 
   // Get PO total for this job (material + labour)
@@ -59865,6 +59888,72 @@ async function tradeLabourBudget(
   }
 }
 export const _tradeLabourBudgetForTest = tradeLabourBudget
+
+// trade_invoice_job_modes answers any job in the caller's company, but a job
+// work order's agreed labour is that job's labour money. It stays on a job
+// only when the caller passes the same tier rule as trade_labour_budget
+// (office, division manager of the job's vertical, or allocated to the job);
+// on any other job both work-order fields read null, the action's existing
+// "no figure" shape. The mode itself is unchanged. Only jobs that carry a
+// figure are checked. A failed assignment read refuses the whole answer,
+// never drops or keeps the figure by guess.
+async function withAgreedLabourForAllocatedJobsOnly(
+  client: any,
+  jobs: TradeInvoiceJobMode[],
+  userId: string,
+  isOffice: boolean,
+  access: TradeJobAccessContext,
+): Promise<TradeInvoiceJobMode[]> {
+  const out: TradeInvoiceJobMode[] = []
+  for (const job of jobs) {
+    if (job.work_order_agreed_ex === null && job.job_work_order_id === null) {
+      out.push(job)
+      continue
+    }
+    let tier: TradeJobAccessTier
+    try {
+      tier = (await resolveTradeJobAccessTier(client, job.job_id, userId, { isOffice, access })).tier
+    } catch {
+      throw new TradeInvoiceModeReadError('your jobs')
+    }
+    out.push(tier === 'office' || tier === 'division_manager' || tier === 'allocated'
+      ? job
+      : { ...job, work_order_agreed_ex: null, job_work_order_id: null })
+  }
+  return out
+}
+export const _withAgreedLabourForAllocatedJobsOnlyForTest = withAgreedLabourForAllocatedJobsOnly
+
+// The allocated-trade shape of trade_labour_budget: total hours and, per crew
+// member, name, hours and the number of shifts. No budget, rate, cost or
+// remainder exists in it. No shift is priced or left out, so the two rate
+// counts are zero by construction, not because a rate read succeeded.
+async function tradeLabourHoursOnly(client: any, jobId: string) {
+  const { data: assignments, error: assignmentError } = await client.from('job_assignments')
+    .select('user_id, started_at, completed_at, users:user_id(name)')
+    .eq('job_id', jobId)
+    .eq('status', 'complete')
+    .not('started_at', 'is', null)
+    .not('completed_at', 'is', null)
+  if (assignmentError || !assignments) throw new ApiError('labour_assignments_read_failed', 503)
+  const byUser = new Map<string, { user_id: string, name: string, hours: number, shifts: number }>()
+  for (const a of assignments) {
+    const hours = Math.round(((new Date(a.completed_at).getTime() - new Date(a.started_at).getTime()) / 3600000) * 100) / 100
+    const userId = String(a.user_id)
+    const row = byUser.get(userId) ?? { user_id: userId, name: a.users?.name || 'Trade', hours: 0, shifts: 0 }
+    row.hours += hours
+    row.shifts += 1
+    byUser.set(userId, row)
+  }
+  const trades = [...byUser.values()]
+  const totalHours = trades.reduce((sum, trade) => sum + trade.hours, 0)
+  return {
+    rate_assumed: 0,
+    rate_missing: 0,
+    total_hours: Math.round(totalHours * 100) / 100,
+    trades,
+  }
+}
 
 // ════════════════════════════════════════════════════════════
 // JOB COMPLETION PACKAGE
