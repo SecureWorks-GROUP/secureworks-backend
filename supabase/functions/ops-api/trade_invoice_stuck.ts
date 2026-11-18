@@ -19,6 +19,7 @@ import { xeroSyncRefusal } from "./crew_invoice_job_work_order.ts";
 import { isGroupShareLine } from "./group_work_order.ts";
 import { recordTradeInvoiceEvent } from "./trade_invoice_events.ts";
 import { TradeXeroBillSearchError } from "./trade_invoice_xero_existing_bill.ts";
+import { payRunHeldRefusalFor } from "./trade_pay_run_hold.ts";
 
 type Row = Record<string, any>;
 
@@ -95,7 +96,7 @@ export async function resolveStuckTradeInvoice(
   }
 
   const { data: invoice, error: readErr } = await client.from("trade_invoices")
-    .select("id, user_id, status, xero_bill_id, query_note, invoice_number")
+    .select("id, user_id, status, xero_bill_id, query_note, invoice_number, pay_run_id")
     .eq("id", invoiceId)
     .maybeSingle();
   if (readErr) fail(503, "invoice_unreadable", "The invoice could not be read.");
@@ -103,6 +104,10 @@ export async function resolveStuckTradeInvoice(
   if (actor.userId && String(invoice.user_id) === String(actor.userId)) {
     fail(403, "self_resolution_forbidden", "You cannot resolve an invoice you submitted.");
   }
+  // A pay run's invoice is the run's: refused before any line read, Xero
+  // search or write.
+  const runHold = payRunHeldRefusalFor(invoice);
+  if (runHold) fail(runHold.status, runHold.code, runHold.message);
   if (invoice.status !== STUCK_TRADE_INVOICE_STATUS) {
     fail(
       409,
@@ -187,6 +192,7 @@ export async function resolveStuckTradeInvoice(
     .eq("id", invoiceId)
     .eq("status", STUCK_TRADE_INVOICE_STATUS)
     .is("xero_bill_id", null)
+    .is("pay_run_id", null)
     .select("id, status")
     .maybeSingle();
   if (moveErr) fail(503, "resolve_failed", "The decision was not saved.");

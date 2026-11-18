@@ -183,6 +183,7 @@ function stuckDb(invoice: Row = {}, lines: Row[] = [{ id: "line-1" }]): FakeDb {
       xero_bill_id: null,
       query_note: null,
       invoice_number: "SW-INV-T-000000-001",
+      pay_run_id: null,
       ...invoice,
     }],
     trade_invoice_lines: lines.map((line) => ({

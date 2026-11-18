@@ -45,6 +45,12 @@ type World = {
   rows?: Record<string, Row>;
   invoices?: Record<string, Record<string, any> | null>;
   push?: (id: string) => Promise<Record<string, unknown>>;
+  /** The run's own status move; false when the invoice changed. */
+  ready?: boolean | "fail";
+  /** What the status move does to the stored figures (a repayment re-check). */
+  afterReady?: Record<string, any>;
+  /** The push claim RPC fails. */
+  claim?: "fail";
 };
 
 function makeDeps(w: World) {
@@ -54,7 +60,15 @@ function makeDeps(w: World) {
     markRunPushed: 0,
     markSuperPaid: [] as string[],
     reads: 0,
+    ready: [] as string[],
+    claims: [] as string[],
+    releases: [] as string[],
   };
+  // Live push claims by invoice (the database's claim_trade_pay_run_push).
+  const claims = new Map<string, string>();
+  let tick = 0;
+  // Option A: a run's invoice keeps its press status until the run's push.
+  const moved = new Set<string>();
   const rows: Record<string, Row> = structuredClone(w.rows ?? {});
   const run = w.run === "fail"
     ? "fail"
@@ -89,15 +103,42 @@ function makeDeps(w: World) {
         rows[id]
           ? {
             pay_run_id: RUN,
-            status: "approved",
+            status: moved.has(id) ? "approved" : "pending_ops_review",
             xero_bill_id: null,
             net_pay: 940,
             gst: 0,
             gst_on: false,
             recurring_deduction_amount: null,
+            ...(moved.has(id) ? w.afterReady ?? {} : {}),
           }
           : null,
       );
+    },
+    readyForRunPush: (_r, id) => {
+      calls.ready.push(id);
+      if (w.ready === "fail") {
+        return Promise.reject(new TradePayRunError("pay_run_write_failed", "x", 503));
+      }
+      if (w.ready === false) return Promise.resolve(false);
+      moved.add(id);
+      return Promise.resolve(true);
+    },
+    claimPush: (_r, id) => {
+      if (w.claim === "fail") {
+        return Promise.reject(new TradePayRunError("pay_run_write_failed", "x", 503));
+      }
+      if (claims.has(id) || rows[id]?.pushed_at) return Promise.resolve(null);
+      const stamp = `2026-11-20T00:00:${String(++tick).padStart(2, "0")}Z`;
+      claims.set(id, stamp);
+      calls.claims.push(id);
+      return Promise.resolve(stamp);
+    },
+    releasePush: (_r, id, stamp) => {
+      if (claims.get(id) === stamp) {
+        claims.delete(id);
+        calls.releases.push(id);
+      }
+      return Promise.resolve();
     },
     push: (id) => {
       calls.push.push(id);
@@ -134,7 +175,7 @@ function makeDeps(w: World) {
     },
     log: () => {},
   };
-  return { deps, calls, rows };
+  return { deps, calls, rows, claims };
 }
 
 function baseRun(over: Partial<PayRunRunRow> = {}): PayRunRunRow {
@@ -279,9 +320,9 @@ Deno.test("push: pressing again on a pushed invoice calls nothing and says so", 
   assertEquals([out.already_pushed, out.xero_bill_id], [true, "bill-a"]);
 });
 
-Deno.test("push: a Xero failure records nothing, and the press can be repeated", async () => {
+Deno.test("push: a Xero failure records nothing, and the press can be repeated once its claim lapses", async () => {
   let fail = true;
-  const { deps, calls } = makeDeps({
+  const { deps, calls, claims } = makeDeps({
     rows: twoClean(),
     push: () =>
       fail
@@ -291,6 +332,9 @@ Deno.test("push: a Xero failure records nothing, and the press can be repeated",
   await assertRejects(() => press(deps, INV_A), Error, "xero 500");
   assertEquals([calls.markPushed.length, calls.markRunPushed], [0, 0]);
   fail = false;
+  // Straight after, the claim is still live: refused, no second Xero call.
+  await assertRejects(() => press(deps, INV_A), TradePayRunError, "already being pushed");
+  claims.clear(); // ten minutes later (claim_trade_pay_run_push's lease)
   const out = await press(deps, INV_A);
   assertEquals(calls.push, [INV_A, INV_A]);
   assertEquals(out.xero_bill_id, "bill-a");
@@ -334,6 +378,88 @@ Deno.test("push: an invoice that no longer pays what the run recorded is 409, ne
   });
   await refused(press(deps, INV_A), "pay_run_pays_changed", 409);
   assertEquals(calls.push.length, 0);
+});
+
+// ── Option A: the run's push moves its own held invoice ───────────────────
+
+Deno.test("push: a run's invoice keeps its press status until the run's push moves it to approved, before Xero", async () => {
+  let readyAtPush = -1;
+  const w: World = { rows: twoClean() };
+  const { deps, calls } = makeDeps({
+    ...w,
+    push: (id) => {
+      readyAtPush = calls.ready.length;
+      return Promise.resolve({ success: true, xero_bill_id: `bill-${id.slice(-1)}` });
+    },
+  });
+  const out = await press(deps, INV_A);
+  assertEquals(calls.ready, [INV_A]);
+  assertEquals(readyAtPush, 1);
+  assertEquals(calls.push, [INV_A]);
+  assertEquals(out.xero_bill_id, "bill-a");
+});
+
+Deno.test("push: a held invoice the status move cannot take (it changed) is 409, never pushed", async () => {
+  const { deps, calls } = makeDeps({ rows: twoClean(), ready: false });
+  await refused(press(deps, INV_A), "invoice_changed", 409);
+  assertEquals([calls.push.length, calls.markPushed.length], [0, 0]);
+});
+
+Deno.test("push: a failed status move refuses 503, never pushed", async () => {
+  const { deps, calls } = makeDeps({ rows: twoClean(), ready: "fail" });
+  await refused(press(deps, INV_A), "pay_run_write_failed", 503);
+  assertEquals(calls.push.length, 0);
+});
+
+Deno.test("push: a pay change already made before the move refuses 409 and never moves the invoice", async () => {
+  const { deps, calls } = makeDeps({
+    rows: twoClean(),
+    invoices: {
+      [INV_A]: {
+        pay_run_id: RUN,
+        status: "pending_ops_review",
+        xero_bill_id: null,
+        net_pay: 940,
+        gst: 0,
+        gst_on: false,
+        recurring_deduction_amount: 25,
+      },
+    },
+  });
+  await refused(press(deps, INV_A), "pay_run_pays_changed", 409);
+  assertEquals([calls.ready.length, calls.push.length], [0, 0]);
+});
+
+Deno.test("push: a repayment re-checked by the status move changes the pay: 409, never pushed", async () => {
+  const { deps, calls } = makeDeps({
+    rows: twoClean(),
+    afterReady: { recurring_deduction_amount: 25 },
+  });
+  await refused(press(deps, INV_A), "pay_run_pays_changed", 409);
+  assertEquals(calls.ready, [INV_A]);
+  assertEquals(calls.push.length, 0);
+});
+
+Deno.test("writes: the status move takes only this run's held invoice, with no bill", async () => {
+  const c = recordingClient({ readyUpdate: { id: INV_A, status: "approved" } });
+  const deps = payRunPushDepsFromClient(c, () => Promise.resolve(true), () => Promise.resolve({}));
+  assertEquals(await deps.readyForRunPush(RUN, INV_A), true);
+  const [move] = c.ops;
+  assertEquals([move.table, move.update], ["trade_invoices", { status: "approved" }]);
+  assertEquals(move.filters, [
+    ["eq", "id", INV_A],
+    ["eq", "pay_run_id", RUN],
+    ["in", "status", ["pending_ops_review", "queried"]],
+    ["is", "xero_bill_id", null],
+  ]);
+  assertEquals(await payRunPushDepsFromClient(recordingClient({}), () => Promise.resolve(true), () => Promise.resolve({}))
+    .readyForRunPush(RUN, INV_A), false);
+  await refused(
+    payRunPushDepsFromClient(recordingClient({ readyError: { code: "XX000" } }), () => Promise.resolve(true), () => Promise.resolve({}))
+      .readyForRunPush(RUN, INV_A),
+    "pay_run_write_failed",
+    503,
+  );
 });
 
 Deno.test("push: pay figures that cannot be read refuse 503, never push", async () => {
@@ -453,6 +579,8 @@ function recordingClient(
     superRead?: any;
     count?: number | null;
     countError?: any;
+    readyUpdate?: any;
+    readyError?: any;
   },
 ) {
   const ops: any[] = [];
@@ -481,8 +609,18 @@ function recordingClient(
           op.filters.push(["is", c, v]);
           return q;
         },
+        in(c: string, v: unknown) {
+          op.filters.push(["in", c, v]);
+          return q;
+        },
         maybeSingle() {
           ops.push(op);
+          if (op.update && op.table === "trade_invoices") {
+            return Promise.resolve({
+              data: answers.readyUpdate ?? null,
+              error: answers.readyError ?? null,
+            });
+          }
           if (op.update) {
             return Promise.resolve({
               data: answers.superUpdate ?? null,
@@ -664,7 +802,12 @@ async function realPress(world: { switchOn: boolean }) {
       );
     }
     if (url.pathname.startsWith("/rest/v1/rpc/")) {
-      return Promise.resolve(Response.json(null));
+      const fn = url.pathname.replace(/^\/rest\/v1\/rpc\//, "");
+      reads.push("rpc:" + fn);
+      // The push claim (director 15:22 (b)) answers with its stamp.
+      return Promise.resolve(Response.json(
+        fn === "claim_trade_pay_run_push" ? "2026-11-20T00:00:01+00:00" : null,
+      ));
     }
     const table = url.pathname.replace(/^\/rest\/v1\//, "");
     if (method !== "GET" && method !== "HEAD") {
@@ -802,6 +945,10 @@ Deno.test({
     // The real push took the stamped invoice past its entry gate (status
     // approved) and read its lines; it then refused before any Xero call.
     assert(out.reads.includes("trade_invoice_lines"), out.reads.join(","));
+    // The press claimed the row before the push and, once the push was
+    // called, kept the claim (outcome unknown; it lapses after ten minutes).
+    assert(out.reads.includes("rpc:claim_trade_pay_run_push"), out.reads.join(","));
+    assertEquals(out.reads.includes("rpc:release_trade_pay_run_push"), false);
     assertEquals(
       String(out.body.error ?? "").startsWith("pay_run_"),
       false,
@@ -815,4 +962,64 @@ Deno.test({
     );
     assertEquals(out.outside, []);
   },
+});
+
+// ── Director 15:22 (b): one press at a time per invoice ───────────────────
+
+Deno.test("claim: two presses at once, the second is refused 409 and Xero is called once", async () => {
+  let finish!: (v: Record<string, unknown>) => void;
+  const { deps, calls } = makeDeps({
+    rows: { [INV_A]: { verdict: "clean", pushed_at: null, xero_bill_id: null } },
+    push: () => new Promise((resolve) => { finish = resolve; }),
+  });
+  const press = { orgId: ORG, actorUserId: APPROVER, runId: RUN, invoiceId: INV_A };
+  const first = pushPayRunInvoice(deps, press);
+  // Let the first press reach the Xero call and wait there.
+  for (let i = 0; i < 20 && calls.push.length === 0; i++) await Promise.resolve();
+  assertEquals(calls.push, [INV_A]);
+  const second = await pushPayRunInvoice(deps, press).then(
+    () => null,
+    (e) => e,
+  );
+  assert(second instanceof TradePayRunError);
+  assertEquals([second.code, second.status], ["pay_run_push_in_progress", 409]);
+  finish({ success: true, xero_bill_id: "bill-a", pdf_attached: true });
+  await first;
+  assertEquals(calls.push, [INV_A]);
+  assertEquals(calls.markPushed, [INV_A]);
+});
+
+Deno.test("claim: a refusal before Xero gives the claim back, so the next press can claim", async () => {
+  const { deps, calls, claims } = makeDeps({
+    rows: { [INV_A]: { verdict: "clean", pushed_at: null, xero_bill_id: null } },
+    ready: false,
+  });
+  const press = { orgId: ORG, actorUserId: APPROVER, runId: RUN, invoiceId: INV_A };
+  const err = await pushPayRunInvoice(deps, press).catch((e) => e);
+  assertEquals(err.code, "invoice_changed");
+  assertEquals([calls.claims, calls.releases, calls.push], [[INV_A], [INV_A], []]);
+  assertEquals(claims.size, 0);
+});
+
+Deno.test("claim: a failed Xero call keeps the claim (outcome unknown), so a second press is refused", async () => {
+  const { deps, calls, claims } = makeDeps({
+    rows: { [INV_A]: { verdict: "clean", pushed_at: null, xero_bill_id: null } },
+    push: () => Promise.reject(new TradePayRunError("xero_unavailable", "x", 502)),
+  });
+  const press = { orgId: ORG, actorUserId: APPROVER, runId: RUN, invoiceId: INV_A };
+  assertEquals((await pushPayRunInvoice(deps, press).catch((e) => e)).code, "xero_unavailable");
+  assertEquals([calls.releases, claims.has(INV_A)], [[], true]);
+  assertEquals((await pushPayRunInvoice(deps, press).catch((e) => e)).code, "pay_run_push_in_progress");
+  assertEquals(calls.push, [INV_A]);
+});
+
+Deno.test("claim: a claim that cannot be made is 503 and Xero is never called", async () => {
+  const { deps, calls } = makeDeps({
+    rows: { [INV_A]: { verdict: "clean", pushed_at: null, xero_bill_id: null } },
+    claim: "fail",
+  });
+  const err = await pushPayRunInvoice(deps, { orgId: ORG, actorUserId: APPROVER, runId: RUN, invoiceId: INV_A })
+    .catch((e) => e);
+  assertEquals([err.code, err.status], ["pay_run_write_failed", 503]);
+  assertEquals([calls.push, calls.ready], [[], []]);
 });
