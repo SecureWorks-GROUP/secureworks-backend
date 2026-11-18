@@ -17,9 +17,9 @@ import {
   holdTradeInvoiceForPayRun,
   PAY_RUN_HOLD_FAILED_DRAFT_WORDS,
   PAY_RUN_HOLD_FAILED_WORDS,
-  PAY_RUN_SWITCH_UNREADABLE_WORDS,
   PAY_RUN_WAIT_WORDS,
   payRunNoXeroBoundary,
+  payRunWaitHttpStatus,
   payRunWaitResponse,
   readPayRunSwitchForSubmit,
 } from "./trade_pay_run_wait.ts";
@@ -80,7 +80,7 @@ function fakeClient(opts: {
   return client;
 }
 
-Deno.test("switch read: on, off, missing row is off, anything else is unreadable", async () => {
+Deno.test("switch read: only enabled = true is on; a missing row, an error, a throw or anything else is off (main's path)", async () => {
   assertEquals(
     await readPayRunSwitchForSubmit(
       fakeClient({ flag: { data: [{ enabled: true }] } }),
@@ -101,21 +101,21 @@ Deno.test("switch read: on, off, missing row is off, anything else is unreadable
     await readPayRunSwitchForSubmit(
       fakeClient({ flag: { error: { code: "XX000" } } }),
     ),
-    "unreadable",
+    "off",
   );
   assertEquals(
     await readPayRunSwitchForSubmit(fakeClient({ flag: { data: null } })),
-    "unreadable",
+    "off",
   );
   assertEquals(
     await readPayRunSwitchForSubmit(
       fakeClient({ flag: { data: [{ enabled: null }] } }),
     ),
-    "unreadable",
+    "off",
   );
   assertEquals(
     await readPayRunSwitchForSubmit(fakeClient({ flag: { throws: true } })),
-    "unreadable",
+    "off",
   );
   // The read names the switch by its key.
   const c = fakeClient({ flag: { data: [{ enabled: true }] } });
@@ -150,7 +150,6 @@ Deno.test("hold: switch on moves only the saved status, only with no bill, to pe
     const wait = await holdTradeInvoiceForPayRun(c, INVOICE_ID, saved, "on");
     assertEquals(wait, {
       waits: true,
-      reason: "pay_run_on",
       held: true,
       savedStatus: saved,
     });
@@ -176,26 +175,6 @@ Deno.test("hold: switch on moves only the saved status, only with no bill, to pe
   }
 });
 
-Deno.test("hold: an unreadable switch still waits, never pushes", async () => {
-  const c = fakeClient({
-    update: { data: { id: INVOICE_ID, status: "pending_ops_review" } },
-  });
-  assertEquals(
-    await holdTradeInvoiceForPayRun(
-      c,
-      INVOICE_ID,
-      "pending_acknowledgment",
-      "unreadable",
-    ),
-    {
-      waits: true,
-      reason: "pay_run_switch_unreadable",
-      held: true,
-      savedStatus: "pending_acknowledgment",
-    },
-  );
-});
-
 Deno.test("hold: a refused or missed write still waits, and says it was not held", async () => {
   // The crew release guard refuses a move on a released group (group_released).
   const refused = fakeClient({ update: { error: { code: "23514" } } });
@@ -208,7 +187,6 @@ Deno.test("hold: a refused or missed write still waits, and says it was not held
     ),
     {
       waits: true,
-      reason: "pay_run_on",
       held: false,
       savedStatus: "pending_acknowledgment",
     },
@@ -217,14 +195,13 @@ Deno.test("hold: a refused or missed write still waits, and says it was not held
   const missed = fakeClient({ update: { data: null } });
   assertEquals(
     await holdTradeInvoiceForPayRun(missed, INVOICE_ID, "draft", "on"),
-    { waits: true, reason: "pay_run_on", held: false, savedStatus: "draft" },
+    { waits: true, held: false, savedStatus: "draft" },
   );
 });
 
 Deno.test("answer: codes, words, and no bill on every waiting answer", () => {
   const on = payRunWaitResponse({
     waits: true,
-    reason: "pay_run_on",
     held: true,
     savedStatus: "pending_acknowledgment",
   });
@@ -240,33 +217,27 @@ Deno.test("answer: codes, words, and no bill on every waiting answer", () => {
     null,
     false,
   ]);
-  const unread = payRunWaitResponse({
-    waits: true,
-    reason: "pay_run_switch_unreadable",
-    held: true,
-    savedStatus: "pending_acknowledgment",
-  });
-  assertEquals([unread.code, (unread.pay_run as any).words], [
-    "pay_run_switch_unreadable",
-    PAY_RUN_SWITCH_UNREADABLE_WORDS,
-  ]);
+  assertEquals(on.success, true);
+  assertEquals(payRunWaitHttpStatus({ waits: true, held: true, savedStatus: "draft" }), 200);
   const failed = payRunWaitResponse({
     waits: true,
-    reason: "pay_run_on",
     held: false,
     savedStatus: "pending_acknowledgment",
   });
-  assertEquals([failed.ok, failed.code, (failed.pay_run as any).words], [
+  // A failed hold is an error, never success (director hold 15:22).
+  assertEquals([failed.ok, failed.success, failed.code, failed.error, (failed.pay_run as any).words], [
+    false,
     false,
     "pay_run_hold_failed",
     PAY_RUN_HOLD_FAILED_WORDS,
+    PAY_RUN_HOLD_FAILED_WORDS,
   ]);
+  assertEquals(payRunWaitHttpStatus({ waits: true, held: false, savedStatus: "pending_acknowledgment" }), 503);
   assertEquals(failed.xero_bill_id, null);
   // A work order invoice that could not be held is still the trade's draft,
   // which the office never sees: the trade is told to send it again.
   const failedDraft = payRunWaitResponse({
     waits: true,
-    reason: "pay_run_on",
     held: false,
     savedStatus: "draft",
   });
@@ -381,7 +352,7 @@ const ASSIGNMENTS = [{
   is_ghost: false,
 }];
 
-type World = { flag: "on" | "off" | "error" };
+type World = { flag: "on" | "off" | "error"; holdFails?: boolean };
 type Captured = {
   status: number;
   body: any;
@@ -511,6 +482,11 @@ async function submitWeek(world: World): Promise<Captured> {
           ? JSON.parse(init.body)
           : {};
         patches.push({ query: url.search, body });
+        if (world.holdFails && body.status === "pending_ops_review") {
+          return Promise.resolve(
+            Response.json({ code: "XX000", message: "boom" }, { status: 500 }),
+          );
+        }
         const wantStatus = filterValues(url, "status");
         if (body.status && (!wantStatus || wantStatus.includes(status))) {
           status = body.status;
@@ -598,15 +574,30 @@ handlerTest(
 );
 
 handlerTest(
-  "switch unreadable: the send waits too, and Xero is never opened",
+  "switch unreadable: read as off, the send takes main's path and is never held",
   async () => {
     const out = await submitWeek({ flag: "error" });
-    assertEquals(out.status, 200, JSON.stringify(out.body));
-    assertEquals(out.body.code, "pay_run_switch_unreadable");
-    assertEquals(
-      out.patches.filter((p) => "status" in p.body).map((p) => p.body.status),
-      ["pending_ops_review"],
+    assert(out.body.pay_run === undefined, JSON.stringify(out.body));
+    const statuses = out.patches.filter((p) => "status" in p.body).map((p) =>
+      p.body.status
     );
+    assert(!statuses.includes("pending_ops_review"), statuses.join(","));
+    assert(statuses.includes("approved"), statuses.join(","));
+    assert(
+      out.tokenReads > 0 || out.xeroCalls.length > 0,
+      "an unreadable switch reaches for Xero as main does",
+    );
+  },
+);
+
+handlerTest(
+  "switch on, hold fails: the answer is an error (503, success false), never success, and Xero is never opened",
+  async () => {
+    const out = await submitWeek({ flag: "on", holdFails: true });
+    assertEquals(out.status, 503, JSON.stringify(out.body));
+    assertEquals([out.body.ok, out.body.success, out.body.code], [false, false, "pay_run_hold_failed"]);
+    assertEquals(out.body.error, PAY_RUN_HOLD_FAILED_WORDS);
+    assertEquals(out.body.pending_ops_review, false);
     assertEquals(out.xeroCalls, []);
     assertEquals(out.tokenReads, 0);
   },

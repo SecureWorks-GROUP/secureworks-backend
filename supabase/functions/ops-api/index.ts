@@ -897,6 +897,7 @@ import {
   type PayRunWait,
   holdTradeInvoiceForPayRun,
   payRunNoXeroBoundary,
+  payRunWaitHttpStatus,
   payRunWaitResponse,
   readPayRunSwitchForSubmit,
 } from './trade_pay_run_wait.ts'
@@ -14349,7 +14350,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
                 pending_ops_review: woPayRunWait.held,
                 ...payRunWaitResponse(woPayRunWait),
-              })
+              }, payRunWaitHttpStatus(woPayRunWait))
             }
 
             // Saved line stamps hold the bill whether or not the review flag
@@ -17457,7 +17458,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 review_flag: reviewFlag,
                 wo_labour_unresolved: woLabourIssues.map((i) => i.trade_name),
                 ...payRunWaitResponse(payRunWait),
-              })
+              }, payRunWaitHttpStatus(payRunWait))
             }
             if (officeReviewHold) {
               return json({

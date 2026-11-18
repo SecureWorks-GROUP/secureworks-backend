@@ -6,30 +6,27 @@
 // 20261118115852) and the door makes no Xero call: no token, no contact, no
 // bill and no crew release. When it is off, the doors run exactly as before.
 //
-// A switch that cannot be read is never read as off: the invoice waits, and
-// the trade is told the office will check it. Nothing reaches Xero on a
-// guess.
+// A switch that cannot be read is read as off (director hold 15:22): the
+// send runs exactly as on main. A hold that fails answers an error (503),
+// never success, so the trade knows the send did not finish.
 
 export const PAY_RUN_SWITCH_FLAG = "trade_pay_run_v1";
 export const PAY_RUN_WAIT_STATUS = "pending_ops_review";
 
 export const PAY_RUN_WAIT_WORDS =
   "Sent. It will be checked in this week's pay run and paid on Friday.";
-export const PAY_RUN_SWITCH_UNREADABLE_WORDS =
-  "Sent. The office will check it before it is paid.";
 export const PAY_RUN_HOLD_FAILED_WORDS =
   "Your invoice was saved, but it could not be marked for the pay run. It was not sent to Xero. The office will check it.";
 /** A work order invoice whose hold failed is still the trade's own draft. */
 export const PAY_RUN_HOLD_FAILED_DRAFT_WORDS =
   "Your invoice was saved but not sent. It was not sent to Xero. Send it again.";
 
-export type PayRunSwitchRead = "on" | "off" | "unreadable";
+export type PayRunSwitchRead = "on" | "off";
 
 export type PayRunWait =
   | { waits: false }
   | {
     waits: true;
-    reason: "pay_run_on" | "pay_run_switch_unreadable";
     /** true when the invoice now holds PAY_RUN_WAIT_STATUS. */
     held: boolean;
     /** The status the door saved; a failed hold leaves the invoice there. */
@@ -37,8 +34,9 @@ export type PayRunWait =
   };
 
 /**
- * One read of the switch per send. An error, a throw or an answer that is not
- * a row is "unreadable", never "off". feature_flags is keyed on flag_name.
+ * One read of the switch per send. Only a row saying enabled = true is "on".
+ * A missing row, an error, a throw or any other answer is "off", main's path.
+ * feature_flags is keyed on flag_name.
  */
 export async function readPayRunSwitchForSubmit(
   // deno-lint-ignore no-explicit-any
@@ -49,15 +47,17 @@ export async function readPayRunSwitchForSubmit(
       .select("enabled")
       .eq("flag_name", PAY_RUN_SWITCH_FLAG)
       .limit(1);
-    if (error || !Array.isArray(data)) return "unreadable";
-    // A missing row is a switch nobody turned on: off.
-    if (data.length === 0) return "off";
-    const enabled = data[0]?.enabled;
-    if (enabled === true) return "on";
-    if (enabled === false) return "off";
-    return "unreadable";
-  } catch {
-    return "unreadable";
+    if (error || !Array.isArray(data)) {
+      console.error("[ops-api] pay run switch unreadable, read as off:", error?.code ?? "no_rows");
+      return "off";
+    }
+    return data[0]?.enabled === true ? "on" : "off";
+  } catch (e) {
+    console.error(
+      "[ops-api] pay run switch read threw, read as off:",
+      (e as { code?: string })?.code ?? "threw",
+    );
+    return "off";
   }
 }
 
@@ -76,10 +76,7 @@ export async function holdTradeInvoiceForPayRun(
   savedStatus: "pending_acknowledgment" | "draft",
   switchRead: PayRunSwitchRead,
 ): Promise<PayRunWait> {
-  if (switchRead === "off") return { waits: false };
-  const reason = switchRead === "on"
-    ? "pay_run_on" as const
-    : "pay_run_switch_unreadable" as const;
+  if (switchRead !== "on") return { waits: false };
   try {
     const { data, error } = await client.from("trade_invoices")
       .update({ status: PAY_RUN_WAIT_STATUS })
@@ -98,14 +95,14 @@ export async function holdTradeInvoiceForPayRun(
         error?.code ?? "no_row",
       );
     }
-    return { waits: true, reason, held, savedStatus };
+    return { waits: true, held, savedStatus };
   } catch (e) {
     console.error(
       "[ops-api] pay run hold threw:",
       invoiceId,
       (e as { code?: string })?.code ?? "threw",
     );
-    return { waits: true, reason, held: false, savedStatus };
+    return { waits: true, held: false, savedStatus };
   }
 }
 
@@ -113,27 +110,38 @@ export async function holdTradeInvoiceForPayRun(
 export function payRunWaitResponse(
   wait: Extract<PayRunWait, { waits: true }>,
 ): Record<string, unknown> {
-  const code = !wait.held
-    ? "pay_run_hold_failed"
-    : wait.reason === "pay_run_on"
-    ? "pay_run_waits"
-    : "pay_run_switch_unreadable";
-  const words = !wait.held
-    ? (wait.savedStatus === "draft"
+  if (!wait.held) {
+    const words = wait.savedStatus === "draft"
       ? PAY_RUN_HOLD_FAILED_DRAFT_WORDS
-      : PAY_RUN_HOLD_FAILED_WORDS)
-    : wait.reason === "pay_run_on"
-    ? PAY_RUN_WAIT_WORDS
-    : PAY_RUN_SWITCH_UNREADABLE_WORDS;
+      : PAY_RUN_HOLD_FAILED_WORDS;
+    return {
+      ok: false,
+      success: false,
+      code: "pay_run_hold_failed",
+      error: words,
+      userMessage: words,
+      pay_run: { waits: true, held: false, words },
+      xero_bill_id: null,
+      xero_bill_number: null,
+      pdf_attached: false,
+    };
+  }
   return {
-    ok: wait.held,
+    ok: true,
     success: true,
-    code,
-    pay_run: { waits: true, held: wait.held, words },
+    code: "pay_run_waits",
+    pay_run: { waits: true, held: true, words: PAY_RUN_WAIT_WORDS },
     xero_bill_id: null,
     xero_bill_number: null,
     pdf_attached: false,
   };
+}
+
+/** HTTP status for a send that waits: 200 when held, 503 when the hold failed. */
+export function payRunWaitHttpStatus(
+  wait: Extract<PayRunWait, { waits: true }>,
+): number {
+  return wait.held ? 200 : 503;
 }
 
 /**
