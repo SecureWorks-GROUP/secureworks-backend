@@ -5,7 +5,7 @@
 -- persist_weekly_trade_invoice_v1 read it when, and only when, the send names
 -- its held lines. A send without held lines behaves exactly as main.
 -- No table write, no schedule, no switch change.
--- Rollback: supabase/rollbacks/20261118104903_trade_line_hold_weekly_split_down.sql.
+-- Rollback: supabase/rollbacks/20261118122208_trade_line_hold_weekly_split_down.sql.
 
 -- ── 1. One rule for a held-line split (both persistence doors) ───────────────
 -- p_backed: the lines a send saves on its payable invoice.

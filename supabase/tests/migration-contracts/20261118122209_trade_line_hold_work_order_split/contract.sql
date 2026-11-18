@@ -4,8 +4,8 @@
 -- Fixtures are rolled back.
 -- Merge-safety rule 17: re-apply first (a no-op at this body), so an
 -- earlier contract in the shard cannot leave a different body behind.
-\ir ../../../migrations/20261118104903_trade_line_hold_weekly_split.sql
-\ir ../../../migrations/20261118104904_trade_line_hold_work_order_split.sql
+\ir ../../../migrations/20261118122208_trade_line_hold_weekly_split.sql
+\ir ../../../migrations/20261118122209_trade_line_hold_work_order_split.sql
 BEGIN;
 DO $$ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.persist_trade_work_order_invoice_v1(jsonb,jsonb,uuid)'::regprocedure)
