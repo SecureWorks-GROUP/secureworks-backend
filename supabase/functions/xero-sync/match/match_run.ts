@@ -20,9 +20,11 @@
 // The sync (director 01:03): the matcher switch is read once at the start of
 // the sync. Off, the sync makes no matcher read or write at all. On, matching
 // starts after the Xero paging, with one 20 s budget and at most 50 bills a
-// run: the bills the sync changed, then bills waiting in match_queue, then up
-// to 25 waiting bills with no open item, oldest first (syncMatchRun). Every
-// requeue of a run is one batched statement.
+// run: the bills the sync changed, then bills waiting in match_queue, then
+// waiting bills (documents) with no open item, oldest first, to fill the 50
+// (syncMatchRun). A backlog bill the budget does not reach is not requeued:
+// the kept position stops before it. Every requeue of a run is one batched
+// statement.
 //
 // A bill with a person's labour on it is never matched here: no clue, no
 // shadow row, no item. It is skipped and counted (`labour_bill`). That is a
@@ -61,10 +63,13 @@ import type { Clue, ClueType, MatchResult, Stop } from "./types.ts";
 
 export const MATCH_RUN_LIMIT = 50;
 export const MATCH_RUN_BUDGET_MS = 20_000;
-/** Waiting bills with no open item a sync run takes, oldest first, inside the run's 50. */
-export const MATCH_BACKLOG_LIMIT = 25;
-/** Lines read per backlog page; at most 50 bills of a page are looked at. */
-export const MATCH_BACKLOG_LINE_PAGE = 100;
+/** Waiting bills (documents, not lines) with no open item a sync run takes, oldest first, inside the run's 50. */
+export const MATCH_BACKLOG_LIMIT = 50;
+/** Lines read per backlog page. */
+export const MATCH_BACKLOG_LINE_PAGE = 300;
+/** Bills of a page looked at per run (open-item and labour reads in chunks of MATCH_BACKLOG_CHUNK). */
+export const MATCH_BACKLOG_DOCS = 100;
+const MATCH_BACKLOG_CHUNK = 50;
 /** Client-side limit on the batched requeue and the backlog reads. */
 export const MATCH_STATEMENT_TIMEOUT_MS = 5_000;
 /** A person's labour: never matched or raised here (#1678 hides these bills from the list). */
@@ -417,16 +422,20 @@ async function requeueAll(sb: Sb, rows: Requeue[], report: MatchRunReport): Prom
   }
 }
 
-/** Runs the bills before the deadline; returns what must be requeued, never writing it. */
+/**
+ * Runs the bills before the deadline; returns what must be requeued (never
+ * writing it) and the bills it reached.
+ */
 async function runCore(
   sb: Sb,
   ids: string[],
   deadline: number,
   now: () => number,
   report: MatchRunReport,
-): Promise<Requeue[]> {
+): Promise<{ requeue: Requeue[]; reached: Set<string> }> {
   const out: Requeue[] = [];
-  if (!ids.length) return out;
+  const reached = new Set<string>();
+  if (!ids.length) return { requeue: out, reached };
   let types: Record<string, ClueType>;
   try {
     const rows = await read<ClueType[]>("read_clue_types", sb.from("match_clue_types").select("code,class,family,mode"));
@@ -435,7 +444,7 @@ async function runCore(
   } catch {
     bump(report.failed, "read_clue_types");
     console.error("[match_run] clue types unreadable");
-    return ids.map((id) => ({ id, reason: "read_failed" }));
+    return { requeue: ids.map((id) => ({ id, reason: "read_failed" })), reached };
   }
   for (const [i, id] of ids.entries()) {
     if (i >= MATCH_RUN_LIMIT || now() > deadline) {
@@ -443,6 +452,7 @@ async function runCore(
       continue;
     }
     report.run++;
+    reached.add(id);
     try {
       const res = await matchOne(sb, id, types);
       if ("applied" in res) bump(report.applied, res.applied);
@@ -457,7 +467,7 @@ async function runCore(
       }
     }
   }
-  return out;
+  return { requeue: out, reached };
 }
 
 const emptyReport = (): MatchRunReport => ({ run: 0, applied: {}, requeued: 0, skipped: {}, failed: {} });
@@ -473,7 +483,7 @@ export async function runMatchFor(
   const ids = subjectsOf(subjectIds);
   if (!ids.length) return report;
   const now = opts.now ?? Date.now;
-  const requeue = await runCore(sb, ids, now() + (opts.budgetMs ?? MATCH_RUN_BUDGET_MS), now, report);
+  const { requeue } = await runCore(sb, ids, now() + (opts.budgetMs ?? MATCH_RUN_BUDGET_MS), now, report);
   await requeueAll(sb, requeue, report);
   if (Object.keys(report.failed).length) console.error("[match_run] failures", JSON.stringify(report.failed));
   return report;
@@ -500,20 +510,26 @@ async function timedRead<T>(code: string, q: { abortSignal: (s: AbortSignal) => 
   return await read<T>(code, q.abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS)));
 }
 
+type BacklogPick = { subject: string; created_at: string; document_id: string };
+type BacklogPlan = {
+  picks: BacklogPick[];
+  /** Where the position goes when every pick is run: past the last bill looked at, or null at the end. */
+  after: { created_at: string; document_id: string } | null;
+  /** The position was set before this run. */
+  hadPosition: boolean;
+  error?: string;
+};
+
 /**
- * Up to `room` waiting bills with no open item and no labour line, oldest
- * first by (line created_at, document id), from the position kept in
- * xero_sync_state. The position moves only after the open-item and labour
- * reads succeed, and goes back to the start once the end is reached, so a bill
- * skipped today is looked at again on the next pass. Bills in `exclude` (run
- * already this sync) are passed over.
+ * Up to `room` waiting bills (documents) with no open item and no labour line,
+ * oldest first by (line created_at, document id), from the position kept in
+ * xero_sync_state. Reads only; the caller moves the position after the run, to
+ * the last bill it reached. Bills in `exclude` (run already this sync) are
+ * passed over. A failed read takes nothing and leaves the position alone.
  */
-async function backlogBills(
-  sb: Sb,
-  room: number,
-  exclude: Set<string>,
-): Promise<{ ids: string[]; error?: string; looked: number }> {
-  if (room <= 0) return { ids: [], looked: 0 };
+async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<BacklogPlan> {
+  const none: BacklogPlan = { picks: [], after: null, hadPosition: false };
+  if (room <= 0) return none;
   try {
     const state = await read<{ cursor_at: string | null; note: string | null } | null>("backlog_state",
       sb.from("xero_sync_state").select("cursor_at,note").eq("key", MATCH_BACKLOG_STATE_KEY)
@@ -542,54 +558,65 @@ async function backlogBills(
       lines = [...lines, ...(later ?? [])];
       full = (later ?? []).length >= MATCH_BACKLOG_LINE_PAGE;
     }
-    // Each bill at its first line's position.
+    // Each bill once, at its first line's position.
     const docs: BacklogLine[] = [];
     const seen = new Set<string>();
+    let capped = false;
     for (const l of lines) {
       if (typeof l?.document_id !== "string" || !l.document_id || typeof l.created_at !== "string") continue;
       if (seen.has(l.document_id)) continue;
+      if (docs.length >= MATCH_BACKLOG_DOCS) {
+        capped = true;
+        break;
+      }
       seen.add(l.document_id);
       docs.push(l);
-      if (docs.length >= 50) break;
     }
-    if (!docs.length) {
-      // The end: start again from the oldest next run.
-      if (at) await writeBacklogPosition(sb, null, null);
-      return { ids: [], looked: 0 };
-    }
+    if (!docs.length) return { picks: [], after: null, hadPosition: !!at };
     const ids = docs.map((d) => d.document_id);
-    const subjects = ids.map((d) => `xero_bill:${d}`);
-    // reconcile_items_open_subject_idx; job_cost_lines_document_idx.
-    const [open, labour] = await Promise.all([
-      timedRead<Array<{ subject_id: string }>>("backlog_items",
-        sb.from("reconcile_items").select("subject_id").eq("subject_table", "cost_document").eq("status", "open")
-          .in("subject_id", subjects)),
-      timedRead<Array<{ document_id: string }>>("backlog_labour",
-        sb.from("job_cost_lines").select("document_id").eq("document_kind", "xero_bill")
-          .in("kind", [...LABOUR_LINE_KINDS]).in("document_id", ids)),
-    ]);
-    const openSet = new Set((open ?? []).map((r) => r.subject_id));
-    const labourSet = new Set((labour ?? []).map((r) => r.document_id));
-    const taken: string[] = [];
-    let last = docs[docs.length - 1];
-    for (const d of docs) {
-      if (taken.length >= room) break;
-      last = d;
-      if (openSet.has(`xero_bill:${d.document_id}`) || labourSet.has(d.document_id)) continue;
-      if (exclude.has(`xero_bill:${d.document_id}`)) continue;
-      taken.push(`xero_bill:${d.document_id}`);
+    const openSet = new Set<string>();
+    const labourSet = new Set<string>();
+    // reconcile_items_open_subject_idx; job_cost_lines_document_idx. In chunks,
+    // so a request URL stays short.
+    for (let i = 0; i < ids.length; i += MATCH_BACKLOG_CHUNK) {
+      const chunk = ids.slice(i, i + MATCH_BACKLOG_CHUNK);
+      const [open, labour] = await Promise.all([
+        timedRead<Array<{ subject_id: string }>>("backlog_items",
+          sb.from("reconcile_items").select("subject_id").eq("subject_table", "cost_document").eq("status", "open")
+            .in("subject_id", chunk.map((d) => `xero_bill:${d}`))),
+        timedRead<Array<{ document_id: string }>>("backlog_labour",
+          sb.from("job_cost_lines").select("document_id").eq("document_kind", "xero_bill")
+            .in("kind", [...LABOUR_LINE_KINDS]).in("document_id", chunk)),
+      ]);
+      for (const r of open ?? []) openSet.add(r.subject_id);
+      for (const r of labour ?? []) labourSet.add(r.document_id);
     }
-    const reachedEnd = !full && last === docs[docs.length - 1] && docs.length < 50;
-    if (reachedEnd) await writeBacklogPosition(sb, null, null);
-    else await writeBacklogPosition(sb, last.created_at, last.document_id);
-    return { ids: taken, looked: docs.indexOf(last) + 1 };
+    const picks: BacklogPick[] = [];
+    let last = docs[docs.length - 1];
+    let stopped = false;
+    for (const d of docs) {
+      if (picks.length >= room) {
+        stopped = true;
+        break;
+      }
+      last = d;
+      const subject = `xero_bill:${d.document_id}`;
+      if (openSet.has(subject) || labourSet.has(d.document_id) || exclude.has(subject)) continue;
+      picks.push({ subject, created_at: d.created_at, document_id: d.document_id });
+    }
+    const reachedEnd = !full && !capped && !stopped;
+    return {
+      picks,
+      after: reachedEnd ? null : { created_at: last.created_at, document_id: last.document_id },
+      hadPosition: !!at,
+    };
   } catch (e) {
-    const code = e instanceof ReadFailed ? e.code : "backlog_failed";
-    return { ids: [], error: code, looked: 0 };
+    return { ...none, error: e instanceof ReadFailed ? e.code : "backlog_failed" };
   }
 }
 
 async function writeBacklogPosition(sb: Sb, at: string | null, documentId: string | null): Promise<void> {
+  // An abort or network fault throws; the caller counts it.
   const { error } = await sb.from("xero_sync_state").upsert(
     { key: MATCH_BACKLOG_STATE_KEY, cursor_at: at, note: documentId, updated_at: new Date().toISOString() },
     { onConflict: "key" },
@@ -649,14 +676,33 @@ export async function syncMatchRun(
   }
 
   room = Math.min(MATCH_BACKLOG_LIMIT, MATCH_RUN_LIMIT - run.length);
+  let plan: BacklogPlan | null = null;
   if (room > 0 && now() <= deadline) {
-    const backlog = await backlogBills(sb, room, new Set([...run, ...requeue.map((r) => r.id)]));
-    if (backlog.error) report.errors.push(backlog.error);
-    run.push(...backlog.ids);
-    report.backlog = backlog.ids.length;
+    plan = await backlogPlan(sb, room, new Set([...run, ...requeue.map((r) => r.id)]));
+    if (plan.error) report.errors.push(plan.error);
+    run.push(...plan.picks.map((p) => p.subject));
   }
 
-  requeue.push(...await runCore(sb, run, deadline, now, report));
+  const { requeue: failed, reached } = await runCore(sb, run, deadline, now, report);
+  // A backlog bill the budget did not reach is not requeued: the position
+  // stops before it, so the next run starts there.
+  const backlogSubjects = new Set((plan?.picks ?? []).map((p) => p.subject));
+  requeue.push(...failed.filter((r) => !(backlogSubjects.has(r.id) && !reached.has(r.id))));
+  if (plan && !plan.error) {
+    const ran = plan.picks.filter((p) => reached.has(p.subject));
+    report.backlog = ran.length;
+    let position: { created_at: string; document_id: string } | null | undefined;
+    if (ran.length === plan.picks.length) position = plan.after;
+    else if (ran.length) position = ran[ran.length - 1];
+    else position = undefined; // none reached: leave the position where it is
+    if (position !== undefined && (position !== null || plan.hadPosition)) {
+      try {
+        await writeBacklogPosition(sb, position?.created_at ?? null, position?.document_id ?? null);
+      } catch {
+        report.errors.push("backlog_position_write");
+      }
+    }
+  }
   await requeueAll(sb, requeue, report);
   if (Object.keys(report.failed).length || report.errors.length) {
     console.error("[match_run] sync step", JSON.stringify({ failed: report.failed, errors: report.errors }));
