@@ -1,10 +1,10 @@
 import { billCostDocument } from "./cost_lines.ts";
+import { readBillMirrorVerdicts } from "./trade_bill_mirror_rule.ts";
 
 const PAGE_SIZE = 200;
 const MAX_PAGES = 10;
 // Per request, not per page. Return the last committed invoice for the next ask.
 export const MAX_TRADE_RPCS = 20;
-const MIRROR_READ_LIMIT = 1000;
 const BILL_COLUMNS =
   "xero_invoice_id,invoice_type,status,invoice_number,invoice_date,xero_contact_id,contact_name,fully_paid_on,line_items,sub_total,cost_line_amount_types:raw_json->LineAmountTypes";
 type Kind = "bills" | "credits" | "trade";
@@ -21,6 +21,9 @@ function message(error: unknown): string {
 export async function backfillCostLines(sb: any, orgId: string, input: Input) {
   let after = input?.after ?? null;
   let done = 0;
+  // Bills not written because only a trade invoice with no organisation holds them.
+  let mirrorStops = 0;
+  const stops = () => (input?.kind === "bills" ? { mirrors_stopped: mirrorStops } : {});
   try {
     if (
       !input || !["bills", "credits", "trade"].includes(input.kind) ||
@@ -67,7 +70,7 @@ export async function backfillCostLines(sb: any, orgId: string, input: Input) {
       if (error || !Array.isArray(rows)) {
         throw error ?? new Error("Document page unavailable");
       }
-      if (!rows.length) return { kind: input.kind, done, next_after: null };
+      if (!rows.length) return { kind: input.kind, done, next_after: null, ...stops() };
       if (input.kind === "trade") {
         for (const row of rows) {
           await write(sb, "job_cost_lines_sync_trade_invoice", {
@@ -82,23 +85,15 @@ export async function backfillCostLines(sb: any, orgId: string, input: Input) {
             p_credit_note_ids: rows.map((r: any) => r[key]),
           });
         } else {
-          // trade_invoices_org_xero_bill_idx bounds one mirror read to this
-          // org and this page's <=200 bill ids. Never scan the trade population.
-          const { data, error } = await sb.from("trade_invoices")
-            .select("xero_bill_id")
-            .eq("org_id", orgId)
-            .in("xero_bill_id", rows.map((r: any) => r.xero_invoice_id))
-            .limit(MIRROR_READ_LIMIT);
-          if (error || !Array.isArray(data)) {
-            throw error ?? new Error("Mirror page unavailable");
-          }
-          // Several trade rows may share a bill. A capped result is not proof
-          // of absence, so refuse before writes or cursor movement.
-          if (data.length >= MIRROR_READ_LIMIT) {
-            throw new Error("Mirror page limit reached");
-          }
-          const mirrors = new Set<string>(data.map((r: any) => r.xero_bill_id));
-          const documents = rows.map((row: any) =>
+          // The one mirror rule (trade_bill_mirror_rule.ts). An unreadable or
+          // incomplete answer throws before any write or cursor movement.
+          const verdicts = await readBillMirrorVerdicts(
+            sb,
+            orgId,
+            rows.map((r: any) => r.xero_invoice_id),
+          );
+          const mirrors = verdicts.mirrors;
+          const documents = rows.filter((row: any) => !verdicts.stopped.has(row.xero_invoice_id)).map((row: any) =>
             billCostDocument({
               ...row,
               raw_json: { LineAmountTypes: row.cost_line_amount_types },
@@ -109,6 +104,7 @@ export async function backfillCostLines(sb: any, orgId: string, input: Input) {
               p_docs: documents,
             });
           }
+          mirrorStops += rows.filter((r: any) => verdicts.stopped.has(r.xero_invoice_id)).length;
         }
         after = rows[rows.length - 1][key];
         done += rows.length;
@@ -118,12 +114,13 @@ export async function backfillCostLines(sb: any, orgId: string, input: Input) {
       if (input.kind === "trade" && done >= MAX_TRADE_RPCS) break;
       if (rows.length < PAGE_SIZE) break;
     }
-    return { kind: input.kind, done, next_after: after };
+    return { kind: input.kind, done, next_after: after, ...stops() };
   } catch (error) {
     return {
       kind: input?.kind,
       done,
       next_after: after,
+      ...stops(),
       error: message(error),
     };
   }
