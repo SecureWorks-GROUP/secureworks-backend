@@ -380,7 +380,7 @@ order fill are exactly as before.
   `trade_line_hold_v1` on: `my_hours` gives `job_left_ex` null,
   `job_left_hidden: true` and `job_left_words`, and a held line's words say
   "this line is more than this job's work order has left" with no amount, its
-  `hold_detail.left_ex` null and `left_hidden: true` (`LEFT_HIDDEN_WORDS`,
+  `hold_detail.left_ex` and `allowed_ex` null and `left_hidden: true` (`LEFT_HIDDEN_WORDS`,
   `trade_line_hold.ts`; the owner read is `readJobsBilledOnlyBy`, and a failed
   owner read hides the amount). A maximum that
   cannot be read is `capped_unreadable` with a zero limit and the budget

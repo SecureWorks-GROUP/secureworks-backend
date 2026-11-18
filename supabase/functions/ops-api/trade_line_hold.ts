@@ -121,7 +121,8 @@ export type ClassifiedLine = HoldLine & {
     job_number: string | null;
     allowed_ex: number | null;
     left_ex: number | null;
-    /** True when left_ex is withheld (another trade billed on the job). */
+    /** True when left_ex and allowed_ex are withheld (another trade billed
+     * on the job). */
     left_hidden?: boolean;
     asked_ex: number;
     expected: unknown;
@@ -229,7 +230,9 @@ export function classifyLines(
         office_review_status: "awaiting",
         hold_detail: {
           job_number: job?.job_number ?? null,
-          allowed_ex: job?.allowed_ex ?? null,
+          // Hidden: neither figure is saved, since the agreed amount beside
+          // the asked and held amounts gives the remainder back.
+          allowed_ex: leftHidden ? null : job?.allowed_ex ?? null,
           left_ex: job && !leftHidden ? Math.max(0, left) / 100 : null,
           ...(leftHidden ? { left_hidden: true } : {}),
           asked_ex: key(line.line_type) === "commission"

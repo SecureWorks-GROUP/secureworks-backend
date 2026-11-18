@@ -913,8 +913,13 @@ Deno.test("cap left: the send's hold words carry the amount left only when every
   assertEquals(hidden.hold_reason, "over_amount");
   assertEquals(hidden.words, "With the office: this line is more than this job's work order has left, so $80.00 is waiting.");
   assertEquals([hidden.hold_detail?.left_ex, hidden.hold_detail?.left_hidden], [null, true]);
-  // The detail keeps the agreed amount (the trade's own work order) but no remainder.
+  // Neither the agreed amount nor the remainder is saved on a hidden line:
+  // agreed beside asked and held would give the remainder back.
+  assertEquals(hidden.hold_detail?.allowed_ex, null, "no agreed amount saved when hidden");
   assertEquals(Object.values(hidden.hold_detail ?? {}).includes(120), false, "no remainder in the detail");
+  assertEquals(Object.values(hidden.hold_detail ?? {}).includes(1120), false, "no agreed amount in the detail");
+  // Shown job: both figures saved as before.
+  assertEquals([shown.hold_detail?.allowed_ex, shown.hold_detail?.left_ex], [1120, 120]);
   // The cap itself is unchanged: the same split, only the words differ.
   assertEquals(classifyLines([over], shared).backed.map((l) => l.sent_amount_ex), classifyLines([over], alone).backed.map((l) => l.sent_amount_ex));
   // Another trade's draft invoice hides nothing.
