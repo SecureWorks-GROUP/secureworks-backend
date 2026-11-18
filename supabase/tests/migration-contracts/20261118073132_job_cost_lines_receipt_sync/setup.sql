@@ -10,3 +10,5 @@ ALTER TABLE public.expense_receipts
   ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending',
   ADD COLUMN IF NOT EXISTS payment_method text DEFAULT 'unknown',
   ADD COLUMN IF NOT EXISTS category text DEFAULT 'unknown';
+-- The live trade_invoices column the reimbursement check reads (20260908120000).
+ALTER TABLE public.trade_invoices ADD COLUMN IF NOT EXISTS xero_bill_status text;

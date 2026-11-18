@@ -209,6 +209,61 @@ DO $$ BEGIN
    RAISE EXCEPTION 'receipt sync: a repaid receipt counted twice'; END IF;
 END $$;
 
+-- Own money with no line, paid back on a live trade invoice, then corrected to company
+-- card: no countable line and no queue row (never counted twice).
+INSERT INTO public.expense_receipts(id,receipt_photo_url,total_amount,gst_amount,payment_method)
+  VALUES('60000000-0000-4000-8000-000000000050','ZZTEST-own-repaid',110,10,'personal_card');
+INSERT INTO public.trade_invoices(id,org_id,status) VALUES
+  ('60000000-0000-4000-8000-000000000051','00000000-0000-0000-0000-000000000001','submitted');
+INSERT INTO public.trade_invoice_lines(id,trade_invoice_id,expense_receipt_id) VALUES
+  ('60000000-0000-4000-8000-000000000052','60000000-0000-4000-8000-000000000051','60000000-0000-4000-8000-000000000050');
+UPDATE public.expense_receipts SET payment_method='company_card' WHERE id='60000000-0000-4000-8000-000000000050';
+DO $$ BEGIN
+ IF EXISTS (SELECT 1 FROM public.job_cost_lines WHERE document_kind='expense_receipt'
+     AND document_id='60000000-0000-4000-8000-000000000050' AND state IS NOT NULL)
+   OR pg_temp.zz_queued('60000000-0000-4000-8000-000000000050')<>0 THEN
+   RAISE EXCEPTION 'receipt sync: a repaid own-money receipt counted on correction %',
+     to_jsonb(pg_temp.zz_line('60000000-0000-4000-8000-000000000050')); END IF;
+END $$;
+
+-- A company card line later paid back on a live trade invoice stops counting at its next save.
+INSERT INTO public.expense_receipts(id,receipt_photo_url,total_amount,gst_amount,payment_method)
+  VALUES('60000000-0000-4000-8000-000000000060','ZZTEST-card-repaid',22,2,'company_card');
+INSERT INTO public.trade_invoices(id,org_id,status) VALUES
+  ('60000000-0000-4000-8000-000000000061','00000000-0000-0000-0000-000000000001','submitted');
+INSERT INTO public.trade_invoice_lines(id,trade_invoice_id,expense_receipt_id) VALUES
+  ('60000000-0000-4000-8000-000000000062','60000000-0000-4000-8000-000000000061','60000000-0000-4000-8000-000000000060');
+UPDATE public.expense_receipts SET vendor_name='ZZTEST Supplier' WHERE id='60000000-0000-4000-8000-000000000060';
+DO $$ DECLARE l public.job_cost_lines; BEGIN
+ l := pg_temp.zz_line('60000000-0000-4000-8000-000000000060');
+ IF l.state IS NOT NULL OR l.not_counted_reason IS DISTINCT FROM 'counted_by_trade_invoice'
+   OR EXISTS (SELECT 1 FROM public.job_cost_line_parts WHERE line_id=l.id) THEN
+   RAISE EXCEPTION 'receipt sync: a repaid company card receipt still counted %',to_jsonb(l); END IF;
+END $$;
+
+-- A VOIDED linked Xero bill pays nothing back: the corrected receipt counts.
+INSERT INTO public.expense_receipts(id,receipt_photo_url,total_amount,gst_amount,payment_method)
+  VALUES('60000000-0000-4000-8000-000000000070','ZZTEST-own-voided',44,4,'personal_card');
+INSERT INTO public.trade_invoices(id,org_id,status,xero_bill_status) VALUES
+  ('60000000-0000-4000-8000-000000000071','00000000-0000-0000-0000-000000000001','submitted','VOIDED');
+INSERT INTO public.trade_invoice_lines(id,trade_invoice_id,expense_receipt_id) VALUES
+  ('60000000-0000-4000-8000-000000000072','60000000-0000-4000-8000-000000000071','60000000-0000-4000-8000-000000000070');
+UPDATE public.expense_receipts SET payment_method='company_card' WHERE id='60000000-0000-4000-8000-000000000070';
+DO $$ DECLARE l public.job_cost_lines; BEGIN
+ l := pg_temp.zz_line('60000000-0000-4000-8000-000000000070');
+ IF l.state IS DISTINCT FROM 'needs_person' OR l.not_counted_reason IS NOT NULL OR l.amount_ex IS DISTINCT FROM 40.00
+   OR pg_temp.zz_queued('60000000-0000-4000-8000-000000000070')<>1 THEN
+   RAISE EXCEPTION 'receipt sync: a voided bill kept the receipt suppressed %',to_jsonb(l); END IF;
+END $$;
+-- A DELETED bill (any case) releases a line it held: the earlier repaid receipt counts again.
+UPDATE public.trade_invoices SET xero_bill_status='deleted' WHERE id='60000000-0000-4000-8000-000000000041';
+UPDATE public.expense_receipts SET vendor_name='ZZTEST Supplier' WHERE id='60000000-0000-4000-8000-000000000040';
+DO $$ DECLARE l public.job_cost_lines; BEGIN
+ l := pg_temp.zz_line('60000000-0000-4000-8000-000000000040');
+ IF l.state IS DISTINCT FROM 'needs_person' OR l.not_counted_reason IS NOT NULL THEN
+   RAISE EXCEPTION 'receipt sync: a deleted bill kept the receipt suppressed %',to_jsonb(l); END IF;
+END $$;
+
 SET CONSTRAINTS ALL IMMEDIATE;
 SELECT 'PASS: P2-06.2 receipts become cost lines by payment method' AS result;
 ROLLBACK;

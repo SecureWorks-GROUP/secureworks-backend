@@ -2,11 +2,16 @@
 -- and supplier-account receipts never are. Creates functions only: no trigger is
 -- installed and no switch changes on apply. The director runs
 -- job_cost_lines_install_receipt_trigger() after the shadow proof on a ZZTEST receipt.
+-- CREATE FUNCTION, not CREATE OR REPLACE: a same-signature function already on live
+-- stops this migration before its body is overwritten.
 
-CREATE OR REPLACE FUNCTION public.job_cost_lines_sync_receipt(p_receipt_id uuid)
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
+
+CREATE FUNCTION public.job_cost_lines_sync_receipt(p_receipt_id uuid)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE r public.expense_receipts%ROWTYPE; line public.job_cost_lines%ROWTYPE; doc jsonb;
-  live boolean; result jsonb; doc_id text; BEGIN
+  live boolean; result jsonb; doc_id text; repaid boolean; BEGIN
   IF NOT EXISTS (SELECT 1 FROM public.feature_flags WHERE flag_name='job_cost_lines_sync_v1' AND enabled) THEN
     RETURN jsonb_build_object('ran',false,'reason','flag_off'); END IF;
   -- A plain read: the receipt row lock belongs to the business write that fired this.
@@ -28,7 +33,17 @@ DECLARE r public.expense_receipts%ROWTYPE; line public.job_cost_lines%ROWTYPE; d
   SELECT * INTO line FROM public.job_cost_lines WHERE org_id=r.org_id
     AND document_kind='expense_receipt' AND document_id=doc_id AND line_key='whole' FOR UPDATE;
 
-  IF r.payment_method='personal_card' THEN
+  -- A live trade invoice line that pays this receipt back is its cost, whatever the
+  -- receipt now says it was paid with. Checked before any line is created or counts
+  -- again. Live is the trade invoice sync's rule (20261117173001): not ops-reject and
+  -- its Xero bill neither DELETED nor VOIDED. Reads the unique partial index on
+  -- trade_invoice_lines.expense_receipt_id from P2-06.1, then trade_invoices_pkey.
+  repaid := r.payment_method IS DISTINCT FROM 'supplier_invoice' AND EXISTS (
+    SELECT 1 FROM public.trade_invoice_lines til JOIN public.trade_invoices ti ON ti.id=til.trade_invoice_id
+    WHERE til.expense_receipt_id=r.id AND ti.status IS DISTINCT FROM 'ops-reject'
+      AND upper(coalesce(ti.xero_bill_status,'')) NOT IN ('DELETED','VOIDED'));
+
+  IF r.payment_method='personal_card' OR repaid THEN
     -- The trade's reimbursement line is the cost; the receipt never counts.
     IF line.id IS NOT NULL AND coalesce(line.not_counted_reason,'') NOT IN ('counted_by_bank_line',
       'duplicate_document','duplicate_of_trade_invoice','counted_by_trade_invoice') THEN
@@ -55,12 +70,8 @@ DECLARE r public.expense_receipts%ROWTYPE; line public.job_cost_lines%ROWTYPE; d
   SELECT * INTO line FROM public.job_cost_lines WHERE org_id=r.org_id
     AND document_kind='expense_receipt' AND document_id=doc_id AND line_key='whole' FOR UPDATE;
   -- A line this receipt marked when it was own money counts again once it is company
-  -- money, unless a trade invoice line still pays the receipt back
-  -- (the unique partial index on trade_invoice_lines.expense_receipt_id from P2-06.1;
-  -- trade_invoices primary key).
-  IF live AND line.not_counted_reason='counted_by_trade_invoice' AND NOT EXISTS (
-    SELECT 1 FROM public.trade_invoice_lines til JOIN public.trade_invoices ti ON ti.id=til.trade_invoice_id
-    WHERE til.expense_receipt_id=r.id AND ti.status IS DISTINCT FROM 'ops-reject') THEN
+  -- money; no live trade invoice line pays it back (checked above).
+  IF live AND line.not_counted_reason='counted_by_trade_invoice' THEN
     UPDATE public.job_cost_lines SET state='needs_person', needs_reason='new', not_counted_reason=NULL,
       state_changed_at=now(), updated_at=now() WHERE id=line.id;
     line.state := 'needs_person';
@@ -76,7 +87,7 @@ $$;
 
 -- Never fails the receipt write: every shadow write and the deferred conservation
 -- checks run in this one subtransaction. A failed sync is warned and not retried.
-CREATE OR REPLACE FUNCTION public.job_cost_lines_try_receipt(p_receipt_id uuid)
+CREATE FUNCTION public.job_cost_lines_try_receipt(p_receipt_id uuid)
 RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='1ms' AS $$
 DECLARE result jsonb; BEGIN
   <<guarded_shadow>> BEGIN
@@ -94,7 +105,7 @@ DECLARE result jsonb; BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION public.job_cost_lines_receipt_row()
+CREATE FUNCTION public.job_cost_lines_receipt_row()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$ BEGIN
   PERFORM public.job_cost_lines_try_receipt(NEW.id);
   RETURN NULL;
@@ -102,7 +113,7 @@ END;
 $$;
 
 -- Installed only by the director after the shadow proof. A merge installs no business trigger.
-CREATE OR REPLACE FUNCTION public.job_cost_lines_install_receipt_trigger()
+CREATE FUNCTION public.job_cost_lines_install_receipt_trigger()
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$ BEGIN
   DROP TRIGGER IF EXISTS job_cost_lines_receipt_sync ON public.expense_receipts;
   CREATE TRIGGER job_cost_lines_receipt_sync AFTER INSERT OR UPDATE OF job_id, stock_division,
@@ -110,7 +121,7 @@ RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$ BEGIN
     ON public.expense_receipts FOR EACH ROW EXECUTE FUNCTION public.job_cost_lines_receipt_row();
 END;
 $$;
-CREATE OR REPLACE FUNCTION public.job_cost_lines_remove_receipt_trigger()
+CREATE FUNCTION public.job_cost_lines_remove_receipt_trigger()
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$ BEGIN
   DROP TRIGGER IF EXISTS job_cost_lines_receipt_sync ON public.expense_receipts;
 END;
