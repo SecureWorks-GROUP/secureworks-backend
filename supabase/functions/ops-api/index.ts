@@ -1564,6 +1564,8 @@ import {
 // TP-01 Xero tie-out (20261029121500): staff read, bills by month and bucket.
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
+// Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
+import { PAY_FIGURES_APPROVER_ACTIONS, payFiguresApproverRefusal } from './pay_figures_approver.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
 import { jobTraceAction, jobTraceView } from './job_trace.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
@@ -6286,6 +6288,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     })
   }
 
+  // Named pay figures are approver-only (pay_figures_approver.ts): checked once
+  // here, after the front door and before the action reads anything. The
+  // server, routine and agent keys carry no person and are refused.
+  const payFiguresAction = _preAuthUrl.searchParams.get('action')
+  if (payFiguresAction && PAY_FIGURES_APPROVER_ACTIONS.has(payFiguresAction)) {
+    const payRefusal = await payFiguresApproverRefusal(sb(), {
+      authMode,
+      userId: authMode === 'jwt' ? authUser?.id ?? null : null,
+    })
+    if (payRefusal) {
+      console.log(opsApiDeniedLogLine(payFiguresAction, req.method, requestActor, payRefusal.status, payRefusal.code))
+      recordOpsApiActorMissing(sb, authMode, requestActor)
+      return new Response(JSON.stringify({ error: payRefusal.error, code: payRefusal.code }), {
+        status: payRefusal.status,
+        headers: { ...CORS, 'Content-Type': 'application/json' },
+      })
+    }
+  }
+
   // Hoisted so the outer catch can audit a refused SES money-chain press: consts
   // declared inside the try are not in scope in its catch (defect 2).
   let auditAction: string | null = null
@@ -10017,8 +10038,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
       // Trade pay-run check (trade-pay-check-v1): every live trade invoice in
       // the pay weeks, clean or stopped with plain reasons, so the bookkeeper
-      // approves the clean bills in one batch. Read only; staff by the front
-      // door (not in any trade, routine or agent-read list). Contract:
+      // approves the clean bills in one batch. Read only; pay run approvers
+      // only (pay_figures_approver.ts, checked before dispatch). Contract:
       // docs/trade-pay-run-check-v1.md.
       case 'trade_pay_run_check': {
         try {

@@ -464,6 +464,9 @@ type Stub = {
   jobs?: any[];
   // the signed-in user's role; "admin" reaches the staff actions
   role?: string;
+  // the signed-in user is a pay run approver: named pay figures
+  // (list_trade_invoices) are approver-only (pay_figures_approver.ts)
+  payApprover?: boolean;
   // rows of job_assignment_logged_times (times saved on the job view)
   loggedTimes?: any[];
   // rows the reads of trade_invoices, trade_invoice_lines and the view answer
@@ -663,6 +666,11 @@ async function callTradeAction(
         default_hourly_rate: null,
         xero_contact_id: null,
         trade_details: {},
+      }]));
+    }
+    if (table === "trade_pay_settings") {
+      return Promise.resolve(reply([{
+        pay_run_approver_user_ids: stub.payApprover ? [TRADE_ID] : [],
       }]));
     }
     if (table === "feature_flags") {
@@ -1608,6 +1616,7 @@ handlerTest("list_trade_invoices: each invoice line answers when it was worked",
   const out = await callTradeAction("list_trade_invoices", {}, {
     flagOn: false,
     role: "admin",
+    payApprover: true,
     invoices: [{
       id: NEW_INVOICE,
       week_start: WEEK_START,

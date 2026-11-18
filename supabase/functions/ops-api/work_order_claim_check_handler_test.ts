@@ -2,7 +2,8 @@
  * V16 work-order claim warning, through the real ops-api request handler
  * (list_trade_invoice_lines), with every database call answered by a fetch
  * spy (nothing leaves the process):
- *  - a staff caller (server key) gets work_order_claim_warning on the two
+ *  - a pay run approver (named pay figures are approver-only, director
+ *    18 Nov 2026; pay_figures_approver_test.ts) gets work_order_claim_warning on the two
  *    claim lines of SWF-261209 and work_order_claim_check with labour 1720.00
  *    against the largest claim 1465.00 (production rows, read only, 3 Nov
  *    2026; worked by hand in work_order_claim_check_test.ts);
@@ -20,7 +21,9 @@ import { CLAIM_CHECK_UNREADABLE_WARNING } from "./work_order_claim_check.ts";
 
 const SERVICE_KEY = "test-service-role-key";
 const USER_JWT = "test-signed-in-trade-jwt";
+const APPROVER_JWT = "test-signed-in-approver-jwt";
 const TRADE_ID = "7d4f0a52-0000-4000-8000-00000000f4c7";
+const APPROVER_ID = "7d4f0a52-0000-4000-8000-00000000a0a1";
 const ENV_NAMES = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
@@ -109,12 +112,19 @@ const EXPECTED =
   "Two leads claimed a work order: Alyx $1,465.00, Henry $1,153.00. " +
   "Check who did the work before approving.";
 
-type Opts = { viewFails?: boolean };
+type Opts = { viewFails?: boolean; approver?: boolean };
 
 function respond(url: URL, opts: Opts): Response {
   const path = url.pathname;
   if (path.endsWith("/auth/v1/user")) {
-    return Response.json({ id: TRADE_ID, email: "", aud: "authenticated" });
+    return Response.json({
+      id: opts.approver ? APPROVER_ID : TRADE_ID,
+      email: "",
+      aud: "authenticated",
+    });
+  }
+  if (path.endsWith("/rest/v1/trade_pay_settings")) {
+    return Response.json({ pay_run_approver_user_ids: [APPROVER_ID] });
   }
   if (path.endsWith("/rest/v1/users")) {
     const ids = url.searchParams.get("id") || "";
@@ -126,10 +136,10 @@ function respond(url: URL, opts: Opts): Response {
         })),
       );
     }
-    // The signed-in trade's own profile.
+    // The signed-in caller's own profile.
     return Response.json({
       org_id: "00000000-0000-0000-0000-000000000001",
-      role: "trade",
+      role: opts.approver ? "owner" : "trade",
       managed_verticals: [],
     });
   }
@@ -210,8 +220,8 @@ function warningsById(body: any): Map<string, string | null> {
 
 Deno.test("office: SWF-261209 claim lines carry the warning, other lines none", async () => {
   const { status, body, urls } = await list({
-    authorization: `Bearer ${SERVICE_KEY}`,
-  });
+    authorization: `Bearer ${APPROVER_JWT}`,
+  }, { approver: true });
   assertEquals(status, 200);
   assertEquals(body.lines.length, 4);
   const w = warningsById(body);
@@ -235,8 +245,8 @@ Deno.test("office: SWF-261209 claim lines carry the warning, other lines none", 
 
 Deno.test("office: a failed labour read never blocks the list and is said on the claim lines", async () => {
   const { status, body } = await list(
-    { authorization: `Bearer ${SERVICE_KEY}` },
-    { viewFails: true },
+    { authorization: `Bearer ${APPROVER_JWT}` },
+    { viewFails: true, approver: true },
   );
   assertEquals(status, 200);
   assertEquals(body.lines.length, 4);
