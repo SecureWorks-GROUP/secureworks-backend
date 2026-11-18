@@ -329,6 +329,7 @@ export type WorkOrderLine = {
   trade_name: string | null;
   invoice_number: string | null;
   invoice_status: string;
+  invoice_kind?: string;
   submitted_at: string | null;
   line_type: string | null;
   description: string | null;
@@ -1196,7 +1197,7 @@ async function readWorkOrderLines(
     while (true) {
       let q = client.from("trade_invoice_lines")
         .select(
-          "id, trade_invoice_id, job_id, job_work_order_id, line_type, description, total_hours, work_order_hours, line_total_ex, override_amount, trade_invoices!inner(id, user_id, invoice_number, status, submitted_at, users:user_id(name))",
+          "id, trade_invoice_id, job_id, job_work_order_id, line_type, description, total_hours, work_order_hours, line_total_ex, override_amount, trade_invoices!inner(id, user_id, invoice_number, status, invoice_kind, submitted_at, users:user_id(name))",
         )
         .in("job_id", chunk);
       if (opts.linkedOnly) q = q.not("job_work_order_id", "is", null);
@@ -1220,6 +1221,10 @@ async function readWorkOrderLines(
           trade_name: inv?.users?.name ?? null,
           invoice_number: inv?.invoice_number ?? null,
           invoice_status: String(inv?.status || ""),
+          // P1-05.8: a holding invoice's lines wait for the office and never
+          // count as billed. Only a held line carries the key, so every
+          // other line reads exactly as before.
+          ...(inv?.invoice_kind === "held" ? { invoice_kind: "held" } : {}),
           submitted_at: inv?.submitted_at ?? null,
           line_type: row.line_type ?? null,
           description: row.description ?? null,
@@ -1240,6 +1245,7 @@ async function readWorkOrderLines(
   for (const line of out) {
     line.cost_lane = lanes.get(line.trade_invoice_line_id) || "unclassified";
     line.counted = workOrderLineIsLabour(line) &&
+      line.invoice_kind !== "held" &&
       JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(line.invoice_status);
   }
   return out;

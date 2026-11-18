@@ -1,6 +1,8 @@
 // JWT flag: --no-verify-jwt. Keep this line at the top: the deploy workflow reads
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
+import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, type SendRow, type SortedSend } from './trade_line_send.ts'
+import { readJobAmountsLeft, type LineHoldFacts } from './trade_line_hold.ts'
 import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
 import { ExpenseCaptureError, expenseCaptureFields, expenseNextStep, refuseBilledReimbursement } from './expense_capture_v2.ts'
 import { listExpenseReceipts } from './expense_list.ts'
@@ -723,6 +725,7 @@ import {
   TRADE_INVOICE_EMPLOYER_SUPER_BASIS,
   TRADE_INVOICE_INCLUSIVE_SUPER_BASIS,
   TradeInvoiceMoneyError,
+  buildTradeInvoiceAuditModel,
   type TradeInvoiceSuperBasis,
   type TradeInvoiceMoney,
   tradeInvoicePayableBeforeDeduction,
@@ -827,6 +830,7 @@ import {
   resolveWorkOrderScopeLine,
   WEEKLY_INVOICE_DEDUCTION_LINE_TYPES,
   WeeklyInvoiceError,
+  rebuildWeeklyInvoiceForHold,
   unbilledBookingWeekEnding,
   weeklyWorkOrderBusinessDate,
   workOrderDirectInvoiceBlock,
@@ -2135,12 +2139,13 @@ export async function _findLiveTradeInvoiceForWeek(
   weekEnd: string,
 ): Promise<any | null> {
   const { data, error } = await client.from('trade_invoices')
-    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, super_base_ex, total_inc, recurring_deduction_label, recurring_deduction_amount')
+    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, super_basis, super_base_ex, total_inc, recurring_deduction_label, recurring_deduction_amount, invoice_kind')
     .eq('user_id', userId)
     .eq('week_end', weekEnd)
     .order('created_at', { ascending: true })
   if (error) throw new Error('Failed to check for an existing invoice this week: ' + error.message)
-  return (data || []).find((row: any) => !RELEASED_INVOICE_STATUS_SET.has(String(row?.status || ''))) || null
+  // P1-05.8: a holding invoice is the office's, never the week's invoice.
+  return (data || []).find((row: any) => row?.invoice_kind !== 'held' && !RELEASED_INVOICE_STATUS_SET.has(String(row?.status || ''))) || null
 }
 
 const XERO_TOKEN_URL = 'https://identity.xero.com/connect/token'
@@ -2721,6 +2726,15 @@ function tradeXeroBillSearchApiError(error: unknown): never {
   throw error
 }
 
+const HOLDING_INVOICE_NOT_PUSHED_MESSAGE = 'This is a holding invoice for the office. It is never sent to Xero; its lines are paid only when the office moves them onto a payable invoice.'
+export function holdingInvoiceNotPushedError(): ApiError {
+  return new ApiError(HOLDING_INVOICE_NOT_PUSHED_MESSAGE, 409, {
+    ok: false,
+    error: HOLDING_INVOICE_NOT_PUSHED_MESSAGE,
+    code: 'holding_invoice_not_pushed',
+  })
+}
+
 async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops-api:push_trade_invoice_to_xero') {
   const { invoice_id } = body
   if (!invoice_id) throw new ApiError('invoice_id required', 400)
@@ -2732,6 +2746,10 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
     .maybeSingle()
   let { data: inv } = await readInvoice()
   if (!inv) throw new ApiError('Invoice not found', 404)
+  // P1-05.8 (Follow-up 10): a holding invoice is never a bill. Refused before
+  // any line read, group release or Xero call. Its lines reach pay only when
+  // the office moves them onto a payable invoice.
+  if (inv.invoice_kind === 'held') throw holdingInvoiceNotPushedError()
   const canEnterNow = canEnterPushTradeInvoiceToXero(inv.status, inv.xero_bill_id)
 
   const { data: lines, error: linesErr } = await client.from('trade_invoice_lines')
@@ -2770,6 +2788,7 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
     reviewLines = reread || []
     inv = (await readInvoice()).data
     if (!inv) throw new ApiError('Invoice not found', 404)
+    if (inv.invoice_kind === 'held') throw holdingInvoiceNotPushedError()
   }
   if (!canEnterPushTradeInvoiceToXero(inv.status, inv.xero_bill_id)) {
     throw new ApiError('Invoice must be acknowledged before pushing to Xero', 400)
@@ -11687,8 +11706,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const { invoice_id: aprInvId } = body
         if (!aprInvId) throw new ApiError('invoice_id required', 400)
         const { data: aprInv } = await client.from('trade_invoices')
-          .select('id, status').eq('id', aprInvId).maybeSingle()
+          .select('id, status, invoice_kind').eq('id', aprInvId).maybeSingle()
         if (!aprInv) throw new ApiError('Invoice not found', 404)
+        // P1-05.8: a holding invoice is never approved for pay; its lines are
+        // moved to a payable invoice by the office instead.
+        if (aprInv.invoice_kind === 'held') throw holdingInvoiceNotPushedError()
         if (aprInv.status !== 'pending_ops_review' && aprInv.status !== 'queried') {
           throw new ApiError('Only invoices pending ops review can be approved (status: ' + aprInv.status + ')', 400)
         }
@@ -11777,6 +11799,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const { data: ntiData, error: ntiErr } = await client.from('trade_invoices')
           .select('*, user:user_id(name, email)')
           .eq('org_id', DEFAULT_ORG_ID)
+          .neq('invoice_kind', 'held')
           .order('week_start', { ascending: false })
           .limit(50)
         if (ntiErr) throw new Error(ntiErr.message)
@@ -13915,7 +13938,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             if (requestedNegativeChargeIds.length > 0) {
               const { data: selectedChargeRows, error: selectedChargeErr } = await client
                 .from('trade_invoice_lines')
-                .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+                .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, invoice_kind, users:user_id(name))')
                 .in('id', requestedNegativeChargeIds)
                 .eq('trade_invoices.org_id', tradeUser.orgId)
               if (selectedChargeErr) throw selectedChargeErr
@@ -13982,16 +14005,19 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // No week on this invoice: its pay day is the day it is made. A
             // retry replaces the caller's own draft and keeps its stored basis.
             const woSuperBasis = await tradePayBasisForSave(client, retryDrafts[0] ?? null, woInvoiceDate)
-            const woMoney = tradeInvoiceMoney(
+            let woMoney = tradeInvoiceMoney(
               invoiceTotals.subtotal_ex,
               woGstOn,
               woInvoiceDate,
               woSuperBasis,
             )
-            const subtotal = woMoney.gross_earned
-            const gst = woMoney.gst_amount
-            const total = woMoney.total_inc
-            const woXeroLineItems = splitTradeInvoiceXeroLines(
+            let subtotal = woMoney.gross_earned
+            let gst = woMoney.gst_amount
+            let total = woMoney.total_inc
+            // The bill's source lines: Xero and the audit PDF read this one
+            // list. With the held-line send it narrows to the backed lines.
+            let woSubmittedLines = lineItems
+            let woXeroLineItems = splitTradeInvoiceXeroLines(
               lineItems,
               woMoney,
               { tradeName: tradeXeroUser?.name || 'Trade', superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE },
@@ -14030,16 +14056,156 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               })
             }
 
-            // The job's work order caps this door too: a crew work order on a
-            // job with an approved job work order may not take the job's total
-            // over it (work_order_total_cap.ts).
-            await _assertWithinWorkOrderTotal(client, tradeUser, workOrderLines)
+            // P1-05.8: with trade_line_hold_v1 on and the pay rule applying to
+            // the day, this door sorts like the weekly send: a line the job
+            // cannot back waits for the office on a holding invoice, never a
+            // refusal (trade_line_send.ts). Off, main's cap below decides.
+            const woLineHoldMode = await lineHoldSendApplies(client, woInvoiceDate)
+            const woSentRows: SendRow[] = workOrderLines.map((line, index) => ({ ...line, _serverPriced: true, _woIndex: index }))
+            let woSorted: SortedSend | null = null
+            let woFacts: LineHoldFacts | null = null
+            let woPersistLines: Array<Record<string, unknown>> = workOrderLines
+            const woLineHoldRead = async (): Promise<SortedSend> => {
+              try {
+                const read = await readAndSortSend(client, tradeUser.id, woSentRows, null)
+                woFacts = read.facts
+                return read.sorted
+              } catch (error) {
+                console.error('[ops-api] submit_work_order_invoice: line hold facts unreadable:', lineSendLogCode(error))
+                const message = 'Your invoice could not be checked, so nothing was sent. Try again in a minute.'
+                throw new ApiError(message, 503, { ok: false, success: false, saved: false, code: 'line_hold_unreadable', error: message, userMessage: message })
+              }
+            }
+            const woLineHoldApply = (sorted: SortedSend) => {
+              // A send whose work is all with the office keeps the chosen
+              // deductions out of it: they stay on their source and come back
+              // with this work order's pay (director default, key
+              // p1-05-8-deduction-only).
+              const pay = sorted.backed.filter((row: any) => !isKeptDeduction(row))
+              woSorted = pay.length === 0 ? { ...sorted, backed: [] } : sorted
+              woPersistLines = woSorted.backed.map((row: any) => {
+                const { _serverPriced: _p, _woIndex: _i, sent_amount_ex: _s, ...line } = row
+                return line
+              })
+              if (woPersistLines.length === 0) return
+              const backedSubtotal = roundMoney(woPersistLines.reduce((sum, line) => sum + Number(line.line_total_ex || 0), 0))
+              if (backedSubtotal <= 0) {
+                // Main refuses chosen deductions that take the invoice to zero
+                // or below; so does this door.
+                throw new ApiError('Invoice rejected: trade charges cannot reduce the work order invoice to zero or below.', 422)
+              }
+              woMoney = tradeInvoiceMoney(backedSubtotal, woGstOn, woInvoiceDate, woSuperBasis)
+              subtotal = woMoney.gross_earned
+              gst = woMoney.gst_amount
+              total = woMoney.total_inc
+              const kept = new Set(woSorted.backed.map((row: any) => Number(row._woIndex)))
+              woSubmittedLines = lineItems.filter((_line: unknown, index: number) => kept.has(index))
+              woXeroLineItems = splitTradeInvoiceXeroLines(
+                woSubmittedLines,
+                woMoney,
+                { tradeName: tradeXeroUser?.name || 'Trade', superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE },
+              )
+              // The audit PDF's own gross check, run now: a mismatch refuses
+              // before anything is saved or any Xero call is made, never after
+              // Xero has created the bill.
+              try {
+                buildTradeInvoiceAuditModel(woSubmittedLines, woMoney, tradeXeroUser?.name || 'Trade')
+              } catch (error) {
+                // Codes only: the money error's own text carries figures.
+                const code = error instanceof TradeInvoiceMoneyError ? error.code : 'audit_lines_invalid'
+                console.error('[ops-api] submit_work_order_invoice: backed lines refused before save:', code)
+                const message = 'Your invoice could not be checked, so nothing was sent. Tell the office.'
+                throw new ApiError(message, 422, { ok: false, success: false, saved: false, code, error: message, userMessage: message })
+              }
+            }
+            if (woLineHoldMode) {
+              woLineHoldApply(await woLineHoldRead())
+            } else {
+              // The job's work order caps this door too: a crew work order on a
+              // job with an approved job work order may not take the job's total
+              // over it (work_order_total_cap.ts).
+              await _assertWithinWorkOrderTotal(client, tradeUser, workOrderLines)
+            }
+            const woHeldRows = () => (woSorted?.held || []).map((row: any) => {
+              const { _serverPriced: _p, _woIndex: _i, ...line } = row
+              return line
+            })
+            let woHoldingSaved: Awaited<ReturnType<typeof saveHoldingInvoice>> | null = null
+            const woHoldFailed = (code: string): never => {
+              const message = 'Your invoice could not be finished, so nothing was sent. Try again in a minute.'
+              throw new ApiError(message, 503, { ok: false, success: false, saved: false, code, error: message, userMessage: message })
+            }
+            const woSaveHolding = async (followsInvoiceId: string | null) => {
+              if ((woSorted?.held.length ?? 0) === 0) return
+              const holdingInitials = tradeInvoiceInitials(tradeXeroUser?.name)
+              const holdingDay = tradeInvoiceDay()
+              woHoldingSaved = await saveHoldingInvoice(client, {
+                orgId: tradeUser.orgId || null,
+                userId: tradeUser.id,
+                sendId: woSendId!,
+                followsInvoiceId,
+                weekStart: null,
+                weekEnd: null,
+                invoiceSource: 'work_order',
+                // With nothing paid, the holding invoice is what claims the
+                // work order, so it is not invoiced twice.
+                workOrderId: followsInvoiceId ? null : work_order_id,
+                jobId: wo.job_id,
+                gstOn: woGstOn,
+                superRate: woMoney.super_rate,
+                superBasis: woMoney.super_basis ?? null,
+                nextNumber: async (attempt: number) => await nextTradeInvoiceNumber(client, { userId: tradeUser.id, initials: holdingInitials, day: holdingDay, skip: attempt }),
+                isNumberTaken: isTradeInvoiceNumberCollision,
+                lineRow: (holdingId: string, row: any) => toWorkOrderHoldingLineRow(holdingId, row),
+                held: woSorted!.held,
+              })
+            }
+            const woTellOffice = async (standardLines: any[]) => {
+              await markTradeInvoiceJobsChanged(client, [...standardLines, ...(woSorted?.held || [])], weekAutofill ? 'trade_invoice' : 'phase1:trade_invoice')
+              if (woHoldingSaved && woFacts) {
+                await raiseHeldLines(client, woHoldingSaved.lines, {
+                  tradeUserId: tradeUser.id,
+                  tradeName: tradeXeroUser?.name ?? null,
+                  tradeRole: tradeUser.role ?? null,
+                  weekStart: null,
+                  facts: woFacts,
+                  backed: standardLines,
+                })
+              }
+            }
+            const woSendId: string | null = woLineHoldMode ? crypto.randomUUID() : null
+            const woAnswerFields = () => {
+              if (!woLineHoldMode || !woSorted || !woSendId) return {}
+              return {
+                ...sendAnswer(woSendId, woPersistLines, woHoldingSaved?.lines ?? [], woSorted.skipped),
+                ...(woHoldingSaved ? { held_invoice_id: woHoldingSaved.id } : {}),
+              }
+            }
+            if (woLineHoldMode && woPersistLines.length === 0) {
+              // Every line waits for the office: no pay invoice this send.
+              try {
+                await woSaveHolding(null)
+              } catch (error) {
+                console.error('[ops-api] submit_work_order_invoice: holding invoice not saved:', lineSendLogCode(error))
+                woHoldFailed('holding_invoice_not_saved')
+              }
+              await woTellOffice([])
+              return json({
+                ok: true,
+                success: true,
+                invoice_id: null,
+                xero_bill_number: null,
+                total: 0,
+                pdf_attached: false,
+                ...woAnswerFields(),
+              })
+            }
 
             // Persist the complete local invoice and its source claims inside
             // the same organization-scoped transaction as weekly invoices.
             // No competing route can pass the source check before this commit,
             // and no Xero work starts until that local identity is durable.
-            const workOrderBoundary = await _claimWorkOrderInvoiceBeforeXero(
+            const woClaim = () => _claimWorkOrderInvoiceBeforeXero(
               client,
               {
                 org_id: tradeUser.orgId,
@@ -14061,12 +14227,51 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   : null,
                 status: 'draft',
                 submitted_at: new Date().toISOString(),
+                // P1-05.8: the held lines, so the persist checks the work
+                // order's scope as the trade sent it. Absent when nothing is held.
+                ...((woSorted?.held.length ?? 0) > 0 ? { hold_lines: woHeldRows() } : {}),
               },
-              workOrderLines,
+              woPersistLines,
               retryDrafts[0]?.id || null,
               weekAutofill ? { onPersisted: () => markTradeInvoiceJobsChanged(client, workOrderLines, 'trade_invoice') } : {},
             )
+            // Step 8: one retry on a job amount guard refusal (P1-05.9); a
+            // second holds the whole job, so every line waits for the office.
+            let workOrderBoundary: Awaited<ReturnType<typeof _claimWorkOrderInvoiceBeforeXero>> | null = null
+            for (let guardTry = 0; !workOrderBoundary; guardTry++) {
+              try {
+                workOrderBoundary = await woClaim()
+              } catch (error) {
+                if (!woLineHoldMode || jobAmountGuardJob(error) === undefined || guardTry >= 2) throw error
+                let sorted = await woLineHoldRead()
+                if (guardTry === 1) sorted = holdWholeJob(sorted, String(wo.job_id))
+                woLineHoldApply(sorted)
+                if (woPersistLines.length === 0) {
+                  try {
+                    await woSaveHolding(null)
+                  } catch (holdError) {
+                    console.error('[ops-api] submit_work_order_invoice: holding invoice not saved:', lineSendLogCode(holdError))
+                    woHoldFailed('holding_invoice_not_saved')
+                  }
+                  await woTellOffice([])
+                  return json({ ok: true, success: true, invoice_id: null, xero_bill_number: null, total: 0, pdf_attached: false, ...woAnswerFields() })
+                }
+              }
+            }
             const tradeInvoiceId = workOrderBoundary.invoiceId
+            if (woLineHoldMode) {
+              // Step 7: if the office's part cannot be saved, this invoice is
+              // released to a draft (the next send replaces it), never pushed.
+              try {
+                await stampStandardSend(client, tradeInvoiceId, woSendId!)
+                await woSaveHolding(tradeInvoiceId)
+              } catch (error) {
+                console.error('[ops-api] submit_work_order_invoice: held-line send not finished:', lineSendLogCode(error))
+                await releaseStandardInvoice(client, tradeInvoiceId, 'Held-line send not finished; the next send replaces this draft.')
+                woHoldFailed('holding_invoice_not_saved')
+              }
+              await woTellOffice(woPersistLines)
+            }
             const tradeInv = { id: tradeInvoiceId }
             // A work-order invoice carries no weekly deduction. When this
             // trade has one this week the invoice is marked for the office;
@@ -14106,6 +14311,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
                 error: 'Xero push failed — contact admin',
                 pdf_attached: false,
+                ...woAnswerFields(),
               })
             }
             if (woOfficeReview.hold) {
@@ -14144,6 +14350,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
                 pdf_attached: false,
                 error: woOfficeReview.hold.error,
+                ...woAnswerFields(),
               })
             }
 
@@ -14219,7 +14426,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   tenantId: woTi,
                   filename: `${tradeName}-${wo.wo_number || 'work-order'}`,
                   clientPdfBase64: body.pdf_base64,
-                  submittedLines: lineItems,
+                  submittedLines: woSubmittedLines,
                   money: woMoney,
                   tradeName,
                 },
@@ -14275,6 +14482,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
                 error: 'Xero push failed — contact admin',
                 pdf_attached: false,
+                ...woAnswerFields(),
               })
             }
 
@@ -14286,6 +14494,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               ...tradeInvoiceMoneyResponse(woMoney),
               negative_charge_total_ex: invoiceTotals.negative_charge_total_ex,
               pdf_attached: woPdfAttached,
+              ...woAnswerFields(),
             })
           }
 
@@ -14342,6 +14551,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 .eq('user_id', tradeUser.id)
                 .eq('week_start', draftWeekStart)
                 .eq('status', 'draft')
+                .neq('invoice_kind', 'held')
                 .order('created_at', { ascending: true })
                 .limit(1)
                 .maybeSingle()
@@ -14869,7 +15079,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             if (weeklyShape && (!week_start || !weekEnd)) {
               throw new ApiError('week_start is required for a weekly work-order invoice', 422)
             }
-            const weeklyInvoice = weeklyShape
+            let weeklyInvoice: WeeklyWorkOrderInvoice | null = weeklyShape
               ? await _resolveWeeklyWorkOrderInvoice(
                 client,
                 tradeUser,
@@ -14903,6 +15113,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 .eq('user_id', tradeUser.id)
                 .eq('week_start', week_start)
                 .eq('status', 'draft')
+                .neq('invoice_kind', 'held')
                 .order('created_at', { ascending: true })
                 .limit(1)
               if (existingDraftErr) {
@@ -14915,6 +15126,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             }
             const weekEvidence = weekAutofill ? await readWeekSendEvidence(client, tradeUser.id, week_start || null, weekEnd) : null
             const priorDraftId: string | null = priorDraft?.id || null
+            // P1-05.8: with trade_line_hold_v1 on and the pay rule applying to
+            // the week, a send never fails on a work order, cap or commission
+            // refusal: each line is paid this week or held for the office
+            // (trade_line_send.ts). Group shares keep their own door. Anything
+            // unreadable reads as off, which is main.
+            const lineHoldMode = !(Array.isArray(extra_items) && extra_items.some(isGroupShareInvoiceItem)) &&
+              await lineHoldSendApplies(client, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead)
+            const lineHoldWeeklySource = weeklyInvoice
             const invoiceSuperBasis = groupInvoiceBasis.superBasis ??
               await tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead)
             const reimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(extra_items) ? extra_items : [], invoiceSuperBasis, week_start ? priorDraftId : null)
@@ -15421,7 +15640,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               // here: the weekly work-order lane (server-built lines), group
               // shares, clock mirrors the loop below skips, and lines that name
               // no job.
-              if (!weeklyInvoice) {
+              if (!weeklyInvoice && !lineHoldMode) {
                 const jobLines = extraItemsIn.filter((item: any) =>
                   item &&
                   item.source !== 'clock' && item._source !== 'clock' && item.source !== 'server_labour' &&
@@ -15754,11 +15973,73 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               throw new ApiError('Nothing to invoice. Your only lines are auto-tracked clock entries. Add your hours or an extra line.', 400)
             }
 
+            // ── P1-05.8: sort the send into this week's pay and the office ───
+            // The lines as sent are kept; every attempt rebuilds this invoice
+            // from the backed set (deductions always stay with the pay).
+            const lineHoldSentRows: SendRow[] = lineHoldMode ? [
+              ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour', _serverPriced: true, _holdLabour: true })),
+              ...extraLineItems,
+            ] : []
+            const lineHoldSendId: string | null = lineHoldMode ? crypto.randomUUID() : null
+            let lineHoldSorted: SortedSend | null = null
+            let lineHoldFacts: LineHoldFacts | null = null
+            let lineHoldLeftOut: any[] = []
+            const lineHoldRead = async (): Promise<SortedSend> => {
+              try {
+                const read = await readAndSortSend(client, tradeUser.id, lineHoldSentRows, week_start || null)
+                lineHoldFacts = read.facts
+                return read.sorted
+              } catch (error) {
+                console.error('[ops-api] generate_trade_invoice: line hold facts unreadable:', lineSendLogCode(error))
+                const message = 'Your lines could not be checked, so nothing was sent. Try again in a minute.'
+                throw new ApiError(message, 503, { ok: false, success: false, saved: false, code: 'line_hold_unreadable', error: message, userMessage: message })
+              }
+            }
+            const lineHoldApply = (sorted: SortedSend) => {
+              let backed = sorted.backed
+              lineHoldLeftOut = []
+              if (lineHoldWeeklySource) {
+                // A work order's deductions travel with its pay
+                // (rebuildWeeklyInvoiceForHold); what is left out is not claimed.
+                let rebuilt
+                try {
+                  rebuilt = rebuildWeeklyInvoiceForHold(backed
+                    .filter((row: any) => !isReimbursementItem(row))
+                    .map((row: any) => lineHoldWeeklySource.lines[Number(row.line_position)]))
+                } catch (error) {
+                  if (error instanceof WeeklyInvoiceError) throw new ApiError(error.message, error.status)
+                  throw error
+                }
+                weeklyInvoice = rebuilt.invoice
+                const leftOut = new Set(rebuilt.left_out)
+                lineHoldLeftOut = backed.filter((row: any) => !isReimbursementItem(row) &&
+                  leftOut.has(lineHoldWeeklySource.lines[Number(row.line_position)]))
+                // With no work order left, a paid receipt waits for the next send too.
+                if (!weeklyInvoice) lineHoldLeftOut.push(...backed.filter((row: any) => isReimbursementItem(row)))
+                backed = backed.filter((row: any) => !lineHoldLeftOut.includes(row))
+                const position = new Map((weeklyInvoice?.lines || []).map((line, index) => [line, index]))
+                backed = backed.map((row: any) => isReimbursementItem(row)
+                  ? row
+                  : { ...row, line_position: position.get(lineHoldWeeklySource.lines[Number(row.line_position)]) ?? null })
+              } else {
+                backed = backed.map((row: any, index: number) => ({ ...row, line_position: index }))
+              }
+              lineHoldSorted = { ...sorted, backed }
+              lineItems.splice(0, lineItems.length, ...backed.filter((row: any) => row._holdLabour))
+              extraLineItems.splice(0, extraLineItems.length, ...backed.filter((row: any) => !row._holdLabour))
+              reimbursements.lines = backed.filter((row: any) => isReimbursementItem(row))
+              reimbursementEx = reimbursementLinesTotalEx(reimbursements.lines)
+              extraSubtotal = roundMoney(extraLineItems.reduce((sum: number, line: any) => sum + Number(line.line_total_ex || 0), 0))
+              totalHours = lineItems.reduce((sum: number, line: any) => sum + Number(line.total_hours || 0), 0)
+            }
+            if (lineHoldMode) lineHoldApply(await lineHoldRead())
+
             // Ruling 17 step 2: a commission line on a job with a commission
             // record is from its named salesperson only, and the job's counted
             // commission stays within the record's amount (job_commission.ts;
-            // the database holds the same rule on every write).
-            {
+            // the database holds the same rule on every write). With line hold
+            // on, the sort above already kept only the trade's own figure.
+            if (!lineHoldMode) {
               const commissionClaims = [...lineItems, ...extraLineItems]
                 .filter((line: any) => isCommissionLine(String(line?.line_type ?? '')) && line?.job_id)
                 .map((line: any) => ({
@@ -15790,12 +16071,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               }
             }
 
-            const labourSubtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
+            let labourSubtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
             let subtotal = labourSubtotal + extraSubtotal
             const invoiceEarningsDate = weekEnd || new Date().toISOString().slice(0, 10)
             // No super on commission (Marnin, 12 Nov 2026): the commission lines
             // stay in gross but come out of the super base.
-            const invoiceCommissionEx = commissionLinesTotalEx([
+            let invoiceCommissionEx = commissionLinesTotalEx([
               ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour' })),
               ...extraLineItems,
             ])
@@ -15833,7 +16114,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
               // 1. Zero-line check: sum of per-line totals must match invoice subtotal
               const lineSum = allLines.reduce((s: number, l: any) => s + (Number(l.line_total_ex) || 0), 0)
-              if (allLines.length === 0) {
+              if (allLines.length === 0 && !lineHoldMode) {
                 throw new ApiError('Invoice rejected: no line items. Add at least one job card with hours or items.', 422)
               }
               if (Math.abs(lineSum - subtotal) > 0.01) {
@@ -15873,7 +16154,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // every trade, plus this invoice's, stays within the agreed labour
             // and approved customer variations, or nothing is saved
             // (work_order_total_cap.ts).
-            {
+            if (!lineHoldMode) {
               const capLines = [...lineItems, ...extraLineItems]
               const capNumbers = [...new Set(capLines
                 .filter((line: any) => !line.job_id && line.job_number)
@@ -16055,8 +16336,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // (Alyx, SW-INV-A-260830-025, SWF-261063, 2026-09-11). Resolved
             // BEFORE persisting so the prior-draft transfer and the Layer B
             // stamp below lock the same set.
-            const woLock = workOrderLockJobs(extraLineItems)
+            // P1-05.8: cards behind a held work-order line are locked by the
+            // holding invoice; cards behind a paid one by this invoice.
+            const lineHoldHeldExtras = () => (lineHoldSorted?.held || []).filter((row: any) => !row._holdLabour)
+            const woLock = workOrderLockJobs(lineHoldMode ? [...extraLineItems, ...lineHoldHeldExtras()] : extraLineItems)
             let woLineAssignmentIds: string[] = []
+            let lineHoldWoCards: Array<{ id: string; job_id: string }> = []
+            let lineHoldWoCardIds: string[] = []
+            const lineHoldSplitWoCards = () => {
+              const backedJobs = new Set(workOrderLockJobs(extraLineItems).jobIds.map(String))
+              woLineAssignmentIds = lineHoldWoCards.filter((card) => backedJobs.has(card.job_id)).map((card) => card.id)
+              lineHoldWoCardIds = lineHoldWoCards.filter((card) => !backedJobs.has(card.job_id)).map((card) => card.id)
+            }
             // In-scope cards another LIVE invoice already holds. They are NOT
             // stamped and NOT double-billed; they are reported on the invoice.
             // Failing the whole submit over one already-billed card blocked a
@@ -16114,21 +16405,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               })
               woLineAssignmentIds = woSelection.assignmentIds
               woLineHeldCardIds = woSelection.alreadyHeldIds
+              if (lineHoldMode) {
+                const cardJob = new Map((woCards || []).map((card: any) => [String(card.id), String(card.job_id)]))
+                lineHoldWoCards = woSelection.assignmentIds.map((id: any) => ({ id: String(id), job_id: cardJob.get(String(id)) || '' }))
+                lineHoldSplitWoCards()
+              }
               for (const card of (woCards || [])) {
                 const label = woLock.jobLabelByJobId[String(card.job_id)]
                 if (label) woLineJobLabels[String(card.id)] = label
               }
             }
-            const includedAssignmentIds = [...new Set([
+            const lineHoldIncludedIds = () => [...new Set([
               ...lineItems.flatMap((line: any) =>
                 Array.isArray(line.assignment_ids) ? line.assignment_ids : []
               ),
               ...woLineAssignmentIds,
             ].filter(Boolean).map(String))]
+            let includedAssignmentIds = lineHoldIncludedIds()
             // "No work order, no invoice" is its own switch, off by default.
             // It runs before any invoice row is written. A line with no job
             // is not refused. An unreadable read refuses rather than invoicing.
-            const jobWorkOrderRefusal = await loadCrewInvoiceJobWorkOrderRefusal(
+            const jobWorkOrderRefusal = lineHoldMode ? null : await loadCrewInvoiceJobWorkOrderRefusal(
               client,
               [...lineItems, ...extraLineItems].filter((line: any) => !isReimbursementItem(line)),
             )
@@ -16194,14 +16491,40 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }
               }
             }
-            const invoiceId = await retryReimbursementClaims(client, reimbursements, async () => await persistWithFreeNumber(() => weeklyInvoice
+            // P1-05.8: hold_lines tells the persist which lines the holding
+            // invoice carries, so each line is checked as the trade sent it.
+            // Sent to the weekly work-order persist only, never without held lines.
+            // A weekly line is checked in the weekly persist's own row shape
+            // (weeklyInvoiceLineRows), so its held part is sent the same way.
+            const lineHoldHeldLineRows = (holdingId: string) => (lineHoldSorted?.held || []).map((row: any) => ({
+              // With trade_week_autofill_v1 on, a weekly send is saved in the
+              // hourly row shape (main's autofill branch), so its held part is too.
+              ...(lineHoldWeeklySource && !weekAutofill && !isReimbursementItem(row)
+                ? { ...lineHoldWeeklySource.lines[Number(row.line_position)], total_hours: null, hourly_rate: null }
+                : lineHoldWeeklySource && !weekAutofill
+                ? reimbursementDbLine(row)
+                : toTradeInvoiceLineRow(holdingId, row, row._holdLabour ? { line_type: 'labour' } : {})),
+              hold_reason: row.hold_reason,
+              hold_detail: row.hold_detail,
+              office_review_status: 'awaiting',
+              sent_amount_ex: row.sent_amount_ex,
+              split_group_id: row.split_group_id ?? null,
+            }))
+            const lineHoldRpcPayload = (payload: Record<string, unknown>) =>
+              lineHoldMode && (lineHoldSorted?.held.length ?? 0) > 0
+                ? { ...payload, hold_lines: lineHoldHeldLineRows('') }
+                : payload
+            const saveStandard = () => retryReimbursementClaims(client, reimbursements, async () => await persistWithFreeNumber(() => weeklyInvoice
               ? weekAutofill
-                ? _persistTradeInvoiceWeekDraft(client, invoicePayload, [
+                ? _persistTradeInvoiceWeekDraft(client, lineHoldRpcPayload(invoicePayload), [
                   ...lineItems.map((line: any) => toTradeInvoiceLineRow('', line, { line_type: 'labour' })),
                   ...extraLineItems.map((line: any) => toTradeInvoiceLineRow('', line)),
                 ], priorDraftId)
                 : _persistWeeklyTradeInvoice(
-                  client, invoicePayload, weeklyInvoiceWithReimbursements(weeklyInvoice, reimbursements.lines), priorDraftId,
+                  client,
+                  lineHoldRpcPayload(invoicePayload),
+                  weeklyInvoiceWithReimbursements(weeklyInvoice, reimbursements.lines),
+                  priorDraftId,
                 )
               : week_start && reimbursements.lines.length > 0
               ? _persistTradeInvoiceWeekDraft(client, { ...invoicePayload, org_id: tradeUser.orgId }, [
@@ -16264,8 +16587,173 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 Object.assign(invoicePayload, tradeInvoiceMoneyFields(money), { subtotal_ex: money.gross_earned, gst, total_inc: totalInc }, tradeRecurringDeductionInvoiceFields(recurringDeduction))
                 if (weeklyInvoice) Object.assign(invoicePayload, { job_grand_total_ex: weeklyInvoice.grand_total + reimbursementEx, to_be_paid_ex: weeklyInvoice.to_be_paid + reimbursementEx })
               }, week_start ? priorDraftId : null)
+
+            // ── P1-05.8: save the pay, then the office's part ────────────────
+            const lineHoldRefresh = async () => {
+              labourSubtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
+              subtotal = roundMoney(labourSubtotal + extraSubtotal)
+              invoiceCommissionEx = commissionLinesTotalEx([
+                ...lineItems.map((line: any) => ({ ...line, line_type: line.line_type || 'labour' })),
+                ...extraLineItems,
+              ])
+              ;({ money, decision: recurringDeduction } = await applyTradeRecurringDeduction(client, tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate, invoiceSuperBasis, invoiceCommissionEx, reimbursementEx), { userId: tradeUser.id, weekStart: week_start || null, weekless: { kind: 'no_invoice_week', day: invoiceEarningsDate } }))
+              gst = money.gst_amount
+              totalInc = money.total_inc
+              Object.assign(invoicePayload, tradeInvoiceMoneyFields(money), { subtotal_ex: money.gross_earned, gst, total_inc: totalInc, total_hours: Math.round(totalHours * 100) / 100 }, tradeRecurringDeductionInvoiceFields(recurringDeduction))
+              if (weeklyInvoice) {
+                Object.assign(invoicePayload, {
+                  job_grand_total_ex: weeklyInvoice.grand_total + reimbursementEx,
+                  final_deductions_total_ex: weeklyInvoice.final_deductions_total,
+                  to_be_paid_ex: weeklyInvoice.to_be_paid + reimbursementEx,
+                  has_manual_overrides: weeklyInvoice.final_deductions_total > 0 || weeklyInvoice.lines.some((line) => line.line_total_ex < 0),
+                  override_details: {
+                    work_order_ids: [...new Set(weeklyInvoice.lines.map((line) => line.source_work_order_id).filter(Boolean))],
+                    crew_charge_line_ids: [...new Set(weeklyInvoice.lines.map((line) => line.source_trade_invoice_line_id).filter(Boolean))],
+                    deduction_user_ids: [...new Set(weeklyInvoice.lines.map((line) => line.deduction_user_id).filter(Boolean))],
+                    grand_total: weeklyInvoice.grand_total,
+                    final_deductions_total: weeklyInvoice.final_deductions_total,
+                    to_be_paid: weeklyInvoice.to_be_paid,
+                  },
+                })
+              }
+              lineHoldSplitWoCards()
+              includedAssignmentIds = lineHoldIncludedIds()
+            }
+            // Step 8: the job amount guard (P1-05.9) refused a line another
+            // invoice took the room for in the same moment. Read and sort
+            // again once; a second refusal holds that job's lines whole.
+            let lineHoldGuardRetries = 0
+            const saveStandardHeld = async (): Promise<string | null> => {
+              for (;;) {
+                if (lineItems.length + extraLineItems.length === 0 || (lineHoldWeeklySource && !weeklyInvoice)) return null
+                try {
+                  return await saveStandard()
+                } catch (error) {
+                  const guardJob = jobAmountGuardJob(error)
+                  if (guardJob === undefined || lineHoldGuardRetries >= 2) throw error
+                  lineHoldGuardRetries++
+                  let sorted = await lineHoldRead()
+                  if (lineHoldGuardRetries === 2) {
+                    for (const jobId of guardJob ? [guardJob] : guardedJobs(sorted, lineHoldFacts)) {
+                      sorted = holdWholeJob(sorted, jobId)
+                    }
+                  }
+                  lineHoldApply(sorted)
+                  await lineHoldRefresh()
+                }
+              }
+            }
+            let lineHoldSaved: Awaited<ReturnType<typeof saveHoldingInvoice>> | null = null
+            const lineHoldFailed = (code: string): never => {
+              const message = 'Your invoice could not be finished, so nothing was sent. Try again in a minute.'
+              throw new ApiError(message, 503, { ok: false, success: false, saved: false, code, error: message, userMessage: message })
+            }
+            const lineHoldUndoHolding = async () => {
+              if (!lineHoldSaved) return
+              const holdingId = lineHoldSaved.id
+              lineHoldSaved = null
+              const { error } = await client.from('job_assignments').update({ invoiced_in: null }).eq('invoiced_in', holdingId)
+              if (error) console.error('[ops-api] holding invoice booking release failed:', lineSendLogCode(error), holdingId)
+              await deleteHoldingInvoice(client, holdingId)
+            }
+            const lineHoldSaveHolding = async (followsInvoiceId: string | null) => {
+              if ((lineHoldSorted?.held.length ?? 0) === 0) return
+              lineHoldSaved = await saveHoldingInvoice(client, {
+                orgId: tradeUser.orgId || null,
+                userId: tradeUser.id,
+                sendId: lineHoldSendId!,
+                followsInvoiceId,
+                weekStart: week_start || null,
+                weekEnd: weekEnd || null,
+                invoiceSource: lineHoldWeeklySource ? 'weekly_work_order' : 'hourly',
+                gstOn,
+                superRate: money.super_rate,
+                superBasis: money.super_basis ?? null,
+                notes: invoiceNotes || null,
+                nextNumber: async (attempt: number) => followsInvoiceId === null && attempt === 0
+                  ? invoiceNumber
+                  : await nextTradeInvoiceNumber(client, { userId: tradeUser.id, initials, day: today, skip: invoiceNumberSkip + attempt }),
+                isNumberTaken: isTradeInvoiceNumberCollision,
+                lineRow: (holdingId: string, row: any) => toTradeInvoiceLineRow(holdingId, row, row._holdLabour ? { line_type: 'labour' } : {}),
+                held: lineHoldSorted!.held,
+              })
+              try {
+                // A split line's booking stays with its paid part (Layer B
+                // stamps it for this week's invoice); only bookings no paid
+                // line carries go to the holding invoice.
+                const paidBookings = new Set(includedAssignmentIds)
+                await stampHeldBookings(client, tradeUser.id, lineHoldSaved.id, [
+                  ...lineHoldSorted!.held.flatMap((row: any) => Array.isArray(row.assignment_ids) ? row.assignment_ids : []),
+                  ...lineHoldWoCardIds,
+                ].filter((id: any) => !paidBookings.has(String(id))), RELEASED_INVOICE_STATUS_SET)
+              } catch (error) {
+                await lineHoldUndoHolding()
+                throw error
+              }
+            }
+            const lineHoldTellOffice = async () => {
+              await markTradeInvoiceJobsChanged(client, [...lineItems, ...extraLineItems, ...(lineHoldSorted?.held || [])], weekAutofill ? 'trade_invoice' : 'phase1:trade_invoice')
+              if (lineHoldSaved && lineHoldFacts) {
+                await raiseHeldLines(client, lineHoldSaved.lines, {
+                  tradeUserId: tradeUser.id,
+                  tradeName: userProfile?.name ?? null,
+                  tradeRole: tradeUser.role ?? null,
+                  weekStart: week_start || null,
+                  facts: lineHoldFacts,
+                  backed: [...lineItems, ...extraLineItems],
+                })
+              }
+            }
+            const lineHoldAnswerFields = () => {
+              if (!lineHoldMode || !lineHoldSorted || !lineHoldSendId) return {}
+              const answer = sendAnswer(lineHoldSendId, [...lineItems, ...extraLineItems], lineHoldSaved?.lines ?? [], lineHoldSorted.skipped)
+              return {
+                ...answer,
+                skipped_items: [...reimbursements.skipped_items, ...answer.skipped_items],
+                ...(lineHoldSaved ? { held_invoice_id: lineHoldSaved.id } : {}),
+                ...(lineHoldLeftOut.length > 0
+                  ? { left_out: lineHoldLeftOut.map((row: any) => ({ job_number: row.job_number ?? null, description: row.description ?? null, amount_ex: roundMoney(Number(row.line_total_ex) || 0) })) }
+                  : {}),
+              }
+            }
+
+            const invoiceId = lineHoldMode ? await saveStandardHeld() : await saveStandard()
+            if (invoiceId === null) {
+              // Every line waits for the office: no pay invoice this send.
+              try {
+                await lineHoldSaveHolding(null)
+              } catch (error) {
+                console.error('[ops-api] generate_trade_invoice: holding invoice not saved:', lineSendLogCode(error))
+                lineHoldFailed('holding_invoice_not_saved')
+              }
+              await lineHoldTellOffice()
+              return json({
+                ok: true,
+                success: true,
+                invoice_id: null,
+                invoice_number: null,
+                total_hours: 0,
+                line_count: 0,
+                xero_bill_id: null,
+                ...lineHoldAnswerFields(),
+              })
+            }
             const invoice = { id: invoiceId }
-            await markTradeInvoiceJobsChanged(client, [...lineItems, ...extraLineItems], weekAutofill ? 'trade_invoice' : 'phase1:trade_invoice')
+            if (lineHoldMode) {
+              // Step 7: if the office's part cannot be saved, this invoice is
+              // released the way a failed stamp releases it, never pushed.
+              try {
+                await stampStandardSend(client, invoiceId, lineHoldSendId!)
+                await stampSplitGroups(client, invoiceId, [...lineItems, ...extraLineItems])
+                await lineHoldSaveHolding(invoiceId)
+              } catch (error) {
+                console.error('[ops-api] generate_trade_invoice: held-line send not finished:', lineSendLogCode(error))
+                await releaseStandardInvoice(client, invoiceId, 'Held-line send not finished; the next send replaces this draft.')
+                lineHoldFailed('holding_invoice_not_saved')
+              }
+            } else {
+              await markTradeInvoiceJobsChanged(client, [...lineItems, ...extraLineItems], weekAutofill ? 'trade_invoice' : 'phase1:trade_invoice')
+            }
 
             // B14: one audit event per held typed rate. No amounts in the
             // reason; the line itself carries them.
@@ -16314,6 +16802,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 if (markErr) {
                   console.error('[ops-api] Failed to mark assignment-stamp failure:', markErr.message)
                 }
+                await lineHoldUndoHolding()
                 throw new Error('Failed to lock invoiced job cards before Xero push: ' + stampMsg)
               }
               const { data: stampCandidates, error: stampReadErr } = await client.from('job_assignments')
@@ -16389,6 +16878,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 await failAssignmentStamp(stampMsg)
               }
             }
+
+            // P1-05.8: the last undo point is behind us; tell the office.
+            if (lineHoldMode) await lineHoldTellOffice()
 
             // ── WO/Commission cards another live invoice already holds ───────
             // These are in scope for this invoice's job-level lines but are
@@ -16879,6 +17371,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 ...tradeInvoiceMoneyResponse(money),
                 ...(payView ? { pay_view: payView } : {}),
                 skipped_items: reimbursements.skipped_items,
+                ...lineHoldAnswerFields(),
                 ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
                 line_count: lineItems.length + extraLineItems.length,
@@ -16904,6 +17397,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 ...tradeInvoiceMoneyResponse(money),
                 ...(payView ? { pay_view: payView } : {}),
                 skipped_items: reimbursements.skipped_items,
+                ...lineHoldAnswerFields(),
                 ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
                 line_count: lineItems.length + extraLineItems.length,
@@ -16927,6 +17421,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               ...tradeInvoiceMoneyResponse(money),
                 ...(payView ? { pay_view: payView } : {}),
                 skipped_items: reimbursements.skipped_items,
+                ...lineHoldAnswerFields(),
               ...tradeRecurringDeductionResponse(recurringDeduction),
               ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
               line_count: lineItems.length + extraLineItems.length,
@@ -16948,6 +17443,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const { data, error } = await client.from('trade_invoices')
               .select('*, lines:trade_invoice_lines(*)')
               .eq('user_id', tradeUser.id)
+              .neq('invoice_kind', 'held')
               .order('week_start', { ascending: false })
               .limit(20)
 
@@ -18421,6 +18917,9 @@ export function _selectWorkOrderNegativeCharges(
     if (String(parent.user_id || '') === String(args.viewerId)) continue
     if (String(row.acknowledgment_status || '') !== 'acknowledged') continue
     if (RELEASED_INVOICE_STATUS_SET.has(String(parent.status || ''))) continue
+    // P1-05.8: a line waiting for the office is not paid, so it is never
+    // taken off anyone's pay.
+    if (parent.invoice_kind === 'held') continue
 
     const overrideApplied = row.override_amount !== null && row.override_amount !== undefined
     const sourceAmount = Number(overrideApplied ? row.override_amount : row.line_total_ex)
@@ -18599,6 +19098,28 @@ export async function _persistTradeInvoiceWeekDraft(
   return invoiceId
 }
 
+// P1-05.8: a held work-order line as the holding invoice stores it, the same
+// columns persist_trade_work_order_invoice_v1 writes for a paid one.
+export function toWorkOrderHoldingLineRow(invoiceId: string, row: Record<string, any>): Record<string, unknown> {
+  return {
+    trade_invoice_id: invoiceId,
+    job_id: row.job_id ?? null,
+    job_number: row.job_number || null,
+    client_name: row.client_name || null,
+    total_hours: row.total_hours ?? null,
+    hourly_rate: row.hourly_rate ?? null,
+    line_total_ex: roundMoney(Number(row.line_total_ex) || 0),
+    acknowledgment_status: 'pending',
+    line_type: row.line_type || 'labour',
+    description: row.description ?? null,
+    quantity: row.quantity ?? null,
+    unit: row.unit ?? null,
+    unit_rate: row.unit_rate ?? null,
+    line_date: row.line_date ?? null,
+    source_trade_invoice_line_id: row.source_trade_invoice_line_id ?? null,
+  }
+}
+
 export async function _persistWorkOrderInvoice(
   client: any,
   invoicePayload: Record<string, unknown>,
@@ -18755,6 +19276,7 @@ async function loadReplaceableWeeklyDraft(
     .eq('user_id', userId)
     .eq('week_start', weekStart)
     .eq('status', 'draft')
+    .neq('invoice_kind', 'held')
     .order('created_at', { ascending: true })
     .limit(2)
   if (error) throw new Error('Failed to load existing weekly draft: ' + error.message)
@@ -18892,7 +19414,7 @@ export async function _resolveWeeklyWorkOrderInvoice(
   if (chargeIds.length > 0) {
     reads.push(
       client.from('trade_invoice_lines')
-        .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+        .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, invoice_kind, users:user_id(name))')
         .in('id', chargeIds)
         .eq('trade_invoices.org_id', tradeUser.orgId),
       client.from('trade_invoice_lines')
@@ -19072,7 +19594,7 @@ async function readWorkOrderChargeRows(
     const ids = jobIds.slice(i, i + WORK_ORDER_ID_CHUNK)
     const { data, error } = await client
       .from('trade_invoice_lines')
-      .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, users:user_id(name))')
+      .select('id, job_id, line_type, group_share_id, description, quantity, unit, unit_rate, total_hours, hourly_rate, line_total_ex, override_amount, acknowledgment_status, trade_invoices!inner(org_id, user_id, status, invoice_kind, users:user_id(name))')
       .in('job_id', ids)
       .eq('trade_invoices.org_id', orgId)
       .neq('trade_invoices.user_id', viewerId)
@@ -58380,6 +58902,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     .select('id, xero_bill_number:xero_bill_id, status')
     .eq('user_id', userId)
     .eq('week_end', weekEnding)
+    .neq('invoice_kind', 'held')
     .maybeSingle()
 
   const subtotal = Math.round(totalHours * rate * 100) / 100
@@ -58458,6 +58981,31 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   for (const a of enriched) stampInvoiceMode(a, String(a.jobs?.id || ''))
   for (const r of groupRouteJobs) stampInvoiceMode(r, String(r.job_id || ''))
 
+  // P1-05.8: with the held-line rule on for this week, each card says what its
+  // job has left on its approved work order (null: no approved amount), so the
+  // app can say before sending that a line goes to the office. A failed read
+  // says so (job_left_unavailable) rather than reading as "no amount".
+  const lineHoldWeek = await lineHoldSendApplies(client, weekStart || weekEnding, paySettingsRead)
+  let jobLeftUnavailable = false
+  if (lineHoldWeek) {
+    // Balance only: no commission, salesperson or rate is read here.
+    let left: Record<string, number | null> = {}
+    if (invoiceModeJobIds.length > 0) {
+      try {
+        left = await readJobAmountsLeft(client, userId, invoiceModeJobIds)
+      } catch (leftErr) {
+        console.error('[ops-api] my_hours: job amounts unreadable:', lineSendLogCode(leftErr))
+        jobLeftUnavailable = true
+      }
+    }
+    const jobLeft = (jobId: string): number | null => {
+      const value = left[jobId]
+      return value == null ? null : roundMoney(value)
+    }
+    for (const a of enriched) a.job_left_ex = jobLeft(String(a.jobs?.id || ''))
+    for (const r of groupRouteJobs) r.job_left_ex = jobLeft(String(r.job_id || ''))
+  }
+
   // Check verification state across assignments
   const pendingVerification = enriched.some((a: any) => a.status === 'submitted')
   const allVerified = enriched.length > 0 && enriched.every((a: any) => a.status === 'verified' || a.status === 'complete')
@@ -58491,6 +59039,8 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
       }),
     subtotal,
     already_submitted: !!existingInvoice,
+    ...(lineHoldWeek ? { line_hold: true as const } : {}),
+    ...(jobLeftUnavailable ? { job_left_unavailable: true as const } : {}),
     running_invoice_draft: runningInvoiceDraftEnabled(userRow?.trade_details),
     // True when how each job is invoiced could not be read; every card's
     // invoice_mode and can_claim_commission are then null.
@@ -58559,6 +59109,7 @@ async function myTradeInvoices(client: any, userId: string) {
     .from('trade_invoices')
     .select(MY_TRADE_INVOICE_COLUMNS + ', query_note')
     .eq('user_id', userId)
+    .neq('invoice_kind', 'held')
     .order('created_at', { ascending: false })
     .limit(100)
 
@@ -58607,6 +59158,7 @@ async function myMoney(client: any, tradeUser: TradeAuthContext, params: URLSear
   const [{ data: userRow, error: userErr }, { data: rows, error: invErr }] = await Promise.all([
     client.from('users').select('id, name, abn, invoice_type, trade_details, xero_contact_id').eq('id', tradeUser.id).maybeSingle(),
     client.from('trade_invoices').select(MY_TRADE_INVOICE_COLUMNS).eq('user_id', tradeUser.id)
+      .neq('invoice_kind', 'held')
       .order('week_end', { ascending: false, nullsFirst: false }).limit(400),
   ])
   if (userErr) throw userErr
@@ -58735,6 +59287,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
     let query = client
       .from('trade_invoices')
       .select(TRADE_BILLS_COLUMNS)
+      .neq('invoice_kind', 'held')
     query = noWeek
       ? query.is('week_start', null).order('created_at', { ascending: false })
       : query.not('week_start', 'is', null).order('week_start', { ascending: false })
@@ -58751,6 +59304,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
     ? client
       .from('trade_invoices')
       .select(TRADE_BILLS_COLUMNS)
+      .neq('invoice_kind', 'held')
       .eq('status', STUCK_TRADE_INVOICE_STATUS)
       .is('xero_bill_id', null)
       .order('created_at', { ascending: false })
@@ -58911,6 +59465,7 @@ async function labourReconciliation(client: any, params: URLSearchParams) {
   const { data: invoices, error: invErr } = await client.from('trade_invoices')
     .select('id, user_id, week_ending:week_end, subtotal:subtotal_ex, total:total_inc, status, xero_bill_number:xero_bill_id, users:user_id(name), trade_invoice_lines!inner(job_id, job_number, total_hours, line_total_ex)')
     .eq('trade_invoice_lines.job_id', jobId)
+    .neq('invoice_kind', 'held')
     .order('week_end', { ascending: false })
   if (invErr) throw invErr
 
