@@ -22,8 +22,16 @@ Commit each batch and repeat both settings with the returned cursor in a new tra
 
 The profit source helper now queues store dirtiness only. It no longer directly marks a page with a source-specific reason. The changed-figure comparison in `job_profit_refresh_many` is the sole profit-driven page marker, using bulk source `profit` once per changed job in the batch. The helper's existing append-only queue and 200-event trim remain. Its switch-off return and all source-routing lookups remain unchanged. Follow-up 32's eleven trigger wrappers are untouched.
 
-The migration replaces definitions on an already-installed job-pages path. It installs no trigger or timer and creates no feature switch. Existing scheduled calls still pass their existing argument; the current installer uses `job_pages_refresh_due(1)`. To gain multiple builds each minute, the director must explicitly change the existing timer to pass 5 after a bounded live proof. This PR makes no live call or schedule change.
+Part 1 replaced the runner and kept the existing timer at one job per call. Part 2 updates that timer as described below.
 
 Proof is `supabase/tests/migration-contracts/20261118055951_job_pages_real_changes_first/contract.sql`: older bulk marks versus a newer invoice, mixed legacy sources, unknown real sources, five fast builds, nonpositive limits, failed builds, one runner, bounded native plans, suppressed first fill, unchanged/default marks, manual marks, the 40-second start budget, unchanged renderer and rollback restoration. All fixtures and renderer stand-ins roll back. The full-stack contract uses the real profit engine; isolated local prerequisites are reported separately.
 
-Director, on live: compare the four guarded function hashes, prove an invoice is chosen ahead of the existing profit backlog, time one bounded run, select the intended timer argument, and verify queue age and reader fallback. Before every bulk fill, inspect what it marks or queues as well as what it writes. Rollback restores the exact previous function bodies and removes only the two new indexes.
+Director, on live: compare the four guarded function hashes, prove an invoice is chosen ahead of the existing profit backlog, time one bounded run and verify queue age and reader fallback. Before every bulk fill, inspect what it marks or queues as well as what it writes. Rollback restores the exact previous function bodies and removes only the two new indexes.
+
+## Part 2: the minute timer
+
+The migration updates the installed refresh command in place and changes the installer to use the same command on a future installation. It keeps the timer id, schedule and active state. If the installation is absent it only updates the installer. If someone has edited the command, the migration refuses the change atomically.
+
+The timer requests up to three serial builds under a 100-second statement timeout. The runner checks elapsed time before each start. A build already running at 40 seconds can finish. If it finishes at 39 seconds, the runner can still start another job while the elapsed time is below 40 seconds. Deferred jobs keep their marks for the next run. The existing renderer records a failed build on an error or cancellation. The nightly recovery path can mark that failed page again.
+
+The contract runs the stored command twice against three due jobs. A 40.1-second first build succeeds, the other two stay due, and the next invocation builds both. A separate run raises a cancellation during the first build, records that failure and builds both remaining pages. The 100-second timeout applies to the statement as a whole.
