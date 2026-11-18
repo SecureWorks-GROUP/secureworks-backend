@@ -83,6 +83,7 @@ function makeWorld() {
     searches: [] as string[],
     bills: [] as Array<Record<string, unknown>>,
     checks: [] as Array<PayRunReleaseXeroCheck | null>,
+    recorded: [] as Array<{ runId: string; invoiceId: string; actor: string; found: any }>,
     invoiceNumber: "ZZTEST-INV-7" as string | null,
     logs: [] as Record<string, unknown>[],
   };
@@ -126,6 +127,10 @@ function makeWorld() {
     log: pushDeps.log,
     now: () => "2026-11-24T02:00:00.000Z",
     invoiceNumber: () => Promise.resolve(db.invoiceNumber),
+    recordFound: (runId, invoiceId, actor, found) => {
+      db.recorded.push({ runId, invoiceId, actor, found });
+      return Promise.resolve();
+    },
     searchXero: (number) => {
       db.searches.push(number);
       return Promise.resolve(db.bills);
@@ -260,15 +265,52 @@ Deno.test("release: a lapsed claim, the server searches Xero, finds no bill and 
   assert(JSON.stringify(db.logs).includes('"xero_searched":true'));
 });
 
-Deno.test("release: a lapsed claim and a bill in Xero: refused, nothing released, bill ids logged", async () => {
+Deno.test("release: a lapsed claim and a bill in Xero: refused, nothing released, the bill kept on the run row", async () => {
   const { db, releaseDeps } = makeWorld();
   db.row.claim_lapsed = true;
-  db.bills = [{ InvoiceID: "ZZTEST-XERO-BILL-1", Status: "DRAFT" }];
+  db.bills = [{
+    InvoiceID: "ZZTEST-XERO-BILL-1",
+    InvoiceNumber: "ZZTEST-INV-7",
+    Status: "DRAFT",
+    Reference: "ZZTEST a trade name",
+    Total: 112,
+  }];
   await refused(press(releaseDeps), "pay_run_xero_check_found_in_xero", 409);
   assertEquals(db.checks, [null]);
   assertEquals(db.row.released_at, null);
   assertEquals(db.invoice.pay_run_id, RUN);
-  assert(JSON.stringify(db.logs).includes("ZZTEST-XERO-BILL-1"));
+  // Who, when, the number searched, the bill (id, number, status only), the count.
+  assertEquals(db.recorded, [{
+    runId: RUN,
+    invoiceId: INV,
+    actor: APPROVER,
+    found: {
+      checked_by: APPROVER,
+      checked_at: "2026-11-24T02:00:00.000Z",
+      source: "ops_api_xero_lookup",
+      searched_number: "ZZTEST-INV-7",
+      bills_found: 1,
+      bills: [{ xero_bill_id: "ZZTEST-XERO-BILL-1", number: "ZZTEST-INV-7", status: "DRAFT" }],
+    },
+  }]);
+  const logged = JSON.stringify(db.logs);
+  assert(logged.includes("ZZTEST-XERO-BILL-1"));
+  assert(logged.includes('"recorded":true'));
+  assertEquals(logged.includes("trade name"), false);
+});
+
+Deno.test("release: a found bill that cannot be kept still refuses, and the log says it was not kept", async () => {
+  const { db, releaseDeps } = makeWorld();
+  db.row.claim_lapsed = true;
+  db.bills = [{ InvoiceID: "ZZTEST-XERO-BILL-1" }];
+  await refused(
+    press({ ...releaseDeps, recordFound: () => Promise.reject(new Error("ZZTEST write failed")) }),
+    "pay_run_xero_check_found_in_xero",
+    409,
+  );
+  assertEquals(db.checks, [null]);
+  assertEquals(db.row.released_at, null);
+  assert(JSON.stringify(db.logs).includes('"recorded":false'));
 });
 
 Deno.test("release: a lapsed claim and Xero cannot be searched, or no number to search: refused, nothing released", async () => {
@@ -359,6 +401,31 @@ function rpcClient(answer: {
 }
 
 const noSearch = () => Promise.reject(new Error("ZZTEST no Xero in this test"));
+
+Deno.test("release: the found bill is kept through the database, and anything but recorded throws", async () => {
+  const found = {
+    checked_by: APPROVER,
+    checked_at: "2026-11-24T02:00:00.000Z",
+    source: "ops_api_xero_lookup" as const,
+    searched_number: "ZZTEST-INV-7",
+    bills_found: 1,
+    bills: [{ xero_bill_id: "ZZTEST-XERO-BILL-1", number: null, status: null }],
+  };
+  const ok = rpcClient({ data: { recorded: true } });
+  await payRunReleaseDepsFromClient(ok.client, () => Promise.resolve(true), noSearch)
+    .recordFound(RUN, INV, APPROVER, found);
+  assertEquals(ok.calls, [{
+    name: "record_trade_pay_run_xero_found",
+    params: { p_run_id: RUN, p_invoice_id: INV, p_actor: APPROVER, p_found: found },
+  }]);
+  for (const answer of [{ error: { message: "pay_run_xero_found_invalid" } }, { data: null }, { data: { recorded: false } }]) {
+    const c = rpcClient(answer);
+    await assertRejects(() =>
+      payRunReleaseDepsFromClient(c.client, () => Promise.resolve(true), noSearch)
+        .recordFound(RUN, INV, APPROVER, found)
+    );
+  }
+});
 
 Deno.test("release: the invoice number is read by id, and a failed read throws", async () => {
   const ok = rpcClient({ invoice: { data: { invoice_number: "ZZTEST-INV-7" }, error: null } });

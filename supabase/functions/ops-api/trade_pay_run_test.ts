@@ -24,6 +24,8 @@ import {
   payRunWeek,
   HOURLY_NO_AGREED_AMOUNT_NOTE,
   readPayRun,
+  xeroBillFoundStop,
+  xeroSearchBeforeReleaseNote,
   type ReconcileRaise,
   type ReconcileWithdraw,
   STANDING_CHECK_CODES,
@@ -100,7 +102,13 @@ type World = {
   runBlocked?: boolean;
   run?: any;
   runInvoices?: Array<
-    { invoice_id: string; pushed_at: string | null; released_at?: string | null }
+    {
+      invoice_id: string;
+      pushed_at: string | null;
+      released_at?: string | null;
+      release_xero_found?: Record<string, unknown> | null;
+      push_claimed_at?: string | null;
+    }
   >;
   lines?: any[];
   held?: any[];
@@ -830,7 +838,8 @@ async function installedColumns(): Promise<Map<string, Set<string>>> {
   for await (const e of Deno.readDir(dir)) {
     if (
       !e.name.endsWith("_trade_pay_run_holds_status.sql") &&
-      !e.name.endsWith("_trade_pay_run_release.sql")
+      !e.name.endsWith("_trade_pay_run_release.sql") &&
+      !e.name.endsWith("_trade_pay_run_xero_found.sql")
     ) continue;
     const later = await Deno.readTextFile(new URL(e.name, dir));
     for (
@@ -929,6 +938,8 @@ Deno.test("pay run: the production reader reads a recorded week against the inst
   assert(!schema.get("trade_pay_run_invoices")?.has("pay_run_id"));
   // cl-payrun-escape: the run read selects the release record.
   assert(schema.get("trade_pay_run_invoices")?.has("released_at"));
+  // cl-payrun-xero-found: and the found Xero bill.
+  assert(schema.get("trade_pay_run_invoices")?.has("release_xero_found"));
   const RUN = "0a200000-0000-4000-8000-000000000501";
   const rows = [
     invoice(1, { pay_run_id: RUN, status: "approved" }),
@@ -1697,6 +1708,93 @@ Deno.test("pay run: an invoice released from the run is stopped there and out of
   assertEquals(out.counts.clean, 1);
   assertEquals(out.totals.super, 120);
   assertEquals(out.super_by_person.map((p: any) => p.super_amount), [120]);
+});
+
+Deno.test("pay run: a Xero bill a release press found shows on that run row, and only while it is neither pushed nor released", async () => {
+  const found = {
+    result: "found_in_xero",
+    checked_by: APPROVER,
+    checked_at: "2026-11-24T02:00:00Z",
+    source: "ops_api_xero_lookup",
+    searched_number: "ZZTEST-INV-2",
+    bills_found: 1,
+    bills: [{ xero_bill_id: "ZZTEST-XERO-BILL-2", number: "ZZTEST-INV-2", status: "DRAFT" }],
+  };
+  const rows = [
+    invoice(1, { pay_run_id: "run-1", status: "pushed_to_xero", xero_bill_id: "ZZTEST-BILL-1" }),
+    invoice(2, { pay_run_id: "run-1", status: "approved" }),
+    invoice(3, { pay_run_id: null, status: "pending_ops_review" }),
+  ];
+  const out: any = await run({
+    rows,
+    run: { id: "run-1", week_start: WEEK },
+    runInvoices: [
+      { invoice_id: id(1), pushed_at: "2026-11-24T01:00:00Z", release_xero_found: found },
+      { invoice_id: id(2), pushed_at: null, release_xero_found: found },
+      { invoice_id: id(3), pushed_at: null, released_at: "2026-11-24T03:00:00Z", release_xero_found: found },
+    ],
+  }, APPROVER);
+  const by = (n: number) => out.invoices.find((i: any) => i.invoice_id === id(n));
+  const stop = by(2).stops.find((x: any) => x.code === "xero_bill_found_at_release");
+  assertEquals(by(2).verdict, "stopped");
+  assertEquals(
+    stop.words,
+    "Xero already has a bill for this invoice: ZZTEST-INV-2 (draft), found when an approver tried to take it out of the run on 24 Nov. It stays in the run: match the bill to the invoice by hand.",
+  );
+  assertEquals(by(1).stops.some((x: any) => x.code === "xero_bill_found_at_release"), false);
+  assertEquals(by(3).stops.map((x: any) => x.code), ["released_from_run"]);
+});
+
+Deno.test("pay run: a run row whose push lapsed carries the director's search words; a live, pushed or released one does not", async () => {
+  const rows = [1, 2, 3, 4, 5].map((n) => invoice(n, { pay_run_id: "run-1", status: "approved" }));
+  const now = new Date("2026-11-24T02:00:00Z");
+  const out: any = await readPayRun(reads({
+    rows,
+    run: { id: "run-1", week_start: WEEK },
+    runInvoices: [
+      // Lapsed: claimed 30 minutes ago, never given back.
+      { invoice_id: id(1), pushed_at: null, push_claimed_at: "2026-11-24T01:30:00Z" },
+      // Live: claimed 5 minutes ago.
+      { invoice_id: id(2), pushed_at: null, push_claimed_at: "2026-11-24T01:55:00Z" },
+      { invoice_id: id(3), pushed_at: "2026-11-24T01:31:00Z", push_claimed_at: "2026-11-24T01:30:00Z" },
+      { invoice_id: id(4), pushed_at: null, push_claimed_at: "2026-11-24T01:30:00Z", released_at: "2026-11-24T01:50:00Z" },
+      { invoice_id: id(5), pushed_at: null, push_claimed_at: null },
+    ],
+  }), { orgId: ORG, weekStart: WEEK, actorUserId: APPROVER, now });
+  const has = (n: number) =>
+    out.invoices.find((i: any) => i.invoice_id === id(n)).stops
+      .filter((x: any) => x.code === "xero_search_before_release");
+  const one = has(1);
+  assertEquals(one.length, 1);
+  const number = rows[0].invoice_number;
+  assertEquals(
+    one[0].words,
+    `Xero is searched for bill number ${number} before release. If anyone changed this bill's number and reference in Xero by hand, the search will not find it: check Xero first.`,
+  );
+  for (const n of [2, 3, 4, 5]) assertEquals(has(n), []);
+  assertEquals(out.invoices.find((i: any) => i.invoice_id === id(1)).verdict, "stopped");
+});
+
+Deno.test("pay run: the search words need a number, and are the director's words exactly", () => {
+  assertEquals(xeroSearchBeforeReleaseNote(null), null);
+  assertEquals(xeroSearchBeforeReleaseNote("  "), null);
+  assertEquals(
+    xeroSearchBeforeReleaseNote(" ZZTEST-7 ")?.words,
+    "Xero is searched for bill number ZZTEST-7 before release. If anyone changed this bill's number and reference in Xero by hand, the search will not find it: check Xero first.",
+  );
+});
+
+Deno.test("pay run: the found-bill words name each bill by number, else its Xero id, and never read a bad record", () => {
+  assertEquals(xeroBillFoundStop(null), null);
+  assertEquals(xeroBillFoundStop({ bills: [] }), null);
+  assertEquals(xeroBillFoundStop({ bills: [{ number: " " }] }), null);
+  assertEquals(
+    xeroBillFoundStop({
+      checked_at: "not a time",
+      bills: [{ number: "ZZTEST-A", status: "PAID" }, { xero_bill_id: "ZZTEST-ID-B" }],
+    })?.words,
+    "Xero already has bills for this invoice: ZZTEST-A (paid), ZZTEST-ID-B, found when an approver tried to take it out of the run. It stays in the run: match the bill to the invoice by hand.",
+  );
 });
 
 Deno.test("pay run: next week's read takes an invoice released from last week's run, clean", async () => {

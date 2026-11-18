@@ -37,6 +37,7 @@ import {
   type WorkOrderTotalCapRefusal,
 } from './work_order_total_cap.ts'
 import { listOverbilledJobWorkOrders, OverbilledReadError } from './work_order_overbilled.ts'
+import { capScopedJobIds, WorkOrderCapScopeUnreadable } from './work_order_cap_scope.ts'
 import {
   assertTradeMayBillExtraJobs,
   commissionLinesTotalEx,
@@ -11299,6 +11300,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         )
         return json(result.body, result.status)
       }
+      case 'work_order_cap_start':
+      case 'set_work_order_cap_start': {
+        const { workOrderCapStartAction } = await import('./work_order_cap_start.ts')
+        const result = await workOrderCapStartAction(client, action, req.method, body, {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          signedIn: authMode === 'jwt',
+          userId: authMode === 'jwt' ? authUser?.id || null : null,
+          email: authMode === 'jwt' ? authUser?.email || null : null,
+        })
+        return json(result.body, result.status)
+      }
       case 'read_scope_payment_stages':
       case 'confirm_scope_payment_stage': {
         const { scopePaymentStagesAction } = await import('./scope_payment_stages.ts')
@@ -19524,7 +19536,9 @@ export async function _persistWorkOrderInvoice(
 // Unreadable: 503, never read as "nothing billed". Ruling 17c: a job paid
 // hourly up to the maximum its job budget seals is capped here too, at that
 // maximum plus the approver's raises (job_labour_cap.ts); there is no other
-// labour cap refusal.
+// labour cap refusal. Follow-up 49 item 9(b): with trade_line_hold_v1 on, it
+// caps only the jobs work_order_cap_scope puts under the start date, the same
+// rule as the send's sorter and the database guard; off, every job as before.
 export async function _assertWithinWorkOrderTotal(
   client: any,
   tradeUser: { id: string; orgId: string },
@@ -19562,10 +19576,21 @@ export async function _assertWithinWorkOrderTotal(
           if (e instanceof JobLabourPayReadError) throw new WorkOrderTotalCapReadError()
           throw e
         }
-        const withWorkOrder: string[] = [...new Set<string>([
+        const candidates: string[] = [...new Set<string>([
           ...(approved || []).map((r: any) => String(r.job_id)),
           ...hourlyCapped,
         ])]
+        if (candidates.length === 0) return []
+        // Follow-up 49 item 9(b): with trade_line_hold_v1 on, only the jobs
+        // under the cap's start date (work_order_cap_scope); off, every one,
+        // as before. A failed switch or scope read is this guard's 503.
+        let withWorkOrder: string[]
+        try {
+          withWorkOrder = await capScopedJobIds(client, candidates)
+        } catch (e) {
+          if (e instanceof WorkOrderCapScopeUnreadable) throw new WorkOrderTotalCapReadError()
+          throw e
+        }
         if (withWorkOrder.length === 0) return []
         try {
           return (await loadTradeInvoiceJobModes(client, {
