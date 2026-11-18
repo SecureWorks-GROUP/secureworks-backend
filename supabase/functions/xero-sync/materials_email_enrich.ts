@@ -19,6 +19,11 @@
 // ════════════════════════════════════════════════════════════
 
 import { extractJobNumber } from "./materials_ingest.ts";
+import {
+  parseAmounts,
+  parseInvoiceNumber,
+} from "../_shared/supplier_credit_parse.ts";
+export { parseAmounts, parseInvoiceNumber };
 
 // ─────────────────────────────────────────────────────────────
 // (a) Supplier invoice text parsing (enrichment / ref recovery)
@@ -47,41 +52,6 @@ function classifySupplier(text: string): SupplierClass {
   if (/\bcmi\b|combined metal industries/.test(t)) return "cmi";
   if (/ampelite/.test(t)) return "ampelite";
   return "unknown";
-}
-
-function parseMoney(s: string | null | undefined): number | null {
-  if (!s) return null;
-  const n = Number(s.replace(/[^0-9.]/g, ""));
-  return Number.isFinite(n) ? n : null;
-}
-
-// Best-effort invoice-number extraction across the supplier classes we email with.
-export function parseInvoiceNumber(text: string): string | null {
-  const patterns = [
-    /Tax\s+Invoice\s*(?:No\.?|Number|#)?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-\/]{3,})/i,
-    /Invoice\s*(?:No\.?|Number|#)\s*[:#]?\s*([A-Z0-9][A-Z0-9\-\/]{3,})/i,
-    /\bINV[\-\s]?([A-Z0-9\-\/]{3,})/i,
-  ];
-  for (const re of patterns) {
-    const m = text.match(re);
-    if (m) return m[1].replace(/[.,;]+$/, "").toUpperCase();
-  }
-  return null;
-}
-
-// Amount extraction: prefer an explicit ex-GST subtotal; fall back to the
-// GST-inclusive total (flagged separately so the caller knows which it got).
-export function parseAmounts(
-  text: string,
-): { exGst: number | null; incGst: number | null } {
-  const exMatch =
-    text.match(/Sub[\s\-]?total\s*(?:\(ex[^)]*\))?\s*\$?\s*([\d,]+\.\d{2})/i) ||
-    text.match(/Total\s*\(ex[^)]*\)\s*\$?\s*([\d,]+\.\d{2})/i);
-  const incMatch = text.match(
-    /Total\s*(?:\(inc[^)]*\)|Due|Amount)?\s*\$?\s*([\d,]+\.\d{2})/i,
-  ) ||
-    text.match(/Amount\s*Due\s*\$?\s*([\d,]+\.\d{2})/i);
-  return { exGst: parseMoney(exMatch?.[1]), incGst: parseMoney(incMatch?.[1]) };
 }
 
 export function parseSupplierInvoiceText(text: string): ParsedSupplierInvoice {
