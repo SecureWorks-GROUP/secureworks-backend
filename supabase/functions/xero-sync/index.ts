@@ -60,6 +60,7 @@ import { builderReferenceAnnotation, decideBuilderReference, loadBuilderReferenc
 // tests can import matchUnlinkedInvoices without binding a port.
 import { parseBankSummary } from './bank_summary.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { matchPendingRequest, matchSweepRequest, readMatcherSwitch, syncMatchRun, type SyncMatchReport } from './match/match_run.ts'
 import {
   buildMaterialsFactRow,
   buildQueueRow,
@@ -236,6 +237,21 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await refreshToken(sb))
       case 'sync_invoices':
         return json(await syncInvoices(sb))
+      case 'match_pending': {
+        // P2-02.7: re-match bills waiting in match_queue, 50 at a time. One
+        // query when nothing waits. POST with the exact service key. Proposals
+        // only (match/match_run.ts); the sync drains the queue on its own.
+        const out = await matchPendingRequest(req, sb, SUPABASE_SERVICE_KEY)
+        return json(out.body, out.status)
+      }
+      case 'match_sweep': {
+        // P2-02.7: bills waiting for a person with no open Reconcile item,
+        // 50 a call, by document id descending. POST with the exact service
+        // key; the caller passes back `next` as `?after=` until `done`.
+        // Proposals only, behind reconcile_matcher_v1.
+        const out = await matchSweepRequest(req, sb, SUPABASE_SERVICE_KEY)
+        return json(out.body, out.status)
+      }
       case 'sync_reports':
         return json(await syncReports(sb))
       case 'sync_projects':
@@ -768,6 +784,12 @@ async function syncInvoices(sb: any) {
   const { accessToken, tenantId } = await getToken(sb)
   let tradePdfBackfilled = 0
   const costLinesChanged = new Set<string>()
+  // P2-02.7: the matcher switch, read once here. Off (or unreadable), the sync
+  // makes no matcher read or write. On, the bills this sync changes are matched
+  // after the Xero paging, in one bounded step (syncMatchRun).
+  const matcher = await readMatcherSwitch(sb)
+  const matchChanged = new Set<string>()
+  let matchRun: SyncMatchReport | { switch: 'off'; error?: string } = { switch: 'off', ...(matcher.error ? { error: matcher.error } : {}) }
   let costLinesWritten = 0
   const costLinesErrors: string[] = []
   let costLinesOn = false
@@ -1201,6 +1223,9 @@ async function syncInvoices(sb: any) {
           if (error) throw error
           costLinesWritten += Number(data?.lines_written ?? 0)
           for (const id of data?.changed ?? []) costLinesChanged.add(id)
+          if (matcher.on) {
+            for (const id of data?.changed ?? []) if (typeof id === 'string') matchChanged.add(id)
+          }
         } catch (e) {
           const message = (e as Error).message
           costLinesErrors.push(message)
@@ -1218,6 +1243,18 @@ async function syncInvoices(sb: any) {
     { key: 'sync_invoices', cursor_at: runStartedAt, note: `synced ${totalSynced} since ${modifiedSince || 'the beginning'}`, updated_at: new Date().toISOString() },
     { onConflict: 'key' },
   )
+
+  // P2-02.7: propose a job for the bills this sync changed, then queued and
+  // waiting bills, after the paging and with its own budget. Proposals only;
+  // never fails the sync.
+  if (matcher.on) {
+    try {
+      matchRun = await syncMatchRun(sb, { on: true, changed: [...matchChanged] })
+    } catch {
+      matchRun = { switch: 'off', error: 'match_step_threw' }
+      console.error('[xero-sync] matcher step threw')
+    }
+  }
 
   // ── Paid close-out catch-up: invoiced and final_payment fencing and patio cards whose
   //    last invoice was paid before the card got there (switch on only; ops-api decides).
@@ -1387,11 +1424,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, cost_lines: { lines_written: costLinesWritten }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
+    payload: { synced: totalSynced, cost_lines: { lines_written: costLinesWritten }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, cost_lines_match: matchRun, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, cost_lines: { lines_written: costLinesWritten }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
+  return { success: true, synced: totalSynced, cost_lines: { lines_written: costLinesWritten }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, cost_lines_match: matchRun, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
 }
 
 
