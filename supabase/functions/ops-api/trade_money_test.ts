@@ -269,7 +269,7 @@ Deno.test("an invoice with no Xero bill is listed as not_in_xero and left out of
     { invoice_id: "unbilled", invoice_number: "unbilled", week_start: "2026-08-31", amount: 0, status: "not_in_xero" },
     { invoice_id: "unbilled-legacy", invoice_number: "unbilled-legacy", week_start: "2026-08-24", amount: 0, status: "not_in_xero" },
   ]);
-  assertEquals(body.super.by_invoice.find(i => i.invoice_id === "a1")?.status, "paid_to_fund");
+  assertEquals(body.super.by_invoice.find(i => i.invoice_id === "a1")?.status, "marked_paid_by_office");
   assertEquals(body.super.by_invoice.find(i => i.invoice_id === "legacy")?.status, "not_recorded");
 
   // The office pushes the bill: a retry counts it like any other invoice.
@@ -278,7 +278,7 @@ Deno.test("an invoice with no Xero bill is listed as not_in_xero and left out of
   assert("super" in pushed.body);
   assertEquals(pushed.body.super.not_in_xero_count, 2);
   assertEquals(pushed.body.super.since_start, baseline.body.super.since_start + 12);
-  assertEquals(pushed.body.super.by_invoice.find(i => i.invoice_id === "unbilled")?.status, "paid_to_fund");
+  assertEquals(pushed.body.super.by_invoice.find(i => i.invoice_id === "unbilled")?.status, "marked_paid_by_office");
 
   // A row returned without the bill column refuses rather than counting as billed or unbilled.
   delete tables.trade_invoices.find(i => i.id === "a2")!.xero_bill_id;
