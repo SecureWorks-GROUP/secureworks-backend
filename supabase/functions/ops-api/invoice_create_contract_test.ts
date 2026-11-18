@@ -1,5 +1,6 @@
 // deno-lint-ignore-file no-explicit-any no-import-prefix
 import {
+  assert,
   assertEquals,
   assertMatch,
   assertNotEquals,
@@ -913,6 +914,7 @@ Deno.test("the customer invoice uses the bound job for every line and reports st
       for (const line of invoice.LineItems) {
         assertEquals(line.Tracking, problem ? undefined : [{ Name: "Business Unit", Option: "SW - FENCING" }]);
       }
+      assert("division_tag" in result);
       assertEquals(result.division_tag, problem ? "missing" : "set");
       assertEquals(result.division_problem, problem);
     }
@@ -955,6 +957,7 @@ Deno.test("retry after a preflight refusal reads the corrected job number", asyn
     job.job_number = "SWP-ZZTEST";
     job.type = "patio";
     const result = await createInvoice(client, invoiceBody());
+    assert("division_tag" in result);
     assertEquals(result.division_tag, "set");
     assertEquals(result.division_problem, null);
     assertEquals(provider.creates.length, 1);
