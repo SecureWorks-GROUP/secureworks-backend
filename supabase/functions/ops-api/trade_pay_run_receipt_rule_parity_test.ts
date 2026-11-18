@@ -2,14 +2,19 @@
 // Part of SEC-465. The pay-back receipt rule lives in SQL (the pay run check)
 // and in TypeScript (the push). trade_pay_run_push_test.ts runs the shared case
 // table through the real push; the newest contract that carries zz_matrix runs
-// its rows through the real check. This test fails when those two tables
-// differ, so changing the rule on one side alone turns CI red.
+// its rows through the real check, and its zz_image_matrix the image rule's.
+// This test fails when those tables differ in any column, so changing the rule
+// on one side alone turns CI red.
 import { assert, assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   caseTableDifferences,
+  imageCaseTableDifferences,
+  PAY_BACK_RECEIPT_IMAGE_CASES,
   PAY_BACK_RECEIPT_RULE_CASES,
+  parseContractImageMatrix,
   parseContractMatrix,
   pushRefusalForCheckStops,
+  pushRefusalForImageStops,
 } from "./trade_pay_run_receipt_rule_cases.ts";
 import { payBackReceiptRefusal } from "./trade_pay_run.ts";
 
@@ -46,6 +51,37 @@ Deno.test("receipt rule parity: the newest check contract's matrix is the push's
   const rows = parseContractMatrix(sql);
   assertEquals(rows.length, PAY_BACK_RECEIPT_RULE_CASES.length, name);
   assertEquals(caseTableDifferences(PAY_BACK_RECEIPT_RULE_CASES, rows), [], name);
+});
+
+Deno.test("receipt image parity: the newest check contract's image matrix is the push's image case table, every column", async () => {
+  const { name, sql } = await newestRuleContract();
+  const rows = parseContractImageMatrix(sql);
+  assertEquals(rows.length, PAY_BACK_RECEIPT_IMAGE_CASES.length, name);
+  assertEquals(imageCaseTableDifferences(PAY_BACK_RECEIPT_IMAGE_CASES, rows), [], name);
+  // The push's own rule gives each image case's refusal.
+  for (const [path, link, , refusal] of PAY_BACK_RECEIPT_IMAGE_CASES) {
+    assertEquals(
+      payBackReceiptRefusal({
+        status: "approved",
+        unbooked_job_id: null,
+        receipt_storage_path: path,
+        receipt_photo_url: link,
+      }),
+      refusal,
+      JSON.stringify([path, link]),
+    );
+  }
+  // A changed row is found; an unknown stop is never read as no image.
+  const changed = rows.map((r) => [...r] as typeof r);
+  changed[0] = [changed[0][0], changed[0][1], ["reimbursement_no_receipt"]];
+  assertEquals(imageCaseTableDifferences(PAY_BACK_RECEIPT_IMAGE_CASES, changed).length, 1);
+  assertEquals(pushRefusalForImageStops(["reimbursement_no_receipt"]), "pay_run_receipt_no_image");
+  assertThrows(() => pushRefusalForImageStops(["reimbursement_receipt_not_approved"]));
+  assertEquals(
+    parseContractImageMatrix("INSERT INTO zz_image_matrix VALUES (E'\\t',NULL,'{}'),('','x','{a}');"),
+    [["\t", null, []], ["", "x", ["a"]]],
+  );
+  assertThrows(() => parseContractImageMatrix("INSERT INTO zz_image_matrix VALUES (true,NULL,'{}');"));
 });
 
 Deno.test("receipt rule parity: the push's own rule gives every case's push refusal", () => {
