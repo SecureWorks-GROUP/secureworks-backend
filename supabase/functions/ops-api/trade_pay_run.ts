@@ -700,8 +700,10 @@ export type PayBackReceipt = {
   unbooked_job_id: unknown;
   /** The office approved this pay-back line (office_review_status exactly 'approved'). */
   line_approved?: boolean;
-  /** The stored receipt image's path; blank is no image. */
+  /** The stored receipt image's path. */
   receipt_storage_path?: unknown;
+  /** The receipt photo's link. The receipt has an image when either is set. */
+  receipt_photo_url?: unknown;
   /** No receipt id on the line, or the receipt row is gone. */
   missing?: boolean;
 };
@@ -710,6 +712,14 @@ export type PayBackReceipt = {
 // newline around a status is kept, on both sides (never String.trim()).
 const spaceTrimmedLower = (v: unknown) =>
   String(v ?? "").replace(/^ +| +$/g, "").toLowerCase();
+
+/** The receipt has an image: its stored path or its photo link is not blank
+ * (spaces trimmed). The check's twin is NULLIF(btrim(...), '') IS NULL on both
+ * columns in its reimbursement_no_receipt stop. */
+function hasReceiptImage(row: PayBackReceipt): boolean {
+  const blank = (v: unknown) => String(v ?? "").replace(/^ +| +$/g, "") === "";
+  return !blank(row.receipt_storage_path) || !blank(row.receipt_photo_url);
+}
 
 /** A receipt the office has queried or rejected (spaces trimmed, any case).
  * The check's twin is the reimbursement_queried_or_rejected stop. */
@@ -773,13 +783,16 @@ export const PAY_BACK_RECEIPT_REFUSALS: readonly {
     refuses: (r) => !payBackReceiptAllowed(r),
   },
   {
-    // The check's reimbursement_no_receipt stop (a blank stored image), read
-    // again now: an image removed after the check is never paid back.
+    // The check's reimbursement_no_receipt stop, read again now: an image
+    // removed after the check is never paid back. A receipt has an image when
+    // either its stored path or its photo link is set (the check's rule, and
+    // the send's); only both blank is refused. Spaces only are trimmed, as
+    // Postgres btrim does.
     code: "pay_run_receipt_no_image",
     outcome: "receipt_no_image",
     words:
       "A pay-back receipt on this invoice has no stored receipt image, so the invoice is not pushed. Store the receipt image, or take the invoice out of the run.",
-    refuses: (r) => !r.missing && String(r.receipt_storage_path ?? "").replace(/^ +| +$/g, "") === "",
+    refuses: (r) => !r.missing && !hasReceiptImage(r),
   },
 ];
 
@@ -1796,7 +1809,8 @@ export type PayRunPushDeps = {
   invoiceForPush(invoiceId: string): Promise<Record<string, any> | null>;
   /**
    * The receipts of the invoice's pay-back lines (status, the not-booked
-   * mark, the stored image and whether the office approved the line), read
+   * mark, the image path and photo link, and whether the office approved the
+   * line), read
    * now: one per pay-back line, `missing` when the line has no receipt id or
    * its receipt row is gone. Throws 503 when they cannot be read.
    */
@@ -2214,7 +2228,10 @@ export function payRunPushDepsFromClient(
       if (ids.length > 0) {
         const { data: receipts, error: receiptError } = await client.from(
           "expense_receipts",
-        ).select("id, status, unbooked_job_id, receipt_storage_path").in("id", ids);
+        ).select("id, status, unbooked_job_id, receipt_storage_path, receipt_photo_url").in(
+          "id",
+          ids,
+        );
         if (receiptError) throw unreadable("the pay-back receipts");
         for (const r of receipts || []) byId.set(String(r?.id ?? ""), r);
       }
@@ -2228,6 +2245,7 @@ export function payRunPushDepsFromClient(
             unbooked_job_id: r.unbooked_job_id ?? null,
             line_approved: l.line_approved,
             receipt_storage_path: r.receipt_storage_path ?? null,
+            receipt_photo_url: r.receipt_photo_url ?? null,
           }
           : {
             status: null,
