@@ -276,3 +276,19 @@ Deno.test("ZZTEST line-hold answer keeps main's combined skips and adds not_adde
     { skipped_items: [asked, other] },
   );
 });
+
+Deno.test("ZZTEST cl-receipt-ownjob: a marked receipt the office has not confirmed waits; confirmed and unmarked join", async () => {
+  const client = fakeClient({
+    flag: true,
+    receipts: [
+      receipt("ZZTEST-r1"),
+      receipt("ZZTEST-r2", { job_id: "ZZTEST-job-b", unbooked_job_id: "ZZTEST-job-b" }),
+      receipt("ZZTEST-r3", { job_id: "ZZTEST-job-b", unbooked_job_id: "ZZTEST-job-b", status: "approved" }),
+    ],
+  });
+  const { own, result, answer } = await generate(client);
+  assertEquals(own.items.map((item) => item.expense_receipt_id).sort(), ["ZZTEST-r1", "ZZTEST-r3"]);
+  assertEquals(result.lines.map((line: any) => line.expense_receipt_id).sort(), ["ZZTEST-r1", "ZZTEST-r3"]);
+  // Waiting, not refused: no not_added line each week until the office confirms.
+  assertEquals(answer, { skipped_items: [], not_added: [] });
+});

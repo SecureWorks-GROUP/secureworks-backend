@@ -11,6 +11,7 @@ import {
 import { ExpenseCaptureError } from "./expense_capture_v2.ts";
 import {
   assertUnbookedApprovalConfirmed,
+  expenseHeldNotBooked,
   assertUnbookedMoveAllowed,
   expenseJobIdOf,
   expenseUnbookedJobMark,
@@ -335,21 +336,41 @@ Deno.test("no job: clearing the job clears the mark without a read", async () =>
 
 // ---- approval of a marked receipt needs a deliberate confirm ----
 
-Deno.test("approve: a marked receipt is refused without confirm, from any caller, and is unchanged", async () => {
-  for (const caller of [office, serverKey]) {
-    const { client, read, state } = store({ row: { job_id: otherJob, unbooked_job_id: otherJob } });
-    const before = read();
-    for (const confirm of [undefined, false, "true", 1]) {
-      const err = await assertRejects(
-        () => approveExpense(client, { expense_id: expenseId, confirm_unbooked: confirm }, caller),
-        ExpenseCaptureError,
-      );
-      const body = err.body as Record<string, unknown>;
-      assertEquals([err.status, body.error], [409, "expense_unbooked_confirm_needed"]);
-      assertEquals(body.userMessage, body.message);
-    }
-    assertEquals([read(), state.writes], [before, 0]);
+Deno.test("approve: a marked receipt is refused without confirm from the office, and is unchanged", async () => {
+  const { client, read, state } = store({ row: { job_id: otherJob, unbooked_job_id: otherJob } });
+  const before = read();
+  for (const confirm of [undefined, false, "true", 1]) {
+    const err = await assertRejects(
+      () => approveExpense(client, { expense_id: expenseId, confirm_unbooked: confirm }, office),
+      ExpenseCaptureError,
+    );
+    const body = err.body as Record<string, unknown>;
+    assertEquals([err.status, body.error], [409, "expense_unbooked_confirm_needed"]);
+    assertEquals(body.userMessage, body.message);
   }
+  assertEquals([read(), state.writes], [before, 0]);
+});
+
+Deno.test("approve: the server key (Jarvis) gets a plain office-only refusal, even with confirm", async () => {
+  const { client, read, state } = store({ row: { job_id: otherJob, unbooked_job_id: otherJob } });
+  const before = read();
+  for (const confirm of [undefined, true]) {
+    const err = await assertRejects(
+      () => approveExpense(client, { expense_id: expenseId, confirm_unbooked: confirm }, serverKey),
+      ExpenseCaptureError,
+    );
+    const body = err.body as Record<string, unknown>;
+    assertEquals([err.status, body.error], [409, "expense_unbooked_office_only"]);
+    assertEquals(body.userMessage,
+      "This receipt was sent by someone who is not booked on its job, so only the office can approve it.");
+  }
+  assertEquals([read(), state.writes], [before, 0]);
+  // Unmarked receipts and query/reject stay as on main for the server key.
+  const unmarked = store({ row: { job_id: ownJob } });
+  assertEquals((await approveExpense(unmarked.client, { expense_id: expenseId }, serverKey)).status, "approved");
+  const query = store({ row: { job_id: otherJob, unbooked_job_id: otherJob } });
+  await approveExpense(query.client, { expense_id: expenseId, intent: "queried" }, serverKey);
+  assertEquals(query.read().status, "queried");
 });
 
 Deno.test("approve: a marked receipt approves with confirm_unbooked true, keeping its mark", async () => {
@@ -397,9 +418,21 @@ Deno.test("approve: a failed approve write is a 503, never a success", async () 
 });
 
 Deno.test("confirm rule and job id reading", () => {
-  assertUnbookedApprovalConfirmed("approved", null, undefined);
-  assertUnbookedApprovalConfirmed("queried", otherJob, undefined);
-  assertUnbookedApprovalConfirmed("approved", otherJob, true);
+  assertUnbookedApprovalConfirmed("approved", null, undefined, false);
+  assertUnbookedApprovalConfirmed("queried", otherJob, undefined, false);
+  assertUnbookedApprovalConfirmed("approved", otherJob, true, true);
+  // The cost and pay-back hold: marked and not yet confirmed.
+  assertEquals(
+    [
+      expenseHeldNotBooked({ unbooked_job_id: otherJob, status: "pending" }),
+      expenseHeldNotBooked({ unbooked_job_id: otherJob, status: "queried" }),
+      expenseHeldNotBooked({ unbooked_job_id: otherJob, status: "approved" }),
+      expenseHeldNotBooked({ unbooked_job_id: otherJob, status: "pushed_to_xero" }),
+      expenseHeldNotBooked({ unbooked_job_id: null, status: "pending" }),
+      expenseHeldNotBooked(null),
+    ],
+    [true, true, false, false, false, false],
+  );
   assertUnbookedMoveAllowed("approved", null);
   assertUnbookedMoveAllowed("pending", otherJob);
   assertEquals(

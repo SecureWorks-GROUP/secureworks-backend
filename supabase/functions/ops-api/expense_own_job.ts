@@ -62,15 +62,40 @@ export async function expenseUnbookedJobMark(
 }
 
 /**
- * Approving a marked receipt needs body.confirm_unbooked === true, from any
- * caller (server key included). Query and reject never need it.
+ * A marked receipt the office has not confirmed yet. It counts on no job's cost
+ * lines and is paid back on no trade invoice until the office confirms it at
+ * approval (the confirm is the only way to approved; pushed_to_xero needs
+ * approved). The SQL twin is the `held` term in job_cost_lines_sync_receipt
+ * (cost-exclusion migration); change both together.
+ */
+export function expenseHeldNotBooked(
+  row: { unbooked_job_id?: unknown; status?: unknown } | null | undefined,
+): boolean {
+  if (!row || !expenseJobIdOf(row.unbooked_job_id)) return false;
+  const status = String(row.status ?? "").toLowerCase();
+  return status !== "approved" && status !== "pushed_to_xero";
+}
+
+/**
+ * Approving a marked receipt needs a signed-in person (director 18 Nov 2026:
+ * the office only, for now) and body.confirm_unbooked === true. The server key
+ * (Jarvis) is refused whatever it sends, in plain words. Query and reject never
+ * need either.
  */
 export function assertUnbookedApprovalConfirmed(
   status: string,
   unbookedJobId: unknown,
   confirm: unknown,
+  byPerson: boolean,
 ): void {
   if (status !== "approved" || !expenseJobIdOf(unbookedJobId)) return;
+  if (!byPerson) {
+    throw new ExpenseOwnJobError(
+      "expense_unbooked_office_only",
+      "This receipt was sent by someone who is not booked on its job, so only the office can approve it.",
+      409,
+    );
+  }
   if (confirm === true) return;
   throw new ExpenseOwnJobError(
     "expense_unbooked_confirm_needed",

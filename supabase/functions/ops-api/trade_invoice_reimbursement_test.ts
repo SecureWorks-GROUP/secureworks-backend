@@ -376,3 +376,22 @@ Deno.test("FU17 receipt-free undated drafts keep the group-share-capable legacy 
   assertEquals(atomic, 0);
   assertEquals(legacy, 1);
 });
+
+Deno.test("ZZTEST cl-receipt-ownjob: a marked receipt is paid back only after the office confirms it", async () => {
+  const marked = await resolve(receipt({ unbooked_job_id: "ZZTEST-job" }));
+  assertEquals(marked.lines, []);
+  assertEquals(marked.skipped_items, [{
+    expense_receipt_id: "ZZTEST-receipt",
+    code: "reimbursement_not_booked",
+    words: "You are not booked on that job, so the office checks this receipt before it is paid back.",
+  }]);
+  const queried = await resolve(receipt({ unbooked_job_id: "ZZTEST-job", status: "queried" }));
+  assertEquals(queried.skipped_items.map((s: any) => s.code), ["reimbursement_not_booked"]);
+  // Confirmed at approval: one line, already office approved, as for any approved receipt.
+  const confirmed = await resolve(receipt({ unbooked_job_id: "ZZTEST-job", status: "approved" }));
+  assertEquals(confirmed.skipped_items, []);
+  assertEquals([confirmed.lines.length, confirmed.lines[0].hold_reason, confirmed.lines[0].office_review_status], [1, null, "approved"]);
+  // Unmarked: as on main (held for the office's usual review while pending).
+  const unmarked = await resolve(receipt());
+  assertEquals([unmarked.lines.length, unmarked.lines[0].hold_reason], [1, "reimbursement"]);
+});

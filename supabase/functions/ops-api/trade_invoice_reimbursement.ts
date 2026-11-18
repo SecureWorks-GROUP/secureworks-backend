@@ -1,4 +1,5 @@
 import { TRADE_PAY_PRIOR_INVOICE_COLUMNS, type TradePayPriorInvoice } from "./trade_pay_rule.ts";
+import { expenseHeldNotBooked } from "./expense_own_job.ts";
 
 export const REIMBURSEMENT_LINE_TYPE = "reimbursement";
 export const REIMBURSEMENT_FLAG = "trade_reimbursement_line_v1";
@@ -11,6 +12,8 @@ const words = {
   reimbursement_receipt_required:
     "Add a photo of the receipt first. A reimbursement needs its receipt.",
   reimbursement_rejected: "The office sent this receipt back.",
+  reimbursement_not_booked:
+    "You are not booked on that job, so the office checks this receipt before it is paid back.",
   expense_already_billed: "This receipt already has a bill in Xero.",
   reimbursement_already_claimed: "This receipt is already on an invoice.",
   reimbursement_amount_unreadable: "Check the receipt amount first. It must be a positive number.",
@@ -63,6 +66,8 @@ export function reimbursementReceiptRefusal(
   if ((!String(receipt.receipt_storage_path || "").trim() &&
       !String(receipt.receipt_photo_url || "").trim()) || receipt.no_receipt_reason) return "reimbursement_receipt_required";
   if (receipt.status === "rejected") return "reimbursement_rejected";
+  // Marked not booked on its job and not yet confirmed by the office.
+  if (expenseHeldNotBooked(receipt)) return "reimbursement_not_booked";
   if (receipt.xero_bill_id) return "expense_already_billed";
   if (claimed) return "reimbursement_already_claimed";
   const amount = Number(receipt.total_amount);
@@ -133,7 +138,7 @@ export async function resolveReimbursementExtras(client: any, input: {
     } else {
       const { data, error } = await client.from("expense_receipts")
         .select(
-          "id, submitted_by, payment_method, receipt_storage_path, receipt_photo_url, no_receipt_reason, status, total_amount, vendor_name, receipt_date, job_id, xero_bill_id, jobs:job_id(job_number)",
+          "id, submitted_by, payment_method, receipt_storage_path, receipt_photo_url, no_receipt_reason, status, unbooked_job_id, total_amount, vendor_name, receipt_date, job_id, xero_bill_id, jobs:job_id(job_number)",
         )
         .eq("id", id).maybeSingle();
       if (error) throw new Error("Could not read the reimbursement receipt");
@@ -249,7 +254,7 @@ export async function ownMoneyReimbursementItems(client: any, input: {
   // idx_expense_receipts_submitted bounds this to one trade's receipts; newest
   // first so repaid history never crowds out a new receipt.
   const { data, error } = await client.from("expense_receipts")
-    .select("id, created_at")
+    .select("id, created_at, status, unbooked_job_id")
     .eq("submitted_by", input.userId)
     .eq("payment_method", "personal_card")
     .is("xero_bill_id", null)
@@ -260,7 +265,9 @@ export async function ownMoneyReimbursementItems(client: any, input: {
     .limit(OWN_MONEY_SWEEP_LIMIT);
   // Never read a failed list as "nothing to pay back".
   if (error) throw new Error("Could not read your receipts to pay back");
-  const rows = (data || []).filter((row: any) => row?.id);
+  // A receipt the office has not confirmed on a job its sender is not booked on
+  // waits for the confirm and joins the first invoice after it.
+  const rows = (data || []).filter((row: any) => row?.id && !expenseHeldNotBooked(row));
   const claimed = await loadClaimedReimbursementReceipts(
     client, rows.map((row: any) => String(row.id)), input.replacingDraftId,
   );
