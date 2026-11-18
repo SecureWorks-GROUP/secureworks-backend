@@ -4742,6 +4742,7 @@ ungated, but the CFO-01 detail fields (`FULL_DETAIL_ROW_KEYS` /
 `FULL_DETAIL_SUMMARY_KEYS`) reach only staff and server callers
 (`reportingApiCallerSeesStaffDetail`); the public key and a trade JWT get the
 basic shape. Tests: `job_profitability_test.ts`, `reporting_staff_gate_test.ts`.
+A change under `supabase/functions/xero-sync/match/` or to an AI spec carries the replay score before and after in its pull request.
 
 ## Reattend Pack Photos Follow Curated `photo_source_scope`
 

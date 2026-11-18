@@ -2,6 +2,7 @@
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
 import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
+import { ExpenseCaptureError, expenseCaptureFields, expenseNextStep, refuseBilledReimbursement } from './expense_capture_v2.ts'
 import { listExpenseReceipts } from './expense_list.ts'
 import { factReadOn } from './fact_reader_switch.ts'
 import { rejectTradeInvoiceStorage } from './trade_invoice_rejection.ts'
@@ -1567,6 +1568,8 @@ import {
 import { readXeroDrafts, XeroDraftsError } from './xero_drafts_read.ts'
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
+// Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
+import { PAY_FIGURES_APPROVER_ACTIONS, payFiguresApproverRefusal } from './pay_figures_approver.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
 import { jobTraceAction, jobTraceView } from './job_trace.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
@@ -6303,6 +6306,23 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     const url = new URL(req.url)
     const action = url.searchParams.get('action')
     auditAction = action
+
+    // Named pay figures are approver-only (pay_figures_approver.ts): checked
+    // once, on the same resolved action the dispatch below switches on, after
+    // the front door and before the action reads anything. The server, routine
+    // and agent keys carry no person and are refused.
+    if (action && PAY_FIGURES_APPROVER_ACTIONS.has(action)) {
+      const payRefusal = await payFiguresApproverRefusal(sb(), {
+        authMode,
+        userId: authMode === 'jwt' ? authUser?.id ?? null : null,
+      })
+      if (payRefusal) {
+        console.log(opsApiDeniedLogLine(action, req.method, requestActor, payRefusal.status, payRefusal.code))
+        recordOpsApiActorMissing(sb, authMode, requestActor)
+        return json({ error: payRefusal.error, code: payRefusal.code }, payRefusal.status)
+      }
+    }
+
     console.log(opsApiRequestLogLine(action, req.method, requestActor))
     recordOpsApiActorMissing(sb, authMode, requestActor)
 
@@ -10042,8 +10062,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
       // Trade pay-run check (trade-pay-check-v1): every live trade invoice in
       // the pay weeks, clean or stopped with plain reasons, so the bookkeeper
-      // approves the clean bills in one batch. Read only; staff by the front
-      // door (not in any trade, routine or agent-read list). Contract:
+      // approves the clean bills in one batch. Read only; pay run approvers
+      // only (pay_figures_approver.ts, checked before dispatch). Contract:
       // docs/trade-pay-run-check-v1.md.
       case 'trade_pay_run_check': {
         try {
@@ -11611,6 +11631,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           staff: _opsApiCallerIsStaffOperator(authMode, authUser),
           userId: authMode === 'jwt' ? authUser?.id || null : null,
           orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+        })
+        return json(result.body, result.status)
+      }
+      case 'trade_pay_settings':
+      case 'set_trade_pay_setting': {
+        const { tradePaySettingsAction } = await import('./trade_pay_settings.ts')
+        const result = await tradePaySettingsAction(client, action, req.method, body, {
+          staff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          userId: authMode === 'jwt' ? authUser?.id || null : null,
         })
         return json(result.body, result.status)
       }
@@ -17216,6 +17245,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       })
       return json(sesError.body, sesError.status)
     }
+    if (err instanceof ExpenseCaptureError) return json(err.body, err.status)
     if (err instanceof ApiError) {
       return json(err.body || { error: err.message }, err.status)
     }
@@ -63942,11 +63972,12 @@ async function resolveApproverUserId(client: any, label: string): Promise<string
   return data?.id || null
 }
 
-async function submitExpense(
+export async function submitExpense(
   client: any,
   body: any,
   authCtx?: { mode: 'api_key' | 'jwt'; user?: { id: string; email: string; role: string } }
 ) {
+  const capture = expenseCaptureFields(body)
   const {
     job_id,
     receipt_photo_url,
@@ -63963,7 +63994,7 @@ async function submitExpense(
     no_receipt_reason,
     field_confidence,
     jarvis_job_suggestion,
-  } = body
+  } = { ...body, ...capture }
 
   // A receipt photo URL is the canonical evidence path. The no-receipt path
   // (no photo, explicit reason) is still allowed — it just means the row will
@@ -64027,6 +64058,7 @@ async function submitExpense(
     expense_tier: job_id ? 'tier_2' : 'tier_3',
     approval_routed_to: routedLabel,
     approval_routed_to_user_id: routedUserId,
+    ...capture,
   }
 
   const { data: expense, error: insertErr } = await client.from('expense_receipts')
@@ -64171,6 +64203,7 @@ async function submitExpense(
       : 'pending',
     routed_to: routedTo,
     flow: inferredFlow,
+    next_step: expenseNextStep(insertRow),
   }
 }
 
@@ -64178,7 +64211,7 @@ async function submitExpense(
 // row that has not yet been pushed to Xero. Used by the Trade UI's review
 // step to record the user's job/category/payment_method choices on top of
 // what Haiku extracted. Whitelisted fields only — no schema poking.
-async function updateExpense(
+export async function updateExpense(
   client: any,
   body: any,
   authCtx?: { mode: 'api_key' | 'jwt'; user?: { id: string; email: string; role: string } }
@@ -64187,10 +64220,10 @@ async function updateExpense(
   if (!expense_id) throw new ApiError('expense_id required', 400)
 
   const { data: row, error: loadErr } = await client.from('expense_receipts')
-    .select('id, submitted_by, status, receipt_sha256')
+    .select('id, submitted_by, status, receipt_sha256, job_id, stock_division, business_category, payment_method, xero_bill_id, updated_at')
     .eq('id', expense_id)
     .maybeSingle()
-  if (loadErr) throw loadErr
+  if (loadErr) throw new ApiError('Expense could not be read.', 503)
   if (!row) throw new ApiError('Expense not found', 404)
 
   // Authz: submitter on JWT path, OR elevated role, OR api_key. Block once
@@ -64202,6 +64235,7 @@ async function updateExpense(
       throw new ApiError('Not authorised to edit this expense', 403)
     }
   }
+  refuseBilledReimbursement(row.xero_bill_id, body)
   if (row.status === 'pushed_to_xero') {
     throw new ApiError('Expense already pushed to Xero — edit in Xero', 409)
   }
@@ -64230,6 +64264,18 @@ async function updateExpense(
     updates[k] = v
   }
 
+  // An old app selecting a job only needs to clear stock when a division was stored.
+  const capture = expenseCaptureFields(body)
+  if (body.stock_division === undefined && !row.stock_division) delete capture.stock_division
+  Object.assign(updates, capture)
+  const result = { ...row, ...updates }
+  if (body.capture_version === 2 && !result.job_id && !result.stock_division) {
+    const { data: flag, error } = await client.from('feature_flags').select('enabled')
+      .eq('flag_name', 'spend_capture_v2').maybeSingle()
+    if (error || typeof flag?.enabled !== 'boolean') throw new ApiError('Receipt settings could not be read.', 503)
+    if (flag.enabled) throw new ExpenseCaptureError('expense_needs_job_or_division', 'Pick the job or the stock this was for.')
+  }
+
   // Receipt evidence is immutable once set. The hash only flips from null
   // to the first computed value; we never overwrite a non-null hash.
   if (body.receipt_sha256 && !row.receipt_sha256) {
@@ -64237,11 +64283,16 @@ async function updateExpense(
   }
 
   if (Object.keys(updates).length === 0) {
-    return { success: true, updated_fields: [], expense_id }
+    return { success: true, updated_fields: [], expense_id, next_step: expenseNextStep(row) }
   }
 
   updates.updated_at = new Date().toISOString()
-  await client.from('expense_receipts').update(updates).eq('id', expense_id)
+  let save = client.from('expense_receipts').update(updates)
+    .eq('id', expense_id).eq('updated_at', row.updated_at).eq('status', row.status)
+  if (body.flow === 'reimbursement' || body.payment_method === 'personal_card') save = save.is('xero_bill_id', null)
+  const { data: saved, error: saveError } = await save.select('job_id, stock_division, business_category, payment_method').maybeSingle()
+  if (saveError) throw new ApiError('Expense could not be saved.', 503)
+  if (!saved) throw new ApiError('The receipt changed. Reload it and try again.', 409)
 
   logBusinessEvent(client, {
     event_type: 'expense.updated',
@@ -64251,7 +64302,7 @@ async function updateExpense(
     metadata: { auth_mode: authCtx?.mode || 'api_key', operator: authCtx?.user?.id || null },
   })
 
-  return { success: true, expense_id, updated_fields: Object.keys(updates).filter(k => k !== 'updated_at') }
+  return { success: true, expense_id, updated_fields: Object.keys(updates).filter(k => k !== 'updated_at'), next_step: expenseNextStep(saved) }
 }
 
 // suggestJobForExpense — ranks likely jobs for an expense submission.
@@ -64386,7 +64437,7 @@ async function suggestJobForExpense(
 //              user this row was routed to (approval_routed_to_user_id).
 // approved_by is now ALWAYS taken from the JWT (or 'system' for api_key),
 // never from the request body. Prevents callers spoofing approver identity.
-async function approveExpense(
+export async function approveExpense(
   client: any,
   body: any,
   authCtx: { mode: 'api_key' | 'jwt'; user?: { id: string; email: string; role: string } }
@@ -64466,7 +64517,7 @@ async function approveExpense(
 // ── buildXeroExpenseBillBody: pure builder, exported via mirror-test pattern.
 // Always emits Status: 'DRAFT' so finance reviews/authorises in Xero. There is
 // no AUTHORISED path from SecureSuite for expense receipts.
-function buildXeroExpenseBillBody(expense: any): any {
+export function buildXeroExpenseBillBody(expense: any): any {
   const today = new Date().toISOString().split('T')[0]
   const lines = Array.isArray(expense.line_items) ? expense.line_items : []
   return {
@@ -64497,7 +64548,10 @@ function buildXeroExpenseBillBody(expense: any): any {
 // and pushing would create a junk DRAFT that finance has to clean up in Xero.
 // We refuse the push, persist the reasons on the row, and emit a business event.
 // The row stays in 'approved' state so the user can fix and retry.
-function preflightExpense(expense: any): { ok: boolean; reasons: string[] } {
+export function preflightExpense(expense: any): { ok: boolean; reasons: string[] } {
+  if (expense.payment_method === 'company_card') {
+    throw new ExpenseCaptureError('expense_not_billable', 'Company-card receipts do not become Xero bills.')
+  }
   const reasons: string[] = []
 
   const vendor = (expense.vendor_name || '').trim()
@@ -64560,10 +64614,11 @@ function preflightExpense(expense: any): { ok: boolean; reasons: string[] } {
   return { ok: reasons.length === 0, reasons }
 }
 
-async function pushExpenseToXero(
+export async function pushExpenseToXero(
   client: any,
   body: any,
-  authCtx: { mode: 'api_key' | 'jwt'; user?: { id: string; email: string; role: string } }
+  authCtx: { mode: 'api_key' | 'jwt'; user?: { id: string; email: string; role: string } },
+  requestFetch?: typeof fetch,
 ) {
   const { expense_id } = body
   if (!expense_id) throw new ApiError('expense_id required', 400)
@@ -64577,21 +64632,23 @@ async function pushExpenseToXero(
     }
   }
 
-  const { data: expense } = await client.from('expense_receipts')
+  const { data: expense, error: readError } = await client.from('expense_receipts')
     .select('*, jobs:job_id(job_number, xero_contact_id)')
     .eq('id', expense_id)
-    .single()
+    .maybeSingle()
+  if (readError) throw new ApiError('Expense could not be read.', 503)
   if (!expense) throw new ApiError('Expense not found', 404)
+  const preflight = preflightExpense(expense)
   if (expense.status !== 'approved') throw new ApiError('Expense must be approved before pushing to Xero', 409)
 
-  const { data: reimbursementFlag } = await client.from('feature_flags')
+  const { data: reimbursementFlag, error: flagError } = await client.from('feature_flags')
     .select('enabled').eq('flag_name', REIMBURSEMENT_FLAG).maybeSingle()
+  if (flagError) throw new ApiError('Receipt claims could not be checked.', 503)
   if (await receiptHasLiveTradeInvoice(client, expense_id, null, reimbursementFlag?.enabled === true)) {
     throw new ApiError("This receipt is being paid back on a trade invoice, so it is not sent to Xero on its own.", 409, { code: "expense_on_trade_invoice" })
   }
 
   // Preflight gate — prevent junk OCR from creating junk Xero drafts.
-  const preflight = preflightExpense(expense)
   if (!preflight.ok) {
     await client.from('expense_receipts').update({
       preflight_failed_reasons: { reasons: preflight.reasons, checked_at: new Date().toISOString() },
@@ -64612,7 +64669,7 @@ async function pushExpenseToXero(
 
   const billBody = buildXeroExpenseBillBody(expense)
 
-  const result = await xeroPost('/Invoices', accessToken, tenantId, { Invoices: [billBody] }, 'POST', `expense-${expense_id}`)
+  const result = await xeroPost('/Invoices', accessToken, tenantId, { Invoices: [billBody] }, 'POST', `expense-${expense_id}`, requestFetch)
   const xeroBillId = result?.Invoices?.[0]?.InvoiceID
 
   await client.from('expense_receipts').update({
