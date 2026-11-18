@@ -369,7 +369,7 @@ what is left. This is the general rule, not a one-job exception. Migration
 - The pot is the work order (or the approved budget) less what they were
   paid, counted the way the group pays: gross on `gross_v1`, gross plus 12%
   less 6% on `all_in_12_6_v1`, gross plus 12% on `all_in_12_v2`, gross on
-  `inclusive_12_112_v1` (P1-13.4, `20261118999903`: super sits inside the
+  `inclusive_12_112_v1` (P1-13.4, `20261118170300`: super sits inside the
   amount; an hourly invoice priced before the pay rule's start is still
   counted at its gross, because the function sees only the gross), in whole
   cents. If that uses the whole pot the split refuses

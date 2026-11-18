@@ -1,4 +1,4 @@
--- Rollback for 20261118999903: restore group_work_order_hours_paid_budget's
+-- Rollback for 20261118170300: restore group_work_order_hours_paid_budget's
 -- body from 20261106160000 (no inclusive branch). Refuses when the live body is
 -- neither this migration's nor the original, so a later change is never undone
 -- blind. After this, an inclusive group on a job with hourly pay refuses its

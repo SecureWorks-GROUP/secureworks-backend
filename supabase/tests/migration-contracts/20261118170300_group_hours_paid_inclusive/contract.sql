@@ -7,7 +7,7 @@ SELECT to_regprocedure('public.group_work_order_hours_paid_budget(text,numeric)'
   AS hours_budget_missing \gset
 \if :hours_budget_missing
 \ir pre_hours_paid_budget.sql
-\ir ../../../migrations/20261118999903_group_hours_paid_inclusive.sql
+\ir ../../../migrations/20261118170300_group_hours_paid_inclusive.sql
 \endif
 
 DO $budget$
