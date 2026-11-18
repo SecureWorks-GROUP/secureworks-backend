@@ -62,9 +62,11 @@ INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoi
   ('00000000-0000-0000-0000-000000000001', 'ZZTEST-TWIN-7', 'ZZ-7', 'ACCPAY', 'AUTHORISED',
    'ZZTEST-crew', 'ZZTEST Crew', 500, date '2026-11-06',
    '[{"LineItemID":"zz-m-1","AccountCode":"306","LineAmount":500,"TaxAmount":50}]', '{}');
-INSERT INTO public.trade_invoices (xero_bill_id, status, subtotal_ex, gst, total_inc, gst_on, super_rate,
+-- Same org as the bill: a mirror is an org's own trade invoice, in the twin as in
+-- the edge backfill (cost_lines_backfill.ts reads trade_invoices by org_id).
+INSERT INTO public.trade_invoices (org_id, xero_bill_id, status, subtotal_ex, gst, total_inc, gst_on, super_rate,
   super_amount, gross_earned, net_pay, super_basis)
-VALUES ('ZZTEST-TWIN-7', 'pushed_to_xero', 500, 0, 500, false, 0.12, 60, 500, 500, 'employer_12_v2');
+VALUES ('00000000-0000-0000-0000-000000000001', 'ZZTEST-TWIN-7', 'pushed_to_xero', 500, 0, 500, false, 0.12, 60, 500, 500, 'employer_12_v2');
 
 DO $$
 DECLARE f jsonb := (SELECT f FROM twin_fixture); org uuid := (f->>'org_id')::uuid; r jsonb;
