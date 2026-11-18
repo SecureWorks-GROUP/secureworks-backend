@@ -65,8 +65,10 @@ export async function expenseUnbookedJobMark(
  * A marked receipt the office has not confirmed yet. It counts on no job's cost
  * lines and is paid back on no trade invoice until the office confirms it at
  * approval (the confirm is the only way to approved; pushed_to_xero needs
- * approved). The SQL twin is the `held` term in job_cost_lines_sync_receipt
- * (cost-exclusion migration); change both together.
+ * approved). The SQL twins are the `held` term in job_cost_lines_sync_receipt
+ * (cost-exclusion migration) and the reimbursement_not_booked_unconfirmed stop
+ * in trade_pay_run_check_v2 (20261118999912); the pay run push re-checks with
+ * this function. Change all three together.
  */
 export function expenseHeldNotBooked(
   row: { unbooked_job_id?: unknown; status?: unknown } | null | undefined,
