@@ -5,5 +5,5 @@
 SELECT coalesce((SELECT md5(prosrc) = 'daee6c551634e062577f1c7f45950ae8' FROM pg_proc
   WHERE oid = to_regprocedure('public.trade_pay_run_check_v2(date,integer,uuid,text)')), false) AS zz_check_allow_list_live \gset
 \if :zz_check_allow_list_live
-\ir ../../../rollbacks/20261118999913_trade_pay_run_receipt_allow_list_down.sql
+\ir ../../../rollbacks/20261118194800_trade_pay_run_receipt_allow_list_down.sql
 \endif

@@ -433,7 +433,7 @@ Deno.test("push: a receipt approved or pushed to Xero, marked or not, is pushed 
 });
 
 // ── SEC-465 allow-list (director 23:14), the same rows as the check's contract ──
-// supabase/tests/migration-contracts/20261118999913_trade_pay_run_receipt_allow_list
+// supabase/tests/migration-contracts/20261118194800_trade_pay_run_receipt_allow_list
 // (zz_matrix): the push refuses exactly where the check stops, with the matching reason.
 const MARK = "0c400000-0000-4000-8000-0000000000aa";
 // Ruling B (director 18 Nov 23:46): one office approval is enough. Columns:
