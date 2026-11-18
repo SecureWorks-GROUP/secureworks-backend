@@ -23,6 +23,7 @@ export async function rejectTradeInvoiceStorage(
     .eq("id", invoiceId)
     .is("xero_bill_id", null)
     .is("xero_pushed_at", null)
+    .is("pay_run_id", null)
     .select("id")
     .maybeSingle();
 }

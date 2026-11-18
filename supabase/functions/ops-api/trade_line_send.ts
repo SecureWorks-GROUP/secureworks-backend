@@ -78,18 +78,61 @@ export type SortedSend = {
   skipped: Array<{ row: SendRow; reason: "not_yours" | "claimed" }>;
 };
 
-/** Step 1: the switch is on and the new pay rule applies to the week.
- * Anything unreadable reads as off, so the door behaves exactly as today. */
-export async function lineHoldSendApplies(
-  client: any,
-  payDay: unknown,
-  settingsRead?: ReturnType<typeof readTradePaySettings>,
-): Promise<boolean> {
+/** trade_line_hold_v1 as stored (feature_flags by flag_name). Anything
+ * unreadable reads as off, which is main. */
+export async function tradeLineHoldFlagOn(client: any): Promise<boolean> {
   try {
     const flag = await client.from("feature_flags").select("enabled")
       .eq("flag_name", TRADE_LINE_HOLD_FLAG).limit(1);
     if (flag?.error || !Array.isArray(flag?.data)) return false;
-    if (flag.data[0]?.enabled !== true) return false;
+    return flag.data[0]?.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * FU49 item 4. The job amount guard takes one lock per job, in the order a
+ * statement's rows reach it, and the header guard takes them by job id. Rows
+ * saved under a counted invoice therefore go in job id order, so two sends on
+ * the same jobs wait for each other instead of deadlocking. A copy, sorted by
+ * job id as the database orders a uuid (lower-case text, code unit order);
+ * stable, rows with no job last. Each row keeps its own fields, so a stored
+ * line_position still gives the order the trade sent.
+ */
+export function linesInJobOrder<T extends Record<string, any>>(
+  rows: readonly T[],
+): T[] {
+  const id = (row: T) =>
+    row?.job_id == null || row.job_id === ""
+      ? null
+      : String(row.job_id).toLowerCase();
+  return rows.map((row, index) => ({ row, index, job: id(row) }))
+    .sort((a, b) =>
+      a.job === b.job
+        ? a.index - b.index
+        : a.job === null
+        ? 1
+        : b.job === null
+        ? -1
+        : a.job < b.job
+        ? -1
+        : 1
+    )
+    .map((entry) => entry.row);
+}
+
+/** Step 1: the switch is on and the new pay rule applies to the week.
+ * Anything unreadable reads as off, so the door behaves exactly as today.
+ * `flagOn`: the switch as the caller already read it (tradeLineHoldFlagOn). */
+export async function lineHoldSendApplies(
+  client: any,
+  payDay: unknown,
+  settingsRead?: ReturnType<typeof readTradePaySettings>,
+  flagOn?: boolean,
+): Promise<boolean> {
+  try {
+    if (!(flagOn ?? await tradeLineHoldFlagOn(client))) return false;
     const rule = await readTradePayRule(client, settingsRead);
     if (!rule.ok) return false;
     return tradePayBasisFor(rule, payDay) !== null;
@@ -360,9 +403,10 @@ export type HoldingInvoiceInput = {
 export async function saveHoldingInvoice(
   client: any,
   input: HoldingInvoiceInput,
-): Promise<{ id: string; lines: Array<{ id: string; row: HeldRow }> }> {
+): Promise<{ id: string; orgId: string | null; lines: Array<{ id: string; row: HeldRow }> }> {
   const heldAt = input.now ?? new Date().toISOString();
   let invoiceId = "";
+  let orgId: string | null = null;
   for (let attempt = 0;; attempt++) {
     const header = {
       ...(input.orgId ? { org_id: input.orgId } : {}),
@@ -391,9 +435,10 @@ export async function saveHoldingInvoice(
       submitted_at: heldAt,
     };
     const { data, error } = await client.from("trade_invoices")
-      .insert(header).select("id").single();
+      .insert(header).select("id, org_id").single();
     if (!error && data?.id) {
       invoiceId = String(data.id);
+      orgId = data.org_id ? String(data.org_id) : null;
       break;
     }
     if (attempt < 2 && input.isNumberTaken(error)) continue;
@@ -424,6 +469,7 @@ export async function saveHoldingInvoice(
     const byPosition = new Map(saved.map((s: any) => [Number(s.line_position), String(s.id)]));
     return {
       id: invoiceId,
+      orgId,
       lines: input.held.map((row, position) => ({ id: byPosition.get(position) ?? "", row })),
     };
   } catch (error) {
@@ -467,6 +513,10 @@ export type RaiseContext = {
   weekStart: string | null;
   facts: LineHoldFacts;
   backed: readonly SendRow[];
+  /** The holding invoice's stored org_id. trade_invoice_lines has no org_id,
+   * so reconcile_item_org cannot find a held line's organisation; the raise
+   * passes this one (director ruling C11). Null leaves the call as before. */
+  orgId?: string | null;
 };
 
 /** The four over-the-amount figures, worked in cents. Over by is claimed plus
@@ -496,7 +546,9 @@ export async function raiseHeldLines(
   let raised = 0, failed = 0;
   const call = async (args: Record<string, unknown>) => {
     try {
-      const { error } = await client.rpc("reconcile_item_raise", args);
+      // The named door (20261118170200): reconcile_item_raise itself takes
+      // its arguments by position, so a named PostgREST call cannot find it.
+      const { error } = await client.rpc("reconcile_item_raise_named", args);
       if (error) throw error;
       raised++;
     } catch (error) {
@@ -561,6 +613,7 @@ export async function raiseHeldLines(
         fallback_reason: (row.hold_detail?.fallback_reason as string | null | undefined) ?? null,
       },
       p_raised_by: "phase1:work_order_gate",
+      ...(ctx.orgId ? { p_org_id: ctx.orgId } : {}),
     });
     const reason = row.hold_reason === "not_on_crew"
       ? String(row.hold_detail?.fallback_reason ?? "")

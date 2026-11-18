@@ -223,8 +223,30 @@ export async function readBilledOnJobs(
     if (flag.data[0]?.enabled !== true) {
       return billedFromLines(await readJobTradeLines(client, ids), opts.excludeLineIds);
     }
+    return await readWorkOrderBackedBilled(client, ids, opts);
+  } catch {
+    throw new WorkOrderTotalCapReadError();
+  }
+}
 
-    const totals = new Map<string, number>();
+/**
+ * The database's one billed sum (work_order_backed_billed, the same function
+ * the job amount guard and job_backed_room read): per job, every line that is
+ * not commission or reimbursement, unreviewed or approved by the office, on a
+ * standard or follow-on invoice in a billed status, override_amount first.
+ * Every reader of "already billed" with trade_line_hold_v1 on calls this; none
+ * restates the rule. Each id must be a job the caller has read: an id the
+ * database does not answer, or a total it cannot make, throws
+ * WorkOrderTotalCapReadError, never reads as nothing billed.
+ */
+export async function readWorkOrderBackedBilled(
+  client: any,
+  jobIds: readonly string[],
+  opts: { excludeLineIds?: readonly string[] } = {},
+): Promise<Map<string, number>> {
+  const ids = [...new Set(jobIds.map(String).filter(Boolean))];
+  const totals = new Map<string, number>();
+  try {
     for (let i = 0; i < ids.length; i += 25) {
       const batch = ids.slice(i, i + 25);
       const result = await client.rpc("work_order_backed_billed", {
@@ -242,10 +264,10 @@ export async function readBilledOnJobs(
         totals.set(row.job_id, row.billed_ex);
       }
     }
-    return totals;
   } catch {
     throw new WorkOrderTotalCapReadError();
   }
+  return totals;
 }
 
 /**
