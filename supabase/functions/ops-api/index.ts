@@ -40,7 +40,7 @@ import {
 } from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { divisionTrackingOption } from '../_shared/xero_draft_standard.ts'
-import { commissionCapCodeFromDbError, commissionCapRefusal, readJobCommissionRecords } from './job_commission.ts'
+import { commissionCapCodeFromDbError, commissionCapRefusal, commissionLineState, readJobCommissionRecords, type JobCommissionRecord } from './job_commission.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
@@ -15154,6 +15154,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const extraLineItems: any[] = []
             let extraSubtotal = 0
             let clientPricedExtraCount = 0
+            let commissionRecordsForOffers: Map<string, JobCommissionRecord> | null = null
             if (hasExtras) {
               // Client lines are trimmed once (type and job references) and
               // every step below reads those values. Weekly work-order lines
@@ -15246,6 +15247,24 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }
               }
 
+              // P1-04.3: offered commission is priced before the weekly rate
+              // check, under the existing commission switch. Reuse this bounded
+              // record read for authority and the cap; switch off keeps today's
+              // typed-extra path. Job ids come from the tenant-scoped read above.
+              const commissionOfferJobIds = extraItemsIn.filter((item: any) =>
+                item && isCommissionLine(extraLineType(item)) &&
+                item.source !== 'clock' && item._source !== 'clock' && item.source !== 'server_labour' &&
+                !isGroupShareInvoiceItem(item) && !item.group_share_id
+              ).map((item: any) => item.job_id ? jobById[item.job_id]?.id : jobByNumber[item.job_number]?.id)
+                .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+              if (!weeklyInvoice && commissionOfferJobIds.length > 0 && await readFlag(client, 'commission_from_job_only_v1')) {
+                try {
+                  commissionRecordsForOffers = await readJobCommissionRecords(client, commissionOfferJobIds)
+                } catch {
+                  throw new ApiError('Could not check the commission on this invoice. Nothing was saved. Please submit again.', 503, { saved: false, code: 'commission_unreadable' })
+                }
+              }
+
               // Who may bill each job (trade_invoice_extra_job_authority.ts).
               // Before any extra line is priced or written, every line that
               // names a job must name one job in the caller's company that the
@@ -15273,7 +15292,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   },
                   lines: jobLines,
                   jobVertical: _jobVertical,
-                  readCommissionRecords: (jobIds) => readJobCommissionRecords(client, jobIds),
+                  readCommissionRecords: (jobIds) => commissionRecordsForOffers
+                    ? Promise.resolve(commissionRecordsForOffers)
+                    : readJobCommissionRecords(client, jobIds),
                 }).catch((error) => {
                   if (error instanceof ExtraJobBillingRefusal) {
                     throw new ApiError(error.message, 403, {
@@ -15402,9 +15423,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     label: rawItem.job_number || rawItem.job_id || 'extra',
                   })
                   : null
+                const offeredJob = rawItem.job_id ? jobById[rawItem.job_id] : jobByNumber[String(rawItem.job_number || '')]
+                const commissionState = commissionRecordsForOffers && isCommissionLine(extraLineType(rawItem))
+                  ? commissionLineState(commissionRecordsForOffers.get(offeredJob?.id) ?? null, tradeUser.id)
+                  : null
+                const serverCommissionAmount = commissionState?.state === 'offer' ? commissionState.remaining_ex : null
+                const serverResolvedCommissionLine = serverCommissionAmount !== null
+                if (serverResolvedCommissionLine && ['rate', 'unit_rate', 'amount', 'commission_amount', 'line_total_ex'].some((key) => Object.hasOwn(rawItem, key))) {
+                  const lineId = rawItem.line_id ?? rawItem.id
+                  console.warn('[ops-api] commission_client_amount_ignored', { line_id: typeof lineId === 'string' ? lineId : null })
+                }
                 const officeHourly = weekAutofill && !serverResolvedWeeklyLine && !isWorkOrderInvoiceItem(rawItem) && (rawItem.row_type === 'labour' || isTradeInvoiceTimeLineType(rawItem.type))
-                const item = { ...(extraTimeEntry ? { ...rawItem, quantity: extraTimeEntry.hours } : rawItem),
-                  ...(officeHourly ? { rate: dayRate(extraTimeEntry?.work_date || rawItem.date || todayPerth()) } : {}) }
+                const item = serverResolvedCommissionLine
+                  ? { ...rawItem, quantity: 1, rate: serverCommissionAmount }
+                  : { ...(extraTimeEntry ? { ...rawItem, quantity: extraTimeEntry.hours } : rawItem),
+                    ...(officeHourly ? { rate: dayRate(extraTimeEntry?.work_date || rawItem.date || todayPerth()) } : {}) }
+                const serverPricedExtra = serverResolvedWeeklyLine || serverResolvedCommissionLine
                 const qty = Number(item.quantity || 0)
                 const rate = Number(item.rate || 0)
                 if (week_start) {
@@ -15417,14 +15451,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 if (week_start && !resolvedJob && item.type !== 'final_payout_deduction') throw new ApiError('Manual invoice job is not active or does not exist: ' + (item.job_number || item.job_id), 422)
                 // Only a line the server priced itself is server_resolved. The
                 // client's own rate_source is never trusted (B14).
-                const rateSource = serverResolvedWeeklyLine || officeHourly ? 'server_resolved' : 'client_entered'
+                const rateSource = serverPricedExtra || officeHourly ? 'server_resolved' : 'client_entered'
                 if (week_start && rateSource === 'client_entered') clientPricedExtraCount++
                 const amt = Math.round((Number(item.quantity || 1) * Number(item.rate || 0)) * 100) / 100
                 if (serverResolvedWeeklyLine && Math.abs(amt - Number(item.line_total_ex)) > 0.01) {
                   throw new ApiError('A server-resolved weekly line no longer matches its quantity and rate', 422)
                 }
                 extraSubtotal += amt
-                const extraHours = serverResolvedWeeklyLine ? 0 : Number(item.quantity ?? item.qty ?? item.hours ?? 0)
+                const extraHours = serverPricedExtra ? 0 : Number(item.quantity ?? item.qty ?? item.hours ?? 0)
                 // B14: a typed rate above the office limit holds the line for
                 // office review, which holds the whole invoice out of Xero.
                 const extraRateHold: ExtraRateHold | null = item.type === 'final_payout_deduction'
@@ -15432,7 +15466,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   : extraLineRateHold({
                     lineType: item.type,
                     rate,
-                    serverResolved: Boolean(serverResolvedWeeklyLine) || officeHourly,
+                    serverResolved: Boolean(serverPricedExtra) || officeHourly,
                     rules: extraRateRules,
                     tradeHourlyRate: resolvedRate > 0 ? resolvedRate : null,
                   })
@@ -15450,7 +15484,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 // never the SWMS- prefix. Same resolver + evaluator as the
                 // assigned path; soft, never blocks, never touches $/hours.
                 let extraHoursFlag: HoursFlagOutcome | null = null
-                if (!serverResolvedWeeklyLine && isMakeSafeLine({ jobType: resolvedJob?.type, division: item.division || resolvedJob?.type, lineType: item.type })) {
+                if (!serverPricedExtra && isMakeSafeLine({ jobType: resolvedJob?.type, division: item.division || resolvedJob?.type, lineType: item.type })) {
                   extraHoursFlag = evaluateHoursFlag({
                     chargedHours: extraHours,
                     candidates: resolvedJob?.id ? candidatesForJob(resolvedJob.id) : [],
@@ -15521,7 +15555,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   site_address: item.site_address || (resolvedJob
                     ? [resolvedJob.site_address, resolvedJob.site_suburb].filter(Boolean).join(', ')
                     : null),
-                  query_note: serverResolvedWeeklyLine
+                  query_note: serverPricedExtra
                     ? null
                     : extraHoursFlag?.flagged
                     ? extraHoursFlag.queryNote + ' | ' + extraRateNote
@@ -15586,7 +15620,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (commissionClaims.length > 0) {
                 let records
                 try {
-                  records = await readJobCommissionRecords(client, commissionClaims.map((c: any) => c.jobId))
+                  records = commissionRecordsForOffers ?? await readJobCommissionRecords(client, commissionClaims.map((c: any) => c.jobId))
                 } catch {
                   throw new ApiError('Could not check the commission on this invoice. Nothing was saved. Please submit again.', 503, { saved: false, code: 'commission_unreadable' })
                 }
