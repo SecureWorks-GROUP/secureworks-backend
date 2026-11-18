@@ -8,7 +8,7 @@ DO $check_guard$
 /* block */ BEGIN
   IF to_regprocedure('public.trade_pay_run_check_v2(date,integer,uuid,text)') IS NOT NULL
      AND (SELECT md5(p.prosrc) FROM pg_proc p WHERE p.oid = to_regprocedure('public.trade_pay_run_check_v2(date,integer,uuid,text)'))
-     NOT IN ('fa27e07999e8d14a6cf0145f828818e9', 'c6c1f4da1fb43e2fb781b884502a7b5d') THEN
+     NOT IN ('daee6c551634e062577f1c7f45950ae8', 'c6c1f4da1fb43e2fb781b884502a7b5d') THEN
     RAISE EXCEPTION 'trade_pay_run_check_v2 rollback: Rule 15, another body is installed; refusing to replace it';
   END IF;
 END $check_guard$;

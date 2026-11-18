@@ -4,7 +4,9 @@
 -- trade_pay_run_check_v2 gains two stops:
 --   reimbursement_queried_or_rejected: the receipt's status is queried or rejected;
 --   reimbursement_receipt_not_approved: an unmarked receipt in any other status that is
---     not approved or pushed_to_xero (pending, pending_extraction, an unknown or new one).
+--     not approved or pushed_to_xero (an unknown or new one included), except a pending or
+--     pending_extraction receipt whose line the office approved (ruling B, 23:46: one office
+--     approval is enough to pay a trade back).
 -- A marked receipt keeps reimbursement_not_booked_unconfirmed (20261118194500); a missing
 -- receipt or a pay-back line with none keeps reimbursement_no_receipt. Everything else in
 -- the body is 20261118194500's, unchanged (md5 c6c1f4da1fb43e2fb781b884502a7b5d).
@@ -24,7 +26,7 @@ DO $check_guard$
     RAISE EXCEPTION 'trade_pay_run_check_v2: expense_receipts.unbooked_job_id (20261118194000) is not applied';
   END IF;
   IF (SELECT md5(p.prosrc) FROM pg_proc p WHERE p.oid = to_regprocedure('public.trade_pay_run_check_v2(date,integer,uuid,text)'))
-     NOT IN ('c6c1f4da1fb43e2fb781b884502a7b5d', 'fa27e07999e8d14a6cf0145f828818e9') THEN
+     NOT IN ('c6c1f4da1fb43e2fb781b884502a7b5d', 'daee6c551634e062577f1c7f45950ae8') THEN
     RAISE EXCEPTION 'trade_pay_run_check_v2: Rule 15, another body is installed; refusing to replace it';
   END IF;
 END $check_guard$;
@@ -342,8 +344,10 @@ DECLARE
       AND lower(coalesce(e.status,'')) NOT IN ('approved','pushed_to_xero')
     UNION ALL
     -- SEC-465: the push's allow-list (payBackReceiptAllowed, trade_pay_run.ts) shown before
-    -- push. Allowed is lower(status) approved or pushed_to_xero, untrimmed, the held term's;
-    -- queried or rejected is trimmed, as payBackReceiptQueriedOrRejected. Change them together.
+    -- push. A receipt passes when it is approved or pushed_to_xero (lower, untrimmed: the held
+    -- term's), or when the office approved its line and it is pending or pending_extraction
+    -- (director 18 Nov 23:46, ruling B: one office approval is enough). Queried or rejected is
+    -- trimmed, as payBackReceiptQueriedOrRejected. Change them together.
     SELECT DISTINCT l.trade_invoice_id, 'stop', 'reimbursement_queried_or_rejected',
            'The office has queried or rejected a pay-back receipt on this invoice.', 8
     FROM ln l JOIN public.expense_receipts e ON e.id = l.expense_receipt_id
@@ -356,6 +360,8 @@ DECLARE
     WHERE l.line_type = 'reimbursement' AND e.unbooked_job_id IS NULL
       AND lower(coalesce(e.status,'')) NOT IN ('approved','pushed_to_xero')
       AND lower(btrim(coalesce(e.status,''))) NOT IN ('queried','rejected')
+      AND NOT (coalesce(l.office_review_status,'') = 'approved'
+               AND lower(coalesce(e.status,'')) IN ('pending','pending_extraction'))
     UNION ALL
     SELECT DISTINCT l.trade_invoice_id, 'stop', 'commission_no_record',
            'A commission has no named commission record on its job.', 8
@@ -531,7 +537,7 @@ GRANT EXECUTE ON FUNCTION public.trade_pay_run_check_v2(date,integer,uuid,text) 
 DO $own$
 /* block */ BEGIN
   IF (SELECT md5(p.prosrc) FROM pg_proc p WHERE p.oid = to_regprocedure('public.trade_pay_run_check_v2(date,integer,uuid,text)'))
-     IS DISTINCT FROM 'fa27e07999e8d14a6cf0145f828818e9' THEN
+     IS DISTINCT FROM 'daee6c551634e062577f1c7f45950ae8' THEN
     RAISE EXCEPTION 'trade_pay_run_check_v2: Rule 15 guard md5 is not this migration''s body';
   END IF;
 END $own$;

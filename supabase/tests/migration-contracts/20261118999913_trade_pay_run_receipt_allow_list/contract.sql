@@ -1,6 +1,7 @@
 -- SEC-465 allow-list contract. Every value, id and word is made up (ZZTEST).
--- The pay run check stops a pay-back line whose receipt is not in status approved or
--- pushed_to_xero, the push's allow-list, with the push's three reasons; nothing else moves.
+-- The pay run check passes a pay-back line only when its receipt is approved or
+-- pushed_to_xero, or pending on a line the office approved (ruling B, 23:46): the push's
+-- allow-list, with the push's three reasons; nothing else moves.
 BEGIN;
 SET LOCAL statement_timeout = '120s';
 -- Rule 17: re-apply what this contract asserts on (twice: the guard takes its own body).
@@ -13,7 +14,7 @@ LANGUAGE plpgsql AS $$ BEGIN
 END $$;
 
 SELECT pg_temp.zz_assert((SELECT md5(prosrc) FROM pg_proc
-  WHERE oid = 'public.trade_pay_run_check_v2(date,integer,uuid,text)'::regprocedure) = 'fa27e07999e8d14a6cf0145f828818e9',
+  WHERE oid = 'public.trade_pay_run_check_v2(date,integer,uuid,text)'::regprocedure) = 'daee6c551634e062577f1c7f45950ae8',
   'own body installed after two runs');
 SELECT pg_temp.zz_assert(has_function_privilege('service_role', 'public.trade_pay_run_check_v2(date,integer,uuid,text)', 'EXECUTE')
   AND NOT has_function_privilege('anon', 'public.trade_pay_run_check_v2(date,integer,uuid,text)', 'EXECUTE')
@@ -45,7 +46,7 @@ SELECT pg_temp.zz_assert(:'collide_apply' LIKE '%trade_pay_run_check_v2: Rule 15
 SELECT pg_temp.zz_assert(:'collide_down' LIKE '%trade_pay_run_check_v2 rollback: Rule 15, another body is installed%',
   'the rollback must refuse another body: ' || :'collide_down');
 SELECT pg_temp.zz_assert((SELECT md5(prosrc) FROM pg_proc
-  WHERE oid = 'public.trade_pay_run_check_v2(date,integer,uuid,text)'::regprocedure) = 'fa27e07999e8d14a6cf0145f828818e9',
+  WHERE oid = 'public.trade_pay_run_check_v2(date,integer,uuid,text)'::regprocedure) = 'daee6c551634e062577f1c7f45950ae8',
   'own body still installed after the refusals');
 
 -- Fixtures (rolled back). Unrelated write guards are set aside only inside this transaction.
@@ -118,7 +119,7 @@ UPDATE public.expense_receipts SET status = 'queried' WHERE id = md5('ZZTEST nb 
 SELECT pg_temp.result()::text AS zz_main_queried \gset
 ROLLBACK TO SAVEPOINT zz_main;
 SELECT pg_temp.zz_assert((SELECT md5(prosrc) FROM pg_proc
-  WHERE oid = 'public.trade_pay_run_check_v2(date,integer,uuid,text)'::regprocedure) = 'fa27e07999e8d14a6cf0145f828818e9',
+  WHERE oid = 'public.trade_pay_run_check_v2(date,integer,uuid,text)'::regprocedure) = 'daee6c551634e062577f1c7f45950ae8',
   'own body back after the savepoint');
 SELECT pg_temp.zz_assert(:'zz_answer'::jsonb = :'zz_main_answer'::jsonb,
   'with every receipt approved the answer must equal 20261118194500''s');
@@ -126,39 +127,67 @@ SELECT pg_temp.zz_assert(:'zz_answer'::jsonb = :'zz_main_answer'::jsonb,
 SELECT pg_temp.zz_assert((SELECT i->>'verdict' FROM jsonb_array_elements(:'zz_main_queried'::jsonb->'invoices') i
        WHERE i->>'invoice_number' = 'ZZTEST-NB-1') = 'clean', 'earlier body passed a queried receipt as clean');
 
--- The matrix. The same rows are in trade_pay_run_push_test.ts ("same stops"): the
+-- The matrix (ruling B, 23:46). The same rows are in trade_pay_run_push_test.ts ("same stops"): the
 -- invoice is stopped exactly where the push refuses, with the matching reasons.
-CREATE TEMP TABLE zz_matrix(status text, marked boolean, want text[]) ON COMMIT DROP;
+CREATE TEMP TABLE zz_matrix(status text, marked boolean, line_approved boolean, want text[]) ON COMMIT DROP;
 INSERT INTO zz_matrix VALUES
- ('approved',false,'{}'),('APPROVED',false,'{}'),('pushed_to_xero',false,'{}'),('Pushed_To_Xero',false,'{}'),
- ('approved',true,'{}'),('pushed_to_xero',true,'{}'),
- ('pending',false,'{reimbursement_receipt_not_approved}'),
- ('pending_extraction',false,'{reimbursement_receipt_not_approved}'),
- ('zz_new_status',false,'{reimbursement_receipt_not_approved}'),
- (' approved ',false,'{reimbursement_receipt_not_approved}'),
- ('',false,'{reimbursement_receipt_not_approved}'),
- (NULL,false,'{reimbursement_receipt_not_approved}'),
- ('queried',false,'{reimbursement_queried_or_rejected}'),
- ('rejected',false,'{reimbursement_queried_or_rejected}'),
- ('Queried',false,'{reimbursement_queried_or_rejected}'),
- (' REJECTED ',false,'{reimbursement_queried_or_rejected}'),
- ('pending',true,'{reimbursement_not_booked_unconfirmed}'),
- ('zz_new_status',true,'{reimbursement_not_booked_unconfirmed}'),
- (NULL,true,'{reimbursement_not_booked_unconfirmed}'),
- ('queried',true,'{reimbursement_not_booked_unconfirmed,reimbursement_queried_or_rejected}'),
- ('rejected',true,'{reimbursement_not_booked_unconfirmed,reimbursement_queried_or_rejected}');
+ -- passes: approved or pushed_to_xero, marked or not, line approved or not
+ ('approved',false,false,'{}'),('APPROVED',false,false,'{}'),('pushed_to_xero',false,false,'{}'),
+ ('Pushed_To_Xero',false,false,'{}'),('approved',true,false,'{}'),('pushed_to_xero',true,false,'{}'),
+ ('approved',false,true,'{}'),
+ -- passes (ruling B): the office approved the line and the receipt is pending or pending_extraction
+ ('pending',false,true,'{}'),('pending_extraction',false,true,'{}'),('PENDING',false,true,'{}'),
+ -- stops: not approved, the line not approved either; an unknown or new status even with the line approved
+ ('pending',false,false,'{reimbursement_receipt_not_approved}'),
+ ('pending_extraction',false,false,'{reimbursement_receipt_not_approved}'),
+ ('zz_new_status',false,false,'{reimbursement_receipt_not_approved}'),
+ ('zz_new_status',false,true,'{reimbursement_receipt_not_approved}'),
+ (' approved ',false,false,'{reimbursement_receipt_not_approved}'),
+ (' pending ',false,true,'{reimbursement_receipt_not_approved}'),
+ ('',false,false,'{reimbursement_receipt_not_approved}'),
+ ('',false,true,'{reimbursement_receipt_not_approved}'),
+ (NULL,false,false,'{reimbursement_receipt_not_approved}'),
+ (NULL,false,true,'{reimbursement_receipt_not_approved}'),
+ -- stops: queried or rejected, whatever the line
+ ('queried',false,false,'{reimbursement_queried_or_rejected}'),
+ ('rejected',false,false,'{reimbursement_queried_or_rejected}'),
+ ('Queried',false,false,'{reimbursement_queried_or_rejected}'),
+ (' REJECTED ',false,false,'{reimbursement_queried_or_rejected}'),
+ ('queried',false,true,'{reimbursement_queried_or_rejected}'),
+ ('rejected',false,true,'{reimbursement_queried_or_rejected}'),
+ -- stops: marked not booked and unconfirmed, whatever the line
+ ('pending',true,false,'{reimbursement_not_booked_unconfirmed}'),
+ ('pending',true,true,'{reimbursement_not_booked_unconfirmed}'),
+ ('pending_extraction',true,true,'{reimbursement_not_booked_unconfirmed}'),
+ ('zz_new_status',true,false,'{reimbursement_not_booked_unconfirmed}'),
+ (NULL,true,false,'{reimbursement_not_booked_unconfirmed}'),
+ ('queried',true,false,'{reimbursement_not_booked_unconfirmed,reimbursement_queried_or_rejected}'),
+ ('rejected',true,true,'{reimbursement_not_booked_unconfirmed,reimbursement_queried_or_rejected}');
 DO $$ DECLARE m record; got text[]; BEGIN
   FOR m IN SELECT * FROM zz_matrix LOOP
     UPDATE public.expense_receipts SET status = m.status,
       unbooked_job_id = CASE WHEN m.marked THEN md5('ZZTEST nb other job')::uuid END
      WHERE id = md5('ZZTEST nb receipt 1')::uuid;
+    UPDATE public.trade_invoice_lines SET office_review_status = CASE WHEN m.line_approved THEN 'approved' END
+     WHERE id = md5('ZZTEST nb pay back 1')::uuid;
     got := pg_temp.receipt_stops('ZZTEST-NB-1');
     PERFORM pg_temp.zz_assert(got = m.want AND (pg_temp.inv('ZZTEST-NB-1')->>'verdict')
       = CASE WHEN cardinality(m.want) = 0 THEN 'clean' ELSE 'stopped' END,
-      format('status %L marked %s: want %s, got %s', m.status, m.marked, m.want, got));
+      format('status %L marked %s line approved %s: want %s, got %s', m.status, m.marked, m.line_approved, m.want, got));
     PERFORM pg_temp.zz_assert(pg_temp.receipt_stops('ZZTEST-NB-2') = ARRAY[]::text[]
       AND (pg_temp.inv('ZZTEST-NB-2')->>'verdict') = 'clean', 'the other invoice stays clean');
   END LOOP;
+END $$;
+-- Only the office's approval of the line passes a pending receipt: a line still
+-- awaiting review, queried or rejected does not (and keeps its own line stop).
+DO $$ DECLARE r text; BEGIN
+  UPDATE public.expense_receipts SET status = 'pending', unbooked_job_id = NULL WHERE id = md5('ZZTEST nb receipt 1')::uuid;
+  FOREACH r IN ARRAY ARRAY['awaiting','queried','rejected','APPROVED'] LOOP
+    UPDATE public.trade_invoice_lines SET office_review_status = r WHERE id = md5('ZZTEST nb pay back 1')::uuid;
+    PERFORM pg_temp.zz_assert(pg_temp.receipt_stops('ZZTEST-NB-1') = ARRAY['reimbursement_receipt_not_approved'],
+      'a pending receipt on a line at review ' || r || ' must stop');
+  END LOOP;
+  UPDATE public.trade_invoice_lines SET office_review_status = NULL WHERE id = md5('ZZTEST nb pay back 1')::uuid;
 END $$;
 -- The words, exactly, one stop per invoice for two pay-back lines on one invoice.
 UPDATE public.expense_receipts SET status = 'pending', unbooked_job_id = NULL WHERE id = md5('ZZTEST nb receipt 1')::uuid;
@@ -179,15 +208,17 @@ SELECT pg_temp.zz_assert((pg_temp.result()#>>'{counts,clean}')::int = 1, 'one cl
 
 -- A pay-back line whose receipt row is missing, or with no receipt at all: only the
 -- existing no-receipt stop (the push refuses both as not approved).
-UPDATE public.trade_invoice_lines SET expense_receipt_id = md5('ZZTEST nb missing')::uuid WHERE id = md5('ZZTEST nb pay back 1')::uuid;
-SELECT pg_temp.zz_assert(pg_temp.receipt_stops('ZZTEST-NB-1') = ARRAY['reimbursement_no_receipt'], 'missing receipt row');
+UPDATE public.trade_invoice_lines SET expense_receipt_id = md5('ZZTEST nb missing')::uuid, office_review_status = 'approved'
+ WHERE id = md5('ZZTEST nb pay back 1')::uuid;
+SELECT pg_temp.zz_assert(pg_temp.receipt_stops('ZZTEST-NB-1') = ARRAY['reimbursement_no_receipt']
+  AND (pg_temp.inv('ZZTEST-NB-1')->>'verdict') = 'stopped', 'missing (deleted) receipt row stops, even with the line approved');
 UPDATE public.trade_invoice_lines SET expense_receipt_id = NULL WHERE id = md5('ZZTEST nb pay back 1')::uuid;
 SELECT pg_temp.zz_assert(pg_temp.receipt_stops('ZZTEST-NB-1') = ARRAY['reimbursement_no_receipt'], 'no receipt id');
 -- Only a pay-back line reads its receipt: a rejected receipt on another kind of line does not.
 UPDATE public.trade_invoice_lines SET expense_receipt_id = md5('ZZTEST nb receipt 1')::uuid, line_type = 'work order'
  WHERE id = md5('ZZTEST nb pay back 1')::uuid;
 SELECT pg_temp.zz_assert(pg_temp.receipt_stops('ZZTEST-NB-1') = ARRAY[]::text[], 'a non pay-back line must not read the receipt');
-\echo 'PASS: SEC-465 allow-list the pay run check stops every pay-back receipt that is not approved or pushed_to_xero, with the push''s reasons; nothing else moves.'
+\echo 'PASS: SEC-465 allow-list the pay run check passes a pay-back receipt approved or pushed_to_xero, or pending on a line the office approved; stops every other, with the push''s reasons; nothing else moves.'
 
 -- Round trip: the rollback gives back the earlier body, and a re-apply installs this one.
 \ir ../../../rollbacks/20261118999913_trade_pay_run_receipt_allow_list_down.sql
@@ -196,7 +227,7 @@ SELECT pg_temp.zz_assert((SELECT md5(prosrc) FROM pg_proc
   'the rollback must give back 20261118194500''s body');
 \ir ../../../migrations/20261118999913_trade_pay_run_receipt_allow_list.sql
 SELECT pg_temp.zz_assert((SELECT md5(prosrc) FROM pg_proc
-  WHERE oid = 'public.trade_pay_run_check_v2(date,integer,uuid,text)'::regprocedure) = 'fa27e07999e8d14a6cf0145f828818e9',
+  WHERE oid = 'public.trade_pay_run_check_v2(date,integer,uuid,text)'::regprocedure) = 'daee6c551634e062577f1c7f45950ae8',
   'the re-apply must install this body');
 ROLLBACK;
 \echo 'PASS: SEC-465 allow-list Rule 15 guards and rollback round trip.'

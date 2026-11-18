@@ -701,13 +701,18 @@ export function xeroBillFoundStop(
 export type PayBackReceipt = {
   status: unknown;
   unbooked_job_id: unknown;
+  /** The office approved this pay-back line (office_review_status exactly 'approved'). */
+  line_approved?: boolean;
   missing?: boolean;
 };
 
-/** SEC-465 allow-list: the only receipts paid back behind a pay-back line are
- * in status approved or pushed_to_xero (lower case, untrimmed: the held
+/** SEC-465 allow-list (director 18 Nov 23:46, ruling B: one office approval is
+ * enough to pay a trade back). A pay-back line passes when its receipt exists
+ * and is approved or pushed_to_xero, or when the office approved the line and
+ * the receipt is pending or pending_extraction (lower case, untrimmed: the held
  * term's, expenseHeldNotBooked). Anything else, an unknown or new status and a
- * missing receipt included, is refused. The check's twin is the
+ * missing receipt included, is refused. Queried, rejected and marked-unconfirmed
+ * are refused before this (their own reasons). The check's twin is the
  * reimbursement_receipt_not_approved stop (trade_pay_run_check_v2); change
  * them together. */
 export function payBackReceiptAllowed(
@@ -715,7 +720,9 @@ export function payBackReceiptAllowed(
 ): boolean {
   if (!row || row.missing) return false;
   const status = String(row.status ?? "").toLowerCase();
-  return status === "approved" || status === "pushed_to_xero";
+  if (status === "approved" || status === "pushed_to_xero") return true;
+  return row.line_approved === true &&
+    (status === "pending" || status === "pending_extraction");
 }
 
 /** A pay-back receipt the office has queried or rejected (trimmed, any case).
@@ -2167,43 +2174,42 @@ export function payRunPushDepsFromClient(
     async payBackReceipts(invoiceId) {
       // idx_inv_lines_invoice (trade_invoice_id), then expense_receipts_pkey.
       const { data: lines, error } = await client.from("trade_invoice_lines")
-        .select("expense_receipt_id")
+        .select("expense_receipt_id, office_review_status")
         .eq("trade_invoice_id", invoiceId)
         .eq("line_type", "reimbursement");
       if (error) throw unreadable("the invoice's pay-back lines");
-      const lineIds = (lines || []).map((l: any) =>
-        String(l?.expense_receipt_id ?? "").trim()
-      );
-      const missing = (): PayBackReceipt => ({
-        status: null,
-        unbooked_job_id: null,
-        missing: true,
-      });
-      // A pay-back line with no receipt is never paid back.
-      const out: PayBackReceipt[] = lineIds.some((id: string) => id === "")
-        ? [missing()]
-        : [];
-      const ids = [...new Set(lineIds.filter((id: string) => id !== ""))];
-      if (ids.length === 0) return out;
-      const { data: receipts, error: receiptError } = await client.from(
-        "expense_receipts",
-      ).select("id, status, unbooked_job_id").in("id", ids);
-      if (receiptError) throw unreadable("the pay-back receipts");
-      const byId = new Map(
-        (receipts || []).map((r: any) => [String(r?.id ?? ""), r]),
-      );
-      for (const id of ids) {
-        const r: any = byId.get(id);
-        out.push(
-          r
-            ? {
-              status: r.status ?? null,
-              unbooked_job_id: r.unbooked_job_id ?? null,
-            }
-            : missing(),
-        );
+      const payBack = (lines || []).map((l: any) => ({
+        id: String(l?.expense_receipt_id ?? "").trim(),
+        line_approved: l?.office_review_status === "approved",
+      }));
+      const ids = [
+        ...new Set(payBack.map((l: any) => l.id).filter((id: string) => id !== "")),
+      ];
+      const byId = new Map<string, any>();
+      if (ids.length > 0) {
+        const { data: receipts, error: receiptError } = await client.from(
+          "expense_receipts",
+        ).select("id, status, unbooked_job_id").in("id", ids);
+        if (receiptError) throw unreadable("the pay-back receipts");
+        for (const r of receipts || []) byId.set(String(r?.id ?? ""), r);
       }
-      return out;
+      // One per pay-back line. A line with no receipt, or whose receipt row is
+      // gone (deleted), reads missing and is never paid back.
+      return payBack.map((l: any): PayBackReceipt => {
+        const r = l.id === "" ? undefined : byId.get(l.id);
+        return r
+          ? {
+            status: r.status ?? null,
+            unbooked_job_id: r.unbooked_job_id ?? null,
+            line_approved: l.line_approved,
+          }
+          : {
+            status: null,
+            unbooked_job_id: null,
+            line_approved: l.line_approved,
+            missing: true,
+          };
+      });
     },
     async claimPush(runId, invoiceId, actor) {
       // trade_pay_run_invoices_pkey; the database clock decides the lease.
