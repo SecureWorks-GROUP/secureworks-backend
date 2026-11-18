@@ -1,5 +1,5 @@
 -- Reapply the real migration, then read back its only row.
-\ir ../../../migrations/20261118194800_reconcile_decide_switch.sql
+\ir ../../../migrations/20261118194900_reconcile_decide_switch.sql
 DO $contract$
 BEGIN
   IF (SELECT count(*) FROM public.feature_flags WHERE flag_name = 'reconcile_decide_v1') <> 1 THEN
