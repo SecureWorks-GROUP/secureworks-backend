@@ -38,7 +38,9 @@ function fakeClient(opts: {
     from: query,
     rpc: async (fn: string, args: any) => {
       calls.push({ fn, args });
-      return opts.rpc ? opts.rpc(fn, args) : { data: { changed: true, cap_start_on: args.p_start, previous_start: args.p_shown_start, authority: "owner" }, error: null };
+      if (opts.rpc) return opts.rpc(fn, args);
+      if (fn === "work_order_cap_start_preview") return { data: { authority: "owner", settings_row: true, cap_start_on: "2026-11-24", hold_switch_on: true }, error: null };
+      return { data: { changed: true, cap_start_on: args.p_start, previous_start: args.p_shown_start, authority: "owner", hold_switch_on: false }, error: null };
     },
   };
 }
@@ -50,8 +52,8 @@ Deno.test("set: a signed-in person's ask goes to the database door as sent, reas
   const out = await workOrderCapStartAction(db, "set_work_order_cap_start", "POST", ask, person);
   assertEquals(out.status, 200);
   assertEquals(out.body, {
-    ok: true, effect: "set", words: capStartChangeWords(null, "2026-11-24").words,
-    changed: true, cap_start_on: "2026-11-24", previous_start: null, authority: "owner",
+    ok: true, effect: "set", words: capStartChangeWords(null, "2026-11-24", false).words,
+    changed: true, cap_start_on: "2026-11-24", previous_start: null, authority: "owner", hold_switch_on: false,
   });
   assertEquals(db.calls, [{
     fn: "set_work_order_cap_start",
@@ -90,6 +92,7 @@ Deno.test("set: database refusals map to their codes; anything else is 503, neve
     [{ data: null, error: { message: "work_order_cap_start_changed" } }, 409, "cap_start_changed"],
     [{ data: null, error: { message: "work_order_cap_settings_missing" } }, 409, "cap_settings_missing"],
     [{ data: null, error: { message: "work_order_cap_start_reason_invalid" } }, 400, "reason_invalid"],
+    [{ data: null, error: { message: "work_order_cap_start_clear_while_on" } }, 409, "cap_start_clear_while_on"],
     [{ data: null, error: { message: "work_order_cap_start_not_recorded" } }, 503, "cap_start_unrecorded"],
     [{ data: null, error: { message: "boom", code: "XX000" } }, 503, "cap_start_unwritable"],
     [{ data: null, error: null }, 503, "cap_start_unwritable"],
@@ -123,32 +126,63 @@ Deno.test("read: staff only; the date, its row and the record; a failed read is 
   assertEquals(post.status, 405);
 });
 
-Deno.test("words: moving the start back releases jobs; forward brings jobs in; clearing releases every job", () => {
-  const later = capStartChangeWords("2026-11-24", "2026-12-01");
-  assertEquals(later.effect, "later");
-  assertEquals(later.words.startsWith("Moving the start back from 2026-11-24 to 2026-12-01 releases jobs from the cap"), true, later.words);
-  const earlier = capStartChangeWords("2026-12-01", "2026-11-24");
+Deno.test("words: an earlier day caps more jobs, a later day fewer; true for the switch either way", () => {
+  const later = capStartChangeWords("2026-11-24", "2026-12-01", true);
+  assertEquals([later.effect, later.refused], ["later", false]);
+  assertEquals(later.words.startsWith("Later start day, 2026-11-24 to 2026-12-01: fewer jobs capped."), true, later.words);
+  const earlier = capStartChangeWords("2026-12-01", "2026-11-24", true);
   assertEquals(earlier.effect, "earlier");
-  assertEquals(earlier.words.includes("brings jobs under the cap"), true);
-  assertEquals(capStartChangeWords("2026-11-24", null).effect, "cleared");
-  assertEquals(capStartChangeWords(null, "2026-11-24").effect, "set");
-  assertEquals(capStartChangeWords("2026-11-24", "2026-11-24").effect, "unchanged");
-  for (const [a, b] of [["2026-11-24", "2026-12-01"], ["2026-12-01", "2026-11-24"], ["2026-11-24", null], [null, "2026-11-24"]] as const) {
-    const w = capStartChangeWords(a, b).words;
-    assertEquals(w.includes("Hourly maximums still apply"), true, w);
-    assertEquals(/[\u2014]/.test(w), false, "no em dash");
+  assertEquals(earlier.words.startsWith("Earlier start day, 2026-12-01 to 2026-11-24: more jobs capped."), true, earlier.words);
+  // Switch on: clearing is refused, and the words say so.
+  const clearOn = capStartChangeWords("2026-11-24", null, true);
+  assertEquals([clearOn.effect, clearOn.refused], ["cleared", true]);
+  assertEquals(clearOn.words.startsWith("Not allowed while held lines are on"), true, clearOn.words);
+  // Switch off: clearing changes nothing yet, and nothing says jobs are released.
+  const clearOff = capStartChangeWords("2026-11-24", null, false);
+  assertEquals([clearOff.effect, clearOff.refused], ["cleared", false]);
+  assertEquals(clearOff.words.includes("changes nothing yet"), true, clearOff.words);
+  assertEquals(/released/.test(clearOff.words), false, clearOff.words);
+  assertEquals(capStartChangeWords("2026-11-24", "2026-12-01", false).words.includes("Held lines are off now"), true);
+  assertEquals(capStartChangeWords("2026-11-24", "2026-12-01", null).words.includes("could not be read"), true);
+  assertEquals(capStartChangeWords(null, "2026-11-24", true).effect, "set");
+  assertEquals(capStartChangeWords("2026-11-24", "2026-11-24", true).effect, "unchanged");
+  for (const hold of [true, false, null]) {
+    for (const [a, b] of [["2026-11-24", "2026-12-01"], ["2026-12-01", "2026-11-24"], ["2026-11-24", null], [null, "2026-11-24"]] as const) {
+      const w = capStartChangeWords(a, b, hold).words;
+      assertEquals(w.includes("Hourly maximums still apply"), true, w);
+      assertEquals(/[\u2014]|back|forward/.test(w), false, w);
+    }
   }
 });
 
-Deno.test("preview: names the effect against the saved date and writes nothing; an unreadable date is 503", async () => {
-  const db = fakeClient({ settings: [{ cap_start_on: "2026-11-24" }] });
+Deno.test("preview: the database checks the approver first; names the effect for the switch; writes nothing", async () => {
+  const db = fakeClient();
   const out = await workOrderCapStartAction(db, "set_work_order_cap_start", "POST",
-    { shown_start: "2026-11-24", cap_start_on: "2026-12-01", reason: "move it back", preview: true }, person);
-  assertEquals([out.status, out.body.effect, out.body.shown_matches, out.body.preview], [200, "later", true, true]);
-  assertEquals(db.calls.length, 0);
-  const failed = await workOrderCapStartAction(fakeClient({ failTable: "work_order_cap_settings" }), "set_work_order_cap_start", "POST",
-    { ...ask, preview: true }, person);
-  assertEquals([failed.status, failed.body.code], [503, "cap_start_unreadable"]);
+    { shown_start: "2026-11-24", cap_start_on: "2026-12-01", reason: "move it later", preview: true }, person);
+  assertEquals([out.status, out.body.effect, out.body.shown_matches, out.body.preview, out.body.hold_switch_on], [200, "later", true, true, true]);
+  assertEquals(db.calls, [{ fn: "work_order_cap_start_preview", args: { p_actor: APPROVER } }]);
+  // Only the approver read: no table is read before or instead of it.
+  assertEquals(db.reads, []);
+  const clear = await workOrderCapStartAction(fakeClient(), "set_work_order_cap_start", "POST",
+    { shown_start: "2026-11-24", cap_start_on: null, reason: "clear it", preview: true }, person);
+  assertEquals([clear.body.effect, clear.body.refused], ["cleared", true]);
+  const notApprover = await workOrderCapStartAction(
+    fakeClient({ rpc: () => ({ data: null, error: { message: "work_order_cap_start_not_approver" } }) }),
+    "set_work_order_cap_start", "POST", { ...ask, preview: true }, person);
+  assertEquals([notApprover.status, notApprover.body.code, notApprover.body.cap_start_on], [403, "approver_required", undefined]);
+  const bad: any[] = [
+    { data: null, error: { message: "boom" } },
+    { data: { cap_start_on: "soon", hold_switch_on: true }, error: null },
+    { data: { cap_start_on: null }, error: null },
+    { data: null, error: null },
+  ];
+  for (const answer of bad) {
+    const r = await workOrderCapStartAction(fakeClient({ rpc: () => answer }), "set_work_order_cap_start", "POST", { ...ask, preview: true }, person);
+    assertEquals([r.status, r.body.code], [503, "cap_start_unreadable"], JSON.stringify(answer));
+  }
+  const thrown = await workOrderCapStartAction(fakeClient({ rpc: () => Promise.reject(new TypeError("fetch failed")) }),
+    "set_work_order_cap_start", "POST", { ...ask, preview: true }, person);
+  assertEquals([thrown.status, thrown.body.code], [503, "cap_start_unreadable"]);
   const key = await workOrderCapStartAction(fakeClient(), "set_work_order_cap_start", "POST", { ...ask, preview: true }, serverKey);
   assertEquals([key.status, key.body.code], [403, "named_person_required"]);
 });
