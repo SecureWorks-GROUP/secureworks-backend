@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 // The unallocated credit raiser. Fake client only; made-up ids and amounts.
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { CREDIT_REASON, creditSweep, creditSweepRequest } from "./credit_run.ts";
+import { CREDIT_BACKLOG_STATE_KEY, CREDIT_REASON, creditSweep, creditSweepRequest, syncCreditRun, syncMatchStep } from "./credit_run.ts";
 
 const JOB = "11111111-1111-4111-8111-111111111111";
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -17,6 +17,9 @@ type World = {
   tradeUsers?: string[];
   fail?: string;
   applyError?: Record<string, unknown>;
+  switchOn?: boolean | "fail";
+  state?: Record<string, { note: string | null }>; // xero_sync_state rows by key
+  upserts?: Array<{ table: string; rows: any }>;
   queries: Array<{ table: string; filters: Record<string, unknown> }>;
   rpcs: Array<{ fn: string; args: any }>;
 };
@@ -25,10 +28,22 @@ function fake(w: World) {
   return {
     from(table: string) {
       const filters: Record<string, unknown> = {};
+      let op = "select";
+      let upserted: any = null;
       const result = () => {
         w.queries.push({ table, filters });
         if (w.fail === table) return { data: null, error: { code: "XX000" } };
+        if (op === "upsert") {
+          (w.upserts ??= []).push({ table, rows: upserted });
+          if (table === "xero_sync_state") (w.state ??= {})[upserted.key] = { note: upserted.note };
+          return { data: null, error: null };
+        }
         switch (table) {
+          case "feature_flags":
+            if (w.switchOn === "fail") return { data: null, error: { code: "XX000" } };
+            return { data: w.switchOn === undefined ? null : { enabled: w.switchOn }, error: null };
+          case "xero_sync_state":
+            return { data: w.state?.[String(filters.key)] ?? null, error: null };
           case "match_clue_types":
             return { data: CLUE_TYPES, error: null };
           case "job_cost_lines": {
@@ -42,7 +57,8 @@ function fake(w: World) {
                 l.state === filters.state && l.needs_reason === filters.needs_reason
               ).map(() => ({ document_id: id }))
             ).filter((r) => filters["lt:document_id"] === undefined || r.document_id < String(filters["lt:document_id"]))
-              .sort((a, b) => (a.document_id < b.document_id ? 1 : -1))
+              .filter((r) => filters["gt:document_id"] === undefined || r.document_id > String(filters["gt:document_id"]))
+              .sort((a, b) => (a.document_id < b.document_id ? 1 : -1) * (filters.ascending ? -1 : 1))
               .slice(0, Number(filters.limit ?? 1e9));
             return { data: rows, error: null };
           }
@@ -73,11 +89,16 @@ function fake(w: World) {
       };
       const chain: any = {
         select: () => chain,
+        upsert: (rows: any) => ((op = "upsert"), (upserted = rows), chain),
+        abortSignal: () => chain,
         eq: (k: string, v: unknown) => ((filters[k] = v), chain),
         lt: (k: string, v: unknown) => ((filters[`lt:${k}`] = v), chain),
+        gt: (k: string, v: unknown) => ((filters[`gt:${k}`] = v), chain),
         in: (k: string, v: unknown) => ((filters[`in:${k}`] = v), chain),
+        like: () => chain,
+        delete: () => ((op = "delete"), chain),
         or: () => chain,
-        order: () => chain,
+        order: (_k: string, o?: { ascending?: boolean }) => ((filters.ascending = o?.ascending !== false), chain),
         limit: (n: number) => ((filters.limit = n), chain),
         maybeSingle: () => Promise.resolve(result()),
         then: (res: any, rej: any) => Promise.resolve(result()).then(res, rej),
@@ -112,7 +133,7 @@ const note = (reference: string | null = "Return for SWF-26123") => ({
   credit_note_date: "2026-11-10",
   line_items: [{ Description: "Returned posts" }],
 });
-const world = (over: Partial<World> = {}): World => ({ queries: [], rpcs: [], ...over });
+const world = (over: Partial<World> = {}): World => ({ queries: [], rpcs: [], switchOn: true, ...over });
 const applies = (w: World) => w.rpcs.filter((r) => r.fn === "match_apply");
 
 Deno.test("an unallocated credit naming a job: a proposal of item kind credit, never auto", async () => {
@@ -207,4 +228,95 @@ Deno.test("a credit from a Trade App user is a person's pay: never raised; an un
   const bad = world({ lines: { c1: [unallocated()] }, notes: { c1: note() }, fail: "users" });
   const r = await creditSweep(fake(bad));
   assertEquals([applies(bad).length, r.failed], [0, { read_trade_user: 1 }]);
+});
+
+Deno.test("credit_sweep: with reconcile_matcher_v1 off, missing or unreadable it reads nothing else and writes nothing", async () => {
+  for (const [on, error] of [[false, undefined], [undefined, undefined], ["fail", "matcher_switch_unreadable"]] as const) {
+    const w = world({ lines: { c1: [unallocated()] }, notes: { c1: note() }, switchOn: on as any });
+    const out = await creditSweep(fake(w), { after: "c9" });
+    assertEquals([out.swept, out.switch, out.error, out.next, out.done], [0, "off", error, "c9", false]);
+    assertEquals(w.queries.map((q) => q.table), ["feature_flags"]);
+    assertEquals([w.rpcs.length, (w.upserts ?? []).length], [0, 0]);
+  }
+});
+
+Deno.test("a credit with a line on an installer account (301 or 306) is labour: never raised", async () => {
+  for (const code of ["301", "306"]) {
+    const xero = world({ lines: { c1: [unallocated()] }, notes: { c1: { ...note(), line_items: [{ Description: "Returned", AccountCode: code }] } } });
+    const a = await creditSweep(fake(xero));
+    assertEquals([applies(xero).length, a.skipped], [0, { labour_credit: 1 }], `Xero line ${code}`);
+    const ours = world({ lines: { c1: [unallocated({ account_code: code })] }, notes: { c1: note() } });
+    const b = await creditSweep(fake(ours));
+    assertEquals([applies(ours).length, b.skipped], [0, { labour_credit: 1 }], `cost line ${code}`);
+  }
+  const supplies = world({ lines: { c1: [unallocated({ account_code: "300" })] }, notes: { c1: { ...note(), line_items: [{ AccountCode: "300" }] } } });
+  await creditSweep(fake(supplies));
+  assertEquals(applies(supplies).length, 1, "a supplies account is not labour");
+});
+
+const throwingClient = () =>
+  new Proxy({}, {
+    get() {
+      throw new Error("touched the database with the switch off");
+    },
+  });
+const credits = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`c${i}`, [unallocated()]]));
+const notesFor = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`c${i}`, note(null)]));
+const creditApplies = (w: World) => applies(w).filter((a) => a.args.p_item_kind === "credit").map((a) => a.args.p_subject_id);
+
+Deno.test("sync step, switch off: no bill or credit read or write at all", async () => {
+  const out = await syncMatchStep(throwingClient(), { on: false, changed: ["xero_bill:a"] });
+  assertEquals([out.switch, out.run, out.credits.switch, out.credits.run], ["off", 0, "off", 0]);
+});
+
+Deno.test("sync step: credits run after the bills, in what is left of the same 50", async () => {
+  const bills = Array.from({ length: 48 }, (_, i) => `xero_bill:b${String(i).padStart(2, "0")}`);
+  const w = world({ lines: credits(5), notes: notesFor(5) });
+  const out = await syncMatchStep(fake(w), { on: true, changed: bills });
+  assertEquals([out.run, out.credits.taken, out.credits.run], [48, 2, 2]);
+  assertEquals(creditApplies(w), ["xero_credit_note:c0", "xero_credit_note:c1"], "oldest id first, after every bill");
+  const firstCredit = w.rpcs.findIndex((r) => r.args?.p_item_kind === "credit");
+  assert(w.rpcs.slice(firstCredit).every((r) => r.args?.p_item_kind !== "bill"));
+  assertEquals(w.state?.[CREDIT_BACKLOG_STATE_KEY], { note: "c1" });
+
+  // The next run starts after c1 and reaches the end: the position goes back to the start.
+  const w2 = world({ lines: credits(5), notes: notesFor(5), state: { ...w.state } });
+  const next = await syncMatchStep(fake(w2), { on: true, changed: [] });
+  assertEquals(creditApplies(w2), ["xero_credit_note:c2", "xero_credit_note:c3", "xero_credit_note:c4"]);
+  assertEquals([next.credits.run, w2.state?.[CREDIT_BACKLOG_STATE_KEY]], [3, { note: null }]);
+
+  // 50 bills fill the run: no credit is read.
+  const full = world({ lines: credits(2), notes: notesFor(2) });
+  const f = await syncMatchStep(fake(full), { on: true, changed: Array.from({ length: 50 }, (_, i) => `xero_bill:x${i}`) });
+  assertEquals([f.run, f.credits.taken, creditApplies(full).length], [50, 0, 0]);
+  assert(!full.queries.some((q) => q.filters.document_kind === "xero_credit_note"));
+});
+
+Deno.test("sync step: one budget; the bills spend it, no credit runs, and the position stays", async () => {
+  let t = 0;
+  const w = world({ lines: credits(3), notes: notesFor(3), state: { [CREDIT_BACKLOG_STATE_KEY]: { note: "c0" } } });
+  const out = await syncMatchStep(fake(w), { on: true, changed: ["xero_bill:a", "xero_bill:b"], budgetMs: 25, now: () => (t += 10) });
+  assertEquals(out.credits.run, 0);
+  assertEquals(creditApplies(w).length, 0);
+  assertEquals(w.state?.[CREDIT_BACKLOG_STATE_KEY], { note: "c0" });
+});
+
+Deno.test("sync credits: an open item or a skipped credit is passed; a credit the budget does not reach is where the next run starts", async () => {
+  let t = 0;
+  // Each clock read costs 10 ms: two credits run.
+  const w = world({ lines: credits(4), notes: notesFor(4), openItems: ["xero_credit_note:c0"] });
+  const out = await syncCreditRun(fake(w), { on: true, room: 50, deadline: 35, now: () => (t += 10) });
+  assertEquals([out.taken, out.run], [3, 2]);
+  assertEquals(creditApplies(w), ["xero_credit_note:c1", "xero_credit_note:c2"]);
+  assertEquals(w.state?.[CREDIT_BACKLOG_STATE_KEY], { note: "c2" });
+});
+
+Deno.test("sync credits: a failed read takes nothing and keeps the position", async () => {
+  for (const fail of ["reconcile_items", "xero_sync_state", "job_cost_lines"]) {
+    const w = world({ lines: credits(2), notes: notesFor(2), state: { [CREDIT_BACKLOG_STATE_KEY]: { note: "a" } }, fail });
+    const out = await syncCreditRun(fake(w), { on: true, room: 50, deadline: Date.now() + 60_000 });
+    assertEquals([out.run, applies(w).length, out.errors.length], [0, 0, 1], fail);
+    assertEquals(w.state?.[CREDIT_BACKLOG_STATE_KEY], { note: "a" }, fail);
+    assertEquals((w.upserts ?? []).length, 0, fail);
+  }
 });

@@ -60,8 +60,8 @@ import { builderReferenceAnnotation, decideBuilderReference, loadBuilderReferenc
 // tests can import matchUnlinkedInvoices without binding a port.
 import { parseBankSummary } from './bank_summary.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { matchPendingRequest, matchSweepRequest, readMatcherSwitch, syncMatchRun, type SyncMatchReport } from './match/match_run.ts'
-import { creditSweepRequest } from './match/credit_run.ts'
+import { matchPendingRequest, matchSweepRequest, readMatcherSwitch } from './match/match_run.ts'
+import { creditSweepRequest, syncMatchStep, type SyncMatchStepReport } from './match/credit_run.ts'
 import {
   buildMaterialsFactRow,
   buildQueueRow,
@@ -257,8 +257,9 @@ if (import.meta.main) serve(async (req: Request) => {
         // Supplier credit notes left unallocated (reason credit_not_allocated),
         // with no open Reconcile item, 50 a call. A credit that follows a bill
         // rides its bill and is never swept. POST with the exact service key;
-        // pass back `next` as `?after=` until `done`. Proposals only, behind
-        // reconcile_matcher_v1 (match/credit_run.ts).
+        // pass back `next` as `?after=` until `done`. Proposals only. With
+        // reconcile_matcher_v1 off it writes nothing (match/credit_run.ts).
+        // The sync runs the same raiser after its bills (syncMatchStep).
         const out = await creditSweepRequest(req, sb, SUPABASE_SERVICE_KEY)
         return json(out.body, out.status)
       }
@@ -796,10 +797,11 @@ async function syncInvoices(sb: any) {
   const costLinesChanged = new Set<string>()
   // P2-02.7: the matcher switch, read once here. Off (or unreadable), the sync
   // makes no matcher read or write. On, the bills this sync changes are matched
-  // after the Xero paging, in one bounded step (syncMatchRun).
+  // after the Xero paging, in one bounded step (syncMatchStep: bills, then
+  // unallocated supplier credits in what is left of the same 50 and 20 s).
   const matcher = await readMatcherSwitch(sb)
   const matchChanged = new Set<string>()
-  let matchRun: SyncMatchReport | { switch: 'off'; error?: string } = { switch: 'off', ...(matcher.error ? { error: matcher.error } : {}) }
+  let matchRun: SyncMatchStepReport | { switch: 'off'; error?: string } = { switch: 'off', ...(matcher.error ? { error: matcher.error } : {}) }
   let costLinesWritten = 0
   const costLinesErrors: string[] = []
   let costLinesOn = false
@@ -1255,11 +1257,12 @@ async function syncInvoices(sb: any) {
   )
 
   // P2-02.7: propose a job for the bills this sync changed, then queued and
-  // waiting bills, after the paging and with its own budget. Proposals only;
+  // waiting bills, then unallocated supplier credits (Follow-up 66), after the
+  // paging and with one budget. Proposals only;
   // never fails the sync.
   if (matcher.on) {
     try {
-      matchRun = await syncMatchRun(sb, { on: true, changed: [...matchChanged] })
+      matchRun = await syncMatchStep(sb, { on: true, changed: [...matchChanged] })
     } catch {
       matchRun = { switch: 'off', error: 'match_step_threw' }
       console.error('[xero-sync] matcher step threw')
