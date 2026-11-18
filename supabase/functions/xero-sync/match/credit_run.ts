@@ -354,7 +354,8 @@ export async function creditSweep(
   const after = opts.after ?? null;
   const matcher = await readMatcherSwitch(sb);
   if (matcher.error) return { swept: 0, switch: "off", error: matcher.error, next: after, done: false };
-  if (!matcher.on) return { swept: 0, switch: "off", next: after, done: false };
+  // An error code, so a caller following `next` until `done` stops here.
+  if (!matcher.on) return { swept: 0, switch: "off", error: "matcher_switch_off", next: after, done: false };
   let q = waitingCredits(sb);
   if (after) q = q.lt("document_id", after);
   let lines: { data: unknown; error: unknown } | null = null;

@@ -231,7 +231,7 @@ Deno.test("a credit from a Trade App user is a person's pay: never raised; an un
 });
 
 Deno.test("credit_sweep: with reconcile_matcher_v1 off, missing or unreadable it reads nothing else and writes nothing", async () => {
-  for (const [on, error] of [[false, undefined], [undefined, undefined], ["fail", "matcher_switch_unreadable"]] as const) {
+  for (const [on, error] of [[false, "matcher_switch_off"], [undefined, "matcher_switch_off"], ["fail", "matcher_switch_unreadable"]] as const) {
     const w = world({ lines: { c1: [unallocated()] }, notes: { c1: note() }, switchOn: on as any });
     const out = await creditSweep(fake(w), { after: "c9" });
     assertEquals([out.swept, out.switch, out.error, out.next, out.done], [0, "off", error, "c9", false]);
@@ -275,8 +275,9 @@ Deno.test("sync step: credits run after the bills, in what is left of the same 5
   const out = await syncMatchStep(fake(w), { on: true, changed: bills });
   assertEquals([out.run, out.credits.taken, out.credits.run], [48, 2, 2]);
   assertEquals(creditApplies(w), ["xero_credit_note:c0", "xero_credit_note:c1"], "oldest id first, after every bill");
-  const firstCredit = w.rpcs.findIndex((r) => r.args?.p_item_kind === "credit");
-  assert(w.rpcs.slice(firstCredit).every((r) => r.args?.p_item_kind !== "bill"));
+  const lastBillRead = w.queries.findLastIndex((q) => q.filters.document_kind === "xero_bill");
+  const firstCreditRead = w.queries.findIndex((q) => q.filters.document_kind === "xero_credit_note");
+  assert(lastBillRead > 0 && firstCreditRead > lastBillRead, "every bill is read before the first credit");
   assertEquals(w.state?.[CREDIT_BACKLOG_STATE_KEY], { note: "c1" });
 
   // The next run starts after c1 and reaches the end: the position goes back to the start.
