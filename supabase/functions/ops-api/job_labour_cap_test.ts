@@ -497,6 +497,31 @@ Deno.test("guard, cap scope: switch on, an older hourly job outside the scope ke
   await assertRejects(() => guard(scopeDb(scopeAll(true)), 900.01), ApiError);
 });
 
+Deno.test("guard, cap scope: switch on, an older job with BOTH an approved order and an hourly maximum keeps the maximum only", async () => {
+  // Out of the scope, hourly up to 900, approved order of 500: the order's
+  // total is not enforced (900 passes); the hourly maximum still is.
+  const both = () => {
+    const db = woDb(scopeAll(false));
+    db.tables.job_budgets = [payRow(JOB_A, 1, "hourly_capped")];
+    return db;
+  };
+  await guard(both(), 900);
+  const err: any = await assertRejects(() => guard(both(), 900.01), ApiError);
+  assertEquals([err.status, err.body?.code, err.body?.jobs?.[0]?.limit], [409, "work_order_total_over_agreed", "hourly_maximum"]);
+  // The pay read moves between the two reads (a newer budget is not hourly):
+  // the mode read now says work order, but the order is out of the scope, so
+  // its total is still not enforced.
+  const moved = both();
+  const from = moved.from.bind(moved);
+  let budgetReads = 0;
+  moved.from = (t: string) => {
+    if (t === "job_budgets" && budgetReads++ === 1) moved.tables.job_budgets = [payRow(JOB_A, 2, "group_work_order")];
+    return from(t);
+  };
+  await guard(moved, 5000);
+  assert(budgetReads >= 2, "both reads of the pay happened");
+});
+
 Deno.test("guard, cap scope: a failed scope read is 503 work_order_cap_unavailable, never capped or uncapped", async () => {
   const cases: Array<[string, Fake]> = [
     ["returns an error", woDb(() => ({ data: null, error: { message: "boom" } }))],
