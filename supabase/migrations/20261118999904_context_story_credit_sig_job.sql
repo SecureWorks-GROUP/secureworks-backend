@@ -29,8 +29,9 @@
 -- (job_cost_bill_line_job_id), or a materials fact on the bill; the employer-super rows copy
 -- their bill line's job. Each route is probed with the allocated bills as one array, on an
 -- existing index. None hits: no placed row can exist, and the answer is NULL, as today.
--- _fast falls back to _main whenever the cost views, the placement view or the parts view
--- differ from the bodies this was written against, or the cost-lines cutover is ready.
+-- _fast falls back to _main whenever the cost views, the placement view, the allocations
+-- view or the parts view differ from the bodies this was written against, or the cost-lines
+-- cutover is ready.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -192,6 +193,7 @@ AS $fn$
  OR md5(pg_get_viewdef('public.v_job_cost_events_legacy'::regclass, true)) IS DISTINCT FROM 'b48997c55913ce3c90e3a3c947533fd3'
  OR md5(pg_get_viewdef('public.v_supplier_credit_placement'::regclass, true)) IS DISTINCT FROM 'e9754f7c63e856eb80f4f6c240039323'
  OR md5(pg_get_viewdef('public.v_bookkeeping_line_parts_current'::regclass, true)) IS DISTINCT FROM '8d1e063dbf8e08524c6c3b2d6023b9c3'
+ OR md5(pg_get_viewdef('public.v_supplier_credit_allocations'::regclass, true)) IS DISTINCT FROM '9684232cbb1c45e7564ce168971d800e'
  OR (EXISTS (SELECT 1 FROM public.feature_flags f WHERE f.flag_name = 'job_cost_events_from_cost_lines_v1' AND f.enabled)
      AND EXISTS (SELECT 1 FROM public.job_cost_events_cutover c WHERE c.singleton AND c.completed_at IS NOT NULL)) THEN
   RETURN public.context_job_story_credit_sig_main(p_job_id);
@@ -203,7 +205,7 @@ EXCEPTION WHEN OTHERS THEN
  RETURN public.context_job_story_credit_sig_main(p_job_id);
 END $fn$;
 COMMENT ON FUNCTION public.context_job_story_credit_sig_fast(uuid) IS
- 'Follow-up 58 (20261118999904): the body install_context_story_credit_sig_job puts under context_job_story_credit_sig. Uses context_job_story_credit_sig_job while v_job_cost_events, its legacy body, v_supplier_credit_placement and v_bookkeeping_line_parts_current are the definitions it was written against and the cost-lines cutover is not ready; otherwise, or on any error, context_job_story_credit_sig_main. Service role only.';
+ 'Follow-up 58 (20261118999904): the body install_context_story_credit_sig_job puts under context_job_story_credit_sig. Uses context_job_story_credit_sig_job while v_job_cost_events, its legacy body, v_supplier_credit_placement, v_supplier_credit_allocations and v_bookkeeping_line_parts_current are the definitions it was written against and the cost-lines cutover is not ready; otherwise, or on any error, context_job_story_credit_sig_main. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.install_context_story_credit_sig_job() RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $fn$

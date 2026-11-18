@@ -5,6 +5,8 @@ BEGIN;
 SET LOCAL jit=off;
 SET LOCAL TimeZone='UTC';
 SET LOCAL statement_timeout='120s';
+CREATE TEMP TABLE cs_pre AS SELECT p.proname, md5(p.prosrc) AS m FROM pg_proc p
+ WHERE p.oid IN ('public.context_job_story_credit_sig(uuid)'::regprocedure,'public.context_job_story_money_sig(uuid)'::regprocedure);
 -- Rule 17: recreate this case's own objects after predecessor rollback proofs.
 \ir ../../../migrations/20261118999904_context_story_credit_sig_job.sql
 CREATE FUNCTION pg_temp.cs_assert(ok boolean,msg text) RETURNS void LANGUAGE plpgsql AS $f$
@@ -14,7 +16,8 @@ CREATE FUNCTION pg_temp.cs_job(num text) RETURNS uuid LANGUAGE sql AS $f$ SELECT
 -- Merge leaves the live name on its 20261031010000 body; the copy is byte for byte that body.
 SELECT pg_temp.cs_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_story_credit_sig(uuid)'::regprocedure)='a5d0f9f74c14ab88cc502f2d2ad98f27','merge changed the live credit signature');
 SELECT pg_temp.cs_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_story_credit_sig_main(uuid)'::regprocedure)='a5d0f9f74c14ab88cc502f2d2ad98f27','main copy is not the live body');
-SELECT pg_temp.cs_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_story_money_sig(uuid)'::regprocedure)='7a7798901a26351b8e910da3f1392509','merge changed money_sig');
+SELECT pg_temp.cs_assert(NOT EXISTS (SELECT 1 FROM cs_pre c JOIN pg_proc p ON p.proname=c.proname AND p.pronamespace='public'::regnamespace
+ WHERE md5(p.prosrc) IS DISTINCT FROM c.m) AND (SELECT count(*) FROM cs_pre)=2,'merge changed credit_sig or money_sig');
 SELECT pg_temp.cs_assert(NOT has_function_privilege('anon','public.context_job_story_credit_sig_job(uuid)','EXECUTE')
  AND NOT has_function_privilege('authenticated','public.install_context_story_credit_sig_job()','EXECUTE')
  AND has_function_privilege('service_role','public.context_job_story_credit_sig_fast(uuid)','EXECUTE'),'grants');
@@ -22,6 +25,7 @@ SELECT pg_temp.cs_assert(NOT has_function_privilege('anon','public.context_job_s
 SELECT pg_temp.cs_assert(md5(pg_get_viewdef('public.v_job_cost_events'::regclass,true))='c2e9632718dfa057703f1ee36b97322e'
  AND md5(pg_get_viewdef('public.v_job_cost_events_legacy'::regclass,true))='b48997c55913ce3c90e3a3c947533fd3'
  AND md5(pg_get_viewdef('public.v_supplier_credit_placement'::regclass,true))='e9754f7c63e856eb80f4f6c240039323'
+ AND md5(pg_get_viewdef('public.v_supplier_credit_allocations'::regclass,true))='9684232cbb1c45e7564ce168971d800e'
  AND md5(pg_get_viewdef('public.v_bookkeeping_line_parts_current'::regclass,true))='8d1e063dbf8e08524c6c3b2d6023b9c3','source views moved');
 
 \ir fixtures.sql
@@ -104,7 +108,12 @@ EXCEPTION WHEN raise_exception THEN
 END $r$;
 ROLLBACK TO SAVEPOINT refuse;
 
--- 5. Any failure in the scoped path gets the company-wide answer.
+-- 5. With the sources as written and no cutover, _fast takes the scoped path (not _main).
+SAVEPOINT scoped;
+CREATE OR REPLACE FUNCTION public.context_job_story_credit_sig_job(p_job_id uuid) RETURNS text LANGUAGE sql STABLE AS $f$ SELECT 'scoped'::text $f$;
+SELECT pg_temp.cs_assert(public.context_job_story_credit_sig_fast(pg_temp.cs_job('CS-1'))='scoped','fast did not take the scoped path');
+ROLLBACK TO SAVEPOINT scoped;
+-- Any failure in the scoped path gets the company-wide answer.
 SAVEPOINT fallback;
 CREATE OR REPLACE FUNCTION public.context_job_story_credit_sig_job(p_job_id uuid) RETURNS text LANGUAGE plpgsql STABLE AS $f$
 /* test */ BEGIN RAISE EXCEPTION 'credit_sig_job_gate_missed_route'; END $f$;
@@ -117,7 +126,9 @@ ALTER TABLE public.job_cost_events_cutover DROP CONSTRAINT job_cost_events_cutov
 UPDATE public.job_cost_events_cutover SET completed_at=now() WHERE singleton;
 CREATE OR REPLACE FUNCTION public.context_job_story_credit_sig_job(p_job_id uuid) RETURNS text LANGUAGE sql STABLE AS $f$ SELECT 'scoped'::text $f$;
 SELECT pg_temp.cs_assert(EXISTS (SELECT 1 FROM public.job_cost_events_cutover WHERE singleton AND completed_at IS NOT NULL),'cutover not ready in test');
-SELECT pg_temp.cs_assert(public.context_job_story_credit_sig_fast(pg_temp.cs_job('CS-1')) IS DISTINCT FROM 'scoped','cutover did not fall back');
+-- (the cost-lines branch holds no rows here, so both read NULL)
+SELECT pg_temp.cs_assert(public.context_job_story_credit_sig_fast(pg_temp.cs_job('CS-1')) IS DISTINCT FROM 'scoped'
+ AND public.context_job_story_credit_sig_fast(pg_temp.cs_job('CS-1')) IS NOT DISTINCT FROM public.context_job_story_credit_sig_main(pg_temp.cs_job('CS-1')),'cutover did not fall back');
 ROLLBACK TO SAVEPOINT cutover;
 
 SELECT 'FU58 credit signature by job: equality, moves, install/remove, refusals and fallbacks passed' AS result;
