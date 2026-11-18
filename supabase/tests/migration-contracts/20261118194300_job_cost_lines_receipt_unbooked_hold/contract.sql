@@ -17,7 +17,7 @@ SELECT to_regprocedure('public.job_cost_lines_sync_receipt(uuid)') IS NULL
 SELECT coalesce((SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.job_cost_lines_sync_receipt(uuid)'))
   = 'c499c1e901175e363c3ad018a4b190c8',false) AS zz_held \gset
 \if :zz_held
-\ir ../../../migrations/20261118999907_job_cost_lines_receipt_unbooked_hold.sql
+\ir ../../../migrations/20261118194300_job_cost_lines_receipt_unbooked_hold.sql
 \endif
 
 SELECT public.job_cost_lines_install_receipt_trigger();
