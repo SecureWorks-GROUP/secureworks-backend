@@ -1,4 +1,4 @@
--- Rollback of 20261119999941_director_cost_watchdogs: the page guard gets back the
+-- Rollback of 20261118195600_director_cost_watchdogs: the page guard gets back the
 -- director's statement in place (same id, active state and history), then the
 -- trace table goes. The timers stay: they were on live before this was filed,
 -- and removing one would strip protection. Same guard as the migration: any

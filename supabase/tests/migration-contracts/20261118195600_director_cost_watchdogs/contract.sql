@@ -40,14 +40,14 @@ CREATE FUNCTION pg_temp.unchanged() RETURNS boolean LANGUAGE sql AS $f$
 CREATE FUNCTION pg_temp.cmd(p text) RETURNS text LANGUAGE sql AS $f$ SELECT command FROM cron.job WHERE jobname = p $f$;
 
 -- 1. Absent: all three installed, every minute, active; the page guard with its trace.
-\ir ../../../migrations/20261119999941_director_cost_watchdogs.sql
+\ir ../../../migrations/20261118195600_director_cost_watchdogs.sql
 SELECT pg_temp.zz_assert((SELECT count(*) FROM cron.job) = 3
   AND pg_temp.cmd('job-profit-watchdog') = pg_temp.s('profit')
   AND pg_temp.cmd('job-pages-watchdog') = pg_temp.s('traced')
   AND pg_temp.cmd('job-matcher-watchdog') = pg_temp.s('matcher')
   AND NOT EXISTS (SELECT FROM cron.job WHERE schedule <> '* * * * *' OR NOT active), 'absent: installed');
 SELECT pg_temp.snap();
-\ir ../../../migrations/20261119999941_director_cost_watchdogs.sql
+\ir ../../../migrations/20261118195600_director_cost_watchdogs.sql
 SELECT pg_temp.zz_assert(pg_temp.unchanged(), 're-apply changes nothing');
 
 -- 2. Present with exactly the live statements (the live case): the two switch
@@ -62,7 +62,7 @@ INSERT INTO cron.job(jobid,jobname,command,active,schedule) VALUES
  (25,'job-profit-watchdog','SELECT 1',true,'* * * * *');
 UPDATE cron.job SET database = 'zz_other_database' WHERE jobid = 25;
 SELECT pg_temp.snap();
-\ir ../../../migrations/20261119999941_director_cost_watchdogs.sql
+\ir ../../../migrations/20261118195600_director_cost_watchdogs.sql
 SELECT pg_temp.zz_assert(
   NOT EXISTS (SELECT * FROM cron.job WHERE jobid <> 22 EXCEPT SELECT * FROM pg_temp.zz_snap)
   AND EXISTS (SELECT FROM cron.job WHERE jobid = 22 AND jobname = 'job-pages-watchdog'
@@ -76,7 +76,7 @@ UPDATE cron.job SET command = pg_temp.s('profit') || ' ' WHERE jobid = 21;
 SELECT pg_temp.snap();
 SAVEPOINT different;
 \set ON_ERROR_STOP off
-\ir ../../../migrations/20261119999941_director_cost_watchdogs.sql
+\ir ../../../migrations/20261118195600_director_cost_watchdogs.sql
 \set different_state :SQLSTATE
 \set ON_ERROR_STOP on
 ROLLBACK TO different;
@@ -87,7 +87,7 @@ UPDATE cron.job SET command = 'SELECT 1' WHERE jobid = 22;
 SELECT pg_temp.snap();
 SAVEPOINT different_pages;
 \set ON_ERROR_STOP off
-\ir ../../../migrations/20261119999941_director_cost_watchdogs.sql
+\ir ../../../migrations/20261118195600_director_cost_watchdogs.sql
 \set different_pages_state :SQLSTATE
 \set ON_ERROR_STOP on
 ROLLBACK TO different_pages;
@@ -100,7 +100,7 @@ INSERT INTO cron.job(jobid,jobname,command,active,schedule) VALUES (26,'job-matc
 SELECT pg_temp.snap();
 SAVEPOINT duplicate;
 \set ON_ERROR_STOP off
-\ir ../../../migrations/20261119999941_director_cost_watchdogs.sql
+\ir ../../../migrations/20261118195600_director_cost_watchdogs.sql
 \set duplicate_state :SQLSTATE
 \set ON_ERROR_STOP on
 ROLLBACK TO duplicate;
@@ -112,7 +112,7 @@ DELETE FROM cron.job WHERE jobid IN (25, 26);
 -- pg_stat_activity (temp relations are searched first).
 CREATE TEMP TABLE zz_activity(backend_type text, state text, pid integer, query_start timestamptz);
 CREATE TEMP VIEW pg_stat_activity AS SELECT * FROM pg_temp.zz_activity;
-\ir ../../../migrations/20261119999941_director_cost_watchdogs.sql
+\ir ../../../migrations/20261118195600_director_cost_watchdogs.sql
 DELETE FROM public.job_watchdog_trips;
 UPDATE cron.job SET active = true WHERE jobid IN (22, 24);
 -- Quiet: 3 slow queries, 3 connections. Nothing moves.
@@ -153,19 +153,19 @@ DROP VIEW pg_stat_activity;
 -- 6. Rollback: the page guard gets the director's statement back in place (same
 -- id, active state), the switch guards and timers stay, the trace table goes.
 UPDATE cron.job SET active = false WHERE jobid = 22;
-\ir ../../../rollbacks/20261119999941_director_cost_watchdogs_down.sql
+\ir ../../../rollbacks/20261118195600_director_cost_watchdogs_down.sql
 SELECT pg_temp.zz_assert(EXISTS (SELECT FROM cron.job WHERE jobid = 22 AND command = pg_temp.s('pages') AND NOT active)
   AND pg_temp.cmd('job-profit-watchdog') = pg_temp.s('profit')
   AND pg_temp.cmd('job-matcher-watchdog') = pg_temp.s('matcher')
   AND to_regclass('public.job_watchdog_trips') IS NULL, 'rollback restores the live statement');
-\ir ../../../rollbacks/20261119999941_director_cost_watchdogs_down.sql
+\ir ../../../rollbacks/20261118195600_director_cost_watchdogs_down.sql
 SELECT pg_temp.zz_assert(pg_temp.cmd('job-pages-watchdog') = pg_temp.s('pages'), 'rollback re-run');
 -- The rollback carries the same guard.
 UPDATE cron.job SET command = 'SELECT 1' WHERE jobid = 23;
 SELECT pg_temp.snap();
 SAVEPOINT rollback_different;
 \set ON_ERROR_STOP off
-\ir ../../../rollbacks/20261119999941_director_cost_watchdogs_down.sql
+\ir ../../../rollbacks/20261118195600_director_cost_watchdogs_down.sql
 \set rollback_different_state :SQLSTATE
 \set ON_ERROR_STOP on
 ROLLBACK TO rollback_different;
@@ -173,7 +173,7 @@ SELECT pg_temp.zz_assert(:'rollback_different_state' = 'P0001', 'rollback_differ
 SELECT pg_temp.zz_assert(pg_temp.unchanged(), 'rollback different: nothing changed');
 UPDATE cron.job SET command = pg_temp.s('matcher') WHERE jobid = 23;
 -- Round trip: apply again after the rollback.
-\ir ../../../migrations/20261119999941_director_cost_watchdogs.sql
+\ir ../../../migrations/20261118195600_director_cost_watchdogs.sql
 SELECT pg_temp.zz_assert(EXISTS (SELECT FROM cron.job WHERE jobid = 22 AND command = pg_temp.s('traced'))
   AND to_regclass('public.job_watchdog_trips') IS NOT NULL, 'round trip');
 
