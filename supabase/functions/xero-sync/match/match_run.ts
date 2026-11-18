@@ -129,6 +129,9 @@ async function matchOne(
   if (!lines?.length) return { skipped: "no_cost_lines" };
   const counted = lines.filter((l) => l.state != null);
   if (!counted.length) return { skipped: "no_counted_lines" };
+  // Proposals are for bills waiting for a person. A bill already on a job,
+  // split or filed is left alone: no item is raised over it.
+  if (!counted.some((l) => l.state === "needs_person")) return { skipped: "nothing_waiting" };
 
   const bill = await read<Record<string, unknown> | null>("read_bill",
     sb.from("xero_invoices").select("xero_invoice_id,invoice_number,reference,xero_contact_id,contact_name,invoice_date,sub_total")
@@ -398,8 +401,9 @@ export async function runMatchFor(
     } catch (e) {
       const code = e instanceof ReadFailed ? e.code : "threw";
       bump(report.failed, code);
-      // A data refusal from match_apply would refuse again: not requeued.
-      if (!code.startsWith("apply:match_")) await requeue(id, code.startsWith("apply") ? "apply_failed" : "read_failed");
+      // A data refusal from match_apply would refuse again: not requeued. An
+      // unreadable switch is not a refusal and is retried.
+      if (!code.startsWith("apply:match_") || code === "apply:match_switch_unreadable") await requeue(id, code.startsWith("apply") ? "apply_failed" : "read_failed");
     }
   }
   if (Object.keys(report.failed).length) console.error("[match_run] failures", JSON.stringify(report.failed));
@@ -408,9 +412,11 @@ export async function runMatchFor(
 
 /** The match_pending action: one read when nothing waits. */
 export async function matchPending(sb: Sb): Promise<Record<string, unknown>> {
-  // match_queue_pkey. Message subjects wait for their own runner.
+  // match_queue_pkey. Bills only: a queued credit, receipt or message waits
+  // for its own runner and is never deleted here.
   const { data, error } = await sb.from("match_queue").select("subject_kind,subject_id")
-    .eq("subject_kind", "cost_document").order("queued_at", { ascending: true }).limit(MATCH_RUN_LIMIT);
+    .eq("subject_kind", "cost_document").like("subject_id", "xero_bill:%")
+    .order("queued_at", { ascending: true }).limit(MATCH_RUN_LIMIT);
   if (error) return { matched: 0, error: "queue_unreadable" };
   const rows = (data ?? []) as Array<{ subject_kind: string; subject_id: string }>;
   if (!rows.length) return { matched: 0 };

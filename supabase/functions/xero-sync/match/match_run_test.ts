@@ -23,6 +23,7 @@ type World = {
   lines?: Record<string, any[]>;
   orders?: any[];
   fail?: string; // a table whose read fails
+  applyError?: Record<string, unknown>;
   queue?: any[];
   queries: Array<{ table: string; op: string }>;
   rpcs: Array<{ fn: string; args: any }>;
@@ -69,8 +70,11 @@ function fake(w: World) {
             };
           case "v_job_orders":
             return { data: w.orders ?? [], error: null };
-          case "match_queue":
-            return op === "delete" ? { data: null, error: null } : { data: w.queue ?? [], error: null };
+          case "match_queue": {
+            if (op === "delete") return { data: null, error: null };
+            const prefix = String(filters["like:subject_id"] ?? "%").replace(/%$/, "");
+            return { data: (w.queue ?? []).filter((r) => String(r.subject_id).startsWith(prefix)), error: null };
+          }
           default:
             return { data: [], error: null };
         }
@@ -79,6 +83,7 @@ function fake(w: World) {
         select: () => chain,
         delete: () => ((op = "delete"), chain),
         eq: (k: string, v: unknown) => ((filters[k] = v), chain),
+        like: (k: string, v: string) => ((filters[`like:${k}`] = v), chain),
         neq: () => chain,
         not: () => chain,
         or: () => chain,
@@ -94,7 +99,12 @@ function fake(w: World) {
     },
     rpc(fn: string, args: any) {
       w.rpcs.push({ fn, args });
-      if (fn === "match_apply") return Promise.resolve({ data: { applied: "shadow" }, error: null });
+      if (fn === "match_apply") {
+        return Promise.resolve(w.applyError ? { data: null, error: w.applyError } : { data: { applied: "shadow" }, error: null });
+      }
+      if (fn === "context_job_evidence_for_bills" && w.fail === fn) {
+        return Promise.resolve({ data: null, error: { code: "XX000" } });
+      }
       return Promise.resolve({ data: [], error: null });
     },
   };
@@ -218,4 +228,34 @@ Deno.test("match_pending: queued bills are taken off the queue and run", async (
 Deno.test("proposalOnly leaves a suggestion or no clue as it is", () => {
   assertEquals(proposalOnly({ result: "none", reason: "no_clue" }), { result: "none", reason: "no_clue" });
   assertEquals(proposalOnly({ result: "suggest", reason: "one_clue" }).result, "suggest");
+});
+
+Deno.test("a bill with no line waiting for a person is left alone", async () => {
+  const lines = billLines();
+  lines[BILL][0].state = "on_job";
+  const w = world({ lines });
+  const report = await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  assertEquals(report.skipped, { nothing_waiting: 1 });
+  assertEquals(applies(w).length, 0);
+});
+
+Deno.test("a failed evidence read requeues; a match_apply refusal is counted and not requeued, an unreadable switch is", async () => {
+  const ev = world({ lines: billLines(), fail: "context_job_evidence_for_bills" });
+  const r1 = await runMatchFor(fake(ev), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  assertEquals([applies(ev).length, r1.failed, r1.requeued], [0, { read_bill_evidence: 1 }, 1]);
+  const refused = world({ lines: billLines(), applyError: { code: "P0001", message: "match_clue_root_required" } });
+  const r2 = await runMatchFor(fake(refused), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  assertEquals([r2.failed, r2.requeued], [{ "apply:match_clue_root_required": 1 }, 0]);
+  const off = world({ lines: billLines(), applyError: { code: "P0001", message: "match_switch_unreadable" } });
+  const r3 = await runMatchFor(fake(off), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  assertEquals(r3.requeued, 1);
+  const odd = world({ lines: billLines(), applyError: { code: "57014", message: "canceling statement" } });
+  const r4 = await runMatchFor(fake(odd), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  assertEquals([r4.failed, r4.requeued], [{ apply_failed: 1 }, 1]);
+});
+
+Deno.test("match_pending never takes a queued credit off the queue", async () => {
+  const w = world({ queue: [{ subject_kind: "cost_document", subject_id: "xero_credit_note:c1" }] });
+  assertEquals(await matchPending(fake(w)), { matched: 0 });
+  assert(!w.queries.some((q) => q.op === "delete"));
 });
