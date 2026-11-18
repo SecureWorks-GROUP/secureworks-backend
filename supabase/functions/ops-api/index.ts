@@ -7976,7 +7976,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
       }
       // Dispatch v2 slice 8, supplier replies and suggested moves (contract:
-      // replies.md; engine dispatch_v2_replies.ts). Two reads (GET) and seven
+      // replies.md; engine dispatch_v2_replies.ts). Two reads (GET) and eight
       // presses (POST), gated as the other Dispatch actions. Absent from
       // ROUTINE_ALLOWED_ACTIONS, AGENT_READ_ALLOWED_ACTIONS and
       // LEAD_INSTALLER_READ_ACTIONS. They write only the dispatch_v2_* reply
@@ -7990,7 +7990,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'dispatch_v2_replies_hide':
       case 'dispatch_v2_replies_clear':
       case 'dispatch_v2_suggestion_accept':
-      case 'dispatch_v2_suggestion_dismiss': {
+      case 'dispatch_v2_suggestion_dismiss':
+      // Items 17 and 5 (18 Nov 2026): Dismiss on a supplier reply. Writes
+      // only the reply's dismissed fields and a job_events row.
+      case 'dispatch_v2_replies_seen': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
           return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
         }
