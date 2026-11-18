@@ -68,7 +68,7 @@ DECLARE d text;
  END IF;
 END $copy$;
 COMMENT ON FUNCTION public.context_job_story_credit_sig_main(uuid) IS
- 'Follow-up 58 (20261118999904): the company-wide supplier-credit signature, byte for byte the body context_job_story_credit_sig had before install_context_story_credit_sig_job (TP-07/TP-16 20261031010000). Fallback for _fast and the body remove_context_story_credit_sig_job restores. Service role only.';
+ 'Follow-up 58 (20261118170400): the company-wide supplier-credit signature, byte for byte the body context_job_story_credit_sig had before install_context_story_credit_sig_job (TP-07/TP-16 20261031010000). Fallback for _fast and the body remove_context_story_credit_sig_job restores. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.context_job_story_credit_sig_job(p_job_id uuid)
 RETURNS text LANGUAGE plpgsql STABLE SECURITY DEFINER
@@ -180,7 +180,7 @@ DECLARE
  RETURN v_sig;
 END $fn$;
 COMMENT ON FUNCTION public.context_job_story_credit_sig_job(uuid) IS
- 'Follow-up 58 (20261118999904): the supplier-credit signature context_job_story_credit_sig_main gives, worked out from this job''s rows only. A gate probes the allocated bills against every route by which v_job_cost_events puts a supplier or fact row on a job (bill job, bookkeeping evidence line or part, job number in a bill line, materials fact); no hit returns NULL with no cost read. Otherwise one read of this job''s cost rows and those bills'' allocations, then the placement view''s placed select and the original witness. Raises credit_sig_job_gate_missed_route if a cost row sits on a bill the gate did not name. Read only. Service role only.';
+ 'Follow-up 58 (20261118170400): the supplier-credit signature context_job_story_credit_sig_main gives, worked out from this job''s rows only. A gate probes the allocated bills against every route by which v_job_cost_events puts a supplier or fact row on a job (bill job, bookkeeping evidence line or part, job number in a bill line, materials fact); no hit returns NULL with no cost read. Otherwise one read of this job''s cost rows and those bills'' allocations, then the placement view''s placed select and the original witness. Raises credit_sig_job_gate_missed_route if a cost row sits on a bill the gate did not name. Read only. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.context_job_story_credit_sig_fast(p_job_id uuid)
 RETURNS text LANGUAGE plpgsql STABLE SECURITY DEFINER
@@ -205,7 +205,7 @@ EXCEPTION WHEN OTHERS THEN
  RETURN public.context_job_story_credit_sig_main(p_job_id);
 END $fn$;
 COMMENT ON FUNCTION public.context_job_story_credit_sig_fast(uuid) IS
- 'Follow-up 58 (20261118999904): the body install_context_story_credit_sig_job puts under context_job_story_credit_sig. Uses context_job_story_credit_sig_job while v_job_cost_events, its legacy body, v_supplier_credit_placement, v_supplier_credit_allocations and v_bookkeeping_line_parts_current are the definitions it was written against and the cost-lines cutover is not ready; otherwise, or on any error, context_job_story_credit_sig_main. Service role only.';
+ 'Follow-up 58 (20261118170400): the body install_context_story_credit_sig_job puts under context_job_story_credit_sig. Uses context_job_story_credit_sig_job while v_job_cost_events, its legacy body, v_supplier_credit_placement, v_supplier_credit_allocations and v_bookkeeping_line_parts_current are the definitions it was written against and the cost-lines cutover is not ready; otherwise, or on any error, context_job_story_credit_sig_main. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.install_context_story_credit_sig_job() RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $fn$
@@ -245,9 +245,9 @@ DECLARE d text;
  EXECUTE replace(d, 'public.context_job_story_credit_sig_main(', 'public.context_job_story_credit_sig(');
 END $fn$;
 COMMENT ON FUNCTION public.install_context_story_credit_sig_job() IS
- 'Follow-up 58 (20261118999904): puts context_job_story_credit_sig_fast''s body under context_job_story_credit_sig (money_sig and money_sig_stored call that name). Refuses unless the live body is 20261031010000''s (md5 a5d0f9f74c14ab88cc502f2d2ad98f27); a second run does nothing. Undo: remove_context_story_credit_sig_job().';
+ 'Follow-up 58 (20261118170400): puts context_job_story_credit_sig_fast''s body under context_job_story_credit_sig (money_sig and money_sig_stored call that name). Refuses unless the live body is 20261031010000''s (md5 a5d0f9f74c14ab88cc502f2d2ad98f27); a second run does nothing. Undo: remove_context_story_credit_sig_job().';
 COMMENT ON FUNCTION public.remove_context_story_credit_sig_job() IS
- 'Follow-up 58 (20261118999904): puts the 20261031010000 body back under context_job_story_credit_sig, from context_job_story_credit_sig_main. Refuses if the live body is neither that nor the installed one; a second run does nothing.';
+ 'Follow-up 58 (20261118170400): puts the 20261031010000 body back under context_job_story_credit_sig, from context_job_story_credit_sig_main. Refuses if the live body is neither that nor the installed one; a second run does nothing.';
 
 REVOKE ALL ON FUNCTION public.context_job_story_credit_sig_main(uuid),
  public.context_job_story_credit_sig_job(uuid), public.context_job_story_credit_sig_fast(uuid),

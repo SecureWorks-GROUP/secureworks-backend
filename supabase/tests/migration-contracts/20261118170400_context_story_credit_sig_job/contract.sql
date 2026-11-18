@@ -8,7 +8,7 @@ SET LOCAL statement_timeout='120s';
 CREATE TEMP TABLE cs_pre AS SELECT p.proname, md5(p.prosrc) AS m FROM pg_proc p
  WHERE p.oid IN ('public.context_job_story_credit_sig(uuid)'::regprocedure,'public.context_job_story_money_sig(uuid)'::regprocedure);
 -- Rule 17: recreate this case's own objects after predecessor rollback proofs.
-\ir ../../../migrations/20261118999904_context_story_credit_sig_job.sql
+\ir ../../../migrations/20261118170400_context_story_credit_sig_job.sql
 CREATE FUNCTION pg_temp.cs_assert(ok boolean,msg text) RETURNS void LANGUAGE plpgsql AS $f$
 BEGIN IF ok IS NOT TRUE THEN RAISE EXCEPTION 'FU58: %',msg; END IF; END $f$;
 CREATE FUNCTION pg_temp.cs_job(num text) RETURNS uuid LANGUAGE sql AS $f$ SELECT id FROM public.jobs WHERE job_number=num $f$;
@@ -84,7 +84,7 @@ SELECT pg_temp.cs_assert(NOT EXISTS(SELECT 1 FROM cs_before b WHERE public.conte
 SELECT pg_temp.cs_assert(has_function_privilege('service_role','public.context_job_story_credit_sig(uuid)','EXECUTE')
  AND NOT has_function_privilege('anon','public.context_job_story_credit_sig(uuid)','EXECUTE'),'install changed grants');
 -- Re-applying this migration while installed is allowed (rule 17).
-\ir ../../../migrations/20261118999904_context_story_credit_sig_job.sql
+\ir ../../../migrations/20261118170400_context_story_credit_sig_job.sql
 SELECT public.remove_context_story_credit_sig_job();
 SELECT public.remove_context_story_credit_sig_job();
 SELECT pg_temp.cs_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_story_credit_sig(uuid)'::regprocedure)='a5d0f9f74c14ab88cc502f2d2ad98f27','remove did not restore');
