@@ -285,6 +285,12 @@ jobs:
         run: |
           deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts
 
+      # Follow-up 56: the director's switch checks stay reads (read-only
+      # session, ZZTEST only, no write verb, listed functions only).
+      - name: Check switch check files stay reads
+        run: |
+          deno test --allow-read scripts/proof/switch-checks/switch-checks_static_test.ts
+
       # Debt Workshop (secureworks-wiki debt-workshop-spec.md; docs/debt-workshop/README.md):
       # the plain rules (scope, lane, kind, share, due dates, categories, steps with the
       # weekend shift, templates, the bank-feed matcher), the Supabase store, and every

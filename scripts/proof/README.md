@@ -117,3 +117,10 @@ function, every check listed; not in CI) and `switch-preconditions_test.sh`
 (disposable localhost Postgres only, same guard as the migration contracts:
 builds the registered stack, expects FAIL rows bare, fills each precondition
 with test-only stand-ins and expects PASS, then takes one away at a time).
+
+## Switch checks
+
+`switch-checks/` holds one read-only file per precondition for turning on
+`job_story_stored_profit_v1` (the stored reader) and `xero_draft_standard_v1`
+(the draft register, PR 1641). Unlike the files above, four stored-reader
+files call stable application reads; `switch-checks/README.md` names them.
