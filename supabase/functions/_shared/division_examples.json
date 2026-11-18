@@ -24,5 +24,8 @@
   {"job_number": "SWR-ZZTEST06", "job_type": "makesafe", "expect": ""},
   {"job_number": "ZZTEST-01", "job_type": null, "expect": ""},
   {"job_number": "SWM-ZZTEST01", "job_type": "miscellaneous", "expect": ""},
-  {"job_number": "SWP-ZZTEST03", "job_type": "general", "expect": "SW - PATIOS"}
+  {"job_number": "SWP-ZZTEST03", "job_type": "general", "expect": "SW - PATIOS"},
+  {"job_number": "SWP-ZZTEST04", "job_type": "\tRePaIr\u00a0", "expect": "SW - MAKESAFE"},
+  {"job_number": " SWP-ZZTEST05", "job_type": null, "expect": ""},
+  {"job_number": "SWRESTOZZTEST01", "job_type": null, "expect": ""}
 ]
