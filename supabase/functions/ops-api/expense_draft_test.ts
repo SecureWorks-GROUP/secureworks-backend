@@ -5,107 +5,11 @@
 //     emit Status: 'DRAFT'. Finance authorises in Xero, not SecureSuite.
 //   - preflightExpense: junk OCR data is rejected before Xero is called.
 //
-// Convention (matches quick_quote_test.ts and approve_and_send_test.ts in
-// this directory): the helpers under test are mirrored inline rather than
-// imported from index.ts. The mirror is checked in the PR diff against the
-// real definitions. Drift between the two is caught at review.
-//
-// No network. No live Supabase. No Xero.
+// Exercise the production helpers without starting the server.
+import { assertEquals, assert, assertStringIncludes, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts"
+import { buildXeroExpenseBillBody, preflightExpense } from "./index.ts"
+import { ExpenseCaptureError } from "./expense_capture_v2.ts"
 
-import { assertEquals, assert, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts"
-
-// ────────────────────────────────────────────────────────────────────────────
-// Mirror of buildXeroExpenseBillBody from supabase/functions/ops-api/index.ts
-// ────────────────────────────────────────────────────────────────────────────
-function buildXeroExpenseBillBody(expense: any): any {
-  const today = new Date().toISOString().split('T')[0]
-  const lines = Array.isArray(expense.line_items) ? expense.line_items : []
-  return {
-    Type: 'ACCPAY',
-    Status: 'DRAFT',
-    Contact: { Name: expense.vendor_name || 'Unknown Vendor' },
-    Date: expense.receipt_date || today,
-    DueDate: expense.receipt_date || today,
-    Reference: expense.jobs?.job_number ? `${expense.jobs.job_number} — Receipt` : 'Receipt',
-    LineItems: lines.length > 0
-      ? lines.map((li: any) => ({
-          Description: li.description || 'Receipt line item',
-          Quantity: li.quantity || 1,
-          UnitAmount: li.unit_price || li.total || 0,
-          AccountCode: '400',
-        }))
-      : [{
-          Description: `Receipt from ${expense.vendor_name || 'vendor'}`,
-          Quantity: 1,
-          UnitAmount: expense.total_amount || 0,
-          AccountCode: '400',
-        }],
-  }
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Mirror of preflightExpense from supabase/functions/ops-api/index.ts
-// ────────────────────────────────────────────────────────────────────────────
-function preflightExpense(expense: any): { ok: boolean; reasons: string[] } {
-  const reasons: string[] = []
-
-  const vendor = (expense.vendor_name || '').trim()
-  if (vendor.length < 2) reasons.push('vendor_name missing or too short')
-
-  const total = Number(expense.total_amount)
-  if (!isFinite(total) || total <= 0) reasons.push('total_amount must be > 0')
-  else if (total > 50000) reasons.push('total_amount exceeds $50,000 sanity cap')
-
-  if (!expense.receipt_date) {
-    reasons.push('receipt_date missing')
-  } else {
-    const d = new Date(expense.receipt_date + 'T00:00:00Z')
-    if (isNaN(d.getTime())) {
-      reasons.push('receipt_date not parseable')
-    } else {
-      const now = Date.now()
-      const oneYearAgo = now - 366 * 24 * 60 * 60 * 1000
-      const sevenDaysAhead = now + 7 * 24 * 60 * 60 * 1000
-      if (d.getTime() < oneYearAgo) reasons.push('receipt_date older than 12 months')
-      if (d.getTime() > sevenDaysAhead) reasons.push('receipt_date more than 7 days in the future')
-    }
-  }
-
-  if (!expense.receipt_sha256 && !expense.no_receipt_reason) {
-    reasons.push('receipt_sha256 or no_receipt_reason required')
-  }
-
-  if (!expense.category || expense.category === 'unknown') {
-    reasons.push('category required')
-  }
-  if (!expense.payment_method || expense.payment_method === 'unknown') {
-    reasons.push('payment_method required')
-  }
-  if (!expense.gst_status || expense.gst_status === 'unknown') {
-    reasons.push('gst_status required')
-  }
-
-  if (!expense.job_id && !expense.business_category) {
-    reasons.push('job_id or business_category required')
-  }
-
-  const lines = Array.isArray(expense.line_items) ? expense.line_items : []
-  if (lines.length > 0 && isFinite(total) && total > 0) {
-    const sumLines = lines.reduce((acc: number, li: any) => {
-      const qty = Number(li.quantity ?? 1)
-      const unit = Number(li.unit_price ?? li.unitPrice ?? 0)
-      const lineTotal = Number(li.total ?? qty * unit)
-      return acc + (isFinite(lineTotal) ? lineTotal : 0)
-    }, 0)
-    if (Math.abs(sumLines - total) > 1.01) {
-      reasons.push(`line_items sum ($${sumLines.toFixed(2)}) does not match total ($${total.toFixed(2)})`)
-    }
-  }
-
-  return { ok: reasons.length === 0, reasons }
-}
-
-// ────────────────────────────────────────────────────────────────────────────
 // Fixture builders
 // ────────────────────────────────────────────────────────────────────────────
 function validExpense(overrides: Record<string, any> = {}): any {
@@ -122,7 +26,7 @@ function validExpense(overrides: Record<string, any> = {}): any {
     ],
     receipt_sha256: 'a'.repeat(64),
     category: 'materials',
-    payment_method: 'personal_card',
+    payment_method: 'cash',
     gst_status: 'included',
     job_id: 'job-uuid-1',
     business_category: null,
@@ -232,9 +136,9 @@ Deno.test("preflight — unknown category fails", () => {
 })
 
 Deno.test("preflight — unknown payment_method fails", () => {
-  const result = preflightExpense(validExpense({ payment_method: 'unknown' }))
-  assertEquals(result.ok, false)
-  assert(result.reasons.some(r => r.includes('payment_method')))
+  const refusal = assertThrows(() => preflightExpense(validExpense({ payment_method: 'unknown' })), ExpenseCaptureError)
+  assertEquals(refusal.status, 409)
+  assertEquals(refusal.code, 'expense_not_billable')
 })
 
 Deno.test("preflight — unknown gst_status fails", () => {
@@ -288,7 +192,7 @@ Deno.test("preflight — multiple violations are all reported", () => {
     total_amount: 0,
     receipt_date: null,
     category: 'unknown',
-    payment_method: 'unknown',
+    payment_method: 'cash',
     gst_status: 'unknown',
   })
   assertEquals(result.ok, false)
