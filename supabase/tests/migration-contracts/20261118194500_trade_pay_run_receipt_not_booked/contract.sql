@@ -3,6 +3,8 @@
 -- its job and not yet confirmed by the office; nothing else in its answer moves.
 BEGIN;
 SET LOCAL statement_timeout = '120s';
+-- Later check bodies first (this transaction is rolled back).
+\ir roll_back_check_successors.sql
 -- Rule 17: re-apply what this contract asserts on (twice: the guard takes its own body).
 \ir ../../../migrations/20261118194500_trade_pay_run_receipt_not_booked.sql
 \ir ../../../migrations/20261118194500_trade_pay_run_receipt_not_booked.sql

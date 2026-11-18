@@ -698,8 +698,28 @@ export function xeroBillFoundStop(
 /** Invoices counted per note code, whatever their verdict, codes in name
  * order. A note never stops an invoice; this keeps each noted group a plain
  * number on the run. */
-/** A pay-back receipt the office has queried or rejected (any case). Read at
- * push only: the run's check does not read an unmarked receipt's status. */
+export type PayBackReceipt = {
+  status: unknown;
+  unbooked_job_id: unknown;
+  missing?: boolean;
+};
+
+/** SEC-465 allow-list: the only receipts paid back behind a pay-back line are
+ * in status approved or pushed_to_xero (lower case, untrimmed: the held
+ * term's, expenseHeldNotBooked). Anything else, an unknown or new status and a
+ * missing receipt included, is refused. The check's twin is the
+ * reimbursement_receipt_not_approved stop (trade_pay_run_check_v2); change
+ * them together. */
+export function payBackReceiptAllowed(
+  row: PayBackReceipt | null | undefined,
+): boolean {
+  if (!row || row.missing) return false;
+  const status = String(row.status ?? "").toLowerCase();
+  return status === "approved" || status === "pushed_to_xero";
+}
+
+/** A pay-back receipt the office has queried or rejected (trimmed, any case).
+ * The check's twin is the reimbursement_queried_or_rejected stop. */
 export function payBackReceiptQueriedOrRejected(
   row: { status?: unknown } | null | undefined,
 ): boolean {
@@ -1712,11 +1732,13 @@ export type PayRunPushDeps = {
   invoiceForPush(invoiceId: string): Promise<Record<string, any> | null>;
   /**
    * The receipts of the invoice's pay-back lines (status and the not-booked
-   * mark), read now. Throws 503 when they cannot be read.
+   * mark), read now: one per receipt, plus one with `missing` for a pay-back
+   * line with no receipt id or whose receipt row is gone. Throws 503 when they
+   * cannot be read.
    */
   payBackReceipts(
     invoiceId: string,
-  ): Promise<{ status: unknown; unbooked_job_id: unknown }[]>;
+  ): Promise<PayBackReceipt[]>;
   /**
    * Moves a run-held invoice from the status it kept at the press
    * (pending_ops_review or queried) to approved, the status the one-invoice
@@ -1890,7 +1912,7 @@ export async function pushPayRunInvoice(
       409,
     );
   }
-  if (receipts.some((r) => expenseHeldNotBooked(r))) {
+  if (receipts.some((r) => !r.missing && expenseHeldNotBooked(r))) {
     deps.log({
       at: "push_pay_run_invoice",
       outcome: "receipt_not_confirmed",
@@ -1900,6 +1922,22 @@ export async function pushPayRunInvoice(
     throw new TradePayRunError(
       "pay_run_receipt_not_confirmed",
       "A pay-back receipt on this invoice is from someone not booked on its job, and the office has not confirmed it, so the invoice is not pushed. Confirm the receipt, or take the invoice out of the run.",
+      409,
+    );
+  }
+  // SEC-465 (director 23:14): an allow-list, not a list of bad states. Only a
+  // receipt approved or pushed to Xero is paid back; a pending, unknown or new
+  // status, or a pay-back line with no receipt, is refused.
+  if (!receipts.every((r) => payBackReceiptAllowed(r))) {
+    deps.log({
+      at: "push_pay_run_invoice",
+      outcome: "receipt_not_approved",
+      run_id: run.id,
+      invoice_id: invoiceId,
+    });
+    throw new TradePayRunError(
+      "pay_run_receipt_not_approved",
+      "A pay-back receipt on this invoice is not approved by the office, or cannot be found, so the invoice is not pushed. Approve the receipt, or take the invoice out of the run.",
       409,
     );
   }
@@ -2133,22 +2171,39 @@ export function payRunPushDepsFromClient(
         .eq("trade_invoice_id", invoiceId)
         .eq("line_type", "reimbursement");
       if (error) throw unreadable("the invoice's pay-back lines");
-      const ids = [
-        ...new Set(
-          (lines || [])
-            .map((l: any) => String(l?.expense_receipt_id ?? "").trim())
-            .filter((id: string) => id !== ""),
-        ),
-      ];
-      if (ids.length === 0) return [];
+      const lineIds = (lines || []).map((l: any) =>
+        String(l?.expense_receipt_id ?? "").trim()
+      );
+      const missing = (): PayBackReceipt => ({
+        status: null,
+        unbooked_job_id: null,
+        missing: true,
+      });
+      // A pay-back line with no receipt is never paid back.
+      const out: PayBackReceipt[] = lineIds.some((id: string) => id === "")
+        ? [missing()]
+        : [];
+      const ids = [...new Set(lineIds.filter((id: string) => id !== ""))];
+      if (ids.length === 0) return out;
       const { data: receipts, error: receiptError } = await client.from(
         "expense_receipts",
       ).select("id, status, unbooked_job_id").in("id", ids);
       if (receiptError) throw unreadable("the pay-back receipts");
-      return (receipts || []).map((r: any) => ({
-        status: r?.status ?? null,
-        unbooked_job_id: r?.unbooked_job_id ?? null,
-      }));
+      const byId = new Map(
+        (receipts || []).map((r: any) => [String(r?.id ?? ""), r]),
+      );
+      for (const id of ids) {
+        const r: any = byId.get(id);
+        out.push(
+          r
+            ? {
+              status: r.status ?? null,
+              unbooked_job_id: r.unbooked_job_id ?? null,
+            }
+            : missing(),
+        );
+      }
+      return out;
     },
     async claimPush(runId, invoiceId, actor) {
       // trade_pay_run_invoices_pkey; the database clock decides the lease.
