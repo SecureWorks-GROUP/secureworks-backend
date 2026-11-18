@@ -9,7 +9,8 @@
 //        20261118073318). Places a waiting cost line on a job, splits it across
 //        jobs, or files it as not a job cost.
 //
-// Decide only. Undo (P2-03.4) is not on main and is not routed. The door does
+// Undo (P2-03.4) is its own door, reconcile_undo.ts, with the same caller
+// rule, switch and words. The door does
 // not refresh Job Profit: reconcile_decide marks the job and the timers do the
 // rest under job_profit_refresh_v1 and their own lock.
 //
@@ -111,6 +112,32 @@ export const RECONCILE_DECIDE_WORDS: Record<string, [number, string]> = {
     409,
     "Name the other document this one duplicates.",
   ],
+  // The database (reconcile_undo, 20261118195300).
+  reconcile_not_latest: [
+    409,
+    "Only the newest decision on this item can be undone. The list has been read again.",
+  ],
+  reconcile_snapshot_missing: [
+    409,
+    "This decision was made before undo was possible, so it cannot be undone here.",
+  ],
+  reconcile_item_changed: [
+    409,
+    "This changed after it was decided, so it cannot be undone. The list has been read again.",
+  ],
+  reconcile_item_kind_unknown: [409, "This kind of item cannot be undone here."],
+  reconcile_document_changed: [
+    409,
+    "The document changed in Xero after it was decided, so it cannot be undone.",
+  ],
+  reconcile_match_evidence_missing: [
+    409,
+    "The evidence behind this decision is missing, so it cannot be undone here.",
+  ],
+  reconcile_restore_invalid: [
+    409,
+    "The earlier state could not be put back. Nothing was changed.",
+  ],
 };
 
 export function reconcileDecideRefusal(code: string): ReconcileDecideError {
@@ -122,7 +149,7 @@ export function reconcileDecideRefusal(code: string): ReconcileDecideError {
   );
 }
 
-type Client = {
+export type Client = {
   rpc: (
     fn: string,
     args?: Record<string, unknown>,
@@ -235,7 +262,7 @@ export function reconcileDecideInput(body: unknown) {
 }
 
 /** A missing row is off; an unreadable switch refuses 503. */
-async function decideSwitchOn(client: Client): Promise<boolean> {
+export async function decideSwitchOn(client: Client): Promise<boolean> {
   let read: { data: unknown; error: unknown };
   try {
     // feature_flags_flag_name_key
@@ -250,7 +277,7 @@ async function decideSwitchOn(client: Client): Promise<boolean> {
   return (read.data as Array<{ enabled?: unknown }>)[0]?.enabled === true;
 }
 
-function databaseRefusal(where: string, error: unknown): ReconcileDecideError {
+export function databaseRefusal(where: string, error: unknown): ReconcileDecideError {
   const e = error as { message?: unknown; code?: unknown };
   const message = String(e?.message ?? "");
   const code = String(e?.code ?? "");
