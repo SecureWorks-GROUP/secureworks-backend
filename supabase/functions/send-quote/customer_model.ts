@@ -172,8 +172,13 @@ const HOUSE_NOTE_BASE = [
   'House edges use the configured heights; the house outline remains indicative.',
   'The house and surroundings are indicative.',
 ]
-const HOUSE_NOTE_CUTAWAY = ' Wall fixing shown in cutaway; anchor heads, washers and order lengths are to confirm.'
-const HOUSE_NOTES = new Set(HOUSE_NOTE_BASE.flatMap((n) => [n, n + HOUSE_NOTE_CUTAWAY]))
+// The cutaway sentence: the current wording, then the wording earlier seals carry. The earlier one said
+// "to confirm", which the Documents customer-file check reads as a staff note, so the page now writes the first.
+const HOUSE_NOTE_CUTAWAYS = [
+  ' Wall fixing shown in cutaway; exact fixings are finalised on site.',
+  ' Wall fixing shown in cutaway; anchor heads, washers and order lengths are to confirm.',
+]
+const HOUSE_NOTES = new Set(HOUSE_NOTE_BASE.flatMap((n) => [n, ...HOUSE_NOTE_CUTAWAYS.map((c) => n + c)]))
 
 const LOOK_RE = /^(lawn|(finish|context):[a-z-]{1,32})$/
 const COLOR_RE = /^#[0-9a-f]{6}$/i
