@@ -3,7 +3,7 @@
 // (work_order_cap_start.ts). The database decides who is an approver and
 // records the change; these cases pin what the doors send and refuse.
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { capStartChangeWords, workOrderCapStartAction } from "./work_order_cap_start.ts";
+import { capStartChangeWords, HOLD_ON_WITHOUT_START_WORDS, workOrderCapStartAction } from "./work_order_cap_start.ts";
 
 const APPROVER = "44444444-4444-4444-8444-444444444444";
 const person = { staff: true, signedIn: true, userId: APPROVER, email: "approver@example.invalid" };
@@ -12,6 +12,7 @@ const serverKey = { staff: true, signedIn: false, userId: null, email: null };
 function fakeClient(opts: {
   settings?: any[];
   changes?: any[];
+  flags?: any[];
   failTable?: string;
   rpc?: (fn: string, args: any) => any;
 } = {}) {
@@ -26,7 +27,9 @@ function fakeClient(opts: {
       then: (res: any, rej: any) => {
         reads.push(table);
         if (opts.failTable === table) return Promise.resolve({ data: null, error: { message: "boom" } }).then(res, rej);
-        const rows = table === "work_order_cap_settings" ? opts.settings ?? [] : opts.changes ?? [];
+        const rows = table === "work_order_cap_settings" ? opts.settings ?? []
+          : table === "feature_flags" ? opts.flags ?? []
+          : opts.changes ?? [];
         return Promise.resolve({ data: rows, error: null }).then(res, rej);
       },
     };
@@ -54,6 +57,7 @@ Deno.test("set: a signed-in person's ask goes to the database door as sent, reas
   assertEquals(out.body, {
     ok: true, effect: "set", words: capStartChangeWords(null, "2026-11-24", false).words,
     changed: true, cap_start_on: "2026-11-24", previous_start: null, authority: "owner", hold_switch_on: false,
+    warning: null,
   });
   assertEquals(db.calls, [{
     fn: "set_work_order_cap_start",
@@ -113,12 +117,15 @@ Deno.test("read: staff only; the date, its row and the record; a failed read is 
   const changes = [{ id: 2, via: "approver", new_start: "2026-11-24" }];
   const db = fakeClient({ settings: [{ cap_start_on: "2026-11-24", updated_at: "2026-11-18T12:00:00Z" }], changes });
   const out = await workOrderCapStartAction(db, "work_order_cap_start", "GET", {}, person);
-  assertEquals(out.body, { ok: true, settings_row: true, cap_start_on: "2026-11-24", updated_at: "2026-11-18T12:00:00Z", changes });
+  assertEquals(out.body, {
+    ok: true, settings_row: true, cap_start_on: "2026-11-24", updated_at: "2026-11-18T12:00:00Z",
+    hold_switch_on: false, warning: null, changes,
+  });
   const none = await workOrderCapStartAction(fakeClient(), "work_order_cap_start", "GET", {}, person);
   assertEquals([none.body.settings_row, none.body.cap_start_on], [false, null]);
   const trade = await workOrderCapStartAction(fakeClient(), "work_order_cap_start", "GET", {}, { ...person, staff: false });
   assertEquals([trade.status, trade.body.code], [403, "operator_access_required"]);
-  for (const table of ["work_order_cap_settings", "work_order_cap_start_changes"]) {
+  for (const table of ["work_order_cap_settings", "work_order_cap_start_changes", "feature_flags"]) {
     const failed = await workOrderCapStartAction(fakeClient({ failTable: table }), "work_order_cap_start", "GET", {}, person);
     assertEquals([failed.status, failed.body.code], [503, "cap_start_unreadable"], table);
   }
@@ -185,4 +192,26 @@ Deno.test("preview: the database checks the approver first; names the effect for
   assertEquals([thrown.status, thrown.body.code], [503, "cap_start_unreadable"]);
   const key = await workOrderCapStartAction(fakeClient(), "set_work_order_cap_start", "POST", { ...ask, preview: true }, serverKey);
   assertEquals([key.status, key.body.code], [403, "named_person_required"]);
+});
+
+Deno.test("warning (own item): held lines on with no start date is said on the read, the preview and the set answer", async () => {
+  const on = [{ enabled: true }];
+  const warning = { code: "hold_on_without_start", words: HOLD_ON_WITHOUT_START_WORDS };
+  const read = await workOrderCapStartAction(fakeClient({ settings: [{ cap_start_on: null }], flags: on }), "work_order_cap_start", "GET", {}, person);
+  assertEquals([read.body.hold_switch_on, read.body.warning], [true, warning]);
+  const noRow = await workOrderCapStartAction(fakeClient({ flags: on }), "work_order_cap_start", "GET", {}, person);
+  assertEquals(noRow.body.warning, warning);
+  const dated = await workOrderCapStartAction(fakeClient({ settings: [{ cap_start_on: "2026-11-24" }], flags: on }), "work_order_cap_start", "GET", {}, person);
+  assertEquals(dated.body.warning, null);
+  const off = await workOrderCapStartAction(fakeClient({ settings: [{ cap_start_on: null }], flags: [{ enabled: false }] }), "work_order_cap_start", "GET", {}, person);
+  assertEquals([off.body.hold_switch_on, off.body.warning], [false, null]);
+  const preview = await workOrderCapStartAction(
+    fakeClient({ rpc: () => ({ data: { authority: "owner", settings_row: true, cap_start_on: null, hold_switch_on: true }, error: null }) }),
+    "set_work_order_cap_start", "POST", { ...ask, preview: true }, person);
+  assertEquals([preview.body.effect, preview.body.warning], ["set", warning]);
+  const retry = await workOrderCapStartAction(
+    fakeClient({ rpc: () => ({ data: { changed: false, cap_start_on: null, authority: "owner", hold_switch_on: true }, error: null }) }),
+    "set_work_order_cap_start", "POST", { shown_start: null, cap_start_on: null, reason: "again" }, person);
+  assertEquals([retry.body.changed, retry.body.warning], [false, warning]);
+  assertEquals(/[\u2014]/.test(HOLD_ON_WITHOUT_START_WORDS), false);
 });

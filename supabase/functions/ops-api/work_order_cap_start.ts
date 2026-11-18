@@ -84,6 +84,18 @@ export function capStartChangeWords(
   };
 }
 
+/** Separate item (the director may strike it): held lines on with no start
+ * date caps no job by its work order. Nothing here can stop the switch being
+ * turned on, so every answer about the date carries this warning while that is
+ * the state. Go-live order: set the date, then turn held lines on. */
+export const HOLD_ON_WITHOUT_START_WORDS =
+  "Held lines are on but no start date is set, so no job is capped by its work order. Set a start day now. Go-live order: set the date first, then turn held lines on.";
+export function capStartWarning(holdOn: boolean | null, capStartOn: string | null) {
+  return holdOn === true && capStartOn === null
+    ? { code: "hold_on_without_start", words: HOLD_ON_WITHOUT_START_WORDS }
+    : null;
+}
+
 const SET_REFUSALS: Array<[string, number, string, string]> = [
   ["work_order_cap_start_not_approver", 403, "approver_required", "Only an approver on the work order approver list can set the cap's start date."],
   ["work_order_cap_start_reason_invalid", 400, "reason_invalid", "Give a reason of 3 to 500 characters."],
@@ -104,18 +116,25 @@ export async function workOrderCapStartAction(
   if (action === "work_order_cap_start") {
     if (method !== "GET") return refuse(405, "method_not_allowed", "Use GET.");
     if (!ctx.staff) return refuse(403, "operator_access_required", "Office staff only.");
-    // work_order_cap_settings_pkey; the record by its primary key, newest first.
-    const [settings, changes] = await Promise.all([
+    // work_order_cap_settings_pkey; the record by its primary key, newest
+    // first; the held-lines switch by flag_name (feature_flags_pkey).
+    const [settings, changes, flag] = await Promise.all([
       client.from("work_order_cap_settings").select("cap_start_on, updated_at").eq("id", 1).limit(1),
       client.from("work_order_cap_start_changes")
         .select("id, changed_at, previous_start, new_start, via, set_by, set_by_email, authority, reason, db_role")
         .order("id", { ascending: false }).limit(20),
+      client.from("feature_flags").select("enabled").eq("flag_name", "trade_line_hold_v1").limit(1),
     ]);
-    if (settings?.error || !Array.isArray(settings?.data) || changes?.error || !Array.isArray(changes?.data)) {
+    if (
+      settings?.error || !Array.isArray(settings?.data) || changes?.error || !Array.isArray(changes?.data) ||
+      flag?.error || !Array.isArray(flag?.data)
+    ) {
       console.error("[ops-api] work_order_cap_start: unreadable");
       return refuse(503, "cap_start_unreadable", "The cap's start date could not be read. Try again in a minute.");
     }
     const row = settings.data[0];
+    // No switch row reads as off, as every reader of the switch does.
+    const holdOn = flag.data[0]?.enabled === true;
     return {
       status: 200,
       body: {
@@ -124,6 +143,8 @@ export async function workOrderCapStartAction(
         settings_row: !!row,
         cap_start_on: row?.cap_start_on ?? null,
         updated_at: row?.updated_at ?? null,
+        hold_switch_on: holdOn,
+        warning: capStartWarning(holdOn, row?.cap_start_on ?? null),
         changes: changes.data,
       },
     };
@@ -176,6 +197,7 @@ export async function workOrderCapStartAction(
         ok: true, preview: true, cap_start_on: saved, proposed_start: start,
         shown_matches: saved === shown, hold_switch_on: d.hold_switch_on,
         effect: change.effect, refused: change.refused, words: change.words,
+        warning: capStartWarning(d.hold_switch_on, saved),
       },
     };
   }
@@ -220,6 +242,7 @@ export async function workOrderCapStartAction(
       previous_start: data.previous_start ?? null,
       authority: data.authority ?? null,
       hold_switch_on: holdOn,
+      warning: capStartWarning(holdOn, data.cap_start_on ?? null),
     },
   };
 }
