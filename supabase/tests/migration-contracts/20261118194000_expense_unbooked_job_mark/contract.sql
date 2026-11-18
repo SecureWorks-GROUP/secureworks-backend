@@ -1,4 +1,4 @@
-\ir ../../../migrations/20261118999906_expense_unbooked_job_mark.sql
+\ir ../../../migrations/20261118194000_expense_unbooked_job_mark.sql
 BEGIN;
 DO $$
 DECLARE receipt uuid;
