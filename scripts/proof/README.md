@@ -83,21 +83,25 @@ overall row. Evidence is object names, counts, codes and dates; no people, no pa
 
 | File | Switch | Kinds of row |
 | --- | --- | --- |
-| `cap-switch-preconditions.sql` | `trade_line_hold_v1` (the cap and the held-line send) | C01-C14 required, F01-F02 fixture, N01-N03 not checked |
+| `cap-switch-preconditions.sql` | `trade_line_hold_v1` (the cap and the held-line send) | C01-C14 required, F01-F02 fixture, F03 after send, N01-N03 not checked |
 | `pay-run-switch-preconditions.sql` | `trade_pay_run_v1` (the weekly pay run) | P01-P09 required, P15 follow-up, F01 fixture, N01-N06 not checked |
 
 - `required`: must PASS before the switch goes on.
 - `fixture`: the ZZTEST job is ready for the proof. A fixture FAIL is not a switch FAIL.
 - `follow_up`: a named follow-up, printed but not counted in the overall row.
+- `after_send`: read after one ZZTEST send with a held line (F03: a raise lands
+  for a ZZTEST held line). Not counted, since no line is held while the switch is off.
 - `NOT CHECKED HERE`: SQL cannot see it (deployed commit, door wiring, wording,
   rulings, the owner's word). An overall PASS never means safe to switch.
 
 A missing settings table or migration ledger prints a FAIL row instead of
 stopping psql. Two required rows fail on main by design until their work lands:
 C12 and C13 need migration PR A (`persist_trade_work_order_invoice_v2`,
-`decide_held_trade_line`), and C10/P06 and P08 are follow-up P1-10.3 items 1-2.
-C11 fails wherever `trade_invoice_lines` has no `org_id` (no repository migration
-adds one), so a held line's office item cannot resolve its organisation.
+`decide_held_trade_line`). C10, C11 and P06 pass once #1643's named door
+`reconcile_item_raise_named` is applied: `reconcile_item_raise` itself is
+positional only, and `trade_invoice_lines` has no `org_id`, so a held line's raise
+carries the holding invoice's organisation through that door (ruling C11 (a),
+#1649). P08 is follow-up P1-10.3 item 2.
 
 Commands, from the repository root, one at a time (no credentials on the line;
 the read-only option makes any write fail):
