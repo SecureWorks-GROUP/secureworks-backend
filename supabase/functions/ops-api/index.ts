@@ -1564,6 +1564,7 @@ import {
   updateMaterialsAiSettings,
 } from './materials_ai.ts'
 // TP-01 Xero tie-out (20261029121500): staff read, bills by month and bucket.
+import { readXeroDrafts, XeroDraftsError } from './xero_drafts_read.ts'
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
@@ -10019,6 +10020,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }))
         } catch (err) {
           if (err instanceof XeroTieoutError) throw new ApiError(err.message, err.status)
+          throw err
+        }
+      }
+
+      case 'xero_drafts': {
+        if (req.method !== 'GET') throw new ApiError('GET required', 405)
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) throw new ApiError('Staff only', 403)
+        try {
+          return json(await readXeroDrafts(client, {
+            from: url.searchParams.get('from'),
+            to: url.searchParams.get('to'),
+            filter: url.searchParams.get('filter'),
+            orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
+          }))
+        } catch (err) {
+          if (err instanceof XeroDraftsError) throw new ApiError(err.message, err.status)
           throw err
         }
       }
