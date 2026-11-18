@@ -1,6 +1,8 @@
 import { assertEquals, assertRejects } from "jsr:@std/assert@1";
 import {
   billStateOf,
+  MAX_LINES_PER_READ,
+  RECONCILE_REASON_WORDS,
   decodeCursor,
   encodeCursor,
   RECONCILE_LIST_FLAG,
@@ -34,6 +36,7 @@ function fakeClient(handler: Handler, rpcs: Record<string, (args: any) => { data
         select: () => b,
         eq: (c: string, v: unknown) => (filters.push(["eq", c, v]), b),
         in: (c: string, v: unknown) => (filters.push(["in", c, v]), b),
+        limit: (n: number) => (filters.push(["limit", "limit", n]), b),
         then: (ok: any, bad: any) => Promise.resolve(handler(table, filters)).then(ok, bad),
       };
       return b;
@@ -245,4 +248,56 @@ Deno.test("reconcile list: the cursor round-trips and passes to the page read", 
   const out: any = await reconcileList(c, new URLSearchParams(`tab=card_bank&after=${encodeCursor(cur)}`), STAFF, NOW);
   assertEquals([out.items, out.next, out.counts], [[], null, { bills: 0, card_bank: 0, receipts: 0 }]);
   assertEquals((c.rpcArgs.reconcile_list_page as any).p_kinds, ["card_line"]);
+});
+
+Deno.test("reconcile list: labour billed outside the Trade App is never listed or worded", async () => {
+  assertEquals("installer_bill_outside_app" in RECONCILE_REASON_WORDS, false);
+  const c = fakeClient((t) => {
+    if (t === "feature_flags") return flagOn;
+    if (t === "reconcile_item_kinds") return { data: KINDS, error: null };
+    if (t === "job_cost_lines") return { data: [line("L9", "xero_bill", "B9", 100)], error: null };
+    throw new Error(`unexpected read ${t}`);
+  }, {
+    // The database leaves it out; this read drops one that ever came back.
+    reconcile_list_page: () => ({ data: [
+      item("c0000000-0000-4000-8000-0000000000e1", "bill", "xero_bill:B8", 5000, { reason: "installer_bill_outside_app" }),
+      item("c0000000-0000-4000-8000-0000000000e2", "bill", "xero_bill:B9", 100),
+    ], error: null }),
+    reconcile_list_counts: () => ({ data: [{ kind: "bill", open: 1 }], error: null }),
+  });
+  const out: any = await reconcileList(c, new URLSearchParams("tab=bills"), STAFF, NOW);
+  assertEquals(out.items.map((i: any) => i.id), ["c0000000-0000-4000-8000-0000000000e2"]);
+  assertEquals(JSON.stringify(out).includes("installer_bill_outside_app"), false);
+});
+
+Deno.test("reconcile list: every line and part read is capped, and past the cap the list refuses", async () => {
+  const many = (n: number, mk: (i: number) => unknown) => Array.from({ length: n }, (_, i) => mk(i));
+  const limits: unknown[] = [];
+  const base = (over: { lines?: number; parts?: number }) => fakeClient((t, f) => {
+    if (t === "feature_flags") return flagOn;
+    if (t === "reconcile_item_kinds") return { data: KINDS, error: null };
+    limits.push([t, val(f, "limit")]);
+    if (t === "job_cost_lines" && val(f, "document_kind") === "xero_bill") {
+      return { data: many(1, () => line("W1", "xero_bill", "BW", 10)), error: null };
+    }
+    if (t === "job_cost_lines") {
+      return { data: many(over.lines ?? 1, (i) => line(`C${i}`, "xero_credit_note", "N1", -1,
+        { follows_document_kind: "xero_bill", follows_document_id: "BW" })), error: null };
+    }
+    if (t === "job_cost_line_parts") {
+      return { data: many(over.parts ?? 1, () => ({ line_id: "W1", target: "overhead", job_id: null, division: null })), error: null };
+    }
+    if (t === "reconcile_items") return { data: [], error: null };
+    return { data: [], error: null };
+  }, {
+    reconcile_list_page: () => ({ data: [item("c0000000-0000-4000-8000-0000000000d1", "credit", "xero_credit_note:N1", -1)], error: null }),
+    reconcile_list_counts: () => ({ data: [], error: null }),
+  });
+  const ok: any = await reconcileList(base({ lines: MAX_LINES_PER_READ }), new URLSearchParams("tab=bills"), STAFF, NOW);
+  assertEquals(ok.items[0].lines.length, MAX_LINES_PER_READ, "at the cap the list is whole");
+  for (const [t, cap] of limits as Array<[string, unknown]>) assertEquals(cap, MAX_LINES_PER_READ + 1, `${t} read is capped`);
+  for (const over of [{ lines: MAX_LINES_PER_READ + 1 }, { parts: MAX_LINES_PER_READ + 1 }]) {
+    const err = await assertRejects(() => reconcileList(base(over), new URLSearchParams("tab=bills"), STAFF, NOW), ReconcileListError);
+    assertEquals([err.code, err.status], ["reconcile_list_too_many_lines", 422], JSON.stringify(over));
+  }
 });

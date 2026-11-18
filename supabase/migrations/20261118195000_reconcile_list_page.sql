@@ -1,19 +1,23 @@
 -- P2-03.6 (Follow-up 66 lift): the page read behind ops-api reconcile_list.
 -- PLACEHOLDER version: the keeper stamps the real one when the PR opens.
 --
--- Adds one partial index on public.reconcile_items, two read-only functions
--- (a page and its per-kind counts) and the switch row reconcile_list_v1,
--- inserted off. No trigger, no schedule, no backfill, no other data write.
+-- Adds two read-only functions (a page and its per-kind counts) and the
+-- switch row reconcile_list_v1, inserted off. No index, no trigger, no
+-- schedule, no backfill, no other data write. No existing table is locked
+-- beyond the switch row insert into public.feature_flags.
 --
--- Lock on apply: CREATE INDEX holds a SHARE lock on public.reconcile_items
--- while it builds (reads go on, raises and decisions wait). The table holds
--- open and closed Reconcile items only, so the build is short; lock_timeout
--- makes a busy table fail the apply instead of queueing writers behind it.
+-- Index: both functions read open items of the cost kinds through the
+-- existing reconcile_items_list_idx (status, kind, amount_ex DESC NULLS LAST,
+-- raised_at; 20261118060051), then sort that open set for the page order. The
+-- open set is the waiting list, so the sort is small; a dedicated index was
+-- dropped at the design read (the planner did not use it).
 --
--- Order of a page (the spec's order, indexable): items not snoozed first,
--- then snoozed; inside each, amount_ex DESC NULLS LAST, raised_at, id. Each
--- half is one ordered scan of reconcile_items_open_page_idx (org, open), so a
--- page reads at most limit + 1 rows per half. "Snoozed" is read at the
+-- An item raised for labour billed outside the Trade App
+-- (reason installer_bill_outside_app) is never listed or counted: it shows a
+-- person's pay and waits on the owner's call.
+--
+-- Order of a page (the spec's order): items not snoozed first, then snoozed;
+-- inside each, amount_ex DESC NULLS LAST, raised_at, id. "Snoozed" is read at the
 -- statement's now(), so an item whose snooze ends between two pages can be
 -- seen twice or not at all on that walk; the screen reads the list again
 -- after every decision.
@@ -21,16 +25,11 @@ SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
 DO $guard$
-DECLARE v_def text; v_comment text; v_fn text;
+DECLARE v_comment text; v_fn text;
 BEGIN
   IF to_regclass('public.reconcile_items') IS NULL
      OR to_regclass('public.reconcile_item_kinds') IS NULL THEN
     RAISE EXCEPTION 'reconcile_list_page: reconcile tables (20261118060051) are missing';
-  END IF;
-  -- Pre-image: the index name is ours or free.
-  SELECT pg_get_indexdef(to_regclass('public.reconcile_items_open_page_idx')) INTO v_def;
-  IF v_def IS NOT NULL AND v_def <> 'CREATE INDEX reconcile_items_open_page_idx ON public.reconcile_items USING btree (org_id, amount_ex DESC NULLS LAST, raised_at, id) WHERE (status = ''open''::text)' THEN
-    RAISE EXCEPTION 'reconcile_list_page: index reconcile_items_open_page_idx exists with another definition';
   END IF;
   -- Pre-image: each function is absent or this migration's own body.
   FOREACH v_fn IN ARRAY ARRAY['public.reconcile_list_page(uuid,text[],integer,jsonb)',
@@ -44,13 +43,6 @@ BEGIN
   END LOOP;
 END
 $guard$;
-
-CREATE INDEX IF NOT EXISTS reconcile_items_open_page_idx
-  ON public.reconcile_items (org_id, amount_ex DESC NULLS LAST, raised_at, id)
-  WHERE status = 'open';
-
-COMMENT ON INDEX public.reconcile_items_open_page_idx IS
-  'Reconcile list (P2-03.6): one org''s open items in page order; also the per-kind counts.';
 
 -- One page of one org's open items of the given kinds. p_after is the
 -- previous page's last row as {snoozed, amount_ex, raised_at, id}; null is
@@ -77,6 +69,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $fn$
       t.evidence_hash, t.raised_at, t.snooze_until, false AS snoozed
     FROM public.reconcile_items t, cur
     WHERE t.org_id = p_org AND t.status = 'open' AND t.kind = ANY(p_kinds)
+      AND t.reason <> 'installer_bill_outside_app'
       AND (t.snooze_until IS NULL OR t.snooze_until <= now())
       AND NOT cur.s
       AND (NOT cur.has OR CASE WHEN cur.a IS NULL
@@ -91,6 +84,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $fn$
       t.evidence_hash, t.raised_at, t.snooze_until, true AS snoozed
     FROM public.reconcile_items t, cur
     WHERE t.org_id = p_org AND t.status = 'open' AND t.kind = ANY(p_kinds)
+      AND t.reason <> 'installer_bill_outside_app'
       AND t.snooze_until > now()
       AND (NOT cur.s OR CASE WHEN cur.a IS NULL
         THEN t.amount_ex IS NULL AND (t.raised_at, t.id) > (cur.r, cur.i)
@@ -108,12 +102,14 @@ COMMENT ON FUNCTION public.reconcile_list_page(uuid,text[],integer,jsonb) IS
   'Reconcile list (P2-03.6): one page of an org''s open items, not snoozed first. Read only.';
 
 -- Open items per kind for one org: the tab counts. Same WHERE as a page
--- without the kind and cursor filters.
+-- without the kind and cursor filters (labour billed outside the Trade App
+-- left out here too, so a count never promises an item the list withholds).
 CREATE OR REPLACE FUNCTION public.reconcile_list_counts(p_org uuid)
 RETURNS TABLE (kind text, open bigint)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $fn$
   SELECT t.kind, count(*) FROM public.reconcile_items t
   WHERE t.org_id = p_org AND t.status = 'open'
+    AND t.reason <> 'installer_bill_outside_app'
   GROUP BY t.kind ORDER BY t.kind COLLATE "C"
 $fn$;
 

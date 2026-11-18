@@ -18,7 +18,7 @@ DO $$ BEGIN
     AND NOT has_function_privilege('anon', 'public.reconcile_list_counts(uuid)', 'EXECUTE'), 'grants');
   PERFORM pg_temp.assert_ok((SELECT enabled = false FROM public.feature_flags WHERE flag_name = 'reconcile_list_v1'),
     'switch row seeded off');
-  PERFORM pg_temp.assert_ok(to_regclass('public.reconcile_items_open_page_idx') IS NOT NULL, 'index present');
+  PERFORM pg_temp.assert_ok(to_regclass('public.reconcile_items_open_page_idx') IS NULL, 'no new index (design read)');
 END $$;
 
 -- Made-up rows: two orgs, cost kinds, one snoozed, one with no amount, a tie.
@@ -31,7 +31,9 @@ INSERT INTO public.reconcile_items(id, org_id, kind, subject_table, subject_id, 
  ('c0000000-0000-4000-8000-000000000005','a0000000-0000-4000-8000-00000000000a','bill','cost_document','xero_bill:ZZ5','amount_unknown',NULL,'h5','ZZTEST','2026-11-01 00:00+00',NULL),
  ('c0000000-0000-4000-8000-000000000006','a0000000-0000-4000-8000-00000000000a','bill','cost_document','xero_bill:ZZ6','no_clue',900,'h6','ZZTEST','2026-11-01 00:00+00','2999-01-01 00:00+00'),
  ('c0000000-0000-4000-8000-000000000007','a0000000-0000-4000-8000-00000000000a','receipt','cost_document','expense_receipt:ZZ7','no_clue',70,'h7','ZZTEST','2026-11-01 00:00+00',NULL),
- ('c0000000-0000-4000-8000-000000000008','b0000000-0000-4000-8000-00000000000b','bill','cost_document','xero_bill:ZZ8','no_clue',1000,'h8','ZZTEST','2026-11-01 00:00+00',NULL);
+ ('c0000000-0000-4000-8000-000000000008','b0000000-0000-4000-8000-00000000000b','bill','cost_document','xero_bill:ZZ8','no_clue',1000,'h8','ZZTEST','2026-11-01 00:00+00',NULL),
+ -- Labour billed outside the Trade App: a person's pay, never listed or counted.
+ ('c0000000-0000-4000-8000-00000000000a','a0000000-0000-4000-8000-00000000000a','bill','cost_document','xero_bill:ZZA','installer_bill_outside_app',5000,'hA','ZZTEST','2026-11-01 00:00+00',NULL);
 INSERT INTO public.reconcile_items(id, org_id, kind, subject_table, subject_id, reason, amount_ex,
   evidence_hash, raised_by, raised_at, status, closed_at) VALUES
  ('c0000000-0000-4000-8000-000000000009','a0000000-0000-4000-8000-00000000000a','bill','cost_document','xero_bill:ZZ9','no_clue',800,'h9','ZZTEST','2026-11-01 00:00+00','decided',now());
@@ -59,22 +61,14 @@ BEGIN
   -- Another org's rows and closed rows never show.
   PERFORM pg_temp.assert_ok(NOT EXISTS (SELECT 1 FROM public.reconcile_list_page('a0000000-0000-4000-8000-00000000000a', ARRAY['bill','credit','receipt'], 100, NULL)
     WHERE id IN ('c0000000-0000-4000-8000-000000000008','c0000000-0000-4000-8000-000000000009')), 'org and status');
-  -- Counts: same org and status, by kind.
+  -- Labour billed outside the Trade App never shows, on any kind or page size.
+  PERFORM pg_temp.assert_ok(NOT EXISTS (SELECT 1 FROM public.reconcile_list_page('a0000000-0000-4000-8000-00000000000a', ARRAY['bill','credit','receipt'], 100, NULL)
+    WHERE id = 'c0000000-0000-4000-8000-00000000000a' OR reason = 'installer_bill_outside_app'), 'installer bill never listed');
+  -- Counts: same org and status, by kind. Labour billed outside the Trade App is not counted.
   PERFORM pg_temp.assert_ok((SELECT jsonb_object_agg(kind, open) FROM public.reconcile_list_counts('a0000000-0000-4000-8000-00000000000a'))
     = '{"bill":5,"credit":1,"receipt":1}'::jsonb, 'counts by kind');
 END $$;
 RESET ROLE;
 
--- The page is an ordered scan of the new index (enable_seqscan off makes a tiny
--- table show the plan a large one gets).
-SET LOCAL enable_seqscan = off;
-DO $$ DECLARE plan text := ''; line text; BEGIN
-  FOR line IN EXECUTE 'EXPLAIN SELECT t.id FROM public.reconcile_items t WHERE t.org_id = ''a0000000-0000-4000-8000-00000000000a'' AND t.status = ''open''
-    AND t.kind = ANY(ARRAY[''bill'']) AND (t.snooze_until IS NULL OR t.snooze_until <= now())
-    ORDER BY t.amount_ex DESC NULLS LAST, t.raised_at, t.id LIMIT 51' LOOP
-    plan := plan || line || ' | ';
-  END LOOP;
-  PERFORM pg_temp.assert_ok(plan LIKE '%reconcile_items_open_page_idx%' AND plan NOT LIKE '%Sort%', 'index plan: ' || plan);
-END $$;
 ROLLBACK;
 SELECT 'P2-03.6 reconcile list page contract passed' AS result;

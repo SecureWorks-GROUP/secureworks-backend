@@ -1320,4 +1320,3 @@ ops-api|supabase/migrations/20261118194200_trade_pay_run_xero_found.sql|function
 # through these two functions (the switch off answers before either is called).
 ops-api|supabase/migrations/20261118195000_reconcile_list_page.sql|function|reconcile_list_page
 ops-api|supabase/migrations/20261118195000_reconcile_list_page.sql|function|reconcile_list_counts
-ops-api|supabase/migrations/20261118195000_reconcile_list_page.sql|index|reconcile_items_open_page_idx

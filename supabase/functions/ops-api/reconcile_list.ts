@@ -14,15 +14,20 @@
 //
 // What it reads (one query each, all scoped to the caller's organisation):
 //   reconcile_item_kinds (the cost kinds and their tab), reconcile_list_page
-//   (one page, reconcile_items_open_page_idx), reconcile_list_counts (per kind,
-//   same index), job_cost_lines of the page's documents
+//   (one page) and reconcile_list_counts (per kind), both through the existing
+//   reconcile_items_list_idx, job_cost_lines of the page's documents
 //   (job_cost_lines_document_idx), and for a credit: the bills it follows, their
 //   counted lines and parts (job_cost_lines_document_idx, the parts' line key),
 //   the bill's open item (reconcile_items_open_subject_idx), and the jobs named
 //   (jobs primary key; never scope_json or pricing_json).
 //
 // Only the cost kinds of three tabs are listed: the pay tab (named pay) and the
-// message tab are not read here. Logs carry codes and ids only.
+// message tab are not read here. An item raised for labour billed outside the
+// Trade App (reason installer_bill_outside_app) is a person's pay: the database
+// functions leave it out of the page and the counts, and this read drops one
+// that ever came back. Every line and part read is capped (MAX_LINES_PER_READ):
+// past the cap the whole list refuses, never a short one. Logs carry codes and
+// ids only.
 
 export const RECONCILE_LIST_FLAG = "reconcile_list_v1";
 
@@ -45,6 +50,7 @@ export const RECONCILE_LIST_WORDS: Record<string, [number, string]> = {
   operator_org_required: [403, "Organisation access required."],
   operator_access_required: [403, "Only admin, owner or ops manager can read the Reconcile list."],
   invalid_request: [400, "That request is not one this list accepts."],
+  reconcile_list_too_many_lines: [422, "This page holds more cost lines than one read may show. Nothing is shown as placed. Read a smaller page."],
   reconcile_list_unreadable: [503, "The list could not be read. Nothing is shown as placed. Try again in a minute."],
 };
 
@@ -61,7 +67,6 @@ export const RECONCILE_REASON_WORDS: Record<string, string> = {
   two_jobs_named: "The document names two jobs",
   possible_duplicate: "Looks like a document already counted",
   same_person_also_in_app: "This person also bills through the Trade App",
-  installer_bill_outside_app: "Labour billed outside the Trade App",
   digit_twin: "Two jobs share these digits",
   job_not_live: "The job named is not live",
   document_before_job: "Dated before the job existed",
@@ -93,6 +98,10 @@ export type ReconcileListCaller = {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PARAMS = new Set(["action", "tab", "limit", "after", "operator_email"]);
 const CHUNK = 25;
+/** The most cost lines, or parts, one list answer reads. Past it the list refuses. */
+export const MAX_LINES_PER_READ = 2000;
+/** Never listed: a person's pay, waiting on the owner's call (director, design read). */
+export const UNLISTED_REASONS = new Set(["installer_bill_outside_app"]);
 
 /** Staff session only; checked before anything is read. */
 export function reconcileListAllowed(caller: ReconcileListCaller): void {
@@ -154,9 +163,16 @@ async function safe(run: () => PromiseLike<{ data: unknown; error: unknown }>): 
   return res.data;
 }
 
-async function inChunks(ids: string[], read: (chunk: string[]) => PromiseLike<{ data: unknown; error: unknown }>) {
+/**
+ * Reads ids in chunks of 25, each capped one past MAX_LINES_PER_READ; more than
+ * MAX_LINES_PER_READ rows in all refuses the whole list (never a short one).
+ */
+async function inChunks(ids: string[], read: (chunk: string[], cap: number) => PromiseLike<{ data: unknown; error: unknown }>) {
   const out: any[] = [];
-  for (let i = 0; i < ids.length; i += CHUNK) out.push(...await safe(() => read(ids.slice(i, i + CHUNK))));
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    out.push(...await safe(() => read(ids.slice(i, i + CHUNK), MAX_LINES_PER_READ + 1)));
+    if (out.length > MAX_LINES_PER_READ) throw reconcileListRefusal("reconcile_list_too_many_lines");
+  }
   return out;
 }
 
@@ -237,8 +253,8 @@ export async function reconcileList(
       p_after: input.after,
     })
   ) as any[];
-  const page = pageRows.slice(0, input.limit);
-  const last = page[page.length - 1];
+  const page = pageRows.slice(0, input.limit).filter((it) => !UNLISTED_REASONS.has(it?.reason));
+  const last = pageRows.slice(0, input.limit).at(-1);
   const next = pageRows.length > input.limit && last
     ? encodeCursor({ snoozed: last.snoozed === true, amount_ex: money(last.amount_ex), raised_at: String(last.raised_at), id: String(last.id) })
     : null;
@@ -254,31 +270,31 @@ export async function reconcileList(
   const docs = page.map((it) => costDocumentOf(it)).filter((d): d is { kind: string; id: string } => d !== null);
   const docIds = [...new Set(docs.map((d) => d.id))];
   const docKinds = [...new Set(docs.map((d) => d.kind))];
-  const lines = docIds.length === 0 ? [] : await inChunks(docIds, (chunk) =>
+  const lines = docIds.length === 0 ? [] : await inChunks(docIds, (chunk, cap) =>
     client.from("job_cost_lines").select(LINE_COLUMNS).eq("org_id", caller.orgId)
-      .in("document_kind", docKinds).in("document_id", chunk));
+      .in("document_kind", docKinds).in("document_id", chunk).limit(cap));
 
   // A credit's bills: by document, or by the parent line's document.
   const credits = docs.filter((d) => d.kind === "xero_credit_note");
   const creditLines = lines.filter((l) => l.document_kind === "xero_credit_note" && credits.some((c) => c.id === l.document_id));
   const parentIds = [...new Set(creditLines.map((l) => l.follows_line_id).filter((v): v is string => typeof v === "string"))];
-  const parents = parentIds.length === 0 ? [] : await inChunks(parentIds, (chunk) =>
-    client.from("job_cost_lines").select("id, document_kind, document_id").eq("org_id", caller.orgId).in("id", chunk));
+  const parents = parentIds.length === 0 ? [] : await inChunks(parentIds, (chunk, cap) =>
+    client.from("job_cost_lines").select("id, document_kind, document_id").eq("org_id", caller.orgId).in("id", chunk).limit(cap));
   const billOfLine = (l: any): string | null => {
     if (l.follows_document_kind === "xero_bill" && typeof l.follows_document_id === "string") return l.follows_document_id;
     const p = parents.find((x) => x.id === l.follows_line_id);
     return p && p.document_kind === "xero_bill" ? p.document_id : null;
   };
   const billIds = [...new Set(creditLines.map(billOfLine).filter((v): v is string => v !== null))];
-  const billLines = billIds.length === 0 ? [] : await inChunks(billIds, (chunk) =>
+  const billLines = billIds.length === 0 ? [] : await inChunks(billIds, (chunk, cap) =>
     client.from("job_cost_lines").select(LINE_COLUMNS).eq("org_id", caller.orgId)
-      .eq("document_kind", "xero_bill").in("document_id", chunk));
+      .eq("document_kind", "xero_bill").in("document_id", chunk).limit(cap));
   const billLineIds = billLines.map((l) => l.id as string);
-  const billParts = billLineIds.length === 0 ? [] : await inChunks(billLineIds, (chunk) =>
-    client.from("job_cost_line_parts").select("line_id, target, job_id, division").in("line_id", chunk));
-  const billItems = billIds.length === 0 ? [] : await inChunks(billIds.map((id) => `xero_bill:${id}`), (chunk) =>
+  const billParts = billLineIds.length === 0 ? [] : await inChunks(billLineIds, (chunk, cap) =>
+    client.from("job_cost_line_parts").select("line_id, target, job_id, division").in("line_id", chunk).limit(cap));
+  const billItems = billIds.length === 0 ? [] : await inChunks(billIds.map((id) => `xero_bill:${id}`), (chunk, cap) =>
     client.from("reconcile_items").select("id, subject_id").eq("org_id", caller.orgId)
-      .eq("subject_table", "cost_document").eq("status", "open").in("subject_id", chunk));
+      .eq("subject_table", "cost_document").eq("status", "open").in("subject_id", chunk).limit(cap));
 
   // Jobs named by a suggestion or a placed bill (jobs primary key).
   const bills = new Map(billIds.map((id) => {
@@ -289,8 +305,8 @@ export async function reconcileList(
     ...page.map((it) => it?.suggestion?.job_id).filter((v): v is string => typeof v === "string" && UUID.test(v)),
     ...[...bills.values()].map((b) => b.job_id).filter((v): v is string => typeof v === "string"),
   ])];
-  const jobs = jobIds.length === 0 ? [] : await inChunks(jobIds, (chunk) =>
-    client.from("jobs").select("id, job_number, site_address, site_suburb").eq("org_id", caller.orgId).in("id", chunk));
+  const jobs = jobIds.length === 0 ? [] : await inChunks(jobIds, (chunk, cap) =>
+    client.from("jobs").select("id, job_number, site_address, site_suburb").eq("org_id", caller.orgId).in("id", chunk).limit(cap));
   const jobOf = (id: string | null) => {
     const j = id ? jobs.find((x) => x.id === id) : null;
     return { job_id: id, job_number: j?.job_number ?? null, job_site: j ? [j.site_address, j.site_suburb].filter(Boolean).join(", ") || null : null };
@@ -320,6 +336,7 @@ export async function reconcileList(
         : null,
       lines: own
         .filter((l) => l.not_counted_reason !== "line_removed")
+        .sort((x, y) => (Number(x.line_no) || 0) - (Number(y.line_no) || 0))
         .map((l) => ({ line_id: l.id, description: l.description ?? null, amount_ex: money(l.amount_ex), account_code: l.account_code ?? null, state: l.state ?? null })),
     };
     if (doc?.kind === "xero_credit_note") {
