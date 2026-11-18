@@ -581,6 +581,15 @@ jobs:
             supabase/functions/ops-api/trade_invoice_pdf_test.ts \
             supabase/functions/ops-api/trade_money_test.ts
 
+      # Weekly pay run read, approval and push (P1-10.2, P1-10.3, P1-10.5).
+      # Every database call is a stub and the Xero push is stubbed or refused
+      # before Xero; no switch is turned on anywhere.
+      - name: Test weekly pay run
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/trade_pay_run_test.ts \
+            supabase/functions/ops-api/trade_pay_run_push_test.ts
+
       # One super rule (P1-01): every amount includes super, chosen by pay week
       # behind trade_pay_inclusive_super_v1. Drives the real
       # generate_trade_invoice handler with every database call answered by a
