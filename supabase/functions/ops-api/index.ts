@@ -42,14 +42,15 @@ import {
   normaliseExtraItem,
 } from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
-import { divisionTrackingOption } from '../_shared/xero_draft_standard.ts'
+import { divisionTrackingOption, loadDraftStandard } from '../_shared/xero_draft_standard.ts'
+import { invoiceDivisionTag } from './invoice_division_tag.ts'
 import { commissionCapCodeFromDbError, commissionCapRefusal, commissionLineState, loggableClientLineId, readJobCommissionRecords, readJobCommissionRecordsReusing, type JobCommissionRecord } from './job_commission.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { isScopeEnginePatioRecord, scopeEngineMaterialLines } from './scope_engine_materials.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
-import { readSwitches } from '../_shared/switch_cache.ts'
+import { readSwitch, readSwitches } from '../_shared/switch_cache.ts'
 import { salesPerformanceAction, salesPerformanceStore } from './sales_performance.ts'
 // ════════════════════════════════════════════════════════════
 // SecureWorks — Ops API Edge Function
@@ -1570,6 +1571,7 @@ import {
 import { readXeroDrafts, XeroDraftsError } from './xero_drafts_read.ts'
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
+import { TradePayRunError, payRunReadsFromClient, readPayRun } from './trade_pay_run.ts'
 // Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
 import { PAY_FIGURES_APPROVER_ACTIONS, payFiguresApproverRefusal } from './pay_figures_approver.ts'
 import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
@@ -10081,6 +10083,29 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }))
         } catch (err) {
           if (err instanceof TradePayRunCheckError) throw new ApiError(err.message, err.status)
+          throw err
+        }
+      }
+
+      // The weekly pay run (P1-10.2): the week's invoices clean or stopped
+      // (pay-run check v2 plus the standing checks), the clean totals, super
+      // owed per person and the hash P1-10.3 approves against. Read only;
+      // staff by the front door (not in any trade, routine or agent-read list),
+      // then the pay run approver list only (ruling 34.13), checked in readPayRun
+      // before any pay is read.
+      case 'pay_run': {
+        try {
+          return json(await readPayRun(payRunReadsFromClient(client), {
+            weekStart: url.searchParams.get('week_start'),
+            // Never substitute the server org for a JWT caller with a missing profile org.
+            orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
+            // The server key is no person: refused 403 like any non-approver.
+            actorUserId: authMode === 'jwt' ? (authUser?.id || null) : null,
+          }))
+        } catch (err) {
+          if (err instanceof TradePayRunError) {
+            return json({ ok: false, error: err.code, message: err.message }, err.status)
+          }
           throw err
         }
       }
@@ -41727,29 +41752,44 @@ async function createInvoice(
   // reference says (owner, 12 Nov 2026): the reference is usually the
   // builder's (MLR-41228), which names no division.
   let invoiceJobIsRestoration = false
+  const useStoredOptions = await readSwitch(client, 'xero_draft_standard_v1')
+  let invoiceJobNumber = ''
   if (jIdForGate) {
     const { data: invoiceJobRow } = await client.from('jobs')
-      .select('type, metadata')
+      .select(useStoredOptions ? 'type, metadata, job_number' : 'type, metadata')
       .eq('id', jIdForGate)
       .eq('org_id', DEFAULT_ORG_ID)
       .maybeSingle()
+    invoiceJobNumber = invoiceJobRow?.job_number || ''
     invoiceJobType = invoiceJobRow?.type || null
     invoiceJobIsRestoration = !!invoiceJobRow && isRestorationCard(invoiceJobRow)
   }
 
-  // Validate tracking category exists in Xero before including it
-  let tracking: any[] = []
-  try {
-    const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
-    const divisionCat = (trackingCats?.TrackingCategories || []).find((tc: any) => tc.Name === 'Business Unit' && tc.Status === 'ACTIVE')
-    if (divisionCat) {
-      const optionName = invoiceJobIsRestoration
-        ? 'SW - RESTORATION'
-        : trackingCategoryForJob(ref, invoiceJobType)
-      const validOption = (divisionCat.Options || []).find((o: any) => o.Name === optionName && o.Status === 'ACTIVE')
-      if (validOption) tracking = [{ Name: 'Business Unit', Option: optionName }]
-    }
-  } catch { /* skip tracking if lookup fails */ }
+  let tracking: { Name: string; Option: string }[] = []
+  let tag: ReturnType<typeof invoiceDivisionTag> | undefined
+  if (useStoredOptions) {
+    const option = invoiceJobIsRestoration
+      ? 'SW - RESTORATION'
+      : trackingCategoryForJob(invoiceJobNumber, invoiceJobType)
+    const standard = await loadDraftStandard(client, DEFAULT_ORG_ID).catch(() => ({
+      activeOptions: new Set<string>(),
+      optionsLoaded: false,
+    }))
+    tag = invoiceDivisionTag(option, standard)
+    tracking = tag.tracking
+  } else {
+    try {
+      const trackingCats = await xeroGet('/TrackingCategories', accessToken, tenantId)
+      const divisionCat = (trackingCats?.TrackingCategories || []).find((tc: any) => tc.Name === 'Business Unit' && tc.Status === 'ACTIVE')
+      if (divisionCat) {
+        const optionName = invoiceJobIsRestoration
+          ? 'SW - RESTORATION'
+          : trackingCategoryForJob(ref, invoiceJobType)
+        const validOption = (divisionCat.Options || []).find((o: any) => o.Name === optionName && o.Status === 'ACTIVE')
+        if (validOption) tracking = [{ Name: 'Business Unit', Option: optionName }]
+      }
+    } catch { /* skip tracking if lookup fails */ }
+  }
 
   const xeroLineItems = items.map((li: any) => ({
     Description: li.description || '',
@@ -41992,6 +42032,7 @@ async function createInvoice(
   // must verify the invoice really came back AUTHORISED before emailing a Pay Now.
   return {
     success: true,
+    ...(tag && { division_tag: tag.problem ? 'missing' : 'set', division_problem: tag.problem }),
     xero_invoice_id: xeroInvId,
     invoice_number: invNumber,
     total: invTotal,

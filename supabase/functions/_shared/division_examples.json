@@ -1,6 +1,6 @@
 [
-  {"job_number": "SWP-ZZTEST01", "job_type": "granny_flat", "expect": ""},
-  {"job_number": null, "job_type": "granny_flat", "expect": ""},
+  {"job_number": "SWP-ZZTEST01", "job_type": "granny_flat", "expect": "", "ruled": "SecureBuild"},
+  {"job_number": null, "job_type": "granny_flat", "expect": "", "ruled": "SecureBuild"},
   {"job_number": "SWR-ZZTEST01", "job_type": "repair", "expect": "SW - MAKESAFE"},
   {"job_number": null, "job_type": "repair", "expect": "SW - MAKESAFE"},
   {"job_number": "SWR-ZZTEST02", "job_type": "roofing", "expect": "SW - PRIVATE ROOFING"},
@@ -24,8 +24,21 @@
   {"job_number": "SWR-ZZTEST06", "job_type": "makesafe", "expect": ""},
   {"job_number": "ZZTEST-01", "job_type": null, "expect": ""},
   {"job_number": "SWM-ZZTEST01", "job_type": "miscellaneous", "expect": ""},
-  {"job_number": "SWP-ZZTEST03", "job_type": "general", "expect": "SW - PATIOS"},
+  {"job_number": "SWP-ZZTEST03", "job_type": "general", "expect": "SW - PATIOS", "ruled": ""},
   {"job_number": "SWP-ZZTEST04", "job_type": "\tRePaIr\u00a0", "expect": "SW - MAKESAFE"},
   {"job_number": " SWP-ZZTEST05", "job_type": null, "expect": ""},
-  {"job_number": "SWRESTOZZTEST01", "job_type": null, "expect": ""}
+  {"job_number": "SWRESTOZZTEST01", "job_type": null, "expect": ""},
+  {"job_number": "SWP-ZZTEST09", "job_type": "misc", "expect": "SW - PATIOS", "option_state": "ACTIVE", "ruled": "Private Renovations"},
+  {"job_number": "SWP-ZZTEST09", "job_type": "Miscellaneous", "expect": "SW - PATIOS", "option_state": "ARCHIVED", "ruled": ""},
+  {"job_number": "SWP-ZZTEST09", "job_type": " General ", "expect": "SW - PATIOS", "option_state": "ACTIVE", "ruled": "Private Renovations"},
+  {"job_number": "SWP-ZZTEST09", "job_type": "misc", "expect": "SW - PATIOS", "option_state": "other_org", "ruled": ""},
+  {"job_number": "SWP-ZZTEST09", "job_type": "misc", "expect": "SW - PATIOS", "option_state": "missing", "ruled": ""},
+  {"job_number": null, "job_type": null, "stock_division": "patios", "expect": "", "ruled": "SW - PATIOS"},
+  {"job_number": null, "job_type": null, "stock_division": "fencing", "expect": "", "ruled": "SW - FENCING"},
+  {"job_number": null, "job_type": null, "stock_division": "insurance", "expect": "", "ruled": "SW - INSURANCE WORK"},
+  {"job_number": null, "job_type": null, "stock_division": "fuel", "expect": "", "ruled": "SW Group"},
+  {"job_number": null, "job_type": null, "stock_division": " PARKING ", "expect": "", "ruled": "SW Group"},
+  {"job_number": null, "job_type": null, "stock_division": "Meals", "expect": "", "ruled": "SW Group"},
+  {"job_number": null, "job_type": null, "stock_division": "constructor", "expect": "", "ruled": ""},
+  {"job_number": null, "job_type": null, "stock_division": "unknown", "expect": "", "ruled": ""}
 ]
