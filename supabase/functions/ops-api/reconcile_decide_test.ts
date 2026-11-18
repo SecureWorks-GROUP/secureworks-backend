@@ -1,5 +1,5 @@
 // deno-lint-ignore-file no-explicit-any
-// P2-03.7: the Reconcile decide and undo doors. Fake client only; made-up
+// P2-03.7: the Reconcile decide door (decide only). Fake client only; made-up
 // amounts; roles only.
 import {
   assert,
@@ -11,7 +11,6 @@ import {
   RECONCILE_DECIDE_WORDS,
   reconcileDecide,
   ReconcileDecideError,
-  reconcileUndo,
 } from "./reconcile_decide.ts";
 
 const STAFF = "11111111-1111-4111-8111-111111111111";
@@ -57,12 +56,9 @@ function fake(w: World) {
     from: q,
     rpc(fn: string, args: any) {
       w.rpcs.push({ fn, args });
-      if (fn === "job_profit_refresh_marked") return Promise.resolve({ data: {}, error: null });
       if (w.rpcError) return Promise.resolve({ data: null, error: w.rpcError });
       return Promise.resolve({
-        data: fn === "reconcile_undo"
-          ? { decision_id: 9, restored_item_id: ITEM }
-          : { decision_id: 7, item_status: "decided", lines: [{ line_id: LINE, state: "on_job" }] },
+        data: { decision_id: 7, item_status: "decided", lines: [{ line_id: LINE, state: "on_job" }] },
         error: null,
       });
     },
@@ -98,10 +94,6 @@ Deno.test("door: a server key, the routine and an agent get 403 before the switc
     assertEquals([err.status, err.code], [403, "person_session_required"]);
     assertEquals(w.reads, [], `${authMode}: nothing read`);
     assertEquals(w.rpcs, [], `${authMode}: nothing called`);
-    const undo = await refused(
-      reconcileUndo(fake(w) as any, { decision_id: 1 }, { authMode, userId: null, isStaff: false }),
-    );
-    assertEquals([undo.status, undo.code], [403, "person_session_required"]);
   }
   // A body naming an actor does not make a server key a person.
   const err = await refused(
@@ -131,7 +123,7 @@ Deno.test("switch: off, missing or unreadable refuses and calls nothing", async 
     assertEquals(w.rpcs, []);
   }
   const w = world({ flag: "fail" });
-  const err = await refused(reconcileUndo(fake(w) as any, { decision_id: 3 }, staff));
+  const err = await refused(reconcileDecide(fake(w) as any, place, staff));
   assertEquals([err.status, err.code], [503, "reconcile_switch_unreadable"]);
   assertEquals(w.rpcs, []);
   assertEquals(RECONCILE_DECIDE_FLAG, "reconcile_decide_v1");
@@ -152,7 +144,9 @@ Deno.test("place: a staff session calls reconcile_decide with the session user, 
       p_user_id: STAFF,
     },
   });
-  assertEquals(w.rpcs[1], { fn: "job_profit_refresh_marked", args: { p_limit: 50 } });
+  // No Job Profit refresh in the request: the database marks the job and the
+  // timers refresh it under their own switch and lock.
+  assertEquals(w.rpcs.length, 1);
   assertEquals([out.decided, out.decision_id, out.item_status], [true, 7, "decided"]);
 });
 
@@ -210,7 +204,7 @@ Deno.test("database refusals map to their words; evidence changed is 409", async
     const w = world({ rpcError: { code: "P0001", message: code } });
     const err = await refused(reconcileDecide(fake(w) as any, place, staff));
     assertEquals([err.status, err.code, err.message], [status, code, RECONCILE_DECIDE_WORDS[code][1]]);
-    assert(!w.rpcs.some((r) => r.fn === "job_profit_refresh_marked"), "no refresh after a refusal");
+    assertEquals(w.rpcs.length, 1, "one call, nothing after a refusal");
   }
   assertEquals(
     RECONCILE_DECIDE_WORDS.reconcile_evidence_changed[1],
@@ -243,20 +237,6 @@ Deno.test("body: an unknown field such as actor is 400; a missing item is 404; a
   const err = await refused(reconcileDecide(fake(odd) as any, { ...place, action: "undo" }, staff));
   assertEquals(err.code, "reconcile_action_unknown");
   assertEquals(odd.rpcs, []);
-});
-
-Deno.test("undo: calls reconcile_undo with the session user; newer decision is 409", async () => {
-  const w = world();
-  const out = await reconcileUndo(fake(w) as any, { decision_id: "12" }, staff);
-  assertEquals(w.rpcs[0], { fn: "reconcile_undo", args: { p_decision_id: 12, p_user_id: STAFF } });
-  assertEquals(out.undone, true);
-  const late = world({ rpcError: { code: "P0001", message: "reconcile_not_latest" } });
-  const err = await refused(reconcileUndo(fake(late) as any, { decision_id: 12 }, staff));
-  assertEquals([err.status, err.code], [409, "reconcile_not_latest"]);
-  for (const body of [{ decision_id: 0 }, { decision_id: 1, actor: STAFF }, {}]) {
-    const e = await refused(reconcileUndo(fake(world()) as any, body, staff));
-    assertEquals(e.code, "invalid_request");
-  }
 });
 
 Deno.test("words: every message is plain, with no code, underscore, dollar or em dash", () => {

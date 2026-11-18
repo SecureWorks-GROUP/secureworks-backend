@@ -525,9 +525,8 @@ job_labour_cap # probe=source-only
 raise_job_labour_cap # probe=source-only
 work_order_cap_start # probe=source-only
 set_work_order_cap_start # probe=source-only
-# P2-03.7: Reconcile decide and undo (reconcile_decide.ts). Signed-in staff only, POST, behind reconcile_decide_v1
+# P2-03.7: Reconcile decide (reconcile_decide.ts). Signed-in staff only, POST, behind reconcile_decide_v1
 reconcile_decide # probe=source-only
-reconcile_undo # probe=source-only
 
 # Tracking correction GET is refused before any provider reads or writes.
 xero_correct_bill_tracking # probe=bounded-refusal

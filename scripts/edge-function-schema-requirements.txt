@@ -924,6 +924,7 @@ ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function
 ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_record_invoice_decision
 ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_rows
 ops-api|supabase/migrations/20261020160000_context_recon_daily_list.sql|function|context_recon_daily_left_out
+ops-api|supabase/migrations/20261118073318_reconcile_decide.sql|function|reconcile_decide
 # Context reconciliation from a job: the context_job_mail and recon_job_items
 # reads call these, so they must exist before this ops-api ships.
 ops-api|supabase/migrations/20261020165000_context_job_reconciliation.sql|function|context_job_mail

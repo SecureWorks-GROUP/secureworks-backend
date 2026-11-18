@@ -8,8 +8,10 @@
 //        (P2-03.5); every other kind -> RPC reconcile_decide (P2-03.3,
 //        20261118073318). Places a waiting cost line on a job, splits it across
 //        jobs, or files it as not a job cost.
-//   POST ?action=reconcile_undo  { decision_id }
-//     -> RPC reconcile_undo (P2-03.4).
+//
+// Decide only. Undo (P2-03.4) is not on main and is not routed. The door does
+// not refresh Job Profit: reconcile_decide marks the job and the timers do the
+// rest under job_profit_refresh_v1 and their own lock.
 //
 // Behind feature_flags.reconcile_decide_v1 (ships off; a missing row is off;
 // an unreadable switch refuses 503 and changes nothing). The person is reconDecisionUser(caller): only a verified staff
@@ -75,7 +77,7 @@ export const RECONCILE_DECIDE_WORDS: Record<string, [number, string]> = {
     500,
     "The decision was not recorded. Nothing was changed. Try again, or ask the office.",
   ],
-  // The database (reconcile_decide, reconcile_decide_message, reconcile_undo).
+  // The database (reconcile_decide, reconcile_decide_message).
   reconcile_not_staff: [
     403,
     "Only admin, owner or ops manager can decide a Reconcile item.",
@@ -88,11 +90,6 @@ export const RECONCILE_DECIDE_WORDS: Record<string, [number, string]> = {
   reconcile_item_closed: [409, "Someone already decided this one."],
   reconcile_parts_do_not_add_up: [409, "The parts do not add up to the line."],
   reconcile_job_not_live: [409, "That job is not live."],
-  reconcile_not_latest: [409, "A newer decision exists, undo that one first."],
-  reconcile_document_changed: [
-    409,
-    "The document changed in Xero since that decision.",
-  ],
   reconcile_action_unknown: [409, "That is not a decision this list knows."],
   reconcile_action_not_for_item: [409, "That decision does not fit this item."],
   reconcile_not_a_duplicate_hold: [
@@ -154,7 +151,6 @@ const DECIDE_FIELDS = new Set([
   "escalate_to",
   "operator_email",
 ]);
-const UNDO_FIELDS = new Set(["decision_id", "operator_email"]);
 
 /** The actions the cost and plain cards accept (reconcile_decide). */
 export const RECONCILE_DECIDE_ACTIONS = [
@@ -238,14 +234,6 @@ export function reconcileDecideInput(body: unknown) {
   };
 }
 
-/** Pure. The checked decision id of an undo. */
-export function reconcileUndoInput(body: unknown): number {
-  const b = fields(body, UNDO_FIELDS);
-  const raw = b.decision_id;
-  const id = typeof raw === "number" ? raw : typeof raw === "string" && /^[0-9]{1,18}$/.test(raw) ? Number(raw) : NaN;
-  return Number.isSafeInteger(id) && id > 0 ? id : bad();
-}
-
 /** A missing row is off; an unreadable switch refuses 503. */
 async function decideSwitchOn(client: Client): Promise<boolean> {
   let read: { data: unknown; error: unknown };
@@ -266,7 +254,7 @@ function databaseRefusal(where: string, error: unknown): ReconcileDecideError {
   const e = error as { message?: unknown; code?: unknown };
   const message = String(e?.message ?? "");
   const code = String(e?.code ?? "");
-  // A function not installed yet (P2-03.4, P2-03.5): PostgREST PGRST202, or
+  // A function not installed yet (P2-03.5): PostgREST PGRST202, or
   // Postgres 42883 undefined_function.
   if (code === "PGRST202" || code === "42883") {
     console.error(`[${where}] function missing`, code);
@@ -276,16 +264,6 @@ function databaseRefusal(where: string, error: unknown): ReconcileDecideError {
   if (named && RECONCILE_DECIDE_WORDS[named]) return reconcileDecideRefusal(named);
   console.error(`[${where}] failed`, code || "no_code");
   return reconcileDecideRefusal("reconcile_failed");
-}
-
-/** Keeps the job's stored profit fresh in the same request; never fails it. */
-async function refreshMarkedProfit(client: Client): Promise<void> {
-  try {
-    const { error } = await client.rpc("job_profit_refresh_marked", { p_limit: 50 });
-    if (error) console.error("[reconcile] profit refresh skipped", String((error as any)?.code ?? "no_code"));
-  } catch {
-    console.error("[reconcile] profit refresh skipped", "threw");
-  }
 }
 
 /** One branch per item kind. Another phase adds a branch here (P3-03.4). */
@@ -348,23 +326,5 @@ export async function reconcileDecide(
   const kind = String((item.data as { kind?: unknown }).kind ?? "");
   const { data, error, fn } = await decideByKind(client, kind, input, userId);
   if (error) throw databaseRefusal(fn, error);
-  await refreshMarkedProfit(client);
   return { ok: true, decided: true, ...(data && typeof data === "object" ? data : {}) };
-}
-
-export async function reconcileUndo(
-  client: Client,
-  body: unknown,
-  caller: ReconcileCaller,
-): Promise<Record<string, unknown>> {
-  const userId = reconcileDecideUser(caller);
-  if (!(await decideSwitchOn(client))) throw reconcileDecideRefusal("reconcile_decide_off");
-  const decisionId = reconcileUndoInput(body);
-  const { data, error } = await client.rpc("reconcile_undo", {
-    p_decision_id: decisionId,
-    p_user_id: userId,
-  });
-  if (error) throw databaseRefusal("reconcile_undo", error);
-  await refreshMarkedProfit(client);
-  return { ok: true, undone: true, ...(data && typeof data === "object" ? data : {}) };
 }
