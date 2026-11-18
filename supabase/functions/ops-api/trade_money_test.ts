@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { fyStartFor, fyLabelFor, summariseTradeMoney, tradeMoneyRow } from "./trade_money.ts";
 
 const paid = tradeMoneyRow({
@@ -69,4 +69,196 @@ Deno.test("summary: an invoice from last financial year is all-time only", () =>
   assertEquals(s.months.length, 2);
   const s2 = summariseTradeMoney([old, owed], "2026-09-08", 3);
   assertEquals(s2.months.length, 1, "months window trims old buckets");
+});
+
+import { readTradePayHistory } from "./trade_pay_history_read.ts";
+import { TRADE_PREVIEW_READS } from "./trade_owner_preview.ts";
+
+type TestRow = Record<string, any>;
+const historyToday = "2026-09-08";
+function invoice(id: string, week: string, end: string, overrides: TestRow = {}): TestRow {
+  return {
+    id, invoice_number: id, user_id: "trade-a", week_start: week, week_end: end,
+    status: "approved", gst_on: false, gst: 0, super_rate: 0.12, super_basis: "inclusive_12_112_v1",
+    gross_earned: 112.01, subtotal_ex: 112.01, total_inc: 112.01, super_amount: 12,
+    net_pay: 100.01, amount_paid: 0, pay_run_id: null, reimbursements: [], ...overrides,
+  };
+}
+
+function historyStore() {
+  const tables: Record<string, TestRow[]> = {
+    trade_invoices: [
+      invoice("a1", "2026-08-24", "2026-08-30", { amount_paid: 23.45, pay_run_id: "closed" }),
+      invoice("a2", "2026-08-24", "2026-08-30", { gross_earned: 115.02, total_inc: 115.02,
+        subtotal_ex: 115.02, super_base_ex: 112.01, net_pay: 103.02, pay_run_id: "open" }),
+      invoice("a3", "2026-08-31", "2026-09-06", { super_basis: null, gross_earned: 100,
+        subtotal_ex: 100, total_inc: 100, super_amount: 12, net_pay: 94, amount_paid: 94 }),
+      invoice("b", "2026-08-31", "2026-09-06", { user_id: "trade-b", pay_run_id: "other" }),
+    ],
+    trade_pay_runs: [{ id: "closed", super_marked_paid_at: historyToday }, { id: "open", super_marked_paid_at: null },
+      { id: "other", super_marked_paid_at: historyToday }],
+    trade_rates: [{ user_id: "trade-b", id: "r3", effective_from: "2026-05-01", hourly_rate: 9 },
+      { user_id: "trade-a", id: "r2", effective_from: "2026-05-01", hourly_rate: 2 },
+      { user_id: "trade-a", id: "r1", effective_from: "2026-01-01", hourly_rate: 1 }],
+    trade_pay_settings: [{ id: 1, tax_set_aside_percent: 20 }],
+  };
+  const state = { fault: "", noRunColumn: false, reads: [] as string[] };
+  const client = { from(table: string) {
+    state.reads.push(table);
+    let rows = [...tables[table]];
+    let fields = "";
+    const sorting: string[] = [];
+    const result = () => {
+      if (state.fault === table) return { data: null, error: { code: "57014", message: "private detail" } };
+      if (state.noRunColumn && fields.endsWith(",pay_run_id")) {
+        return { data: null, error: { code: "42703", message: "column trade_invoices.pay_run_id does not exist" } };
+      }
+      return { data: rows.map(row => {
+        const copy = { ...row };
+        if (!fields.includes("pay_run_id")) delete copy.pay_run_id;
+        return copy;
+      }), error: null };
+    };
+    const q = {
+      select(cols: string) { fields = cols; return q; },
+      eq(key: string, value: unknown) {
+        if (key !== "reimbursements.line_type") rows = rows.filter(row => row[key] === value);
+        return q;
+      },
+      not(key: string, _op: string, list: string) {
+        rows = rows.filter(row => !list.slice(1, -1).split(",").includes(row[key]));
+        return q;
+      },
+      or(filter: string) {
+        const floor = filter.split(",")[0].split(".")[2];
+        rows = rows.filter(row => row.week_end === null || row.week_end >= floor);
+        return q;
+      },
+      lt(key: string, value: string) { rows = rows.filter(row => row[key] != null && row[key] < value); return q; },
+      in(key: string, ids: string[]) { rows = rows.filter(row => ids.includes(row[key])); return result(); },
+      order(key: string) { sorting.push(key); return q; },
+      range(start: number, end: number) {
+        rows.sort((a, b) => {
+          for (const key of sorting) {
+            const cmp = String(a[key]).localeCompare(String(b[key]));
+            if (cmp) return cmp;
+          }
+          return 0;
+        });
+        rows = rows.slice(start, end + 1);
+        return result();
+      },
+      limit() { return result(); },
+    };
+    return q;
+  } };
+  return { client, tables, state };
+}
+
+Deno.test("pay history: three invoices reconcile across weeks, months, FY, super and tax", async () => {
+  const { client } = historyStore();
+  const { status, body } = await readTradePayHistory(client, "trade-a", historyToday, null);
+  assertEquals(status, 200);
+  assert("weeks" in body);
+  const august = { total_inc_super: 224.02, paid_to_super: 24, paid_to_you: 200.02, reimbursements: 3.01, paid_into_bank: 23.45, invoices: 2 };
+  const september = { total_inc_super: 106, paid_to_super: 12, paid_to_you: 94, reimbursements: 0, paid_into_bank: 94, invoices: 1 };
+  const fy = { total_inc_super: 330.02, paid_to_super: 36, paid_to_you: 294.02, reimbursements: 3.01, paid_into_bank: 117.45, invoices: 3 };
+  assertEquals(body.weeks, [{ week_start: "2026-08-31", ...september }, { week_start: "2026-08-24", ...august }]);
+  assertEquals(body.months, [{ month: "2026-09", label: "Sep 2026", ...september }, { month: "2026-08", label: "Aug 2026", ...august }]);
+  assertEquals(body.years, [{ fy_label: "FY 2026/27", ...fy }]);
+  assertEquals(body.this_year_vs_last.this_fy, fy);
+  assertEquals(body.super.since_start, 36);
+  assertEquals(body.super.this_fy, 36);
+  assertEquals(body.super.by_invoice.map(row => [row.invoice_id, row.status]), [
+    ["a3", "to_be_paid"], ["a2", "to_be_paid"], ["a1", "paid_to_fund"],
+  ]);
+  assertEquals(body.tax_set_aside, { percent: 20, this_fy_amount: 58.8 });
+  assertEquals(body.rate_history, [{ effective_from: "2026-01-01", hourly_rate: 1 }, { effective_from: "2026-05-01", hourly_rate: 2 }]);
+
+  const other = await readTradePayHistory(client, "trade-b", historyToday, "1");
+  assert("super" in other.body);
+  assertEquals(other.body.super.by_invoice.map(row => row.invoice_id), ["b"]);
+  assertEquals(other.body.super.since_start, 12);
+  assertEquals(other.body.rate_history, [{ effective_from: "2026-05-01", hourly_rate: 9 }]);
+});
+
+Deno.test("one-year history still compares to the same point last FY and counts lifetime super", async () => {
+  const { tables, client } = historyStore();
+  tables.trade_invoices.push(invoice("on", "2025-09-08", "2025-09-08"), invoice("after", "2025-09-08", "2025-09-09"),
+    invoice("older", "2024-01-01", "2024-01-07"), invoice("future", "2026-09-14", "2026-09-20"));
+  for (const status of ["draft", "ops-reject", "failed"]) tables.trade_invoices.push(invoice(status, "", historyToday, { status }));
+  tables.trade_invoices.push(invoice("void", "", historyToday, { xero_bill_status: "VOIDED", net_pay: null }));
+  const { body } = await readTradePayHistory(client, "trade-a", historyToday, "1");
+  assert("weeks" in body);
+  assertEquals(body.years?.length, 1);
+  assertEquals(body.this_year_vs_last?.last_fy_same_point.paid_to_you, 100.01);
+  assertEquals(body.super?.since_start, 72);
+  assertEquals(body.super?.by_invoice.length, 3);
+});
+
+Deno.test("only the missing pay-run column falls back; a failed read or missing figure refuses and can be retried", async () => {
+  const { tables, client, state } = historyStore();
+  const read = () => readTradePayHistory(client, "trade-a", historyToday, null);
+  for (const table of Object.keys(tables)) {
+    state.fault = table;
+    const { status, body } = await read();
+    assertEquals(status, 503);
+    assertEquals(body, { code: "pay_history_unreadable", error: "Could not read your pay history. Try again." });
+  }
+  state.fault = "";
+  tables.trade_invoices[0].amount_paid = null;
+  assertEquals((await read()).status, 503);
+  tables.trade_invoices[0].amount_paid = 7.19;
+  tables.trade_pay_settings[0].tax_set_aside_percent = null;
+  state.noRunColumn = true;
+  const { body } = await read();
+  assert("weeks" in body);
+  assertEquals(body.super?.by_invoice.every(i => i.status === "to_be_paid"), true);
+  assertEquals(body.tax_set_aside, null);
+  assertEquals(body.this_year_vs_last?.this_fy.paid_into_bank, 101.19);
+  tables.trade_pay_settings.length = 0;
+  assertEquals((await read()).status, 503);
+});
+
+Deno.test("history requires a signed-in trade and valid range before any pay read; preview cannot select someone else", async () => {
+  const { state, client } = historyStore();
+  assertEquals((await readTradePayHistory(client, "", historyToday, null)).status, 401);
+  for (const years of ["0", "8", "1.5"]) {
+    assertEquals((await readTradePayHistory(client, "trade-a", historyToday, years)).status, 400);
+  }
+  assertEquals(state.reads, []);
+  assertEquals(TRADE_PREVIEW_READS.has("my_pay_history"), false);
+  const index = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const route = index.slice(index.indexOf("case 'my_pay_history': {")).split("\n          }")[0];
+  assertEquals(route.includes("readTradePayHistory(client, tradeUser.id, getAWSTDate(), url.searchParams.get('years'))"), true);
+  assertEquals(route.includes("req.method !== 'GET'"), true);
+});
+
+Deno.test("history pages beyond 250 invoices and only trims the displayed periods", async () => {
+  const { client, tables } = historyStore();
+  tables.trade_invoices = [];
+  for (let n = 0; n < 260; n++) {
+    const date = new Date(Date.UTC(2031, 8, 7 - n * 7));
+    const end = date.toISOString().slice(0, 10);
+    date.setUTCDate(date.getUTCDate() - 6);
+    tables.trade_invoices.push(invoice(String(n), date.toISOString().slice(0, 10), end));
+  }
+  const { body } = await readTradePayHistory(client, "trade-a", "2031-09-08", "7");
+  assert("weeks" in body);
+  assertEquals(body.weeks?.length, 26);
+  assertEquals(body.months?.length, 24);
+  assertEquals(body.super?.by_invoice.length, 260);
+  assertEquals(body.years?.reduce((sum, y) => sum + y.invoices, 0), 260);
+});
+
+Deno.test("history sums a recorded older split before the pricing calculator's first supported date", async () => {
+  const { client, tables } = historyStore();
+  tables.trade_invoices = [invoice("early", "2024-09-02", "2024-09-08", {
+    super_basis: null, super_rate: 0.115, gross_earned: 19.85, subtotal_ex: 19.85, total_inc: 19.85,
+    net_pay: 19.85, super_amount: 2.28, amount_paid: 18,
+  })];
+  const { body } = await readTradePayHistory(client, "trade-a", historyToday, "7");
+  assert("years" in body);
+  assertEquals(body.years, [{ fy_label: "FY 2024/25", total_inc_super: 22.13, paid_to_you: 19.85,
+    paid_to_super: 2.28, reimbursements: 0, paid_into_bank: 18, invoices: 1 }]);
 });
