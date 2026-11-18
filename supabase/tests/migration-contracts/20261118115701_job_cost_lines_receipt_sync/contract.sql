@@ -5,7 +5,7 @@ SET LOCAL statement_timeout = '120s';
 SELECT to_regprocedure('public.job_cost_lines_sync_receipt(uuid)') IS NULL
   OR to_regprocedure('public.job_cost_lines_install_receipt_trigger()') IS NULL AS zz_reapply \gset
 \if :zz_reapply
-\ir ../../../migrations/20261118102731_job_cost_lines_receipt_sync.sql
+\ir ../../../migrations/20261118115701_job_cost_lines_receipt_sync.sql
 \endif
 DO $$ BEGIN
  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname LIKE 'job_cost_lines_receipt%') THEN
