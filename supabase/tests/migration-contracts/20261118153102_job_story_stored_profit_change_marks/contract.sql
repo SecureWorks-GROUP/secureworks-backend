@@ -9,7 +9,7 @@ SET LOCAL statement_timeout='120s';
 \ir ../../../migrations/20261118024514_context_story_book_speed.sql
 \ir ../../../migrations/20261118065939_job_story_stored_profit.sql
 \ir ../../../migrations/20261118115531_job_story_stored_profit_guards.sql
-\ir ../../../migrations/20261118131726_job_story_stored_profit_change_marks.sql
+\ir ../../../migrations/20261118153102_job_story_stored_profit_change_marks.sql
 CREATE INDEX IF NOT EXISTS job_cost_events_stored_job_idx ON public.job_cost_events_stored(job_id);
 CREATE INDEX IF NOT EXISTS job_revenue_events_stored_job_idx ON public.job_revenue_events_stored(job_id);
 CREATE FUNCTION pg_temp.cm_assert(ok boolean,msg text) RETURNS void LANGUAGE plpgsql AS $f$
@@ -182,7 +182,7 @@ END $plans$;
 ROLLBACK TO plan_rows;
 
 -- 9. Re-apply keeps this body; no browser role reaches it.
-\ir ../../../migrations/20261118131726_job_story_stored_profit_change_marks.sql
+\ir ../../../migrations/20261118153102_job_story_stored_profit_change_marks.sql
 SELECT pg_temp.cm_assert((SELECT md5(prosrc)='ea1bd9b50d9191e704653525370d74e3' FROM pg_proc WHERE oid='public.job_story_stored_profit_as_at(uuid,timestamptz)'::regprocedure),'re-apply changed the body');
 SELECT pg_temp.cm_assert(NOT has_function_privilege('anon','public.job_story_stored_profit_as_at(uuid,timestamptz)','EXECUTE')
  AND NOT has_function_privilege('authenticated','public.job_story_stored_profit_as_at(uuid,timestamptz)','EXECUTE'),'browser privilege');

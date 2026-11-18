@@ -12,7 +12,7 @@
 -- On merge: one replaced private body. No entry point, trigger, schedule,
 -- table, index or switch changes. job_story_stored_profit_v1 stays as it is.
 -- job_profit_stored_read_v1 has no reader on main; none is added here.
--- Rollback: supabase/rollbacks/20261118131726_job_story_stored_profit_change_marks_down.sql.
+-- Rollback: supabase/rollbacks/20261118153102_job_story_stored_profit_change_marks_down.sql.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
