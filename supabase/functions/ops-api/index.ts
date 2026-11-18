@@ -624,6 +624,7 @@ import { contextJobMail, ContextJobReconError, reconJobItems } from './context_j
 import { reconDailyList, reconRecordDecision, ReconDecisionError } from './recon_decisions.ts'
 import { ReconcileListError, reconcileList, reconcileListRefusal } from './reconcile_list.ts'
 import { ReconcileDecideError, reconcileDecide, reconcileDecideRefusal } from './reconcile_decide.ts'
+import { reconcileUndo } from './reconcile_undo.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
 import {
   approvedSendSealSecret,
@@ -9528,11 +9529,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
       }
       // ── Reconcile decisions (P2-03.7, Follow-up 66): the Reconcile screen's
-      // presses. Decide only (undo is not routed yet). POST only. The person is the verified staff session user,
+      // presses: decide, and undo of the newest decision (reconcile_undo.ts).
+      // POST only. The person is the verified staff session user,
       // never a body field or header; a server key, the routine and an agent
       // are refused 403 (reconcile_decide.ts). Behind reconcile_decide_v1,
       // which ships off. Not on the routine, agent-read or trade lists.
-      case 'reconcile_decide': {
+      case 'reconcile_decide':
+      case 'reconcile_undo': {
         const reconcileCaller = {
           authMode,
           userId: authMode === 'jwt' ? authUser?.id : null,
@@ -9541,7 +9544,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         try {
           if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) throw reconcileDecideRefusal('operator_org_required')
           if (req.method !== 'POST') throw reconcileDecideRefusal('method_not_allowed')
-          return json(await reconcileDecide(client, body, reconcileCaller))
+          return json(action === 'reconcile_undo'
+            ? await reconcileUndo(client, body, reconcileCaller)
+            : await reconcileDecide(client, body, reconcileCaller))
         } catch (error) {
           if (error instanceof ReconcileDecideError) return json({ ok: false, error: error.code, code: error.code, message: error.message, userMessage: error.message }, error.status)
           throw error
