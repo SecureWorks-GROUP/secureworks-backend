@@ -895,6 +895,7 @@ import {
   stripJobWorkOrderCardMoney,
   xeroSyncRefusal,
 } from './crew_invoice_job_work_order.ts'
+import { PAY_RUN_HELD_CODE, PAY_RUN_HELD_WORDS, payRunHeldRefusalFor } from './trade_pay_run_hold.ts'
 import {
   type PayRunWait,
   holdTradeInvoiceForPayRun,
@@ -2663,6 +2664,8 @@ async function markTradeInvoiceRetryable(
   })
     .eq('id', invoiceId)
     .is('xero_bill_id', null)
+    // Never on a pay run's invoice: only the run's own push moves it.
+    .is('pay_run_id', null)
     .select('id')
     .maybeSingle()
   if (error || data?.id !== invoiceId) {
@@ -2686,6 +2689,12 @@ async function pushReleasedGroupSiblings(client: any, invoiceId: string, actor: 
     try {
       results.push({ invoice_id: id, xero_push: await pushTradeInvoiceToXeroAction(client, { invoice_id: id }, actor) })
     } catch (error) {
+      // A pay run's invoice is the run's to push: nothing was sent and nothing
+      // is marked on it.
+      if (((error as ApiError)?.body as { code?: string } | undefined)?.code === PAY_RUN_HELD_CODE) {
+        results.push({ invoice_id: id, xero_push: 'in_pay_run' })
+        continue
+      }
       await markTradeInvoiceRetryable(client, id, 'The crew was released together, but this bill\'s Xero result is unconfirmed. Check Xero for an existing bill before retrying.')
         .catch((markErr) => console.error('[ops-api] group sibling retry mark failed:', (markErr as Error).message))
       results.push({ invoice_id: id, xero_push: 'unconfirmed', xero_push_error: (error as Error)?.message || 'Xero push failed' })
@@ -2746,10 +2755,15 @@ export function holdingInvoiceNotPushedError(): ApiError {
   })
 }
 
-async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops-api:push_trade_invoice_to_xero') {
+async function pushTradeInvoiceToXeroAction(
+  client: any,
+  body: any,
+  actor = 'ops-api:push_trade_invoice_to_xero',
+  // Set only by the pay run's own push (push_pay_run_invoice), never from a body.
+  opts: { payRunId?: string } = {},
+) {
   const { invoice_id } = body
   if (!invoice_id) throw new ApiError('invoice_id required', 400)
-
   // Get the invoice + lines + user
   const readInvoice = () => client.from('trade_invoices')
     .select('*, user:user_id(id, name, email, abn, default_hourly_rate, payment_terms_days, xero_contact_id)')
@@ -2757,6 +2771,10 @@ async function pushTradeInvoiceToXeroAction(client: any, body: any, actor = 'ops
     .maybeSingle()
   let { data: inv } = await readInvoice()
   if (!inv) throw new ApiError('Invoice not found', 404)
+  // An invoice an approved pay run holds is pushed by that run only. Read off
+  // this row ('*' carries pay_run_id), before any line read or Xero call.
+  const runHold = payRunHeldRefusalFor(inv, { runPushFor: opts.payRunId })
+  if (runHold) throw new ApiError(runHold.message, runHold.status, { ok: false, code: runHold.code, error: runHold.message })
   // P1-05.8 (Follow-up 10): a holding invoice is never a bill. Refused before
   // any line read, group release or Xero call. Its lines reach pay only when
   // the office moves them onto a payable invoice.
@@ -10179,6 +10197,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               client,
               { invoice_id: invoiceId },
               `ops-api:push_pay_run_invoice:${runId}`,
+              { payRunId: runId },
             ),
           )
           const pressOpts = {
@@ -11849,18 +11868,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const { invoice_id: aprInvId } = body
         if (!aprInvId) throw new ApiError('invoice_id required', 400)
         const { data: aprInv } = await client.from('trade_invoices')
-          .select('id, status, invoice_kind').eq('id', aprInvId).maybeSingle()
+          .select('id, status, invoice_kind, pay_run_id').eq('id', aprInvId).maybeSingle()
         if (!aprInv) throw new ApiError('Invoice not found', 404)
         // P1-05.8: a holding invoice is never approved for pay; its lines are
         // moved to a payable invoice by the office instead.
         if (aprInv.invoice_kind === 'held') throw holdingInvoiceNotPushedError()
+        // A pay run owns the invoices it approved (trade_pay_run_hold.ts).
+        const aprHold = payRunHeldRefusalFor(aprInv)
+        if (aprHold) return json({ ok: false, code: aprHold.code, error: aprHold.message }, aprHold.status)
         if (aprInv.status !== 'pending_ops_review' && aprInv.status !== 'queried') {
           throw new ApiError('Only invoices pending ops review can be approved (status: ' + aprInv.status + ')', 400)
         }
-        const { error: aprErr } = await client.from('trade_invoices')
+        const { data: aprMoved, error: aprErr } = await client.from('trade_invoices')
           .update({ status: 'approved', acknowledged_at: new Date().toISOString() })
           .eq('id', aprInvId)
+          .is('pay_run_id', null)
+          .select('id')
+          .maybeSingle()
         if (aprErr) throw new Error('Failed to approve: ' + aprErr.message)
+        // A run stamped it between the read and the write: the run has it.
+        if (aprMoved?.id !== aprInvId) {
+          return json({ ok: false, code: PAY_RUN_HELD_CODE, error: PAY_RUN_HELD_WORDS }, 409)
+        }
         return json({ success: true, invoice_id: aprInvId, status: 'approved' })
       }
       case 'release_voided_trade_invoice': {
@@ -11886,12 +11915,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const { invoice_id: rejInvId, note: rejNote } = body
         if (!rejInvId) throw new ApiError('invoice_id required', 400)
         const { data: rejInv, error: rejLookupErr } = await client.from('trade_invoices')
-          .select('id, status, xero_bill_id, xero_pushed_at').eq('id', rejInvId).maybeSingle()
+          .select('id, status, xero_bill_id, xero_pushed_at, pay_run_id').eq('id', rejInvId).maybeSingle()
         if (rejLookupErr) throw new Error('Failed to inspect trade invoice: ' + rejLookupErr.message)
         if (!rejInv) throw new ApiError('Invoice not found', 404)
         if (tradeInvoiceHasExternalXeroIdentity(rejInv) || rejInv.status === 'pushed_to_xero' || rejInv.status === 'paid') {
           throw new ApiError('Cannot reject an invoice already in Xero/paid', 400)
         }
+        const rejHold = payRunHeldRefusalFor(rejInv)
+        if (rejHold) return json({ ok: false, code: rejHold.code, error: rejHold.message }, rejHold.status)
         const { data: rejected, error: rejErr } = await rejectTradeInvoiceStorage(client, rejInvId, officeSentBackNote(rejNote), reviewActorLabel(authUser))
         if (rejErr) throw new Error('Failed to reject: ' + rejErr.message)
         if (rejected?.id !== rejInvId) {

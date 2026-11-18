@@ -1,5 +1,12 @@
 -- P1-10.1 contract. Every value, id and word below is made up (ZZTEST).
 BEGIN;
+-- cl-1622-fix: 20261118163000 replaces approve_trade_pay_run's stamp. Put
+-- P1-10.1's own body back first; this transaction is rolled back.
+SELECT coalesce((SELECT md5(prosrc) = 'dc17fd7b51c2916054ede4801eb8ead1' FROM pg_proc
+  WHERE oid = to_regprocedure('public.approve_trade_pay_run(uuid,date,uuid,jsonb)')), false) AS holds_status_live \gset
+\if :holds_status_live
+\ir ../../../rollbacks/20261118163000_trade_pay_run_holds_status_down.sql
+\endif
 -- Rule 17: re-apply what this contract asserts on. A stand-in for phase 2's
 -- allow-list (P2-03.1's columns) exists only inside this transaction, so the
 -- kind row is proved once after two runs of the migration.
