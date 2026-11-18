@@ -56,7 +56,7 @@ function render(fy: number, profile: Row, rows: Row[]) {
   y -= 17;
   ops.push(textAt("ABN " + profile.abn, 36, y, 10, 540));
   y -= 26;
-  ["Total (includes super)", "Paid to your super fund", "Paid to you", "Reimbursements", "GST", "Repayments"]
+  ["Total (includes super)", "Super on your pay", "Your pay", "Reimbursements", "GST", "Repayments"]
     .forEach((label, i) => {
       const cents = invoices.reduce((sum, inv) => sum + Math.round(inv.amounts[i] * 100), 0);
       ops.push(textAt(label, 36, y, 11, 240), textAt(money(cents / 100), 276, y, 11, 290));
@@ -76,7 +76,7 @@ function render(fy: number, profile: Row, rows: Row[]) {
   function tableRow(values: string[], fontSize: number) {
     values.forEach((value, i) => ops.push(textAt(value, columns[i], y, fontSize, columns[i + 1] - columns[i] - 5)));
   }
-  tableRow(["Invoice number", "Week starting", "Total", "Super", "Paid to you"], 10);
+  tableRow(["Invoice number", "Week starting", "Total", "Super", "Your pay"], 10);
   ops.push(`0.6 G 36 ${y - 3} m 576 ${y - 3} l S`);
   for (const invoice of invoices) {
     y -= rowHeight;

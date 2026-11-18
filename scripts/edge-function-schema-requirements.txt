@@ -682,6 +682,12 @@ ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_pro
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_cost_events
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_revenue_events
 ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|function|job_profit
+# P0-09.5: job_profit, job_profit_list and the rollup read these switch views
+# (stored rows when job_profit_stored_read_v1 is on and the row is fresh, else
+# the live views above). The migration must land before the ops-api deploy.
+ops-api|supabase/migrations/20261118170100_job_profit_read_views.sql|table|v_job_profit_read
+ops-api|supabase/migrations/20261118170100_job_profit_read_views.sql|table|v_job_cost_events_read
+ops-api|supabase/migrations/20261118170100_job_profit_read_views.sql|table|v_job_revenue_events_read
 # B4: job_profit's dispatch_orders reads the Dispatch order and bill link views.
 ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|table|v_dispatch_orders
 ops-api|supabase/migrations/20261104010000_dispatch_order_bill_links.sql|table|v_dispatch_order_bills

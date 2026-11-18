@@ -11,6 +11,7 @@ import {
   readLineHoldFacts,
 } from "./trade_line_hold.ts";
 import type { JobCommissionRecord } from "./job_commission.ts";
+import { readBilledOnJobs } from "./work_order_total_cap.ts";
 
 const line = (extra: Partial<HoldLine> = {}): HoldLine => ({
   job_id: "ZZTEST-JOB",
@@ -330,8 +331,30 @@ Deno.test("200 repeatable random sends conserve every cent and do not mutate inp
   }
 });
 
+// The database's one billed sum (work_order_backed_billed), as the fakes
+// answer it: one row per requested job from rows.backed_billed. The TS side
+// never works it out from lines (FU49 item 8).
+function billedRpc(rows: Record<string, any>, fault = "") {
+  return (name: string, args: any, crew: unknown = false) => {
+    if (name !== "work_order_backed_billed") {
+      return Promise.resolve({ data: crew, error: null });
+    }
+    if (fault === "work_order_backed_billed") {
+      return Promise.resolve({ data: null, error: { code: "ZZTEST" } });
+    }
+    const billed = rows.backed_billed ?? {};
+    return Promise.resolve({
+      data: (args.p_job_ids as string[]).map((job_id) => ({
+        job_id,
+        billed_ex: billed[job_id] ?? 0,
+      })),
+      error: null,
+    });
+  };
+}
+
 // A tiny PostgREST fake supplies rows, not business verdicts. No network or writes.
-function client(rows: Record<string, any[]>, fault = "", throws = false) {
+function client(rows: Record<string, any>, fault = "", throws = false) {
   return {
     from(table: string) {
       const q: any = {
@@ -363,11 +386,10 @@ function client(rows: Record<string, any[]>, fault = "", throws = false) {
       };
       return q;
     },
-    rpc: (_name: string, _args: any) =>
-      Promise.resolve({ data: false, error: null }),
+    rpc: billedRpc(rows, fault) as (name: string, args: any) => Promise<any>,
   };
 }
-const readRows = () => ({
+const readRows = (): Record<string, any> => ({
   users: [{ id: "ZZTEST-TRADE", org_id: "ZZTEST-ORG", invoice_type: null }],
   jobs: [{
     id: "ZZTEST-JOB",
@@ -382,27 +404,10 @@ const readRows = () => ({
     status: "approved",
     agreed_labour_ex: 1120,
   }],
-  trade_invoice_lines: [
-    {
-      id: "ZZTEST-1",
-      job_id: "ZZTEST-JOB",
-      line_type: "materials",
-      line_total_ex: 1000,
-      trade_invoices: { status: "approved", invoice_kind: "standard" },
-    },
-    ...["draft", "ops-reject", "paid"].map((status, i) => ({
-      id: `ZZTEST-${i + 2}`,
-      job_id: "ZZTEST-JOB",
-      line_type: "materials",
-      line_total_ex: 99,
-      trade_invoices: {
-        status,
-        invoice_kind: status === "paid" ? "held" : "standard",
-      },
-    })),
-  ],
+  // What the database counts as billed on the job (made-up figure).
+  backed_billed: { "ZZTEST-JOB": 1000 },
 });
-Deno.test("batched facts exclude draft, rejected and held money, and fresh reads reflect office changes", async () => {
+Deno.test("batched facts take billed from the database's one sum, and fresh reads reflect office changes", async () => {
   const rows = readRows();
   const f = await readLineHoldFacts(client(rows), "ZZTEST-TRADE", [line()]);
   assertEquals(f.jobs["ZZTEST-JOB"].backed_billed_ex, 1000);
@@ -417,7 +422,7 @@ Deno.test("every facts read fault throws the same 503 and retry reads again", as
       "users",
       "jobs",
       "work_orders",
-      "trade_invoice_lines",
+      "work_order_backed_billed",
       "work_order_customer_variations",
       "work_order_amount_changes",
       "v_job_commission",
@@ -446,8 +451,11 @@ Deno.test("every facts read fault throws the same 503 and retry reads again", as
     }
   }
   const bad = client(readRows());
-  bad.rpc = () =>
-    Promise.resolve({ data: null, error: { code: "ZZTEST" } } as any);
+  const answer = bad.rpc;
+  bad.rpc = (name: string, args: any) =>
+    name === "work_order_backed_billed"
+      ? answer(name, args)
+      : Promise.resolve({ data: null, error: { code: "ZZTEST" } } as any);
   await assertRejects(
     () => readLineHoldFacts(bad, "ZZTEST-TRADE", [line()]),
     LineHoldFactsUnreadable,
@@ -464,23 +472,8 @@ Deno.test("every facts read fault throws the same 503 and retry reads again", as
   );
 });
 
-Deno.test("paged billed facts include cap changes and crew holds spend nothing across weeks", async () => {
-  const rows: Record<string, any[]> = readRows();
-  rows.trade_invoice_lines = Array.from({ length: 1001 }, (_, i) => ({
-    id: `ZZTEST-${i}`,
-    job_id: "ZZTEST-JOB",
-    line_type: "materials",
-    line_total_ex: 1,
-    trade_invoices: { status: "approved", invoice_kind: "standard" },
-  }));
-  rows.trade_invoice_lines.push({
-    id: "ZZTEST-CREDIT",
-    job_id: "ZZTEST-JOB",
-    line_type: "other",
-    line_total_ex: 7,
-    override_amount: -1,
-    trade_invoices: { status: "paid", invoice_kind: "follow_on" },
-  });
+Deno.test("billed facts include cap changes and crew holds spend nothing across weeks", async () => {
+  const rows: Record<string, any> = readRows();
   rows.work_order_customer_variations = [
     {
       id: "ZZTEST-V1",
@@ -507,8 +500,8 @@ Deno.test("paged billed facts include cap changes and crew holds spend nothing a
     line({ week_start: "2026-11-23", work_date: "2026-11-23" }),
   ];
   const db = client(rows);
-  db.rpc = (_name, args) =>
-    Promise.resolve({ data: args.p_week_start === "2026-11-16", error: null });
+  const answer = billedRpc(rows);
+  db.rpc = (name, args) => answer(name, args, args.p_week_start === "2026-11-16");
   const f = await readLineHoldFacts(db, "ZZTEST-TRADE", l);
   assertEquals(f.jobs["ZZTEST-JOB"].allowed_ex, 1150);
   assertEquals(f.jobs["ZZTEST-JOB"].backed_billed_ex, 1000);
@@ -519,12 +512,13 @@ Deno.test("paged billed facts include cap changes and crew holds spend nothing a
 });
 
 Deno.test("P1-05.8: an undated counted line is held not_on_crew with its fallback, never thrown", async () => {
-  const rows: Record<string, any[]> = readRows();
+  const rows: Record<string, any> = readRows();
   let rpcCalls = 0;
   const db = client(rows);
-  db.rpc = () => {
-    rpcCalls++;
-    return Promise.resolve({ data: false, error: null });
+  const answer = billedRpc(rows);
+  db.rpc = (name: string, args: any) => {
+    if (name === "trade_is_off_job_crew") rpcCalls++;
+    return answer(name, args);
   };
   const undated = line({ week_start: undefined, work_date: undefined });
   const f = await readLineHoldFacts(db, "ZZTEST-TRADE", [undated]);
@@ -593,7 +587,7 @@ Deno.test("P1-05.8 ruling 1: a send keeps only a same-rate hours split exact to 
 });
 
 // Hold 1590 (b): records every read so a test can say what was never fetched.
-function recordingClient(rows: Record<string, any[]>) {
+function recordingClient(rows: Record<string, any>) {
   const reads: Array<{ table: string; columns: string; eq: Record<string, unknown> }> = [];
   return {
     reads,
@@ -613,7 +607,7 @@ function recordingClient(rows: Record<string, any[]>) {
         order: () => q,
         range: () => q,
         then(resolve: any, reject: any) {
-          const data = (rows[table] ?? []).filter((row) =>
+          const data = ((rows[table] ?? []) as any[]).filter((row: any) =>
             Object.entries(read.eq).every(([col, val]) =>
               !(col in row) || row[col] === val
             )
@@ -623,7 +617,7 @@ function recordingClient(rows: Record<string, any[]>) {
       };
       return q;
     },
-    rpc: () => Promise.resolve({ data: false, error: null }),
+    rpc: billedRpc(rows) as (name: string, args: any) => Promise<any>,
   };
 }
 const FIGURES = ["expected_amount_ex_gst", "claimed_ex_gst", "remaining_ex_gst", "salesperson_user_id"];
@@ -679,11 +673,11 @@ Deno.test("hold 1590: my_hours' balance read fetches no commission, salesperson,
   };
   const db = recordingClient(rows);
   const left = await readJobAmountsLeft(db, "ZZTEST-TRADE", ["ZZTEST-JOB", "ZZTEST-JOB"]);
-  // approved 1,120.00 less 1,000.00 billed (draft, rejected and held excluded)
+  // approved 1,120.00 less the database's 1,000.00 billed
   assertEquals(left, { "ZZTEST-JOB": 120 });
   assertEquals(
     [...new Set(db.reads.map((r) => r.table))].sort(),
-    ["jobs", "trade_invoice_lines", "users", "work_order_amount_changes", "work_order_customer_variations", "work_orders"],
+    ["jobs", "users", "work_order_amount_changes", "work_order_customer_variations", "work_orders"],
   );
   for (const r of db.reads) {
     for (const c of FIGURES) assertEquals(r.columns.split(",").includes(c), false, `${r.table} reads ${c}`);
@@ -695,7 +689,7 @@ Deno.test("hold 1590: my_hours' balance read: no approved order is null, any fai
   rows.work_orders[0].status = "draft";
   assertEquals(await readJobAmountsLeft(recordingClient(rows), "ZZTEST-TRADE", ["ZZTEST-JOB"]), { "ZZTEST-JOB": null });
   assertEquals(await readJobAmountsLeft(recordingClient(readRows()), "ZZTEST-TRADE", []), {});
-  for (const table of ["users", "jobs", "work_orders", "trade_invoice_lines", "work_order_customer_variations", "work_order_amount_changes"]) {
+  for (const table of ["users", "jobs", "work_orders", "work_order_backed_billed", "work_order_customer_variations", "work_order_amount_changes"]) {
     for (const throws of [false, true]) {
       await assertRejects(
         () => readJobAmountsLeft(client(readRows(), table, throws), "ZZTEST-TRADE", ["ZZTEST-JOB"]),
@@ -703,4 +697,71 @@ Deno.test("hold 1590: my_hours' balance read: no approved order is null, any fai
       );
     }
   }
+});
+
+Deno.test("FU49 item 8: awaiting and rejected lines count the same in the send, my_hours and the cap: the database's one sum", async () => {
+  const rows: Record<string, any> = {
+    ...readRows(),
+    feature_flags: [{ flag_name: "trade_line_hold_v1", enabled: true }],
+    // On a billed standard invoice: one approved line, one the office has
+    // not reviewed yet (awaiting) and one it rejected. Main's classifier
+    // added all three (1,000 + 200 + 300); the database counts the approved
+    // one only, and its answer is the only figure any side may use.
+    trade_invoice_lines: [
+      { id: "ZZTEST-A", job_id: "ZZTEST-JOB", line_type: "labour", line_total_ex: 1000, office_review_status: "approved", trade_invoices: { status: "approved", invoice_kind: "standard" } },
+      { id: "ZZTEST-W", job_id: "ZZTEST-JOB", line_type: "labour", line_total_ex: 200, office_review_status: "awaiting", trade_invoices: { status: "approved", invoice_kind: "standard" } },
+      { id: "ZZTEST-R", job_id: "ZZTEST-JOB", line_type: "labour", line_total_ex: 300, office_review_status: "rejected", trade_invoices: { status: "approved", invoice_kind: "standard" } },
+    ],
+    backed_billed: { "ZZTEST-JOB": 1000 },
+  };
+  const db = recordingClient(rows);
+  const calls: any[] = [];
+  const answer = db.rpc;
+  db.rpc = (name: string, args: any) => {
+    calls.push({ name, args });
+    return answer(name, args);
+  };
+  const facts = await readLineHoldFacts(db, "ZZTEST-TRADE", [line()]);
+  const left = await readJobAmountsLeft(db, "ZZTEST-TRADE", ["ZZTEST-JOB"]);
+  const cap = await readBilledOnJobs(db, ["ZZTEST-JOB"]);
+  assertEquals(facts.jobs["ZZTEST-JOB"].backed_billed_ex, 1000);
+  assertEquals(left, { "ZZTEST-JOB": 120 });
+  assertEquals(cap.get("ZZTEST-JOB"), 1000);
+  // 120 left, so the 120 line is paid whole. Counting the awaiting and
+  // rejected lines (main) would have left nothing and held it all.
+  const sorted = classifyLines([line()], facts);
+  assertEquals(sorted.held, []);
+  assertEquals(sorted.backed[0].sent_amount_ex, 120);
+  // No side reads lines to make its own sum.
+  assertEquals(db.reads.filter((r) => r.table === "trade_invoice_lines"), []);
+  const billedCalls = calls.filter((c) => c.name === "work_order_backed_billed");
+  assertEquals(billedCalls.length, 3);
+  for (const c of billedCalls) assertEquals(c.args.p_job_ids, ["ZZTEST-JOB"]);
+});
+
+Deno.test("FU49 item 8: only jobs read are asked, and an answer missing a job refuses, never 0", async () => {
+  const rows: Record<string, any> = readRows();
+  const db = client(rows);
+  const asked: string[][] = [];
+  const answer = db.rpc;
+  db.rpc = (name: string, args: any) => {
+    if (name === "work_order_backed_billed") asked.push(args.p_job_ids);
+    return answer(name, args);
+  };
+  // A line naming a job the jobs read does not return is not sent to the sum.
+  await readLineHoldFacts(db, "ZZTEST-TRADE", [line(), line({ job_id: "ZZTEST-GONE" })]);
+  assertEquals(asked, [["ZZTEST-JOB"]]);
+  const short = client(rows);
+  short.rpc = (name: string, args: any) =>
+    name === "work_order_backed_billed"
+      ? Promise.resolve({ data: [], error: null })
+      : answer(name, args);
+  await assertRejects(() => readLineHoldFacts(short, "ZZTEST-TRADE", [line()]), LineHoldFactsUnreadable);
+  await assertRejects(() => readJobAmountsLeft(short, "ZZTEST-TRADE", ["ZZTEST-JOB"]), LineHoldFactsUnreadable);
+  const unknown = client(rows);
+  unknown.rpc = (name: string, args: any) =>
+    name === "work_order_backed_billed"
+      ? Promise.resolve({ data: [{ job_id: "ZZTEST-JOB", billed_ex: null }], error: null })
+      : answer(name, args);
+  await assertRejects(() => readLineHoldFacts(unknown, "ZZTEST-TRADE", [line()]), LineHoldFactsUnreadable);
 });

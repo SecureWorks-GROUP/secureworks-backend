@@ -1504,10 +1504,10 @@ export function payRunApproveDepsFromClient(
       const { data, error } = await client.rpc("approve_trade_pay_run", params);
       return { data, error };
     },
-    // reconcile_item_raise takes its seven arguments by position (P2-03.2):
-    // these names are its ALIAS names. See the PR for the open gap.
+    // reconcile_item_raise takes its arguments by position (P2-03.2), so a
+    // named PostgREST call goes through its named door (20261118170200).
     raise: (item) =>
-      rpcOrThrow("reconcile_item_raise", {
+      rpcOrThrow("reconcile_item_raise_named", {
         p_kind: item.kind,
         p_subject_table: item.subject_table,
         p_subject_id: item.subject_id,

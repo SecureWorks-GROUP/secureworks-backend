@@ -1,9 +1,9 @@
 // JWT flag: --no-verify-jwt. Keep this line at the top: the deploy workflow reads
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
-import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, type SendRow, type SortedSend } from './trade_line_send.ts'
+import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, linesInJobOrder, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, tradeLineHoldFlagOn, type SendRow, type SortedSend } from './trade_line_send.ts'
 import { readJobAmountsLeft, type LineHoldFacts } from './trade_line_hold.ts'
-import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
+import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine, ownMoneyReimbursementItems, reimbursementSkipAnswer } from './trade_invoice_reimbursement.ts'
 import { ExpenseCaptureError, expenseCaptureFields, expenseNextStep, refuseBilledReimbursement } from './expense_capture_v2.ts'
 import { listExpenseReceipts } from './expense_list.ts'
 import { factReadOn } from './fact_reader_switch.ts'
@@ -46,6 +46,7 @@ import {
 } from './trade_invoice_extra_job_authority.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { divisionTrackingOption, loadDraftStandard } from '../_shared/xero_draft_standard.ts'
+import { recordXeroDraft } from '../_shared/xero_draft_register.ts'
 import { invoiceDivisionTag } from './invoice_division_tag.ts'
 import { commissionCapCodeFromDbError, commissionCapRefusal, commissionLineState, loggableClientLineId, readJobCommissionRecords, readJobCommissionRecordsReusing, type JobCommissionRecord } from './job_commission.ts'
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
@@ -880,6 +881,7 @@ import {
   updateJobWorkOrderDraft,
 } from './job_work_orders.ts'
 import { readJobWorkOrderGaps } from './job_work_order_gaps.ts'
+import { confirmJobWorkOrderLabour, listJobWorkOrderLabourConfirm } from './job_work_order_labour_confirm.ts'
 import { loadWorkOrderClaimCheck, withClaimWarnings } from './work_order_claim_check.ts'
 import {
   CREW_INVOICE_LINE_OFFICE_REVIEW_FLAG,
@@ -2743,6 +2745,28 @@ function createTradeXeroBillOnce(
   }, args)
 }
 
+// P3-01.9: a trade bill's register row (X6). Recorded after its PDFs are
+// attached; never raised (phase 2 owns the pay path's stop). recordXeroDraft
+// never throws and does nothing while the draft standard switch is off.
+function recordTradeBillDraft(
+  client: any,
+  args: { tradeInvoiceId: string; bill: any; payload: any; pdfAttached: boolean; jobIds: unknown[] },
+) {
+  return recordXeroDraft(client, {
+    orgId: DEFAULT_ORG_ID,
+    xeroDocumentId: args.bill?.InvoiceID,
+    documentType: 'ACCPAY',
+    sourceKind: 'trade_invoice',
+    sourceId: args.tradeInvoiceId,
+    registerRow: 'X6',
+    jobIds: args.jobIds.map((id) => (id == null ? null : String(id))),
+    payload: args.payload?.Invoices?.[0],
+    returned: args.bill,
+    hasSourceDocument: args.pdfAttached === true,
+    raise: false,
+  })
+}
+
 function tradeXeroBillSearchApiError(error: unknown): never {
   if (error instanceof TradeXeroBillSearchError) {
     throw new ApiError(error.message, error.status, { ok: false, code: error.code, error: error.message })
@@ -3027,6 +3051,13 @@ async function pushTradeInvoiceToXeroAction(
       tradeName,
     },
   )
+  await recordTradeBillDraft(client, {
+    tradeInvoiceId: invoice_id,
+    bill,
+    payload: xeroPayload,
+    pdfAttached,
+    jobIds: reviewLines.map((line: any) => line?.job_id),
+  })
 
   // Cache in xero_invoices
   try {
@@ -11033,6 +11064,23 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         actor.orgId = authMode === 'api_key' ? DEFAULT_ORG_ID : actor.orgId
         return json(await runJobWorkOrder(() => readJobWorkOrderGaps(client, req.method, actor)))
       }
+      // FU49 9(a): open jobs whose draft job work order has no agreed labour,
+      // each with its sealed budget amount as a proposal, and the one office
+      // press that confirms it (job_work_order_labour_confirm_v1, seeded off).
+      case 'list_job_work_order_labour_confirm': {
+        if (req.method !== 'GET') {
+          return json({ error: 'list_job_work_order_labour_confirm is GET only', code: 'method_not_allowed' }, 405)
+        }
+        const actor = officeJobWorkOrderActor(authMode, authUser)
+        actor.orgId = authMode === 'api_key' ? DEFAULT_ORG_ID : actor.orgId
+        return json(await runJobWorkOrder(() => listJobWorkOrderLabourConfirm(client, url.searchParams, actor)))
+      }
+      case 'confirm_job_work_order_labour': {
+        if (req.method !== 'POST') {
+          return json({ error: 'confirm_job_work_order_labour is POST only', code: 'method_not_allowed' }, 405)
+        }
+        return json(await runJobWorkOrder(() => confirmJobWorkOrderLabour(client, body, officeJobWorkOrderActor(authMode, authUser))))
+      }
       case 'list_office_job_work_orders': {
         if (req.method !== 'GET') {
           return json({ error: 'list_office_job_work_orders is GET only', code: 'method_not_allowed' }, 405)
@@ -14388,6 +14436,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               await markTradeInvoiceJobsChanged(client, [...standardLines, ...(woSorted?.held || [])], weekAutofill ? 'trade_invoice' : 'phase1:trade_invoice')
               if (woHoldingSaved && woFacts) {
                 await raiseHeldLines(client, woHoldingSaved.lines, {
+                  orgId: woHoldingSaved.orgId ?? null,
                   tradeUserId: tradeUser.id,
                   tradeName: tradeXeroUser?.name ?? null,
                   tradeRole: tradeUser.role ?? null,
@@ -14676,6 +14725,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   tradeName,
                 },
               )
+              await recordTradeBillDraft(client, {
+                tradeInvoiceId: tradeInv.id,
+                bill: xeroInv,
+                payload: xeroPayload,
+                pdfAttached: woPdfAttached,
+                jobIds: [wo.job_id],
+              })
               xeroBillId = identity.xeroBillId
               xeroBillNumber = identity.xeroBillNumber
               xeroSuccess = !!xeroBillId
@@ -15376,12 +15432,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // refusal: each line is paid this week or held for the office
             // (trade_line_send.ts). Group shares keep their own door. Anything
             // unreadable reads as off, which is main.
-            const lineHoldMode = !(Array.isArray(extra_items) && extra_items.some(isGroupShareInvoiceItem)) &&
-              await lineHoldSendApplies(client, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead)
+            // FU49 item 4: with the switch on, the job amount guard locks each
+            // job a saved line names, so this send's lines are saved in job
+            // order whether or not the hold applies to its week (a group share
+            // or a week before the pay rule still meets the guard).
+            const lineHoldFlagOn = await tradeLineHoldFlagOn(client)
+            const lineHoldMode = lineHoldFlagOn && !(Array.isArray(extra_items) && extra_items.some(isGroupShareInvoiceItem)) &&
+              await lineHoldSendApplies(client, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead, true)
             const lineHoldWeeklySource = weeklyInvoice
             const invoiceSuperBasis = groupInvoiceBasis.superBasis ??
               await tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead)
-            const reimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(extra_items) ? extra_items : [], invoiceSuperBasis, week_start ? priorDraftId : null)
+            // P2-06.6: the trade's own-money receipts not yet on an invoice join
+            // this one through the same door (switch off: no read, main's answer).
+            const ownMoney = await ownMoneyReimbursementItems(client, { userId: tradeUser.id, basis: invoiceSuperBasis, requested: Array.isArray(extra_items) ? extra_items : [], replacingDraftId: week_start ? priorDraftId : null, groupShare: Array.isArray(extra_items) && extra_items.some(isGroupShareInvoiceItem) })
+            const reimbursements = await invoiceReimbursements(client, tradeUser.id, [...(Array.isArray(extra_items) ? extra_items : []), ...ownMoney.items], invoiceSuperBasis, week_start ? priorDraftId : null, ownMoney.flagOn ? true : undefined)
             const invoiceExtraItems = weeklyInvoice
               ? weeklyInvoiceLineRows(weeklyInvoice).map((line: any) => ({
                 ...line,
@@ -16759,23 +16823,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               lineHoldMode && (lineHoldSorted?.held.length ?? 0) > 0
                 ? { ...payload, hold_lines: lineHoldHeldLineRows('') }
                 : payload
+            const lineJobOrder = { jobOrder: lineHoldFlagOn }
             const saveStandard = () => retryReimbursementClaims(client, reimbursements, async () => await persistWithFreeNumber(() => weeklyInvoice
               ? weekAutofill
                 ? _persistTradeInvoiceWeekDraft(client, lineHoldRpcPayload(invoicePayload), [
                   ...lineItems.map((line: any) => toTradeInvoiceLineRow('', line, { line_type: 'labour' })),
                   ...extraLineItems.map((line: any) => toTradeInvoiceLineRow('', line)),
-                ], priorDraftId)
+                ], priorDraftId, lineJobOrder)
                 : _persistWeeklyTradeInvoice(
                   client,
                   lineHoldRpcPayload(invoicePayload),
                   weeklyInvoiceWithReimbursements(weeklyInvoice, reimbursements.lines),
                   priorDraftId,
+                  lineJobOrder,
                 )
               : week_start && reimbursements.lines.length > 0
               ? _persistTradeInvoiceWeekDraft(client, { ...invoicePayload, org_id: tradeUser.orgId }, [
                   ...lineItems.map((line: any) => toTradeInvoiceLineRow('', line, { line_type: 'labour' })),
                   ...extraLineItems.map((extra: any) => toTradeInvoiceLineRow('', extra)),
-                ], priorDraftId)
+                ], priorDraftId, lineJobOrder)
               : replaceTradeInvoiceDraftKeepingPrior({
               createInvoice: async () => {
                 const { data: newInvoice, error: invErr } = await client.from('trade_invoices')
@@ -16788,10 +16854,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 return newInvoice.id
               },
               insertLines: async (replacementId) => {
-                const lineRows = [
+                const lineRows = tradeInvoiceLinesForInsert([
                   ...lineItems.map((line: any) => toTradeInvoiceLineRow(replacementId, line, { line_type: 'labour' })),
                   ...extraLineItems.map((extra: any) => toTradeInvoiceLineRow(replacementId, extra)),
-                ]
+                ], lineJobOrder)
                 const { error: lineErr } = await client.from('trade_invoice_lines').insert(lineRows)
                 if (lineErr) throw new Error('Failed to save invoice line items: ' + lineErr.message)
               },
@@ -16940,6 +17006,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               await markTradeInvoiceJobsChanged(client, [...lineItems, ...extraLineItems, ...(lineHoldSorted?.held || [])], weekAutofill ? 'trade_invoice' : 'phase1:trade_invoice')
               if (lineHoldSaved && lineHoldFacts) {
                 await raiseHeldLines(client, lineHoldSaved.lines, {
+                  orgId: lineHoldSaved.orgId ?? null,
                   tradeUserId: tradeUser.id,
                   tradeName: userProfile?.name ?? null,
                   tradeRole: tradeUser.role ?? null,
@@ -16954,7 +17021,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               const answer = sendAnswer(lineHoldSendId, [...lineItems, ...extraLineItems], lineHoldSaved?.lines ?? [], lineHoldSorted.skipped)
               return {
                 ...answer,
-                skipped_items: [...reimbursements.skipped_items, ...answer.skipped_items],
+                ...reimbursementSkipAnswer(reimbursements, ownMoney.autoIds, answer.skipped_items),
                 ...(lineHoldSaved ? { held_invoice_id: lineHoldSaved.id } : {}),
                 ...(lineHoldLeftOut.length > 0
                   ? { left_out: lineHoldLeftOut.map((row: any) => ({ job_number: row.job_number ?? null, description: row.description ?? null, amount_ex: roundMoney(Number(row.line_total_ex) || 0) })) }
@@ -17237,7 +17304,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   week_start,
                   total_hours: totalHours,
                   ...tradeInvoiceMoneyResponse(money),
-                skipped_items: reimbursements.skipped_items,
+                ...reimbursementSkipAnswer(reimbursements, ownMoney.autoIds),
                   ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
                   client_priced_lines: clientPricedExtraCount,
                   possible_duplicate_extra_lines: duplicateExtraCount,
@@ -17510,6 +17577,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                       tradeName,
                     },
                   )
+                  await recordTradeBillDraft(client, {
+                    tradeInvoiceId: invoice.id,
+                    bill,
+                    payload: xeroPayload,
+                    pdfAttached,
+                    jobIds: [...lineItems, ...extraLineItems].map((l: any) => l?.job_id),
+                  })
                   xeroBillId = identity.xeroBillId
                   xeroBillNumber = identity.xeroBillNumber
                   // Cache
@@ -17628,7 +17702,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 total_hours: totalHours,
                 ...tradeInvoiceMoneyResponse(money),
                 ...(payView ? { pay_view: payView } : {}),
-                skipped_items: reimbursements.skipped_items,
+                ...reimbursementSkipAnswer(reimbursements, ownMoney.autoIds),
                 ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
                 line_count: lineItems.length + extraLineItems.length,
@@ -17650,7 +17724,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 total_hours: totalHours,
                 ...tradeInvoiceMoneyResponse(money),
                 ...(payView ? { pay_view: payView } : {}),
-                skipped_items: reimbursements.skipped_items,
+                ...reimbursementSkipAnswer(reimbursements, ownMoney.autoIds),
                 ...lineHoldAnswerFields(),
                 ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
@@ -17676,7 +17750,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 total_hours: totalHours,
                 ...tradeInvoiceMoneyResponse(money),
                 ...(payView ? { pay_view: payView } : {}),
-                skipped_items: reimbursements.skipped_items,
+                ...reimbursementSkipAnswer(reimbursements, ownMoney.autoIds),
                 ...lineHoldAnswerFields(),
                 ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
@@ -17700,7 +17774,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               total_hours: totalHours,
               ...tradeInvoiceMoneyResponse(money),
                 ...(payView ? { pay_view: payView } : {}),
-                skipped_items: reimbursements.skipped_items,
+                ...reimbursementSkipAnswer(reimbursements, ownMoney.autoIds),
                 ...lineHoldAnswerFields(),
               ...tradeRecurringDeductionResponse(recurringDeduction),
               ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
@@ -19340,13 +19414,25 @@ export async function _persistWeeklyTradeInvoice(
   invoicePayload: Record<string, unknown>,
   invoice: WeeklyWorkOrderInvoice,
   requestedPriorDraftId: string | null,
+  opts: { jobOrder?: boolean } = {},
 ): Promise<string> {
   return await _persistTradeInvoiceWeekDraft(
     client,
     invoicePayload,
     weeklyInvoiceLineRows(invoice),
     requestedPriorDraftId,
+    opts,
   )
+}
+
+// FU49 item 4: the rows a save hands the database. With jobOrder (the
+// trade_line_hold_v1 switch on) they go in job id order (linesInJobOrder);
+// off, exactly as given. Positions are fixed by the caller first.
+export function tradeInvoiceLinesForInsert<T extends Record<string, any>>(
+  lineRows: readonly T[],
+  opts: { jobOrder?: boolean } = {},
+): T[] {
+  return opts.jobOrder ? linesInJobOrder(lineRows) : [...lineRows]
 }
 
 export async function _persistTradeInvoiceWeekDraft(
@@ -19354,6 +19440,7 @@ export async function _persistTradeInvoiceWeekDraft(
   invoicePayload: Record<string, unknown>,
   lineRows: Array<Record<string, unknown>>,
   requestedPriorDraftId: string | null,
+  opts: { jobOrder?: boolean } = {},
 ): Promise<string> {
   // v2 is v1 unchanged plus the time-entry stamp on the lines it inserted
   // (20261012180000_trade_invoice_time_entries.sql). v3 is v2 unchanged plus
@@ -19361,10 +19448,10 @@ export async function _persistTradeInvoiceWeekDraft(
   // (20261013143700_trade_recurring_deductions.sql).
   const { data, error } = await client.rpc(Object.hasOwn(invoicePayload, 'accepted_untouched') ? 'persist_weekly_trade_invoice_v4' : 'persist_weekly_trade_invoice_v3', {
     p_invoice: invoicePayload,
-    p_lines: lineRows.map((line, linePosition) => ({
+    p_lines: tradeInvoiceLinesForInsert(lineRows.map((line, linePosition) => ({
       ...line,
       line_position: line.line_position ?? linePosition,
-    })),
+    })), opts),
     p_requested_prior_draft_id: requestedPriorDraftId,
   })
   const invoiceId = String(data || '')
@@ -42706,6 +42793,26 @@ async function createInvoice(
     }
   }
 
+  // P3-01.9: register row X3, raised when incomplete. Only a document Xero
+  // returned as DRAFT is recorded (an invoice created AUTHORISED is not a
+  // draft). Nothing is attached to a customer invoice by design. Never throws.
+  if (providerInvoiceStatus && providerInvoiceStatus.trim().toUpperCase() === 'DRAFT') {
+    const jIdForRegister = job_id || jobId
+    await recordXeroDraft(client, {
+      orgId: DEFAULT_ORG_ID,
+      xeroDocumentId: providerInvoiceId,
+      documentType: 'ACCREC',
+      sourceKind: 'customer_invoice',
+      sourceId: jIdForRegister ? String(jIdForRegister) : null,
+      registerRow: 'X3',
+      jobIds: [jIdForRegister ? String(jIdForRegister) : null],
+      payload: invoice.Invoices[0],
+      returned: xeroInv,
+      hasSourceDocument: true,
+      raise: true,
+    })
+  }
+
   // Email acceptance is separate from successful invoice creation. A timeout or
   // incomplete response leaves the delivery outcome unknown; never retry here.
   const emailRequested = !sesContext && !internal.captainLock && !!send_email
@@ -65686,6 +65793,22 @@ export async function pushExpenseToXero(
     entity_type: 'expense_receipt',
     entity_id: expense_id,
     payload: { xero_bill_id: xeroBillId, xero_status: 'draft' },
+  })
+
+  // P3-01.9: register row X7. No receipt is attached on this path yet, and
+  // phase 2 owns the stop, so nothing is raised. Never throws.
+  await recordXeroDraft(client, {
+    orgId: DEFAULT_ORG_ID,
+    xeroDocumentId: xeroBillId,
+    documentType: 'ACCPAY',
+    sourceKind: 'expense_receipt',
+    sourceId: expense_id,
+    registerRow: 'X7',
+    jobIds: [expense.job_id],
+    payload: billBody,
+    returned: result?.Invoices?.[0],
+    hasSourceDocument: false,
+    raise: false,
   })
 
   return { success: true, xero_bill_id: xeroBillId, xero_status: 'draft' }

@@ -1609,16 +1609,17 @@ Deno.test("approve pay run: the production dependencies call what the migrations
     Object.keys(calls.find((c) => c.name === "reconcile_item_withdraw")!.args),
     declaredParams(reconcile, "reconcile_item_withdraw"),
   );
-  // reconcile_item_raise declares its arguments by position and names them by
-  // ALIAS inside; the call uses those names, in order (open gap: PostgREST
-  // calls by name, see the PR).
-  const aliases = [
-    ...reconcile.matchAll(/(p_\w+) ALIAS FOR \$(\d)/g),
-  ].sort((a, b) => Number(a[2]) - Number(b[2])).map((m) => m[1]);
-  assertEquals(aliases.length, 7);
+  // reconcile_item_raise declares its arguments by position, so PostgREST
+  // cannot call it by name; the call goes through the named door, whose
+  // declared parameters the call's names must match (all but the optional
+  // p_org_id, last).
+  assert(!calls.some((c) => c.name === "reconcile_item_raise"));
+  const named = await migrationText("_reconcile_item_raise_named.sql");
+  const namedParams = declaredParams(named, "reconcile_item_raise_named");
+  assertEquals(namedParams.at(-1), "p_org_id");
   assertEquals(
-    Object.keys(calls.find((c) => c.name === "reconcile_item_raise")!.args),
-    aliases,
+    Object.keys(calls.find((c) => c.name === "reconcile_item_raise_named")!.args),
+    namedParams.slice(0, -1),
   );
 
   // trade_invoice_lines job columns as created (20260325000003).

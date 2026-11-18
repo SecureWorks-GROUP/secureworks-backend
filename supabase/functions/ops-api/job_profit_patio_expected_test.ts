@@ -210,7 +210,7 @@ Deno.test("job_profit: a patio job carries patio_expected from the frozen revisi
   const saved = { scope_json: record(), pricing_json: pricing() };
   const h = await lastSaveHashes(saved);
   const c = fake({
-    v_job_profit: [row()],
+    v_job_profit_read: [row()],
     jobs: [{ id: JOB, ...current(), ...saved }],
     scope_revisions: [{ job_id: JOB, ...frozen(), ...h }],
     job_documents: [QUOTE_ACCEPTED],
@@ -244,7 +244,7 @@ Deno.test("job_profit: acceptance is read from quote documents and accepted runs
   const saved = { scope_json: record(), pricing_json: pricing() };
   const h = await lastSaveHashes(saved);
   const base = {
-    v_job_profit: [row()],
+    v_job_profit_read: [row()],
     jobs: [{ id: JOB, ...current(), ...saved }],
     scope_revisions: [{ job_id: JOB, ...frozen(), ...h }],
   };
@@ -323,7 +323,7 @@ Deno.test("job_profit: an accepted revision A never opens a later frozen revisio
   const saved = { scope_json: recB, pricing_json: pricing() };
   const h = await lastSaveHashes(saved);
   const base = {
-    v_job_profit: [row()],
+    v_job_profit_read: [row()],
     jobs: [{
       id: JOB,
       ...current(recB),
@@ -393,7 +393,7 @@ Deno.test("job_profit: an accepted revision A never opens a later frozen revisio
 });
 
 Deno.test("job_profit: a job with no frozen patio row reads no acceptance", async () => {
-  const c = fake({ v_job_profit: [row()], jobs: [{ id: JOB, ...current() }] });
+  const c = fake({ v_job_profit_read: [row()], jobs: [{ id: JOB, ...current() }] });
   await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`));
   assertEquals(
     c.calls.filter((x) =>
@@ -405,7 +405,7 @@ Deno.test("job_profit: a job with no frozen patio row reads no acceptance", asyn
 
 Deno.test("job_profit: an unreadable scope never fails the profit read", async () => {
   for (const table of ["jobs", "scope_revisions"]) {
-    const c = fake({ v_job_profit: [row()] }, { [table]: "timeout" });
+    const c = fake({ v_job_profit_read: [row()] }, { [table]: "timeout" });
     const out = await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`));
     assertEquals(out.status, 200, table);
     assertEquals((out.body as any).patio_expected.status, "unreadable", table);
@@ -421,7 +421,7 @@ Deno.test("job_profit: a save edited after the freeze reads not frozen, by hash"
     pricing_json: pricing(),
   };
   const c = fake({
-    v_job_profit: [row()],
+    v_job_profit_read: [row()],
     jobs: [{ id: JOB, ...current(), ...edited }],
     scope_revisions: [{ job_id: JOB, ...frozen(), ...h }],
   });
@@ -444,7 +444,7 @@ Deno.test("job_profit: an engine without the installer rule holds both patio lan
   ) {
     const c = fake(
       {
-        v_job_profit: [row()],
+        v_job_profit_read: [row()],
         jobs: [{ id: JOB, ...current(), ...saved }],
         scope_revisions: [{ job_id: JOB, ...frozen(), ...h }],
       },
@@ -467,7 +467,7 @@ Deno.test("job_profit: a released quote naming the frozen and baseline revision 
   const saved = { scope_json: record(), pricing_json: pricing() };
   const h = await lastSaveHashes(saved);
   const bound = {
-    v_job_profit: [row()],
+    v_job_profit_read: [row()],
     // ec_rev stands in for the projected expected_costs->>scope_revision_id
     // path; the fake does not project.
     jobs: [{ id: JOB, ...current(), ...saved, ec_rev: "srv-row-9" }],
