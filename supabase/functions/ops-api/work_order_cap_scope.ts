@@ -46,3 +46,28 @@ export async function readWorkOrderCapScope(
   }
   return scope;
 }
+
+/** Follow-up 49 item 9(b), the older code cap (_assertWithinWorkOrderTotal,
+ * index.ts): with trade_line_hold_v1 on, the given jobs work_order_cap_scope
+ * puts under the cap; with it off, every job given, as before. The switch is
+ * read strictly here: a failed read throws, never reads as off or on.
+ * feature_flags_pkey, then work_order_cap_scope. */
+export async function capScopedJobIds(
+  client: any,
+  jobIds: readonly string[],
+): Promise<string[]> {
+  if (jobIds.length === 0) return [];
+  let flag: any;
+  try {
+    flag = await client.from("feature_flags").select("enabled")
+      .eq("flag_name", "trade_line_hold_v1").limit(1);
+  } catch {
+    throw new WorkOrderCapScopeUnreadable();
+  }
+  if (flag?.error || !Array.isArray(flag?.data)) {
+    throw new WorkOrderCapScopeUnreadable();
+  }
+  if (flag.data[0]?.enabled !== true) return [...jobIds];
+  const scope = await readWorkOrderCapScope(client, jobIds);
+  return jobIds.filter((id) => scope.get(String(id)) === true);
+}

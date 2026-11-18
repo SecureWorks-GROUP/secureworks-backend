@@ -1112,6 +1112,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # cl-payrun-escape: the release door and the run read's
                       # released_at (trade_pay_run.ts).
                       ("20261118170500", "trade_pay_run_release"),
+                      # FU49 9(b): the cap's scope and settings, and the
+                      # approver's door with its record (work_order_cap_*.ts).
+                      ("20261118193817", "work_order_cap_start_date"),
+                      ("20261118194100", "work_order_cap_start_set"),
                       # cl-receipt-ownjob: the not-booked-on-this-job receipt
                       # mark (expense_own_job.ts).
                       ("20261118194000", "expense_unbooked_job_mark"),
