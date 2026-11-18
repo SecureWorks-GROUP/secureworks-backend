@@ -3,7 +3,7 @@
 // verification on, which refuses every x-api-key caller at the gateway (401).
 import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, linesInJobOrder, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, tradeLineHoldFlagOn, type SendRow, type SortedSend } from './trade_line_send.ts'
 import { readJobAmountsLeft, type LineHoldFacts } from './trade_line_hold.ts'
-import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine } from './trade_invoice_reimbursement.ts'
+import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine, ownMoneyReimbursementItems, reimbursementSkipAnswer } from './trade_invoice_reimbursement.ts'
 import { ExpenseCaptureError, expenseCaptureFields, expenseNextStep, refuseBilledReimbursement } from './expense_capture_v2.ts'
 import { listExpenseReceipts } from './expense_list.ts'
 import { factReadOn } from './fact_reader_switch.ts'
@@ -15411,7 +15411,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const lineHoldWeeklySource = weeklyInvoice
             const invoiceSuperBasis = groupInvoiceBasis.superBasis ??
               await tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead)
-            const reimbursements = await invoiceReimbursements(client, tradeUser.id, Array.isArray(extra_items) ? extra_items : [], invoiceSuperBasis, week_start ? priorDraftId : null)
+            // P2-06.6: the trade's own-money receipts not yet on an invoice join
+            // this one through the same door (switch off: no read, main's answer).
+            const ownMoney = await ownMoneyReimbursementItems(client, { userId: tradeUser.id, basis: invoiceSuperBasis, requested: Array.isArray(extra_items) ? extra_items : [], replacingDraftId: week_start ? priorDraftId : null, groupShare: Array.isArray(extra_items) && extra_items.some(isGroupShareInvoiceItem) })
+            const reimbursements = await invoiceReimbursements(client, tradeUser.id, [...(Array.isArray(extra_items) ? extra_items : []), ...ownMoney.items], invoiceSuperBasis, week_start ? priorDraftId : null, ownMoney.flagOn ? true : undefined)
             const invoiceExtraItems = weeklyInvoice
               ? weeklyInvoiceLineRows(weeklyInvoice).map((line: any) => ({
                 ...line,
@@ -16986,7 +16989,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               const answer = sendAnswer(lineHoldSendId, [...lineItems, ...extraLineItems], lineHoldSaved?.lines ?? [], lineHoldSorted.skipped)
               return {
                 ...answer,
-                skipped_items: [...reimbursements.skipped_items, ...answer.skipped_items],
+                ...reimbursementSkipAnswer(reimbursements, ownMoney.autoIds, answer.skipped_items),
                 ...(lineHoldSaved ? { held_invoice_id: lineHoldSaved.id } : {}),
                 ...(lineHoldLeftOut.length > 0
                   ? { left_out: lineHoldLeftOut.map((row: any) => ({ job_number: row.job_number ?? null, description: row.description ?? null, amount_ex: roundMoney(Number(row.line_total_ex) || 0) })) }
@@ -17269,7 +17272,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   week_start,
                   total_hours: totalHours,
                   ...tradeInvoiceMoneyResponse(money),
-                skipped_items: reimbursements.skipped_items,
+                ...reimbursementSkipAnswer(reimbursements, ownMoney.autoIds),
                   ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
                   client_priced_lines: clientPricedExtraCount,
                   possible_duplicate_extra_lines: duplicateExtraCount,
@@ -17667,7 +17670,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 total_hours: totalHours,
                 ...tradeInvoiceMoneyResponse(money),
                 ...(payView ? { pay_view: payView } : {}),
-                skipped_items: reimbursements.skipped_items,
+                ...reimbursementSkipAnswer(reimbursements, ownMoney.autoIds),
                 ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
                 line_count: lineItems.length + extraLineItems.length,
@@ -17689,7 +17692,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 total_hours: totalHours,
                 ...tradeInvoiceMoneyResponse(money),
                 ...(payView ? { pay_view: payView } : {}),
-                skipped_items: reimbursements.skipped_items,
+                ...reimbursementSkipAnswer(reimbursements, ownMoney.autoIds),
                 ...lineHoldAnswerFields(),
                 ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
@@ -17715,7 +17718,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 total_hours: totalHours,
                 ...tradeInvoiceMoneyResponse(money),
                 ...(payView ? { pay_view: payView } : {}),
-                skipped_items: reimbursements.skipped_items,
+                ...reimbursementSkipAnswer(reimbursements, ownMoney.autoIds),
                 ...lineHoldAnswerFields(),
                 ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
@@ -17739,7 +17742,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               total_hours: totalHours,
               ...tradeInvoiceMoneyResponse(money),
                 ...(payView ? { pay_view: payView } : {}),
-                skipped_items: reimbursements.skipped_items,
+                ...reimbursementSkipAnswer(reimbursements, ownMoney.autoIds),
                 ...lineHoldAnswerFields(),
               ...tradeRecurringDeductionResponse(recurringDeduction),
               ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
