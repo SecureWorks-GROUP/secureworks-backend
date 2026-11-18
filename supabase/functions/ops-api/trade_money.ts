@@ -237,7 +237,20 @@ type HistoryOptions = {
   priorNotInXero?: number
   taxPercent: number | null
   rates: PayHistoryRate[]
-  paidRuns: ReadonlySet<string>
+  /** Runs whose super the office marked paid: run id -> the stamp (ISO). */
+  paidRuns: ReadonlyMap<string, string>
+}
+
+/**
+ * Director 15:22: until Marnin decides, My pay says the office marked the
+ * super paid, never that it reached the fund. The day is Perth's (UTC+8).
+ */
+export function superMarkedPaidWords(stamp: string): { marked_paid_on: string; words: string } {
+  const ms = Date.parse(stamp)
+  if (!Number.isFinite(ms)) throw new Error('pay_history_unreadable')
+  const day = new Date(ms + 8 * 3600_000).toISOString().slice(0, 10)
+  const words = 'Marked paid by the office on ' + Number(day.slice(8, 10)) + ' ' + monthLabel(day)
+  return { marked_paid_on: day, words }
 }
 
 const emptyHistory = () => ({
@@ -337,7 +350,7 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
   const years = new Map<string, HistoryTotals>()
   const thisYear = emptyHistory()
   const lastYear = emptyHistory()
-  const byInvoice: { invoice_id: string; invoice_number: string | null; week_start: string; amount: number; status: string }[] = []
+  const byInvoice: { invoice_id: string; invoice_number: string | null; week_start: string; amount: number; status: string; marked_paid_on?: string; words?: string }[] = []
   let sinceStart = opts.priorSuper
   let superNotRecorded = opts.priorSuperNotRecorded ?? 0
   let notInXero = opts.priorNotInXero ?? 0
@@ -378,9 +391,11 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
     addPeriod(weeks, week, totals)
     addPeriod(months, day.slice(0, 7), totals)
     addPeriod(years, fyLabelFor(day), totals)
+    const marked = recordedSuper === null ? undefined : opts.paidRuns.get(row.pay_run_id)
     byInvoice.push({ invoice_id: row.id, invoice_number: row.invoice_number, week_start: week,
       amount: superAmount, status: recordedSuper === null ? 'not_recorded' :
-        opts.paidRuns.has(row.pay_run_id) ? 'paid_to_fund' : 'to_be_paid' })
+        marked ? 'marked_paid_by_office' : 'to_be_paid',
+      ...(marked ? superMarkedPaidWords(marked) : {}) })
   }
 
   const newest = (map: Map<string, HistoryTotals>) => [...map].sort(([a], [b]) => b.localeCompare(a))

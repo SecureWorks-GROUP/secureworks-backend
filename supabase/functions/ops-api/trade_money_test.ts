@@ -1,5 +1,5 @@
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { fyStartFor, fyLabelFor, summariseTradeMoney, tradeMoneyRow } from "./trade_money.ts";
+import { assert, assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { fyStartFor, fyLabelFor, summariseTradeMoney, superMarkedPaidWords, tradeMoneyRow } from "./trade_money.ts";
 
 const paid = tradeMoneyRow({
   id: "i1", invoice_number: "SW-INV-H-260801-020", week_end: "2026-08-02", status: "paid", xero_bill_status: "PAID",
@@ -158,6 +158,11 @@ function historyStore() {
   return { client, tables, state };
 }
 
+Deno.test("pay history: the office's super stamp is shown as a Perth day", () => {
+  assertEquals(superMarkedPaidWords("2026-11-17T17:30:00Z"), { marked_paid_on: "2026-11-18", words: "Marked paid by the office on 18 Nov 2026" });
+  assertThrows(() => superMarkedPaidWords("not a date"));
+});
+
 Deno.test("pay history: three invoices reconcile across weeks, months, FY, super and tax", async () => {
   const { client } = historyStore();
   const { status, body } = await readTradePayHistory(client, "trade-a", historyToday, null);
@@ -174,8 +179,13 @@ Deno.test("pay history: three invoices reconcile across weeks, months, FY, super
   assertEquals(body.super.not_recorded_count, 0);
   assertEquals(body.super.this_fy, 36);
   assertEquals(body.super.by_invoice.map(row => [row.invoice_id, row.status]), [
-    ["a3", "to_be_paid"], ["a2", "to_be_paid"], ["a1", "paid_to_fund"],
+    ["a3", "to_be_paid"], ["a2", "to_be_paid"], ["a1", "marked_paid_by_office"],
   ]);
+  // Director 15:22: the office marked it paid; My pay never says it reached the fund.
+  const marked = body.super.by_invoice.find(row => row.invoice_id === "a1");
+  assertEquals([marked?.marked_paid_on, marked?.words], ["2026-09-08", "Marked paid by the office on 8 Sep 2026"]);
+  assert(!JSON.stringify(body).toLowerCase().includes("fund"), "no fund wording anywhere in My pay");
+  assertEquals(body.super.by_invoice.find(row => row.invoice_id === "a2")?.words, undefined);
   assertEquals(body.tax_set_aside, { percent: 20, this_fy_amount: 58.8 });
   assertEquals(body.rate_history, [{ effective_from: "2026-01-01", hourly_rate: 1 }, { effective_from: "2026-05-01", hourly_rate: 2 }]);
 
@@ -259,7 +269,7 @@ Deno.test("an invoice with no Xero bill is listed as not_in_xero and left out of
     { invoice_id: "unbilled", invoice_number: "unbilled", week_start: "2026-08-31", amount: 0, status: "not_in_xero" },
     { invoice_id: "unbilled-legacy", invoice_number: "unbilled-legacy", week_start: "2026-08-24", amount: 0, status: "not_in_xero" },
   ]);
-  assertEquals(body.super.by_invoice.find(i => i.invoice_id === "a1")?.status, "paid_to_fund");
+  assertEquals(body.super.by_invoice.find(i => i.invoice_id === "a1")?.status, "marked_paid_by_office");
   assertEquals(body.super.by_invoice.find(i => i.invoice_id === "legacy")?.status, "not_recorded");
 
   // The office pushes the bill: a retry counts it like any other invoice.
@@ -268,7 +278,7 @@ Deno.test("an invoice with no Xero bill is listed as not_in_xero and left out of
   assert("super" in pushed.body);
   assertEquals(pushed.body.super.not_in_xero_count, 2);
   assertEquals(pushed.body.super.since_start, baseline.body.super.since_start + 12);
-  assertEquals(pushed.body.super.by_invoice.find(i => i.invoice_id === "unbilled")?.status, "paid_to_fund");
+  assertEquals(pushed.body.super.by_invoice.find(i => i.invoice_id === "unbilled")?.status, "marked_paid_by_office");
 
   // A row returned without the bill column refuses rather than counting as billed or unbilled.
   delete tables.trade_invoices.find(i => i.id === "a2")!.xero_bill_id;

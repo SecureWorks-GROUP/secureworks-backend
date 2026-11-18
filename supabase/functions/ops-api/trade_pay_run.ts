@@ -285,7 +285,16 @@ export type PayRunReads = {
   /** Invoice ids and push state recorded on a run. */
   runInvoices(
     runId: string,
-  ): Promise<Array<{ invoice_id: string; pushed_at: string | null }>>;
+  ): Promise<
+    Array<
+      {
+        invoice_id: string;
+        pushed_at: string | null;
+        /** cl-payrun-escape: set when an approver took it back out. */
+        released_at?: string | null;
+      }
+    >
+  >;
   /** Every invoice of the org that could be in a run up to week W. */
   candidates(
     orgId: string,
@@ -373,7 +382,9 @@ export function payRunReadsFromClient(client: any): PayRunReads {
     async runInvoices(runId) {
       return await allPages(
         (from, to) =>
-          client.from("trade_pay_run_invoices").select("invoice_id, pushed_at")
+          client.from("trade_pay_run_invoices").select(
+            "invoice_id, pushed_at, released_at",
+          )
             .eq("run_id", runId).order("invoice_id").range(from, to),
         "the run's invoices",
       );
@@ -592,6 +603,21 @@ const OLDER_THAN_WINDOW: Stop = {
   code: "older_than_run_window",
   words: "This invoice is for a week more than 8 weeks ago. Check it by hand.",
 };
+/**
+ * The statuses the run's stamp takes (approve_trade_pay_run, newest
+ * migration). Before a run exists the read stops every other status, so an
+ * invoice the read shows as clean is one the stamp will take, and the press
+ * is never refused for a status the read did not show. A test pins this list
+ * to the migration's.
+ */
+export const PAY_RUN_STAMP_STATUSES: readonly string[] = [
+  "pending_ops_review",
+  "queried",
+];
+const NOT_WAITING_FOR_RUN: Stop = {
+  code: "not_waiting_for_run",
+  words: "This invoice is not waiting for the pay run yet (the trade or the office still has it). Check it by hand.",
+};
 // cl-1622-crew-in-run, ruling (1): an all-in crew bill (employer super) is
 // released and pushed with its whole crew, never by the run.
 const CREW_RELEASE_PATH: Stop = {
@@ -603,6 +629,12 @@ const CREW_RELEASE_PATH: Stop = {
 const MONEY_UNREADABLE: Stop = {
   code: "money_unreadable",
   words: "This invoice's pay figures do not add up. Check it by hand.",
+};
+
+const RELEASED_FROM_RUN: Stop = {
+  code: "released_from_run",
+  words:
+    "An approver took this invoice back out of the run. It went back to review and waits for a later run.",
 };
 
 /** Invoices counted per note code, whatever their verdict, codes in name
@@ -689,10 +721,12 @@ export async function readPayRun(
   // before, every eligible invoice placed in this week.
   let rows: PayRunInvoiceRow[];
   const pushedAt = new Map<string, string | null>();
+  const released = new Set<string>();
   if (run) {
     const recorded = await reads.runInvoices(String(run.id));
     for (const r of recorded) {
       pushedAt.set(String(r.invoice_id), r.pushed_at ?? null);
+      if (r.released_at) released.add(String(r.invoice_id));
     }
     rows = await reads.invoicesById([...pushedAt.keys()]);
     if (rows.length !== pushedAt.size) throw unreadable("the run's invoices");
@@ -749,6 +783,9 @@ export async function readPayRun(
       // Inside the window and missing from the check: never shown as clean.
       throw unreadable("pay-run check v2 left out an invoice of this week");
     }
+    if (!run && !PAY_RUN_STAMP_STATUSES.includes(String(row.status ?? ""))) {
+      stops.push(NOT_WAITING_FOR_RUN);
+    }
     // Option A: an invoice this run approved keeps its press status until the
     // run pushes it, so the check's "not approved yet" is not a stop for it.
     if (run && String(row.pay_run_id ?? "") === String(run.id)) {
@@ -763,6 +800,10 @@ export async function readPayRun(
     } catch {
       stops.push(MONEY_UNREADABLE);
     }
+    // cl-payrun-escape: an invoice an approver took back out of this run is
+    // never one of its clean invoices, whatever the check says now; the run
+    // record keeps the figures it was approved with.
+    if (released.has(id)) stops.push(RELEASED_FROM_RUN);
     return {
       invoice_id: id,
       invoice_number: row.invoice_number ?? null,
@@ -839,6 +880,10 @@ export async function readPayRun(
     week_start: week,
     cut_off: payRunCutOff(week),
     run: run ?? null,
+    // cl-payrun-escape: how many invoices an approver took back out of this
+    // run (each is also listed, stopped, with released_from_run). Only when
+    // there is one, so every other week reads exactly as before.
+    ...(released.size > 0 ? { released_from_run: released.size } : {}),
     can_approve: true, // only an approver reaches this answer
     stage,
     counts: {
@@ -2025,6 +2070,266 @@ export function payRunPushDepsFromClient(
     },
     log(line) {
       console.log(JSON.stringify(line));
+    },
+  };
+}
+
+// ════════════════════════════════════════════════════════════
+// Release an invoice from its run (cl-payrun-escape).
+//
+//   release_pay_run_invoice  POST { run_id, invoice_id, reason }
+//
+// The run's push moves an invoice to approved, then checks what it pays
+// against the run. When the repayment lock changed it at that move, the push
+// refuses (pay_run_pays_changed) and the invoice stays approved and stamped:
+// every old door refuses it and the push takes only pending_ops_review or
+// queried. This is the office's way out: a signed-in pay run approver takes
+// that one invoice back out of the run, to review, with a reason. One
+// database call (release_trade_pay_run_invoice) locks the run, the run row
+// and the invoice, refuses a pushed row, a live push claim or any Xero
+// identity, and records who, when and why. A claim left by a press that may
+// have reached Xero (lapsed, never given back) is released only with a
+// recorded Xero check (xero_check: {in_xero: false, checked_by, checked_at};
+// director ruling 18 Nov): it must say the invoice is not in Xero, name the
+// pay run approver who checked, and be dated after the claim lapsed. The
+// database enforces all three and keeps the check. It calls no Xero and
+// sends nothing. A second press answers already_released and writes nothing.
+// ════════════════════════════════════════════════════════════
+
+export const PAY_RUN_RELEASE_REASON_MIN = 5;
+export const PAY_RUN_RELEASE_REASON_MAX = 500;
+
+export type PayRunReleaseDeps =
+  & Pick<PayRunPushDeps, "switchOn" | "approvers" | "runById" | "log">
+  & {
+    /** release_trade_pay_run_invoice; throws its refusal as a TradePayRunError. */
+    release(
+      runId: string,
+      invoiceId: string,
+      actor: string,
+      reason: string,
+      /** The recorded Xero check, passed as sent; the database judges it. */
+      xeroCheck: Record<string, unknown> | null,
+    ): Promise<Record<string, unknown>>;
+  };
+
+/** The database refusals, by the code it raises, with what the office reads. */
+export const PAY_RUN_RELEASE_REFUSALS: Record<
+  string,
+  { code: string; status: number; words: string }
+> = {
+  pay_run_not_approver: {
+    code: "pay_run_not_approver",
+    status: 403,
+    words: NOT_APPROVER_WORDS,
+  },
+  pay_run_not_found: {
+    code: "pay_run_not_found",
+    status: 404,
+    words: "No pay run with that id.",
+  },
+  pay_run_release_reason_required: {
+    code: "pay_run_release_reason_required",
+    status: 400,
+    words:
+      `Say why the invoice is coming out of the run (${PAY_RUN_RELEASE_REASON_MIN} to ${PAY_RUN_RELEASE_REASON_MAX} characters).`,
+  },
+  pay_run_release_invalid: {
+    code: "pay_run_release_invalid",
+    status: 400,
+    words: "run_id and invoice_id must be the pay run's and its invoice's ids.",
+  },
+  invoice_not_in_run: {
+    code: "invoice_not_in_run",
+    status: 409,
+    words: "That invoice is not in this pay run.",
+  },
+  invoice_not_clean: {
+    code: "invoice_not_clean",
+    status: 409,
+    words: "That invoice was stopped in this pay run, so it is not held by it.",
+  },
+  pay_run_invoice_pushed: {
+    code: "pay_run_invoice_pushed",
+    status: 409,
+    words: "This invoice was pushed to Xero by the run. It cannot be taken out.",
+  },
+  pay_run_push_in_progress: {
+    code: "pay_run_push_in_progress",
+    status: 409,
+    words:
+      "This invoice is being pushed right now. Wait ten minutes, open the pay run again, then check Xero before taking it out.",
+  },
+  pay_run_push_claim_lapsed: {
+    code: "pay_run_push_claim_lapsed",
+    status: 409,
+    words:
+      "An earlier push of this invoice did not finish and may have reached Xero. Look in Xero for a bill for this invoice now. If there is none, record that check (not in Xero, who checked, when) and press again. If there is one, do not release it: the run already paid it.",
+  },
+  pay_run_xero_check_found_in_xero: {
+    code: "pay_run_xero_check_found_in_xero",
+    status: 409,
+    words:
+      "The Xero check found this invoice in Xero, so it stays in the run: pushing it again would pay the trade twice. Ask for the bill to be matched to the invoice by hand.",
+  },
+  pay_run_xero_check_unnamed: {
+    code: "pay_run_xero_check_unnamed",
+    status: 400,
+    words: "The Xero check must name the pay run approver who checked.",
+  },
+  pay_run_xero_check_not_approver: {
+    code: "pay_run_xero_check_not_approver",
+    status: 403,
+    words: "The Xero check must be by a pay run approver.",
+  },
+  pay_run_xero_check_stale: {
+    code: "pay_run_xero_check_stale",
+    status: 409,
+    words:
+      "The Xero check is older than the moment the earlier push lapsed. Look in Xero again now and record that check.",
+  },
+  pay_run_xero_check_invalid: {
+    code: "pay_run_xero_check_invalid",
+    status: 400,
+    words:
+      "The Xero check must say plainly that the invoice is not in Xero (in_xero: false) and carry the time it was checked, not in the future.",
+  },
+  pay_run_invoice_billed: {
+    code: "pay_run_invoice_billed",
+    status: 409,
+    words:
+      "This invoice already has a bill in Xero. Check Xero; it is not taken out of the run.",
+  },
+  pay_run_invoice_status: {
+    code: "pay_run_invoice_status",
+    status: 409,
+    words:
+      "This invoice is not waiting in the run any more. Open the pay run again.",
+  },
+  group_released: {
+    code: "pay_run_release_group_released",
+    status: 409,
+    words:
+      "This invoice is a share of a group work order that has been released, so it cannot go back to review. Ask for it to be checked by hand.",
+  },
+};
+
+export async function releasePayRunInvoice(
+  deps: PayRunReleaseDeps,
+  opts: {
+    orgId: string | null | undefined;
+    actorUserId: string | null | undefined;
+    runId: unknown;
+    invoiceId: unknown;
+    reason: unknown;
+    /** The recorded Xero check; anything but a plain object is no check. */
+    xeroCheck?: unknown;
+  },
+): Promise<Record<string, unknown>> {
+  const { actor, run } = await payRunPressGate(deps, opts);
+  const invoiceId = typeof opts.invoiceId === "string"
+    ? opts.invoiceId.trim()
+    : "";
+  if (!UUID_RE.test(invoiceId)) {
+    throw new TradePayRunError(
+      "pay_run_invoice_invalid",
+      "invoice_id must be an invoice of the run.",
+      400,
+    );
+  }
+  const reason = typeof opts.reason === "string" ? opts.reason.trim() : "";
+  if (
+    reason.length < PAY_RUN_RELEASE_REASON_MIN ||
+    reason.length > PAY_RUN_RELEASE_REASON_MAX
+  ) {
+    const r = PAY_RUN_RELEASE_REFUSALS.pay_run_release_reason_required;
+    throw new TradePayRunError(r.code, r.words, r.status);
+  }
+  let result: Record<string, unknown>;
+  try {
+    result = await deps.release(
+      run.id,
+      invoiceId,
+      actor,
+      reason,
+      opts.xeroCheck !== null && typeof opts.xeroCheck === "object" &&
+        !Array.isArray(opts.xeroCheck)
+        ? opts.xeroCheck as Record<string, unknown>
+        : null,
+    );
+  } catch (e) {
+    deps.log({
+      at: "release_pay_run_invoice",
+      outcome: "refused",
+      run_id: run.id,
+      invoice_id: invoiceId,
+      code: (e as { code?: unknown })?.code ?? null,
+    });
+    throw e;
+  }
+  // Codes and ids only: the reason is never logged.
+  deps.log({
+    at: "release_pay_run_invoice",
+    outcome: result.already_released === true ? "already_released" : "released",
+    run_id: run.id,
+    invoice_id: invoiceId,
+    actor,
+    run_status: result.run_status ?? null,
+  });
+  return { ok: true, ...result };
+}
+
+/** The real call, through the service client. */
+export function payRunReleaseDepsFromClient(
+  client: any,
+  switchOn: () => Promise<boolean>,
+): PayRunReleaseDeps {
+  const push = payRunPushDepsFromClient(client, switchOn, () => {
+    throw new TradePayRunError(
+      "pay_run_push_not_here",
+      "A release never pushes.",
+      500,
+    );
+  });
+  return {
+    switchOn,
+    approvers: push.approvers,
+    runById: push.runById,
+    log: push.log,
+    async release(runId, invoiceId, actor, reason, xeroCheck) {
+      const { data, error } = await client.rpc(
+        "release_trade_pay_run_invoice",
+        {
+          p_run_id: runId,
+          p_invoice_id: invoiceId,
+          p_actor: actor,
+          p_reason: reason,
+          p_xero_check: xeroCheck,
+        },
+      );
+      if (error) {
+        const message = String(error.message ?? "").trim();
+        const known = PAY_RUN_RELEASE_REFUSALS[message] ??
+          (/\bgroup_released\b/.test(message)
+            ? PAY_RUN_RELEASE_REFUSALS.group_released
+            : undefined);
+        if (known) {
+          throw new TradePayRunError(known.code, known.words, known.status);
+        }
+        throw new TradePayRunError(
+          "pay_run_write_failed",
+          "The invoice could not be taken out of the run. Nothing was changed. Open the pay run again.",
+          503,
+        );
+      }
+      if (!data || typeof data !== "object") {
+        throw new TradePayRunError(
+          "pay_run_write_failed",
+          "The release did not answer. Open the pay run again before pressing again.",
+          503,
+        );
+      }
+      return data as Record<string, unknown>;
     },
   };
 }
