@@ -1102,7 +1102,11 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261117020000", "trade_pay_inclusive_super"),
                       # A trade's own savings goal (P1-07.4,
                       # trade_savings_goal.ts).
-                      ("20261118042110", "trade_savings_goals")]:
+                      ("20261118042110", "trade_savings_goals"),
+                      # Dispatch item 16b: the tray asks for its PDFs to be
+                      # read and reads back the words
+                      # (dispatch_v2_tray_pdf_read.ts).
+                      ("20261118160000", "dispatch_v2_tray_pdf_read")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
