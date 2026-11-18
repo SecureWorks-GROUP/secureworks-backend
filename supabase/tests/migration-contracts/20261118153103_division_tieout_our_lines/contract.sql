@@ -9,8 +9,8 @@ SELECT to_regprocedure('public.job_division_option(text,text,uuid)') IS NULL AS 
 \ir ../../../migrations/20261118080638_job_division_option.sql
 \ir ../../../migrations/20261118120115_division_rulings.sql
 \endif
-\ir ../../../migrations/20261118134254_division_tieout_our_lines.sql
-\ir ../../../migrations/20261118134254_division_tieout_our_lines.sql
+\ir ../../../migrations/20261118153103_division_tieout_our_lines.sql
+\ir ../../../migrations/20261118153103_division_tieout_our_lines.sql
 
 CREATE TEMP TABLE checks(label text PRIMARY KEY);
 CREATE FUNCTION pg_temp.prove(label text, ok boolean) RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$

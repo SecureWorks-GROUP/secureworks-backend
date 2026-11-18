@@ -18,11 +18,11 @@ BEGIN;
 ROLLBACK;
 
 BEGIN;
-\ir migration-contracts/20261118134254_division_tieout_our_lines/setup.sql
+\ir migration-contracts/20261118153103_division_tieout_our_lines/setup.sql
 COMMIT;
-\ir migration-contracts/20261118134254_division_tieout_our_lines/contract.sql
+\ir migration-contracts/20261118153103_division_tieout_our_lines/contract.sql
 BEGIN;
-\ir ../migrations/20261118134254_division_tieout_our_lines.sql
-\ir ../rollbacks/20261118134254_division_tieout_our_lines_down.sql
-\ir migration-contracts/20261118134254_division_tieout_our_lines/rollback-contract.sql
+\ir ../migrations/20261118153103_division_tieout_our_lines.sql
+\ir ../rollbacks/20261118153103_division_tieout_our_lines_down.sql
+\ir migration-contracts/20261118153103_division_tieout_our_lines/rollback-contract.sql
 ROLLBACK;
