@@ -8,6 +8,7 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  PAY_RUN_STAMP_STATUSES,
   approvePayRun,
   cleanIdsHash,
   defaultPayRunWeek,
@@ -522,6 +523,43 @@ Deno.test("pay run: once recorded, the run reads its own invoices after Xero", a
     out.invoices.map((i: any) => [i.invoice_id, i.verdict, i.pushed]),
     [[id(2), "stopped", false], [id(1), "clean", true]],
   );
+});
+
+Deno.test("pay run: before a run, only the statuses the stamp takes can be clean", async () => {
+  const statuses = ["pending_ops_review", "queried", "pending_acknowledgment", "acknowledged", "approved", "pushed_to_xero"];
+  const out: any = await run({
+    rows: statuses.map((status, n) => invoice(n + 1, { status })),
+  }, APPROVER);
+  const verdicts = Object.fromEntries(out.invoices.map((i: any) => [
+    statuses[statuses.findIndex((_, n) => id(n + 1) === i.invoice_id)] ?? i.invoice_id,
+    [i.verdict, i.stops.map((x: any) => x.code)],
+  ]));
+  assertEquals(verdicts, {
+    pending_ops_review: ["clean", []],
+    queried: ["clean", []],
+    pending_acknowledgment: ["stopped", ["not_waiting_for_run"]],
+    acknowledged: ["stopped", ["not_waiting_for_run"]],
+    approved: ["stopped", ["not_waiting_for_run"]],
+    pushed_to_xero: ["stopped", ["not_waiting_for_run"]],
+  });
+});
+
+Deno.test("pay run: the read's stamp statuses are the newest migration's stamp statuses", async () => {
+  const dir = new URL("../../migrations/", import.meta.url);
+  const names: string[] = [];
+  for await (const e of Deno.readDir(dir)) if (e.name.endsWith(".sql")) names.push(e.name);
+  let stamp: string | null = null;
+  for (const name of names.sort().reverse()) {
+    const sql = await Deno.readTextFile(new URL(name, dir));
+    if (!sql.includes("FUNCTION public.approve_trade_pay_run(")) continue;
+    const m = sql.match(/UPDATE public\.trade_invoices i\s+SET[^;]*?i\.status IN \(([^)]*)\)/);
+    assert(m, `${name}: the stamp's status list`);
+    stamp = m[1];
+    break;
+  }
+  assert(stamp, "a migration defines approve_trade_pay_run");
+  const fromSql = stamp.split(",").map((x) => x.trim().replace(/^'|'$/g, "")).sort();
+  assertEquals(fromSql, [...PAY_RUN_STAMP_STATUSES].sort());
 });
 
 Deno.test("pay run: held lines are summed by reason and not in the run", async () => {
