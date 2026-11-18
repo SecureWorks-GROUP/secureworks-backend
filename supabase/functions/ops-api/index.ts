@@ -19550,9 +19550,10 @@ export async function _persistWorkOrderInvoice(
 // Unreadable: 503, never read as "nothing billed". Ruling 17c: a job paid
 // hourly up to the maximum its job budget seals is capped here too, at that
 // maximum plus the approver's raises (job_labour_cap.ts); there is no other
-// labour cap refusal. Follow-up 49 item 9(b): with trade_line_hold_v1 on, it
-// caps only the jobs work_order_cap_scope puts under the start date, the same
-// rule as the send's sorter and the database guard; off, every job as before.
+// labour cap refusal. Follow-up 49 item 9(b): with trade_line_hold_v1 on, an
+// approved job work order caps only the jobs work_order_cap_scope puts under
+// the start date, the same rule as the send's sorter and the database guard;
+// off, every job as before. The hourly maximum is never scoped.
 export async function _assertWithinWorkOrderTotal(
   client: any,
   tradeUser: { id: string; orgId: string },
@@ -19591,21 +19592,23 @@ export async function _assertWithinWorkOrderTotal(
           if (e instanceof JobLabourPayReadError) throw new WorkOrderTotalCapReadError()
           throw e
         }
-        const candidates: string[] = [...new Set<string>([
-          ...(approved || []).map((r: any) => String(r.job_id)),
-          ...hourlyCapped,
-        ])]
-        if (candidates.length === 0) return []
-        // Follow-up 49 item 9(b): with trade_line_hold_v1 on, only the jobs
-        // under the cap's start date (work_order_cap_scope); off, every one,
-        // as before. A failed switch or scope read is this guard's 503.
-        let withWorkOrder: string[]
-        try {
-          withWorkOrder = await capScopedJobIds(client, candidates)
-        } catch (e) {
-          if (e instanceof WorkOrderCapScopeUnreadable) throw new WorkOrderTotalCapReadError()
-          throw e
+        const approvedIds: string[] = [...new Set<string>((approved || []).map((r: any) => String(r.job_id)))]
+        // Follow-up 49 item 9(b): with trade_line_hold_v1 on, an approved job
+        // work order caps only the jobs under the cap's start date
+        // (work_order_cap_scope); off, every one, as before. The hourly
+        // maximum (ruling 17c) is never scoped: a job paid hourly up to a
+        // maximum keeps it whatever the start date. A failed switch or scope
+        // read is this guard's 503.
+        let scopedApproved: string[] = []
+        if (approvedIds.length > 0) {
+          try {
+            scopedApproved = await capScopedJobIds(client, approvedIds)
+          } catch (e) {
+            if (e instanceof WorkOrderCapScopeUnreadable) throw new WorkOrderTotalCapReadError()
+            throw e
+          }
         }
+        const withWorkOrder: string[] = [...new Set<string>([...scopedApproved, ...hourlyCapped])]
         if (withWorkOrder.length === 0) return []
         try {
           return (await loadTradeInvoiceJobModes(client, {
@@ -65682,8 +65685,9 @@ export async function approveExpense(
   }
   // api_key path: server-to-server (e.g. automated JARVIS). Allowed; approverId stays null.
 
-  // A receipt marked "not booked on this job" is approved only with a deliberate confirm.
-  assertUnbookedApprovalConfirmed(status, existing.unbooked_job_id, body.confirm_unbooked)
+  // A receipt marked "not booked on this job" is approved only by a signed-in person
+  // with a deliberate confirm; the server key (Jarvis) gets a plain refusal.
+  assertUnbookedApprovalConfirmed(status, existing.unbooked_job_id, body.confirm_unbooked, authCtx.mode === 'jwt')
 
   const updates: Record<string, any> = {
     status,
