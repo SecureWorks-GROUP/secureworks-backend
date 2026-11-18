@@ -1,6 +1,6 @@
 \set ON_ERROR_STOP on
 BEGIN;
-\ir ../../../migrations/20261118123715_job_cost_proven_share.sql
+\ir ../../../migrations/20261118124326_job_cost_proven_share.sql
 SET LOCAL statement_timeout='120s';
 
 CREATE FUNCTION pg_temp.check_share(ok boolean, label text) RETURNS void LANGUAGE plpgsql AS $$
