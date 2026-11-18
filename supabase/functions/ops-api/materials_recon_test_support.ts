@@ -216,10 +216,15 @@ export interface FakeClient {
   from(table: string): Query;
 }
 
+export { PEOPLE_ACCOUNT_ROWS } from "../_shared/people_accounts_test_support.ts";
+import { PEOPLE_ACCOUNT_ROWS } from "../_shared/people_accounts_test_support.ts";
+
 export function makeFakeClient(seed: Store = {}): { client: FakeClient; store: Store } {
   // deep-ish clone so each test is isolated
   const store: Store = {};
   for (const k of Object.keys(seed)) store[k] = (seed[k] || []).map((r) => ({ ...r }));
+  // people_account_codes as migrated, unless a test seeds its own.
+  if (!("people_account_codes" in seed)) store.people_account_codes = PEOPLE_ACCOUNT_ROWS.map((r) => ({ ...r }));
   const client: FakeClient = { from: (table: string) => new Query(store, table) };
   return { client, store };
 }

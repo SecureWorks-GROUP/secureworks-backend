@@ -20,6 +20,7 @@ import {
 } from "./bill_prematch.ts";
 import { runBillPrematch } from "./bill_prematch_run.ts";
 import { baseSeed, makeFakeClient, ORG } from "../ops-api/materials_recon_test_support.ts";
+import { LABOUR } from "../_shared/people_accounts_test_support.ts";
 
 const JOBS: PrematchJob[] = [
   { id: "j-fence", job_number: "SWF-261060", status: "scheduled", created_at: "2026-10-01", site_address: "9 Tuart Drive, Joondalup WA", holding: false },
@@ -34,7 +35,7 @@ const DISPATCH_PO: PrematchPO = {
 };
 
 function ctx(pos: PrematchPO[]) {
-  return { ...buildJobMaps(JOBS), addressIndex: buildAddressIndex(JOBS), pos, emailJobIds: [] };
+  return { ...buildJobMaps(JOBS), addressIndex: buildAddressIndex(JOBS), pos, emailJobIds: [], labour: LABOUR };
 }
 
 function bill(over: Partial<PrematchBill> & { line?: string; account?: string; amount?: number } = {}): PrematchBill {

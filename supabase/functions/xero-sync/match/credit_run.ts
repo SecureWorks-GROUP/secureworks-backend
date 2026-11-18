@@ -20,7 +20,10 @@
 // A credit of a person's labour is skipped (`labour_credit`), with no clue,
 // shadow row or item, as the bill runner skips a labour bill: a credit from a
 // Xero contact that is a Trade App user (director 01:03), or one with a line
-// on an installer account, 301 or 306 (director 02:21).
+// on an installer account, 301 or 306 (director 02:21). A credit with a line on
+// an account hidden from Reconcile that is not labour (475, director 03:36) is
+// skipped the same way, counted `hidden_account_credit`. Both sets are
+// people_account_codes (_shared/people_accounts.ts).
 //
 // Where it runs, both behind reconcile_matcher_v1 (director 02:21):
 // - The sync: syncMatchStep runs the bill step, then credits in what is left of
@@ -36,7 +39,14 @@
 // cursor. Logs carry codes and counts only.
 
 import { jobNumbersIn } from "../bill_prematch.ts";
-import { INSTALLER_ACCOUNT_CODES } from "../materials_ingest.ts";
+import {
+  hiddenSkip,
+  labourAccounts,
+  type PeopleAccounts,
+  peopleAccountsCode,
+  readPeopleAccounts,
+  reconcileHiddenAccounts,
+} from "../../_shared/people_accounts.ts";
 import { decideMatch } from "./decide.ts";
 import { documentStops, jobNumberClue, type MatchDocument, type MatchJob } from "./doc_clues.ts";
 import {
@@ -94,7 +104,7 @@ const emptyCreditReport = (): CreditRunReport => ({ run: 0, applied: {}, skipped
 async function creditOne(
   sb: Sb,
   creditId: string,
-  types: Record<string, ClueType>,
+  { types, accounts }: RunInputs,
 ): Promise<{ applied: string } | { skipped: string }> {
   const subjectId = `xero_credit_note:${creditId}`;
   // job_cost_lines_document_idx
@@ -114,11 +124,9 @@ async function creditOne(
       .eq("org_id", waiting.org_id).eq("xero_credit_note_id", creditId).maybeSingle());
   if (!note) return { skipped: "credit_note_missing" };
   const xeroLines = (Array.isArray(note.line_items) ? note.line_items : []) as Array<Record<string, unknown>>;
-  // An installer account (301, 306) on any line, ours or Xero's: a person's labour.
-  if (
-    [...(lines ?? []).map((l) => l.account_code), ...xeroLines.map((l) => l?.AccountCode)]
-      .some((code) => INSTALLER_ACCOUNT_CODES.has(String(code ?? "").trim()))
-  ) return { skipped: "labour_credit" };
+  // A hidden account (301, 306, 475) on any line, ours or Xero's: never proposed.
+  const hidden = hiddenSkip(accounts, [...(lines ?? []).map((l) => l.account_code), ...xeroLines.map((l) => l?.AccountCode)]);
+  if (hidden) return { skipped: hidden === "labour" ? "labour_credit" : "hidden_account_credit" };
   const partyId = (note.xero_contact_id as string) ?? (waiting.party_id as string) ?? null;
   if (partyId) {
     const people = await read<Array<{ id: string }>>("read_trade_user",
@@ -167,7 +175,7 @@ async function creditOne(
 
   const fresh = [jobNumberClue(doc, jobs)]
     .filter((c): c is Clue => !!c && !!types[c.clue_code] && types[c.clue_code].mode !== "off");
-  const stops = documentStops(doc, jobs);
+  const stops = documentStops(doc, jobs, accounts.labour);
   // The line keeps its reason: with the switch on, match_apply writes the
   // result's reason onto waiting lines, and "money left on the credit" is why
   // a person is needed. The suggestion and any stop travel on the item.
@@ -196,18 +204,25 @@ async function creditOne(
   return { applied: String((data as { applied?: unknown })?.applied ?? "unknown") };
 }
 
-async function readTypes(sb: Sb): Promise<Record<string, ClueType>> {
+type RunInputs = { types: Record<string, ClueType>; accounts: PeopleAccounts };
+
+/** The clue types and the people accounts, once a run; either unreadable throws its code. */
+async function readInputs(sb: Sb): Promise<RunInputs> {
   const rows = await read<ClueType[]>("read_clue_types", sb.from("match_clue_types").select("code,class,family,mode"));
   const types = Object.fromEntries((rows ?? []).map((t) => [t.code, t]));
   if (!Object.keys(types).length) throw new ReadFailed("read_clue_types");
-  return types;
+  try {
+    return { types, accounts: await readPeopleAccounts(sb, { timeoutMs: MATCH_STATEMENT_TIMEOUT_MS }) };
+  } catch (e) {
+    throw new ReadFailed(peopleAccountsCode(e) ?? "people_accounts_unreadable");
+  }
 }
 
 /** Runs the credits in order until the deadline; returns the ones it reached. */
 async function runCredits(
   sb: Sb,
   ids: string[],
-  types: Record<string, ClueType>,
+  inputs: RunInputs,
   deadline: number,
   now: () => number,
   report: CreditRunReport,
@@ -218,7 +233,7 @@ async function runCredits(
     report.run++;
     reached.add(id);
     try {
-      const out = await creditOne(sb, id, types);
+      const out = await creditOne(sb, id, inputs);
       if ("applied" in out) bump(report.applied, out.applied);
       else bump(report.skipped, out.skipped);
     } catch (e) {
@@ -266,7 +281,7 @@ export async function syncCreditRun(
   let picks: string[];
   let after: string | null;
   let hadPosition: boolean;
-  let types: Record<string, ClueType>;
+  let inputs: RunInputs;
   try {
     const state = await read<{ note: string | null } | null>("credit_state",
       sb.from("xero_sync_state").select("note").eq("key", CREDIT_BACKLOG_STATE_KEY)
@@ -293,14 +308,14 @@ export async function syncCreditRun(
     const reachedEnd = (rows ?? []).length < CREDIT_BACKLOG_DOCS && !stopped;
     after = reachedEnd ? null : last;
     if (!picks.length && !hadPosition && after === null) return report;
-    types = picks.length ? await readTypes(sb) : {};
+    inputs = picks.length ? await readInputs(sb) : { types: {}, accounts: { labour: labourAccounts([]), hidden: reconcileHiddenAccounts([]) } };
   } catch (e) {
     report.errors.push(e instanceof ReadFailed ? e.code : "credit_plan_failed");
     console.error("[credit_run] sync step", JSON.stringify({ errors: report.errors }));
     return report;
   }
   report.taken = picks.length;
-  const reached = await runCredits(sb, picks, types, opts.deadline, now, report);
+  const reached = await runCredits(sb, picks, inputs, opts.deadline, now, report);
   const ran = picks.filter((d) => reached.has(d));
   let position: string | null | undefined;
   if (ran.length === picks.length) position = after;
@@ -385,15 +400,16 @@ export async function creditSweep(
   const toRun = taken.filter((d) => !open.has(`xero_credit_note:${d}`));
 
   const report = { ...emptyCreditReport(), left_for_next_pass: 0 };
-  let types: Record<string, ClueType>;
+  let inputs: RunInputs;
   try {
-    types = await readTypes(sb);
-  } catch {
-    console.error("[credit_sweep] clue types unreadable");
-    return { swept: 0, error: "clue_types_unreadable", next: after, done: false };
+    inputs = await readInputs(sb);
+  } catch (e) {
+    const code = e instanceof ReadFailed && e.code !== "read_clue_types" ? e.code : "clue_types_unreadable";
+    console.error("[credit_sweep]", code);
+    return { swept: 0, error: code, next: after, done: false };
   }
   const now = opts.now ?? Date.now;
-  const reached = await runCredits(sb, toRun, types, now() + (opts.budgetMs ?? MATCH_RUN_BUDGET_MS), now, report);
+  const reached = await runCredits(sb, toRun, inputs, now() + (opts.budgetMs ?? MATCH_RUN_BUDGET_MS), now, report);
   report.left_for_next_pass = toRun.length - reached.size;
   if (Object.keys(report.failed).length) console.error("[credit_sweep] failures", JSON.stringify(report.failed));
   return { swept: taken.length, with_open_item: taken.length - toRun.length, ...report, next, done };

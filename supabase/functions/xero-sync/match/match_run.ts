@@ -49,9 +49,13 @@
 // line of kind installer_bill or employer_super, a line on an installer account
 // (301, 306: the installer_bill_outside_app stop), or a bill from a Xero
 // contact that is a Trade App user. Each carries a name and a pay total.
+// A bill with a line on an account hidden from Reconcile that is not labour
+// (475, director 03:36) is skipped the same way, counted `hidden_account_bill`:
+// never proposed, its kind unchanged. Both sets are people_account_codes
+// (_shared/people_accounts.ts), checked on our cost lines and Xero's lines.
 
 import { jobNumbersIn } from "../bill_prematch.ts";
-import { INSTALLER_ACCOUNT_CODES } from "../materials_ingest.ts";
+import { hiddenSkip, type PeopleAccounts, peopleAccountsCode, readPeopleAccounts } from "../../_shared/people_accounts.ts";
 import { decideMatch } from "./decide.ts";
 import {
   deliveryAddressClue,
@@ -200,6 +204,7 @@ async function matchOne(
   sb: Sb,
   subjectId: string,
   types: Record<string, ClueType>,
+  accounts: PeopleAccounts,
   signal: AbortSignal,
 ): Promise<{ applied: string } | { skipped: string }> {
   const billRead = billReader(sb, signal);
@@ -211,11 +216,9 @@ async function matchOne(
   if (!lines?.length) return { skipped: "no_cost_lines" };
   // A person's labour, alone or beside supplier lines: no read of the bill, no
   // clue, no shadow row, no item.
-  if (
-    lines.some((l) =>
-      LABOUR_LINE_KINDS.has(String(l.kind ?? "")) || INSTALLER_ACCOUNT_CODES.has(String(l.account_code ?? ""))
-    )
-  ) return { skipped: "labour_bill" };
+  if (lines.some((l) => LABOUR_LINE_KINDS.has(String(l.kind ?? "")))) return { skipped: "labour_bill" };
+  const hiddenOurs = hiddenSkip(accounts, lines.map((l) => l.account_code));
+  if (hiddenOurs) return { skipped: hiddenOurs === "labour" ? "labour_bill" : "hidden_account_bill" };
   // A Trade App user's own bill is their pay (users is small; no index needed).
   const partyId = lines.find((l) => typeof l.party_id === "string" && l.party_id)?.party_id;
   if (partyId) {
@@ -229,6 +232,9 @@ async function matchOne(
   if (!counted.some((l) => l.state === "needs_person")) return { skipped: "nothing_waiting" };
 
   const bill = (await billRead("read_bill", "bill", { document_id: documentId }))?.[0] ?? null;
+  // Xero's own lines too (a zero line is not a cost line): still before any write.
+  const hiddenXero = hiddenSkip(accounts, Array.isArray(bill?.line_items) ? bill.line_items.map((l: any) => l?.AccountCode) : []);
+  if (hiddenXero) return { skipped: hiddenXero === "labour" ? "labour_bill" : "hidden_account_bill" };
   const first = lines[0];
   const money = counted.map((l) => num(l.amount_ex));
   const doc: MatchDocument = {
@@ -393,7 +399,7 @@ async function matchOne(
   }));
   const all = [...fresh, ...keptClues];
 
-  const stops: Stop[] = [...documentStops(doc, jobs)];
+  const stops: Stop[] = [...documentStops(doc, jobs, accounts.labour)];
   const dup = duplicateStop(doc, others);
   if (dup) stops.push(dup);
   const candidate = all.find((c) => c.outcome === "job" && c.job_id && c.names_one && (c.class === "key" || c.class === "clue"));
@@ -571,6 +577,19 @@ async function runCore(
     for (const id of fresh) slow.clear.add(id);
     return { requeue: ids.map((id) => ({ id, reason: "read_failed" })), reached, slow };
   }
+  // The people accounts (labour and hidden), once a run: unreadable or empty
+  // runs nothing and writes nothing (every bill is requeued).
+  let accounts: PeopleAccounts;
+  try {
+    accounts = await readPeopleAccounts(sb, { timeoutMs: MATCH_STATEMENT_TIMEOUT_MS });
+  } catch (e) {
+    const code = peopleAccountsCode(e) ?? "people_accounts_unreadable";
+    bump(report.failed, code);
+    console.error("[match_run]", code);
+    // A changed bill's count is still cleared, so its retry is not passed over.
+    for (const id of fresh) slow.clear.add(id);
+    return { requeue: ids.map((id) => ({ id, reason: "read_failed" })), reached, slow };
+  }
   // Which bills are parked or counted. A failed read is never "not parked":
   // only the changed bills run, the rest wait (requeued; a backlog bill stays
   // past the kept position).
@@ -613,7 +632,7 @@ async function runCore(
     reached.add(id);
     try {
       // The bill gets the time left in the run, not a fresh budget.
-      const res = await matchOne(sb, id, types, AbortSignal.timeout(Math.max(0, deadline - at)));
+      const res = await matchOne(sb, id, types, accounts, AbortSignal.timeout(Math.max(0, deadline - at)));
       if ("applied" in res) bump(report.applied, res.applied);
       else bump(report.skipped, res.skipped);
       if (known) slow.clear.add(id);

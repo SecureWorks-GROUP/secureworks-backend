@@ -156,7 +156,7 @@ END $plan$;
 
 -- The runner's reads: pinned 5 s statement limit, service only, each read's columns.
 SELECT pg_temp.check_it(
-  (SELECT md5(prosrc)='950c83b44a9aaa1fd7db6468c29e7ea3' AND proconfig @> ARRAY['statement_timeout=5s','search_path=""']
+  (SELECT md5(prosrc)='5107006995e323d24746b965cf6614c0' AND proconfig @> ARRAY['statement_timeout=5s','search_path=""']
      AND provolatile='s' AND NOT prosecdef FROM pg_proc WHERE oid='public.match_bill_read(text,jsonb)'::regprocedure),
   'match_bill_read: body, 5 s statement limit, empty search path, stable, invoker');
 SELECT pg_temp.check_it(has_function_privilege('service_role','public.match_bill_read(text,jsonb)','execute')

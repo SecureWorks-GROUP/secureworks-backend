@@ -17,6 +17,7 @@
 
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { assignReconRow, listReconQueue, markReconNotJobRelated, type QueueRow } from "./materials_recon.ts";
+import { PEOPLE_ACCOUNT_ROWS } from "./materials_recon_test_support.ts";
 import { baseSeed, makeFakeClient, ORG } from "./materials_recon_test_support.ts";
 
 const NOW = "2026-07-05T06:00:00.000Z";
@@ -193,6 +194,36 @@ Deno.test("assign — the agent never confirms an installer bill, and a material
     () => assignReconRow(m.client, { queueId: "q-open-noref", jobNumber: "SWF-25010", actor: "x", orgId: ORG, nowIso: NOW }),
     Error, "already has a materials fact",
   );
+});
+
+Deno.test("labour flag: a bill on 475 (hidden, not labour) lands as before, as materials; the flag decides; an unreadable set places nothing", async () => {
+  const on475 = () => {
+    const seed = installerSeed();
+    seed.xero_invoices[0].line_items = [{ Description: "Internal", AccountCode: "475", LineAmount: 1000 }];
+    return seed;
+  };
+  // Not labour: the same path as a 310 bill (its lane is materials, so the fact it has blocks it).
+  const asBefore = makeFakeClient(on475());
+  await assertRejects(
+    () => assignReconRow(asBefore.client, { queueId: "q-open-noref", jobNumber: "SWF-25010", actor: "x", orgId: ORG, nowIso: NOW }),
+    Error, "already has a materials fact",
+  );
+  // The labour flag decides, not code: flagged labour, the same bill is an installer bill.
+  const flaggedSeed: any = { ...on475(), people_account_codes: [...PEOPLE_ACCOUNT_ROWS.slice(0, 2), { account_code: "475", labour: true, hidden_from_reconcile: true }] };
+  flaggedSeed.materials_reconciliation_queue.find((r: any) => r.id === "q-open-noref")!.suggestion_reason = "no_ref_no_po";
+  const flagged = makeFakeClient(flaggedSeed);
+  await assertRejects(
+    () => assignReconRow(flagged.client, { queueId: "q-open-noref", jobNumber: "SWP-25029", actor: "agent", orgId: ORG, nowIso: NOW, agent: { matchReason: "x" } }),
+    Error, "installer bill",
+  );
+  for (const rows of [[], [{ account_code: "  ", labour: true, hidden_from_reconcile: true }], [{ account_code: "306", hidden_from_reconcile: true }]]) {
+    const m = makeFakeClient({ ...on475(), people_account_codes: rows as any });
+    await assertRejects(
+      () => assignReconRow(m.client, { queueId: "q-open-noref", useSuggestion: true, actor: "staff@x", orgId: ORG, nowIso: NOW }),
+      Error, "people_accounts_",
+    );
+    assertEquals(m.store.job_materials_facts[0].automation_source, "xero_ref_link", "nothing written");
+  }
 });
 
 Deno.test("mark-not-job-related — BLOCKED when a fact already owns the bill", async () => {

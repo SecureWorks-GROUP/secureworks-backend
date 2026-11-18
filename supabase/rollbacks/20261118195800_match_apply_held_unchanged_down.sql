@@ -13,7 +13,7 @@ DECLARE sig regprocedure := 'public.match_apply(text,text,uuid,text,jsonb,jsonb,
     RAISE EXCEPTION 'match_apply_held_unchanged down: match_clues_unchanged body changed';
   END IF;
   SELECT md5(prosrc) INTO helper FROM pg_proc WHERE oid = to_regprocedure('public.match_bill_read(text,jsonb)');
-  IF helper IS NOT NULL AND helper <> '950c83b44a9aaa1fd7db6468c29e7ea3' THEN
+  IF helper IS NOT NULL AND helper <> '5107006995e323d24746b965cf6614c0' THEN
     RAISE EXCEPTION 'match_apply_held_unchanged down: match_bill_read body changed';
   END IF;
   SELECT md5(prosrc), pg_get_functiondef(oid) INTO STRICT h, def FROM pg_proc WHERE oid = sig;

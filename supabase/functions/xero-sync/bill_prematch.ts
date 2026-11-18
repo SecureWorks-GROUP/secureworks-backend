@@ -30,6 +30,7 @@
 // list and dropped: amount near quoted materials and date window alone.
 // ════════════════════════════════════════════════════════════
 
+import { type LabourAccounts, onLabourAccount } from "../_shared/people_accounts.ts";
 import { amountWithinTolerance, DEFAULT_MATCH_CONFIG, type MatchConfig } from "./materials_ingest.ts";
 
 // The canonical job-number grammar (materials_ingest.ts JOB_NUMBER_RE), global,
@@ -38,9 +39,6 @@ import { amountWithinTolerance, DEFAULT_MATCH_CONFIG, type MatchConfig } from ".
 // word or number, so "SWF-261060" is never SWF-26106 and a product code such
 // as "SWF261009XL" is no job number. jobNumbersIn normalises.
 export const JOB_NUMBER_RE_GLOBAL = /(?<![A-Z0-9])SW(MS|[A-Z])(?:-(\d{4,6})|[ \t]?-?[ \t]?(\d{5,6}))(?![A-Z0-9])/gi;
-
-// Subcontractor labour: out of the agent for now (owner call, 15 Oct 2026).
-export const LABOUR_ACCOUNTS = new Set(["306", "301"]);
 
 // Overhead accounts: never a job's cost (fuel, advertising, accounting, training,
 // meals, insurance, licences, motor vehicle, marketing, staff amenities, wages
@@ -108,6 +106,8 @@ export interface PrematchContext {
   poFactBills?: Map<string, string[]>; // PO id -> bills whose fact is already matched to it
   duplicateDocuments?: string[]; // other live bills that look like this same supplier document
   config?: MatchConfig;
+  /** Subcontractor labour, 306 and 301 (people_account_codes.labour; owner call, 15 Oct 2026). */
+  labour: LabourAccounts;
 }
 
 export type SignalName =
@@ -418,8 +418,8 @@ export function duplicateDocumentsOf(
 }
 
 // True when any money line is subcontractor labour (306, 301): an installer bill.
-export function isInstallerBill(bill: PrematchBill): boolean {
-  return moneyLines(bill).some((l) => LABOUR_ACCOUNTS.has(String(l.account_code || "")));
+export function isInstallerBill(bill: PrematchBill, labour: LabourAccounts): boolean {
+  return moneyLines(bill).some((l) => onLabourAccount(labour, l.account_code || ""));
 }
 
 export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): PrematchDecision {
@@ -427,7 +427,7 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
   // 0. Installer bills (JP-12, owner 20 Oct 2026: "Include installer bills
   // with human confirmation for now"): the agent proposes, a person confirms
   // each. A certain match is never placed by the agent; it becomes a proposal.
-  if (!isInstallerBill(bill)) return d;
+  if (!isInstallerBill(bill, ctx.labour)) return d;
   if (d.kind === "job" && d.confidence === "high") {
     return {
       ...d,

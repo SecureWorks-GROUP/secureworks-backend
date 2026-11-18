@@ -36,7 +36,7 @@ DECLARE h text;
   SELECT md5(prosrc) INTO h FROM pg_proc WHERE oid = to_regprocedure('public.match_clues_unchanged(text,text,jsonb,text)');
   IF h IS NOT NULL AND h <> 'f228062ecc1a3a69e266533282028e5e' THEN RAISE EXCEPTION 'match_apply_held_unchanged: match_clues_unchanged body changed'; END IF;
   SELECT md5(prosrc) INTO h FROM pg_proc WHERE oid = to_regprocedure('public.match_bill_read(text,jsonb)');
-  IF h IS NOT NULL AND h <> '950c83b44a9aaa1fd7db6468c29e7ea3' THEN RAISE EXCEPTION 'match_apply_held_unchanged: match_bill_read body changed'; END IF;
+  IF h IS NOT NULL AND h <> '5107006995e323d24746b965cf6614c0' THEN RAISE EXCEPTION 'match_apply_held_unchanged: match_bill_read body changed'; END IF;
   IF to_regclass('public.match_slow_bills') IS NOT NULL AND (SELECT string_agg(attname || ':' || format_type(atttypid, atttypmod), ',' ORDER BY attnum)
        FROM pg_attribute WHERE attrelid = to_regclass('public.match_slow_bills') AND attnum > 0 AND NOT attisdropped)
      IS DISTINCT FROM 'subject_kind:text,subject_id:text,cuts:integer,reason:text,last_cut_at:timestamp with time zone,parked_at:timestamp with time zone' THEN
@@ -136,7 +136,8 @@ BEGIN
       SELECT u.id, u.xero_contact_id FROM public.users u WHERE u.xero_contact_id = p_args->>'party_id' LIMIT 2) r;
   WHEN 'bill' THEN -- xero_invoices primary key
     SELECT jsonb_agg(to_jsonb(r)) INTO out FROM (
-      SELECT i.xero_invoice_id, i.invoice_number, i.reference, i.xero_contact_id, i.contact_name, i.invoice_date, i.sub_total
+      SELECT i.xero_invoice_id, i.invoice_number, i.reference, i.xero_contact_id, i.contact_name, i.invoice_date, i.sub_total,
+             i.line_items
         FROM public.xero_invoices i WHERE i.xero_invoice_id = p_args->>'document_id') r;
   WHEN 'jobs_by_number' THEN -- job numbers ending in the digits named on the bill
     SELECT jsonb_agg(to_jsonb(r) ORDER BY r.job_number, r.id) INTO out FROM (
@@ -198,7 +199,7 @@ GRANT EXECUTE ON FUNCTION public.match_bill_read(text,jsonb) TO service_role;
 
 DO $read$
 BEGIN
-  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.match_bill_read(text,jsonb)'::regprocedure) <> '950c83b44a9aaa1fd7db6468c29e7ea3'
+  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.match_bill_read(text,jsonb)'::regprocedure) <> '5107006995e323d24746b965cf6614c0'
      OR NOT (SELECT proconfig @> ARRAY['statement_timeout=5s'] FROM pg_proc WHERE oid = 'public.match_bill_read(text,jsonb)'::regprocedure) THEN
     RAISE EXCEPTION 'match_apply_held_unchanged: match_bill_read did not install';
   END IF;
