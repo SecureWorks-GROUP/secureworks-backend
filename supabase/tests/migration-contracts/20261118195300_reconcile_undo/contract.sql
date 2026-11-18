@@ -1,5 +1,7 @@
 \set ON_ERROR_STOP on
 BEGIN;
+-- 20261118196000 patches this body; take its switch check out before re-applying.
+\ir ../../../rollbacks/20261118196000_reconcile_decide_switch_in_database_down.sql
 -- P2-02.8 patches match_apply on top of this one: unwind it first.
 SELECT to_regprocedure('public.match_clues_unchanged(text,text,jsonb,text)') IS NOT NULL AS held_installed \gset
 \if :held_installed

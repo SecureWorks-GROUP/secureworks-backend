@@ -1,5 +1,8 @@
 \set ON_ERROR_STOP on
 BEGIN;
+-- 20261118196000 patches reconcile_decide and reconcile_undo, which this proof calls
+-- directly: take its switch check out first, as the decide and undo contracts do.
+\ir ../../../rollbacks/20261118196000_reconcile_decide_switch_in_database_down.sql
 -- A re-apply is a no-op on this migration's own bodies.
 \ir ../../../migrations/20261118195800_match_apply_held_unchanged.sql
 SET LOCAL statement_timeout = '60s';

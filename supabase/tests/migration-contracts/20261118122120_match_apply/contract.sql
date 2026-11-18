@@ -7,6 +7,8 @@ SELECT to_regprocedure('public.match_clues_unchanged(text,text,jsonb,text)') IS 
 \endif
 SELECT to_regprocedure('public.reconcile_undo(bigint,uuid)') IS NOT NULL AS undo_installed \gset
 \if :undo_installed
+-- 20261118196000 patches this body; take its switch check out before re-applying.
+\ir ../../../rollbacks/20261118196000_reconcile_decide_switch_in_database_down.sql
 \ir ../../../rollbacks/20261118195300_reconcile_undo_down.sql
 \endif
 \ir ../../../migrations/20261118122120_match_apply.sql

@@ -156,3 +156,13 @@ Deno.test("undo route: ops-api routes reconcile_undo through the decide door's c
   const listed = Deno.readTextFileSync(new URL("../../../scripts/_ops-api-required-actions.txt", import.meta.url));
   assert(/^reconcile_undo # probe=source-only$/m.test(listed));
 });
+
+Deno.test("undo switch in the database: a refusal raised by reconcile_undo itself is the door's 409 words", async () => {
+  const w = world({ rpcError: { code: "55000", message: "reconcile_decide_off" } });
+  const err = await refused(reconcileUndo(fake(w) as any, { decision_id: 7 }, staff));
+  assertEquals(
+    [err.status, err.code, err.message],
+    [409, "reconcile_decide_off", RECONCILE_DECIDE_WORDS.reconcile_decide_off[1]],
+  );
+  assertEquals(w.rpcs.length, 1, "one call, nothing after the refusal");
+});
