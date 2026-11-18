@@ -341,7 +341,7 @@ Deno.test({
 });
 
 Deno.test("index.ts folds WO line cards into the same Layer B stamp and prior-draft transfer", () => {
-  const includedAt = INDEX.indexOf("const includedAssignmentIds = [...new Set([");
+  const includedAt = INDEX.indexOf("const lineHoldIncludedIds = () => [...new Set([");
   const included = INDEX.slice(includedAt, includedAt + 300);
   assertStringIncludes(included, "...woLineAssignmentIds,");
   // The prior-draft RPC and the Layer B CAS both still consume the one list.
@@ -428,7 +428,7 @@ Deno.test("index.ts notes already-held WO cards on the invoice instead of failin
   // The stamp set is what gets stamped, and held cards are not in it.
   const stampAt = INDEX.indexOf("const expectedAssignmentIds = [...new Set(includedAssignmentIds)]");
   assert(stampAt > 0 && stampAt < noteAt, "the note is recorded after the Layer B stamp");
-  const includedAt = INDEX.indexOf("const includedAssignmentIds = [...new Set([");
+  const includedAt = INDEX.indexOf("const lineHoldIncludedIds = () => [...new Set([");
   const included = INDEX.slice(includedAt, includedAt + 300);
   assert(!included.includes("woLineHeldCardIds"), "held cards must never enter the stamp set");
 });

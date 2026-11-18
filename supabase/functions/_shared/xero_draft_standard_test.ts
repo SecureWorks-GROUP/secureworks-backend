@@ -11,7 +11,14 @@ import {
 } from './xero_draft_standard.ts'
 import { _trackingCategoryForJob } from '../ops-api/index.ts'
 
-type Example = { job_number: string | null; job_type: string | null; expect: string }
+type Example = {
+  job_number: string | null
+  job_type: string | null
+  stock_division?: string
+  expect: string // Legacy invoice or switch off.
+  ruled?: string // When the owner ruling changes the answer.
+  option_state?: 'ACTIVE' | 'ARCHIVED' | 'other_org' | 'missing'
+}
 const examples: Example[] = JSON.parse(
   await Deno.readTextFile(new URL('./division_examples.json', import.meta.url)),
 )
@@ -28,6 +35,22 @@ Deno.test('division examples: divisionTrackingOption and trackingCategoryForJob 
       e.expect,
       `trackingCategoryForJob(${e.job_number}, ${e.job_type})`,
     )
+  }
+})
+
+Deno.test('division examples: switched-on drafts follow the same table as SQL', async () => {
+  for (const row of examples) {
+    const client = fakeClient({
+      feature_flags: { data: [{ enabled: true }], error: null },
+      xero_tracking_options: {
+        data: row.option_state === 'ACTIVE' ? [{ option_name: 'Private Renovations' }] : [],
+        error: null,
+      },
+    })
+    assertEquals(await draftDivisionTrackingOption(client, 'org-1', row), row.ruled ?? row.expect, JSON.stringify(row))
+    for (const read of client.calls.filter((call) => call.table === 'xero_tracking_options')) {
+      assertEquals(read.filters, [['org_id', 'org-1'], ['status', 'ACTIVE'], ['option_name', 'Private Renovations']])
+    }
   }
 })
 

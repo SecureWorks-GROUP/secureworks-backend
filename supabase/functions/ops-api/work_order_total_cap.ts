@@ -193,6 +193,8 @@ function billedFromLines(
     if (!JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(line.invoice_status)) {
       continue;
     }
+    // P1-05.8: only standard and follow_on invoices count; held lines wait.
+    if (line.invoice_kind === "held") continue;
     if (!countsAgainstWorkOrder(line.line_type)) continue;
     if (excluded.has(String(line.trade_invoice_line_id))) continue;
     billedEx.set(
