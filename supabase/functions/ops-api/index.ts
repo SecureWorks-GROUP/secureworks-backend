@@ -622,6 +622,7 @@ import { linkSiteJobs, SiteLinkError } from './site_links.ts'
 import { ledgerPersonEdit, LedgerPersonEditError } from './ledger_person_edit.ts'
 import { contextJobMail, ContextJobReconError, reconJobItems } from './context_job_reconciliation.ts'
 import { reconDailyList, reconRecordDecision, ReconDecisionError } from './recon_decisions.ts'
+import { ReconcileDecideError, reconcileDecide, reconcileDecideRefusal } from './reconcile_decide.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
 import {
   approvedSendSealSecret,
@@ -9501,6 +9502,26 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json(await reconRecordDecision(client, body, { authMode, userId: authMode === 'jwt' ? authUser?.id : null }))
         } catch (error) {
           if (error instanceof ReconDecisionError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
+      // ── Reconcile decisions (P2-03.7, Follow-up 66): the Reconcile screen's
+      // presses. Decide only (undo is not routed yet). POST only. The person is the verified staff session user,
+      // never a body field or header; a server key, the routine and an agent
+      // are refused 403 (reconcile_decide.ts). Behind reconcile_decide_v1,
+      // which ships off. Not on the routine, agent-read or trade lists.
+      case 'reconcile_decide': {
+        const reconcileCaller = {
+          authMode,
+          userId: authMode === 'jwt' ? authUser?.id : null,
+          isStaff: authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role),
+        }
+        try {
+          if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) throw reconcileDecideRefusal('operator_org_required')
+          if (req.method !== 'POST') throw reconcileDecideRefusal('method_not_allowed')
+          return json(await reconcileDecide(client, body, reconcileCaller))
+        } catch (error) {
+          if (error instanceof ReconcileDecideError) return json({ ok: false, error: error.code, code: error.code, message: error.message, userMessage: error.message }, error.status)
           throw error
         }
       }
