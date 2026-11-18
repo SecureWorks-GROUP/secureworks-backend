@@ -1,8 +1,8 @@
 BEGIN;
 SET LOCAL statement_timeout = '90s';
 -- Applies twice: the guards accept this migration's own index and bodies.
-\ir ../../../migrations/20261119000000_reconcile_list_page.sql
-\ir ../../../migrations/20261119000000_reconcile_list_page.sql
+\ir ../../../migrations/20261118195000_reconcile_list_page.sql
+\ir ../../../migrations/20261118195000_reconcile_list_page.sql
 
 CREATE FUNCTION pg_temp.assert_ok(ok boolean, label text) RETURNS void LANGUAGE plpgsql AS $$ BEGIN
   IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'ZZTEST %', label; END IF;

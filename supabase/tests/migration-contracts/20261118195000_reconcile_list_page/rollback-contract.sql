@@ -16,6 +16,6 @@ DO $$ BEGIN
   END IF;
 END $$;
 BEGIN;
-\ir ../../../migrations/20261119000000_reconcile_list_page.sql
+\ir ../../../migrations/20261118195000_reconcile_list_page.sql
 ROLLBACK;
 SELECT 'P2-03.6 reconcile list page rollback passed' AS result;
