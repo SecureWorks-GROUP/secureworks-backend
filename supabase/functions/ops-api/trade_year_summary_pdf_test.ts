@@ -70,9 +70,9 @@ Deno.test("own financial year reconciles and excludes another trade, adjacent ye
     { ...rows[0], invoice_number: "void", xero_bill_status: "VOIDED" });
   assert.deepEqual(await contents(await read()), [
     "Pay summary, 1 July 2026 to 30 June 2027", "ZZTEST Trade", "ABN ZZTEST ABN",
-    "Total (includes super)", "$224.02", "Paid to your super fund", "$24.00", "Paid to you", "$200.02",
+    "Total (includes super)", "$224.02", "Super on your pay", "$24.00", "Your pay", "$200.02",
     "Reimbursements", "$0.00", "GST", "$0.00", "Repayments", "$0.00",
-    "Invoice number", "Week starting", "Total", "Super", "Paid to you",
+    "Invoice number", "Week starting", "Total", "Super", "Your pay",
     "ZZTEST-01", "2026-06-29", "$112.01", "$12.00", "$100.01",
     "ZZTEST-02", "2027-06-28", "$112.01", "$12.00", "$100.01",
     "Built from your SecureWorks invoices. A summary, not tax advice. Give it to your accountant.",
@@ -134,9 +134,9 @@ Deno.test("mixed invoices total recorded super and identify every missing split"
   rows.push(legacy, { ...legacy, id: "ZZTEST-04", invoice_number: "ZZTEST-04" });
   const text = await contents(await read());
   assert.ok(text.includes("Super not recorded on 2 invoices"));
-  assert.equal(text[text.indexOf("Paid to your super fund") + 1], "$24.00");
+  assert.equal(text[text.indexOf("Super on your pay") + 1], "$24.00");
   assert.equal(text[text.indexOf("Total (includes super)") + 1], "$318.48");
-  assert.equal(text[text.indexOf("Paid to you") + 1], "$294.48");
+  assert.equal(text[text.indexOf("Your pay") + 1], "$294.48");
   for (const number of ["ZZTEST-03", "ZZTEST-04"]) {
     const index = text.indexOf(number);
     assert.deepEqual(text.slice(index + 2, index + 5), ["$47.23", "Not recorded", "$47.23"]);
@@ -170,15 +170,15 @@ Deno.test("an invoice with no Xero bill reads Not yet processed and the PDF tota
   const year = history.years[0];
   const money = (value: number) => "$" + value.toFixed(2);
   assert.equal(shown("Total (includes super)"), money(year.total_inc_super));
-  assert.equal(shown("Paid to your super fund"), money(year.paid_to_super));
-  assert.equal(text[text.indexOf("Paid to you") + 1], money(year.paid_to_you));
+  assert.equal(shown("Super on your pay"), money(year.paid_to_super));
+  assert.equal(text[text.indexOf("Your pay") + 1], money(year.paid_to_you));
   assert.equal(shown("Reimbursements"), money(year.reimbursements));
   assert.equal(year.invoices, 3);
   assert.equal(history.super.not_in_xero_count, 1);
   assert.deepEqual(history.super.by_invoice.filter(i => i.status === "not_in_xero"),
     [{ invoice_id: "ZZTEST-04", invoice_number: "ZZTEST-04", week_start: "2026-09-28", amount: 0, status: "not_in_xero" }]);
   // Fixed figures as well, so both cannot drift together: three billed invoices only.
-  assert.deepEqual([shown("Total (includes super)"), shown("Paid to your super fund"), shown("GST"), shown("Repayments")],
+  assert.deepEqual([shown("Total (includes super)"), shown("Super on your pay"), shown("GST"), shown("Repayments")],
     ["$557.35", "$59.71", "$0.00", "$0.00"]);
 
   // A second unbilled invoice with no recorded split is not yet processed, not "super not recorded".
