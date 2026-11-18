@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { officeSentBackNote } from "./trade_invoice_office_note.ts";
 
 // Drive the actual action, including its preflight and compare-and-set outcome.
@@ -95,11 +95,14 @@ Deno.test("FU17 existing Xero identity is refused before the release operation",
 
 Deno.test("FU17 hourly submit passes labour, group share and receipt to the same atomic save", async () => {
   const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const start = source.indexOf("            const invoiceId = await retryReimbursementClaims(client, reimbursements,");
-  const end = source.indexOf("            const invoice = { id: invoiceId }", start);
+  // P1-05.8 names the standard save saveStandard (the held-line send calls it
+  // too); with the switch off the door awaits it once, as before.
+  const start = source.indexOf("            const saveStandard = () => retryReimbursementClaims(client, reimbursements,");
+  const end = source.indexOf("            // ── P1-05.8: save the pay, then the office's part", start);
+  assert(start > 0 && end > start);
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const submit = new AsyncFunction("ctx", "with (ctx) {" + source.slice(start, end)
-    .replace(/: (any|number)\b/g, "") + "return invoiceId; }");
+    .replace(/: (any|number)\b/g, "") + "return await saveStandard(); }");
   const labour = { line_type: "labour", job_id: "ZZTEST-hourly", line_total_ex: 560 };
   const group = { line_type: "group share", job_id: "ZZTEST-group", group_share_id: "ZZTEST-share", line_total_ex: 280 };
   const receipt = { line_type: "reimbursement", expense_receipt_id: "ZZTEST-receipt", line_total_ex: 80 };

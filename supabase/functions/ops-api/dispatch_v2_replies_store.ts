@@ -33,6 +33,9 @@ export class RepliesStoreError extends Error {
 export type CapturedEmailRow = CapturedEmail & {
   capture_mode: string | null;
   history_tier: string | null;
+  /** When the capture saved it (business_events.recorded_at). Read now
+   * (contract section 3j) moves the cursor only over rows older than the lag. */
+  recorded_at?: string | null;
 };
 
 export type ScanState = {
@@ -246,6 +249,7 @@ export function capturedEmailOf(row: any): CapturedEmailRow {
     attachment_names: atts.map((a: any) => str(a?.name)).filter(Boolean),
     capture_mode: str(m.capture_mode) || null,
     history_tier: str(m.history_tier) || null,
+    recorded_at: str(row.recorded_at) || null,
   };
 }
 

@@ -286,10 +286,43 @@ export function recordedHistorySuper(row: HistoryInvoice): number | null {
   return historyAmount(row.super_amount)
 }
 
-function mondayOf(day: string) {
+export function mondayOf(day: string) {
   const date = new Date(day + 'T00:00:00Z')
   date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7)
   return date.toISOString().slice(0, 10)
+}
+
+// The one place an invoice becomes pay figures: pay history and the year PDF
+// both add up what this returns and nothing else. An invoice with no Xero bill
+// is not yet processed, so it answers zero on every figure (and counts as no
+// invoice) with notInXero true; neither reader can then total it by mistake.
+export function historyInvoiceTotals(row: HistoryInvoice, day: string, taxPercent: number | null = null,
+  recordedSuper: number | null | undefined = undefined) {
+  if (!historyInvoiceInXero(row)) return { totals: emptyHistory(), taxSetAside: 0, notInXero: true }
+  if (recordedSuper === undefined) recordedSuper = recordedHistorySuper(row)
+  // The pricing validator knows statutory rates only from its effective date.
+  // For earlier legacy invoices sum their recorded split, without guessing a rate.
+  const earlierLegacy = !row.super_basis && day < TRADE_INVOICE_SUPER_EFFECTIVE_FROM
+  const money = recordedSuper === null || earlierLegacy ? null : validatePersistedTradeInvoiceMoney(row)
+  const view = money && buildPayView(money, {
+    reimbursementsEx: r2(money.gross_earned - (money.super_base_ex ?? money.gross_earned)),
+    taxSetAsidePercent: taxPercent, repayment: null,
+  })
+  if (!view && (!Array.isArray(row.reimbursements) ||
+      row.reimbursements.some((line: HistoryInvoice) => num(line.line_total_ex) === null))) {
+    throw new Error('pay_history_unreadable')
+  }
+  const paidToYou = view?.paid_to_you ?? historyAmount(recordedSuper === null ? row.total_inc : row.net_pay)
+  const superAmount = recordedSuper ?? 0
+  if (superAmount < 0 || paidToYou < 0) throw new Error('pay_history_unreadable')
+  const totals = {
+    total_inc_super: view?.total_inc_super ?? r2(paidToYou + superAmount),
+    paid_to_super: superAmount, paid_to_you: paidToYou,
+    reimbursements: view?.reimbursements ?? reimbursementLinesTotalEx(row.reimbursements),
+    // The settled cash on the bill, including a partial payment or an office edit.
+    paid_into_bank: historyAmount(row.amount_paid), invoices: 1,
+  }
+  return { totals, taxSetAside: view?.tax_set_aside?.amount, notInXero: false }
 }
 
 export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, opts: HistoryOptions) {
@@ -316,47 +349,30 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
     const day = row.week_end || row.created_at?.slice(0, 10)
     if (!day) throw new Error('pay_history_unreadable')
     if (day > today) continue
-    if (!historyInvoiceInXero(row)) {
-      notInXero++
-      if (day >= start) {
-        byInvoice.push({ invoice_id: row.id, invoice_number: row.invoice_number,
-          week_start: row.week_start || mondayOf(day), amount: 0, status: 'not_in_xero' })
-      }
-      continue
-    }
-    const recordedSuper = recordedHistorySuper(row)
-    if (recordedSuper === null) superNotRecorded++
+    // Lifetime counts only: which invoices are in Xero, and their recorded super.
+    const inXero = historyInvoiceInXero(row)
+    const recordedSuper = inXero ? recordedHistorySuper(row) : null
+    if (!inXero) notInXero++
+    else if (recordedSuper === null) superNotRecorded++
     const superAmount = recordedSuper ?? 0
     sinceStart = r2(sinceStart + superAmount)
     const comparable = day >= lastFy && day <= lastCutoff
     if (day < start && !comparable) continue
 
-    // The pricing validator knows statutory rates only from its effective date.
-    // For earlier legacy invoices sum their recorded split, without guessing a rate.
-    const earlierLegacy = !row.super_basis && day < TRADE_INVOICE_SUPER_EFFECTIVE_FROM
-    const money = recordedSuper === null || earlierLegacy ? null : validatePersistedTradeInvoiceMoney(row)
-    const view = money && buildPayView(money, {
-      reimbursementsEx: r2(money.gross_earned - (money.super_base_ex ?? money.gross_earned)),
-      taxSetAsidePercent: opts.taxPercent, repayment: null,
-    })
-    if (!view && (!Array.isArray(row.reimbursements) ||
-        row.reimbursements.some((line: HistoryInvoice) => num(line.line_total_ex) === null))) {
-      throw new Error('pay_history_unreadable')
-    }
-    const paidToYou = view?.paid_to_you ?? historyAmount(recordedSuper === null ? row.total_inc : row.net_pay)
-    if (superAmount < 0 || paidToYou < 0) throw new Error('pay_history_unreadable')
-    const totals = {
-      total_inc_super: view?.total_inc_super ?? r2(paidToYou + superAmount),
-      paid_to_super: superAmount, paid_to_you: paidToYou,
-      reimbursements: view?.reimbursements ?? reimbursementLinesTotalEx(row.reimbursements),
-      // The settled cash on the bill, including a partial payment or an office edit.
-      paid_into_bank: historyAmount(row.amount_paid), invoices: 1,
-    }
+    // Every period total comes from the shared function, which answers zero
+    // for an invoice not in Xero. Such an invoice is listed and makes no period row.
+    const { totals, taxSetAside, notInXero: unbilled } = historyInvoiceTotals(row, day, opts.taxPercent, recordedSuper)
+    const paidToYou = totals.paid_to_you
     if (comparable) addHistory(lastYear, totals)
     if (day < start) continue
+    if (unbilled) {
+      byInvoice.push({ invoice_id: row.id, invoice_number: row.invoice_number,
+        week_start: row.week_start || mondayOf(day), amount: 0, status: 'not_in_xero' })
+      continue
+    }
     if (day >= thisFy) {
       addHistory(thisYear, totals)
-      if (opts.taxPercent !== null) tax = r2(tax + (view?.tax_set_aside?.amount ?? r2(paidToYou * opts.taxPercent / 100)))
+      if (opts.taxPercent !== null) tax = r2(tax + (taxSetAside ?? r2(paidToYou * opts.taxPercent / 100)))
     }
     const week = row.week_start || mondayOf(day)
     addPeriod(weeks, week, totals)
