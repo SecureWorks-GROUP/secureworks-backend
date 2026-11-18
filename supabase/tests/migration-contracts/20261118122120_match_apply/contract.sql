@@ -1,5 +1,5 @@
 BEGIN;
-\ir ../../../migrations/20261118112924_match_apply.sql
+\ir ../../../migrations/20261118122120_match_apply.sql
 SET LOCAL statement_timeout = '60s';
 
 INSERT INTO public.jobs(id, org_id, job_number, type, status) VALUES
@@ -207,7 +207,7 @@ BEGIN
  END LOOP;
 END $plans$;
 SET CONSTRAINTS ALL IMMEDIATE;
-\ir ../../../rollbacks/20261118112924_match_apply_down.sql
+\ir ../../../rollbacks/20261118122120_match_apply_down.sql
 SELECT pg_temp.check_that(to_regprocedure('public.match_apply_stop(text)') IS NULL AND
  to_regprocedure('public.match_clue_add(text,text,uuid,text,text,jsonb,text)') IS NULL AND
  EXISTS (SELECT FROM public.reconcile_decisions WHERE subject_id='xero_bill:ZZTEST-0206:auto'),'rollback preserves audit');
