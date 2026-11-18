@@ -1118,7 +1118,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261118194100", "work_order_cap_start_set"),
                       # cl-receipt-ownjob: the not-booked-on-this-job receipt
                       # mark (expense_own_job.ts).
-                      ("20261118194000", "expense_unbooked_job_mark")]:
+                      ("20261118194000", "expense_unbooked_job_mark"),
+                      # cl-payrun-xero-found: the found Xero bill on the run
+                      # row (trade_pay_run.ts).
+                      ("20261118194200", "trade_pay_run_xero_found")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

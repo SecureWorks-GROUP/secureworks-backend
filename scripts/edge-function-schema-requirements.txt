@@ -1310,3 +1310,8 @@ ops-api|supabase/migrations/20261118153000_dispatch_v2_reply_dismiss.sql|constra
 ops-api|supabase/migrations/20261118170500_trade_pay_run_release.sql|column|trade_pay_run_invoices.released_at
 ops-api|supabase/migrations/20261118170500_trade_pay_run_release.sql|function|release_trade_pay_run_invoice
 ops-api|supabase/migrations/20261118194000_expense_unbooked_job_mark.sql|column|expense_receipts.unbooked_job_id
+# cl-payrun-xero-found: the weekly pay run read selects release_xero_found on
+# every recorded run, and release_pay_run_invoice records a found Xero bill
+# through the function, so ops-api must not deploy ahead of the migration.
+ops-api|supabase/migrations/20261118194200_trade_pay_run_xero_found.sql|column|trade_pay_run_invoices.release_xero_found
+ops-api|supabase/migrations/20261118194200_trade_pay_run_xero_found.sql|function|record_trade_pay_run_xero_found
