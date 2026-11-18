@@ -95,9 +95,11 @@ overall row. Evidence is object names, counts, codes and dates; no people, no pa
   rulings, the owner's word). An overall PASS never means safe to switch.
 
 A missing settings table or migration ledger prints a FAIL row instead of
-stopping psql. Two required rows fail on main by design until their work lands:
-C12 and C13 need migration PR A (`persist_trade_work_order_invoice_v2`,
-`decide_held_trade_line`). C10, C11 and P06 pass once #1643's named door
+stopping psql. Required row C13 fails on main by design until
+`decide_held_trade_line` (P1-05.10) lands. C12 is code only (#1664: the work
+order door moves its draft to approved before any Xero call, so the guard checks
+it first), so SQL cannot see it: it reads NOT CHECKED HERE and is proved with N01's
+deployed-commit check. C10, C11 and P06 pass once #1643's named door
 `reconcile_item_raise_named` is applied: `reconcile_item_raise` itself is
 positional only, and `trade_invoice_lines` has no `org_id`, so a held line's raise
 carries the holding invoice's organisation through that door (ruling C11 (a),

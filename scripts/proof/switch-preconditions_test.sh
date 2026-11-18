@@ -80,8 +80,8 @@ save pay-bare.txt "$pay"
 for id in C01 C04 C05 C09; do expect "$cap" "$id" PASS; done
 # No repository migration gives trade_invoice_lines an org_id, so a
 # pay_line_held raise cannot resolve its organisation (C11).
-for id in C02 C03 C06 C07 C08 C10 C11 C12 C13 C14 F01 F02 F03; do expect "$cap" "$id" FAIL; done
-for id in N01 N02 N03; do expect "$cap" "$id" "NOT CHECKED HERE"; done
+for id in C02 C03 C06 C07 C08 C10 C11 C13 C14 F01 F02 F03; do expect "$cap" "$id" FAIL; done
+for id in C12 N01 N02 N03; do expect "$cap" "$id" "NOT CHECKED HERE"; done
 expect_overall "$cap" FAIL
 for id in P01 P02 P03 P04 P07; do expect "$pay" "$id" PASS; done
 for id in P05 P06 P08 P09 P15 F01; do expect "$pay" "$id" FAIL; done
@@ -132,16 +132,12 @@ SELECT public.reconcile_item_raise_named(p_kind => 'pay_line_held', p_subject_ta
   p_subject_id => '00000000-0000-0000-0000-0000000000e1', p_job_ids => ARRAY['00000000-0000-0000-0000-0000000000b1']::uuid[],
   p_suggestion => '{}'::jsonb, p_evidence => '{"reason":"no_work_order","amount_ex":10}'::jsonb,
   p_raised_by => 'phase1:work_order_gate', p_org_id => '00000000-0000-0000-0000-000000000001');
--- Stand-ins for migration PR A.
-CREATE FUNCTION public.persist_trade_work_order_invoice_v2(p_invoice jsonb, p_lines jsonb, p_requested_prior_draft_id uuid)
-  RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid';
+-- Stand-in for the held-line decision (P1-05.10).
 CREATE FUNCTION public.decide_held_trade_line(p_line_id uuid, p_decision text, p_actor uuid, p_org_id uuid, p_changes jsonb, p_reason text)
   RETURNS jsonb LANGUAGE sql AS 'SELECT NULL::jsonb';
-REVOKE ALL ON FUNCTION public.persist_trade_work_order_invoice_v2(jsonb,jsonb,uuid),
-  public.decide_held_trade_line(uuid,text,uuid,uuid,jsonb,text)
+REVOKE ALL ON FUNCTION public.decide_held_trade_line(uuid,text,uuid,uuid,jsonb,text)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.persist_trade_work_order_invoice_v2(jsonb,jsonb,uuid),
-  public.decide_held_trade_line(uuid,text,uuid,uuid,jsonb,text)
+GRANT EXECUTE ON FUNCTION public.decide_held_trade_line(uuid,text,uuid,uuid,jsonb,text)
   TO service_role;
 CREATE TABLE public.trade_pay_run_weeks(id text PRIMARY KEY, org_id uuid NOT NULL);
 SQL
@@ -153,7 +149,8 @@ pay=$(run_script pay-run-switch-preconditions.sql)
 [ "$(state_digest)" = "$before" ] || { echo "FAIL: a script changed state" >&2; failures=$((failures + 1)); }
 save cap-filled.txt "$cap"
 save pay-filled.txt "$pay"
-for id in C01 C02 C03 C04 C05 C06 C07 C08 C09 C10 C11 C12 C13 C14 F01 F02 F03; do expect "$cap" "$id" PASS; done
+for id in C01 C02 C03 C04 C05 C06 C07 C08 C09 C10 C11 C13 C14 F01 F02 F03; do expect "$cap" "$id" PASS; done
+expect "$cap" C12 "NOT CHECKED HERE"
 expect_overall "$cap" PASS
 for id in P01 P02 P03 P04 P05 P06 P07 P08 P09 F01; do expect "$pay" "$id" PASS; done
 expect "$pay" P15 FAIL
