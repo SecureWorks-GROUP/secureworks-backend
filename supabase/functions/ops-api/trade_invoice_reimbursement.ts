@@ -11,6 +11,7 @@ const words = {
   reimbursement_receipt_required:
     "Add a photo of the receipt first. A reimbursement needs its receipt.",
   reimbursement_rejected: "The office sent this receipt back.",
+  expense_already_billed: "This receipt already has a bill in Xero.",
   reimbursement_already_claimed: "This receipt is already on an invoice.",
   reimbursement_amount_unreadable: "Check the receipt amount first. It must be a positive number.",
 };
@@ -62,7 +63,8 @@ export function reimbursementReceiptRefusal(
   if ((!String(receipt.receipt_storage_path || "").trim() &&
       !String(receipt.receipt_photo_url || "").trim()) || receipt.no_receipt_reason) return "reimbursement_receipt_required";
   if (receipt.status === "rejected") return "reimbursement_rejected";
-  if (receipt.xero_bill_id || claimed) return "reimbursement_already_claimed";
+  if (receipt.xero_bill_id) return "expense_already_billed";
+  if (claimed) return "reimbursement_already_claimed";
   const amount = Number(receipt.total_amount);
   if (!Number.isFinite(amount) || amount <= 0) return "reimbursement_amount_unreadable";
   return null;
