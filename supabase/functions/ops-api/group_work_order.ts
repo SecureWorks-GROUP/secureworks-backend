@@ -37,7 +37,8 @@ import { GOOGLE_REVIEW_URL as SEEDED_GOOGLE_REVIEW_URL } from "../_shared/google
 import { signatureDataUrl } from "../_shared/signature_image.ts";
 import { readGroupClaimFlow, confirmGroupWorkOrderHours, readGroupClaim } from "./group_claim.ts";
 import { readSwitch } from "../_shared/switch_cache.ts";
-import { calculateTradeInvoiceMoney, TRADE_INVOICE_EMPLOYER_SUPER_BASIS, TRADE_INVOICE_WORKER_WITHHOLD_RATE } from "./trade_invoice_money.ts";
+import { calculateTradeInvoiceMoney, TRADE_INVOICE_EMPLOYER_SUPER_BASIS, TRADE_INVOICE_INCLUSIVE_SUPER_BASIS, TRADE_INVOICE_WORKER_WITHHOLD_RATE, type TradeInvoiceSuperBasis } from "./trade_invoice_money.ts";
+import { readTradePayRule, tradePayBasisFor } from "./trade_pay_rule.ts";
 import { resolveTradeInvoiceTimeEntry } from "./trade_invoice_time_entry.ts";
 
 export const GROUP_WORK_ORDER_FLAG = "group_work_order_v1";
@@ -57,11 +58,71 @@ export const GROUP_SHARE_LINE_TYPE = "group share";
  * does not freeze and does not hold the share. A non-draft line other
  * than ops-reject does.
  */
-// Owner, 30 Oct 2026: new groups pay full 12% super inside each share.
+// Owner, 30 Oct 2026: new groups pay full 12% super inside each share,
+// until the one super rule applies (GROUP_PAY_BASIS_INCLUSIVE below).
 export const GROUP_PAY_BASIS_EMPLOYER_SUPER = "all_in_12_v2";
-const ALL_IN_BASES = ["all_in_12_6_v1", GROUP_PAY_BASIS_EMPLOYER_SUPER];
+// P1-13.4 (owner, 17 Nov 2026, one super rule): a group opened while the pay
+// rule applies is written on this basis. Each person's invoice line is their
+// share; the fund gets 12/112 of it and the person the rest
+// (group_work_order_pay_for_basis, 20261117171901). An existing group keeps
+// the basis it was opened with.
+export const GROUP_PAY_BASIS_INCLUSIVE = "inclusive_12_112_v1";
+const ALL_IN_BASES = ["all_in_12_6_v1", GROUP_PAY_BASIS_EMPLOYER_SUPER, GROUP_PAY_BASIS_INCLUSIVE];
 function isAllInBasis(basis: unknown): boolean {
   return ALL_IN_BASES.includes(String(basis || ""));
+}
+
+/** The invoice super basis a group's share invoice is priced on; null is the ordinary split. */
+function groupShareInvoiceBasis(groupBasis: unknown): TradeInvoiceSuperBasis | null {
+  if (groupBasis === GROUP_PAY_BASIS_EMPLOYER_SUPER) return TRADE_INVOICE_EMPLOYER_SUPER_BASIS;
+  if (groupBasis === GROUP_PAY_BASIS_INCLUSIVE) return TRADE_INVOICE_INCLUSIVE_SUPER_BASIS;
+  return null;
+}
+
+/** Today's date in Perth (UTC+8, no daylight saving). */
+export function perthToday(now: Date = new Date()): string {
+  return new Date(now.getTime() + 8 * 3600_000).toISOString().slice(0, 10);
+}
+
+export const GROUP_PAY_RULE_UNREADABLE_WORDS =
+  "Could not check the pay rule. The group was not opened. Try again in a minute.";
+
+/**
+ * The basis a NEW group is written on (P1-13.4): inclusive while the one
+ * super rule applies to today in Perth (trade_pay_rule.ts decides), else the
+ * full employer-super basis, as before. Read only on the insert path, so a
+ * join or a re-open never reads it. Unreadable: 503 pay_rule_unreadable and
+ * no group, because a group opened on the wrong basis pays every share wrongly.
+ */
+export async function groupPayBasisForNewGroup(client: any, now: Date = new Date()): Promise<string> {
+  const read = await readTradePayRule(client);
+  if (!read.ok) {
+    throw new GroupWorkOrderError("pay_rule_unreadable", GROUP_PAY_RULE_UNREADABLE_WORDS, 503);
+  }
+  return tradePayBasisFor(read, perthToday(now)) === TRADE_INVOICE_INCLUSIVE_SUPER_BASIS
+    ? GROUP_PAY_BASIS_INCLUSIVE
+    : GROUP_PAY_BASIS_EMPLOYER_SUPER;
+}
+
+export const CLIENT_SIGNOFF_SWITCH = "trade_invoice_requires_client_signoff_v1";
+
+/**
+ * P1-13.4: whether the group screens wait on a customer signature. The
+ * database gate (group_client_signoff_gate_passes, 20261118082253) reads the
+ * same switch: off or missing gates nothing. A read that fails keeps main's
+ * answer (wait for the signature): the screen is never told less than the
+ * database will enforce.
+ */
+async function groupSignoffSwitchOn(client: any): Promise<boolean> {
+  try {
+    // feature_flags_flag_name_key
+    const { data, error } = await client.from("feature_flags").select("enabled")
+      .eq("flag_name", CLIENT_SIGNOFF_SWITCH).limit(1);
+    if (error) return true;
+    return (Array.isArray(data) ? data[0] : data)?.enabled === true;
+  } catch {
+    return true;
+  }
 }
 
 export const GROUP_FENCE_RELEASED_INVOICE_STATUSES = [
@@ -1353,13 +1414,14 @@ export async function createGroupWorkOrder(
   if ((await readHoursPaidUserIds(client, jobId)).has(caller.userId)) {
     throw new GroupWorkOrderError("group_member_paid_by_hours", PAID_BY_HOURS_NO_GROUP_MESSAGE, 409);
   }
+  const payBasis = await groupPayBasisForNewGroup(client);
   const token = newShareToken();
   const { data, error } = await client.from("group_work_orders").insert({
     org_id: job.org_id || caller.orgId,
     job_id: jobId,
     work_order_id: workOrderId,
     status: "open",
-    pay_basis: GROUP_PAY_BASIS_EMPLOYER_SUPER,
+    pay_basis: payBasis,
     share_token: token,
     created_by: caller.userId,
   }).select(
@@ -1416,12 +1478,13 @@ export async function agentCreateGroupWorkOrder(client: any, body: Record<string
   } else {
     potFromWorkOrder(await loadWorkOrder(client, workOrderId));
     await assertNoNormalPayOnJob(client, jobId);
+    const payBasis = await groupPayBasisForNewGroup(client);
     const { data, error } = await client.from("group_work_orders").insert({
       org_id: job.org_id || requester.org_id,
       job_id: jobId,
       work_order_id: workOrderId,
       status: "open",
-      pay_basis: GROUP_PAY_BASIS_EMPLOYER_SUPER,
+      pay_basis: payBasis,
       share_token: newShareToken(),
       created_by: requesterId,
     }).select("id, org_id, job_id, work_order_id, status, share_token, client_signed_at, split_frozen_at").single();
@@ -2413,7 +2476,9 @@ async function loadShareView(
   // older screens that still read it never wait on it.
   const needsApproval: string[] = [];
   let awaiting: GroupAwaiting = "ready";
-  if (!signed) awaiting = "awaiting_signoff";
+  // P1-13.4: with the sign-off switch off the signature gates nothing, so the
+  // state goes on to the next one. client_signed stays the truth.
+  if (!signed && await groupSignoffSwitchOn(client)) awaiting = "awaiting_signoff";
   else if (group.split_frozen_at) awaiting = "frozen";
   else if (needsHours.length > 0) awaiting = "awaiting_others";
   else if (needsRate.length > 0) awaiting = "awaiting_rate";
@@ -2578,23 +2643,26 @@ async function allInSharePay(client: any, group: Record<string, unknown>, budget
   throwQuery(error, "check pay and super within your group allocation");
   if (!data || !(Number(data.invoice_ex) >= 0)) throw new GroupWorkOrderError("group_share_amount_invalid", "Your group allocation could not be checked.", 503);
   const employer = group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER;
-  const canonical = calculateTradeInvoiceMoney({grossEarned: Number(data.invoice_ex), gstOn:false, earningsDate:new Date().toISOString().slice(0,10), superBasis: employer ? TRADE_INVOICE_EMPLOYER_SUPER_BASIS : null});
-  if (canonical.super_rate !== .12 || (!employer && TRADE_INVOICE_WORKER_WITHHOLD_RATE !== .06) || Math.abs(Number(canonical.company_total_out) - Number(data.company_total_out)) > .001 || Math.abs(Number(canonical.net_pay)-Number(data.cash_pay)) > .001 || Math.abs(Number(canonical.super_amount)-Number(data.super_amount)) > .001) {
+  const inclusive = group.pay_basis === GROUP_PAY_BASIS_INCLUSIVE;
+  const canonical = calculateTradeInvoiceMoney({grossEarned: Number(data.invoice_ex), gstOn:false, earningsDate:new Date().toISOString().slice(0,10), superBasis: groupShareInvoiceBasis(group.pay_basis)});
+  if (canonical.super_rate !== .12 || (!employer && !inclusive && TRADE_INVOICE_WORKER_WITHHOLD_RATE !== .06) || Math.abs(Number(canonical.company_total_out) - Number(data.company_total_out)) > .001 || Math.abs(Number(canonical.net_pay)-Number(data.cash_pay)) > .001 || Math.abs(Number(canonical.super_amount)-Number(data.super_amount)) > .001) {
     throw new GroupWorkOrderError("group_super_policy_changed", "The office needs to confirm this group's super policy before invoicing.",409);
   }
   return data as Record<string, any>;
 }
 
 /** Refuses an all-in share mixed with other work; says which super basis prices it. */
-export async function assertAllInGroupInvoiceStandalone(client: any, caller: GroupCaller, body: Record<string, any>): Promise<{ superBasis: typeof TRADE_INVOICE_EMPLOYER_SUPER_BASIS | null }> {
+export async function assertAllInGroupInvoiceStandalone(client: any, caller: GroupCaller, body: Record<string, any>): Promise<{ superBasis: TradeInvoiceSuperBasis | null }> {
   const extras = Array.isArray(body.extra_items) ? body.extra_items : [];
   const shareItems = extras.filter(isGroupShareInvoiceItem);
-  let superBasis: typeof TRADE_INVOICE_EMPLOYER_SUPER_BASIS | null = null;
+  let superBasis: TradeInvoiceSuperBasis | null = null;
   if (!shareItems.length || !(await groupFeatureOn(client))) return { superBasis };
   for (const item of shareItems) {
     const group = await resolveGroup(client,item);
     if (!isAllInBasis(group.pay_basis)) continue;
-    if (group.pay_basis === GROUP_PAY_BASIS_EMPLOYER_SUPER) superBasis = TRADE_INVOICE_EMPLOYER_SUPER_BASIS;
+    // A full employer-super share is priced on employer_12_v2; an inclusive
+    // share (P1-13.4) on inclusive_12_112_v1, its line being the share itself.
+    superBasis = groupShareInvoiceBasis(group.pay_basis) ?? superBasis;
     requireParticipant(await loadParticipants(client,String(group.id)),caller.userId);
     if (extras.length !== 1 || Object.keys(body).some(key => !["extra_items","gst_on","notes"].includes(key))) {
       throw new GroupWorkOrderError("group_share_separate_invoice", "Submit this group share with its own button. Other jobs and extras stay on your weekly invoice.",409);
