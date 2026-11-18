@@ -233,6 +233,7 @@ export type PayHistoryRate = { effective_from: string; hourly_rate: number }
 type HistoryOptions = {
   years: number
   priorSuper: number
+  priorSuperNotRecorded?: number
   taxPercent: number | null
   rates: PayHistoryRate[]
   paidRuns: ReadonlySet<string>
@@ -269,6 +270,13 @@ export function historyAmount(value: unknown) {
   return amount
 }
 
+// Older invoices can predate the recorded split. A null basis alone is also
+// used on invoices that do carry a recorded amount.
+export function recordedHistorySuper(row: HistoryInvoice): number | null {
+  if (row.super_amount === null && row.super_basis === null) return null
+  return historyAmount(row.super_amount)
+}
+
 function mondayOf(day: string) {
   const date = new Date(day + 'T00:00:00Z')
   date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7)
@@ -289,6 +297,7 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
   const lastYear = emptyHistory()
   const byInvoice: { invoice_id: string; invoice_number: string | null; week_start: string; amount: number; status: string }[] = []
   let sinceStart = opts.priorSuper
+  let superNotRecorded = opts.priorSuperNotRecorded ?? 0
   let tax = 0
 
   for (const row of rows) {
@@ -297,14 +306,17 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
     const day = row.week_end || row.created_at?.slice(0, 10)
     if (!day) throw new Error('pay_history_unreadable')
     if (day > today) continue
-    sinceStart = r2(sinceStart + historyAmount(row.super_amount))
+    const recordedSuper = recordedHistorySuper(row)
+    if (recordedSuper === null) superNotRecorded++
+    const superAmount = recordedSuper ?? 0
+    sinceStart = r2(sinceStart + superAmount)
     const comparable = day >= lastFy && day <= lastCutoff
     if (day < start && !comparable) continue
 
     // The pricing validator knows statutory rates only from its effective date.
     // For earlier legacy invoices sum their recorded split, without guessing a rate.
     const earlierLegacy = !row.super_basis && day < TRADE_INVOICE_SUPER_EFFECTIVE_FROM
-    const money = earlierLegacy ? null : validatePersistedTradeInvoiceMoney(row)
+    const money = recordedSuper === null || earlierLegacy ? null : validatePersistedTradeInvoiceMoney(row)
     const view = money && buildPayView(money, {
       reimbursementsEx: r2(money.gross_earned - (money.super_base_ex ?? money.gross_earned)),
       taxSetAsidePercent: opts.taxPercent, repayment: null,
@@ -313,8 +325,7 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
         row.reimbursements.some((line: HistoryInvoice) => num(line.line_total_ex) === null))) {
       throw new Error('pay_history_unreadable')
     }
-    const paidToYou = view?.paid_to_you ?? historyAmount(row.net_pay)
-    const superAmount = historyAmount(row.super_amount)
+    const paidToYou = view?.paid_to_you ?? historyAmount(recordedSuper === null ? row.total_inc : row.net_pay)
     if (superAmount < 0 || paidToYou < 0) throw new Error('pay_history_unreadable')
     const totals = {
       total_inc_super: view?.total_inc_super ?? r2(paidToYou + superAmount),
@@ -334,7 +345,8 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
     addPeriod(months, day.slice(0, 7), totals)
     addPeriod(years, fyLabelFor(day), totals)
     byInvoice.push({ invoice_id: row.id, invoice_number: row.invoice_number, week_start: week,
-      amount: superAmount, status: opts.paidRuns.has(row.pay_run_id) ? 'paid_to_fund' : 'to_be_paid' })
+      amount: superAmount, status: recordedSuper === null ? 'not_recorded' :
+        opts.paidRuns.has(row.pay_run_id) ? 'paid_to_fund' : 'to_be_paid' })
   }
 
   const newest = (map: Map<string, HistoryTotals>) => [...map].sort(([a], [b]) => b.localeCompare(a))
@@ -343,7 +355,7 @@ export function summariseTradePayHistory(rows: HistoryInvoice[], today: string, 
     months: newest(months).slice(0, 24).map(([month, totals]) => ({ month, label: monthLabel(month), ...totals })),
     years: newest(years).map(([fy_label, totals]) => ({ fy_label, ...totals })),
     this_year_vs_last: { this_fy: thisYear, last_fy_same_point: lastYear },
-    super: { this_fy: thisYear.paid_to_super, since_start: sinceStart,
+    super: { this_fy: thisYear.paid_to_super, since_start: sinceStart, not_recorded_count: superNotRecorded,
       by_invoice: byInvoice.sort((a, b) => b.week_start.localeCompare(a.week_start) || b.invoice_id.localeCompare(a.invoice_id)) },
     tax_set_aside: opts.taxPercent === null ? null : { percent: opts.taxPercent, this_fy_amount: tax },
     rate_history: opts.rates,
