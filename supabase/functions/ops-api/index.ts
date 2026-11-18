@@ -14207,7 +14207,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             let woQuery = (client as any).from('work_orders')
               .select(woColumns)
               .eq('id', work_order_id)
-            woQuery = retireCrewWorkOrders ? woQuery.in('kind', ['crew', 'job']) : woQuery.eq('kind', 'crew')
+            woQuery = retireCrewWorkOrders ? woQuery.neq('kind', 'additional') : woQuery.neq('kind', 'job').neq('kind', 'additional')
             const { data: wo, error: woFetchErr } = await woQuery
               .eq('org_id', tradeUser.orgId)
               .eq('jobs.org_id', tradeUser.orgId)
@@ -18698,7 +18698,7 @@ async function opsSummary(client: any) {
     client.from('work_orders')
       .select('id, status, scheduled_date, job_id, wo_number')
       .eq('org_id', DEFAULT_ORG_ID)
-      .eq('kind', 'crew')
+      .neq('kind', 'job').neq('kind', 'additional')
       .in('status', ['draft', 'sent', 'accepted', 'in_progress']),
 
     // KPI targets
@@ -20325,7 +20325,7 @@ export async function tradeWorkOrders(
     let query = client
       .from('work_orders')
       .select(workOrderSelect)
-    query = retireCrewWorkOrders ? query.in('kind', ['crew', 'job']) : query.eq('kind', 'crew')
+    query = retireCrewWorkOrders ? query.neq('kind', 'additional') : query.neq('kind', 'job').neq('kind', 'additional')
     query = query
       .eq('org_id', viewer.orgId)
       .eq('jobs.org_id', viewer.orgId)
@@ -21193,7 +21193,7 @@ async function pipeline(
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
         client.from('purchase_orders').select(dispatchList ? DISPATCH_DELIVERY_LIST_SELECT : 'job_id').in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
-        client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled').eq('kind', 'crew')),
+        client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled').neq('kind', 'job').neq('kind', 'additional')),
       readPipelineEnrichmentRows(jobIds, 'council_submissions', (chunkIds) =>
         client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', chunkIds)),
       readPipelineEnrichmentRows(jobIds, 'po_communications', (chunkIds) =>
@@ -21658,7 +21658,7 @@ async function jobDetail(
     client.from('job_events').select('*, users:user_id(name)').eq('job_id', jobId).order('created_at', { ascending: false }).limit(50),
     client.from('job_media').select('*').eq('job_id', jobId).order('created_at'),
     client.from('purchase_orders').select('*').eq('job_id', jobId).neq('status', 'deleted').order('created_at', { ascending: false }),
-    client.from('work_orders').select('*').eq('job_id', jobId).eq('kind', 'crew').neq('status', 'cancelled').order('created_at', { ascending: false }),
+    client.from('work_orders').select('*').eq('job_id', jobId).neq('kind', 'job').neq('kind', 'additional').neq('status', 'cancelled').order('created_at', { ascending: false }),
     client.from('xero_projects').select('*').eq('job_id', jobId).maybeSingle(),
     client.from('job_contacts').select('*').eq('job_id', jobId).eq('status', 'active').order('contact_label'),
     client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at, event_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
@@ -22224,7 +22224,7 @@ export async function listWorkOrders(client: any, params: URLSearchParams) {
 
   let query = client.from('work_orders')
     .select('*')
-    .eq('kind', 'crew')
+    .neq('kind', 'job').neq('kind', 'additional')
     .neq('status', 'cancelled')
     .order('created_at', { ascending: false })
 
@@ -22893,7 +22893,7 @@ async function assembleJobDossier(client: any, body: any) {
     const { data, error } = await client.from('work_orders')
       .select('id, wo_number, trade_name, status, scheduled_date, sent_at, accepted_at, completed_at, created_at')
       .eq('job_id', jobId)
-      .eq('kind', 'crew')
+      .neq('kind', 'job').neq('kind', 'additional')
       .order('created_at', { ascending: false })
       .limit(50)
     if (error) throw new Error(error.message)
@@ -40802,7 +40802,7 @@ export async function updateJobStatus(client: any, body: any) {
         let draftWoQuery = client.from('work_orders')
           .select('id, wo_number')
           .eq('job_id', jId)
-          .eq('kind', 'crew')
+          .neq('kind', 'job').neq('kind', 'additional')
           .eq('status', 'draft')
         if (ordersOn) draftWoQuery = draftWoQuery.is('quote_builder_version_id', null)
         const { data: draftWOs } = await draftWoQuery
@@ -49053,7 +49053,7 @@ async function tradeJobDetail(
     // order, so this is a real mismatch, not a theoretical one.
     client.from('work_orders')
       .select('id, wo_number, scope_items, special_instructions, scheduled_date, status')
-      .eq('job_id', jobId).eq('kind', 'crew').neq('status', 'cancelled').order('created_at', { ascending: false }),
+      .eq('job_id', jobId).neq('kind', 'job').neq('kind', 'additional').neq('status', 'cancelled').order('created_at', { ascending: false }),
     // All crew assignments for this job (not filtered by date — user explicitly opened this job)
     client.from('job_assignments')
       .select('id, user_id, scheduled_date, start_time, role, is_lead, crew_name, status, started_at, completed_at, acknowledged_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, hours_worked, users:user_id(name, phone)')
