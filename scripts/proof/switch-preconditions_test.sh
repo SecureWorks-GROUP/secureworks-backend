@@ -77,14 +77,14 @@ pay=$(run_script pay-run-switch-preconditions.sql)
 [ "$(state_digest)" = "$before" ] || { echo "FAIL: a script changed state" >&2; failures=$((failures + 1)); }
 save cap-bare.txt "$cap"
 save pay-bare.txt "$pay"
-for id in C01 C04 C05 C09; do expect "$cap" "$id" PASS; done
-# No repository migration gives trade_invoice_lines an org_id, so a
-# pay_line_held raise cannot resolve its organisation (C11).
-for id in C02 C03 C06 C07 C08 C10 C11 C13 C14 C15 F01 F02 F03; do expect "$cap" "$id" FAIL; done
+# #1643's named door (20261118170200) is a repository migration now, so the
+# raise is callable by name (C10, P06) and carries the org hint (C11).
+for id in C01 C04 C05 C09 C10 C11; do expect "$cap" "$id" PASS; done
+for id in C02 C03 C06 C07 C08 C13 C14 C15 F01 F02 F03; do expect "$cap" "$id" FAIL; done
 for id in C12 N01 N02 N03; do expect "$cap" "$id" "NOT CHECKED HERE"; done
 expect_overall "$cap" FAIL
-for id in P01 P02 P03 P04 P07; do expect "$pay" "$id" PASS; done
-for id in P05 P06 P08 P09 P15 F01; do expect "$pay" "$id" FAIL; done
+for id in P01 P02 P03 P04 P06 P07; do expect "$pay" "$id" PASS; done
+for id in P05 P08 P09 P15 F01; do expect "$pay" "$id" FAIL; done
 for id in N01 N02 N03 N04 N05 N06; do expect "$pay" "$id" "NOT CHECKED HERE"; done
 expect_overall "$pay" FAIL
 
@@ -123,14 +123,8 @@ INSERT INTO public.trade_invoice_lines(id, trade_invoice_id, job_id, line_type, 
   VALUES ('00000000-0000-0000-0000-0000000000e1', '00000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-0000000000b1',
     'materials', 10, 'no_work_order', 'awaiting');
 SET session_replication_role = origin;
--- Stand-in for #1643's named door (exact signature), then the raise a held
--- send makes through it with the holding invoice's organisation (#1649).
-CREATE FUNCTION public.reconcile_item_raise_named(p_kind text, p_subject_table text, p_subject_id text,
-  p_job_ids uuid[], p_suggestion jsonb, p_evidence jsonb, p_raised_by text, p_org_id uuid DEFAULT NULL)
-  RETURNS uuid LANGUAGE sql AS
-  'SELECT public.reconcile_item_raise(p_kind, p_subject_table, p_subject_id, p_job_ids, p_suggestion, p_evidence, p_raised_by, p_org_id)';
-REVOKE ALL ON FUNCTION public.reconcile_item_raise_named(text,text,text,uuid[],jsonb,jsonb,text,uuid) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.reconcile_item_raise_named(text,text,text,uuid[],jsonb,jsonb,text,uuid) TO service_role;
+-- The raise a held send makes through #1643's named door (a repository
+-- migration since 20261118170200), with the holding invoice's organisation (#1649).
 SELECT public.reconcile_item_raise_named(p_kind => 'pay_line_held', p_subject_table => 'trade_invoice_lines',
   p_subject_id => '00000000-0000-0000-0000-0000000000e1', p_job_ids => ARRAY['00000000-0000-0000-0000-0000000000b1']::uuid[],
   p_suggestion => '{}'::jsonb, p_evidence => '{"reason":"no_work_order","amount_ex":10}'::jsonb,
