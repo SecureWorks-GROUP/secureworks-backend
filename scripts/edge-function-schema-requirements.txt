@@ -1344,11 +1344,11 @@ xero-sync|supabase/migrations/20261118195500_trade_invoice_bill_mirror_rule.sql|
 # matcher's and credit step's skip); ops-api reads the row for its labour flag
 # (manual landing). The reader selects all three columns, so neither function
 # deploys ahead of the table.
-xero-sync|supabase/migrations/20261119999910_reconcile_people_accounts.sql|table|people_account_codes
-xero-sync|supabase/migrations/20261119999910_reconcile_people_accounts.sql|column|people_account_codes.account_code
-xero-sync|supabase/migrations/20261119999910_reconcile_people_accounts.sql|column|people_account_codes.labour
-xero-sync|supabase/migrations/20261119999910_reconcile_people_accounts.sql|column|people_account_codes.hidden_from_reconcile
-ops-api|supabase/migrations/20261119999910_reconcile_people_accounts.sql|table|people_account_codes
-ops-api|supabase/migrations/20261119999910_reconcile_people_accounts.sql|column|people_account_codes.account_code
-ops-api|supabase/migrations/20261119999910_reconcile_people_accounts.sql|column|people_account_codes.labour
-ops-api|supabase/migrations/20261119999910_reconcile_people_accounts.sql|column|people_account_codes.hidden_from_reconcile
+xero-sync|supabase/migrations/20261118195700_reconcile_people_accounts.sql|table|people_account_codes
+xero-sync|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.account_code
+xero-sync|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.labour
+xero-sync|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.hidden_from_reconcile
+ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|table|people_account_codes
+ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.account_code
+ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.labour
+ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.hidden_from_reconcile

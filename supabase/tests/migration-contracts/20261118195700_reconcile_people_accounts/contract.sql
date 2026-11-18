@@ -7,13 +7,13 @@ END $$;
 
 -- Seeded at creation only: a re-apply never puts back a row the owner removed.
 DELETE FROM public.people_account_codes WHERE account_code = '475';
-\ir ../../../migrations/20261119999910_reconcile_people_accounts.sql
+\ir ../../../migrations/20261118195700_reconcile_people_accounts.sql
 DO $$ BEGIN
   PERFORM pg_temp.assert_ok((SELECT array_agg(account_code ORDER BY account_code) FROM public.people_account_codes)
     = ARRAY['301','306'], 're-apply does not reseed a removed row');
 END $$;
 INSERT INTO public.people_account_codes (account_code, labour, hidden_from_reconcile, note) VALUES ('475', false, true, 'Admin (Internal Subcontractors)');
-\ir ../../../migrations/20261119999910_reconcile_people_accounts.sql
+\ir ../../../migrations/20261118195700_reconcile_people_accounts.sql
 
 DO $$ BEGIN
   PERFORM pg_temp.assert_ok((SELECT array_agg(account_code || ':' || labour || ':' || hidden_from_reconcile ORDER BY account_code) FROM public.people_account_codes)

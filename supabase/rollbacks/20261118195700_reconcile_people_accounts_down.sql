@@ -1,4 +1,4 @@
--- Rollback of 20261119999910_reconcile_people_accounts (PLACEHOLDER version): puts back
+-- Rollback of 20261118195700_reconcile_people_accounts (PLACEHOLDER version): puts back
 -- 20261118195400's bodies of reconcile_list_page and reconcile_list_counts,
 -- byte for byte.
 -- The table public.people_account_codes is LEFT in place, with its labour hold
