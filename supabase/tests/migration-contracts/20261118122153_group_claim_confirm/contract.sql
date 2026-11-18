@@ -1,6 +1,6 @@
 BEGIN;
-\ir ../../../rollbacks/20261118104627_group_claim_confirm_down.sql
-\ir ../../../migrations/20261118104627_group_claim_confirm.sql
+\ir ../../../rollbacks/20261118122153_group_claim_confirm_down.sql
+\ir ../../../migrations/20261118122153_group_claim_confirm.sql
 \ir ../20261117171901_group_inclusive_pay_basis/fixture.sql
 DO $test$
 DECLARE
