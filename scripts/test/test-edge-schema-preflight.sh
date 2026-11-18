@@ -1105,7 +1105,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261118042110", "trade_savings_goals"),
                       # Dispatch items 17 and 5: Dismiss on a supplier reply
                       # (dispatch_v2_replies.ts, dispatch_board.ts).
-                      ("20261118153000", "dispatch_v2_reply_dismiss")]:
+                      ("20261118153000", "dispatch_v2_reply_dismiss"),
+                      # P0-09.5: Job Profit's reads go through the switch
+                      # views (job_profit.ts, job_profit_rollup.ts).
+                      ("20261118170100", "job_profit_read_views")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

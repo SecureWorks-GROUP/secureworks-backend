@@ -96,6 +96,22 @@ Deno.test("raiseHeldLines: the four over-the-amount figures add up; a failing ra
   assertEquals(await raiseHeldLines(client, [held], ctx), { raised: 0, failed: 1 });
 });
 
+Deno.test("C11: a held line's raise carries the holding invoice's organisation; none given, none sent", async () => {
+  const calls: any[] = [];
+  const client = { rpc: (_name: string, args: any) => { calls.push(args); return Promise.resolve({ error: null }); } };
+  const f = facts({ [JOB_A]: { job_number: "ZZF-1", workOrder: null, allowed_ex: 0, backed_billed_ex: 0 } });
+  const held = { id: "zz-h9", row: { job_id: JOB_A, line_type: "materials", line_total_ex: 50, sent_amount_ex: 50, hold_reason: "no_work_order" } as any };
+  const base = { tradeUserId: "zz-user", tradeName: null, tradeRole: "lead_installer", weekStart: "2026-11-16", facts: f, backed: [] };
+  const ORG = "6c2f0a52-0000-4000-8000-0000000c0011";
+  assertEquals(await raiseHeldLines(client, [held], { ...base, orgId: ORG }), { raised: 2, failed: 0 });
+  const line = calls.find((c) => c.p_kind === "pay_line_held");
+  assertEquals([line.p_subject_table, line.p_org_id], ["trade_invoice_lines", ORG]);
+  assertEquals(calls.find((c) => c.p_kind === "invoice_no_work_order").p_org_id, undefined);
+  calls.length = 0;
+  await raiseHeldLines(client, [held], base);
+  assertEquals("p_org_id" in calls.find((c) => c.p_kind === "pay_line_held"), false);
+});
+
 Deno.test("hold 1590: a line held whole is over by the excess, not by the held amount", async () => {
   const calls: any[] = [];
   const client = { rpc: (_name: string, args: any) => { calls.push(args); return Promise.resolve({ error: null }); } };

@@ -2856,7 +2856,7 @@ export async function readyUnreleasedGroupInvoiceIds(client: any): Promise<strin
     const invoiceIds = [...new Set(lines.map((row) => String(row.trade_invoice_id)))];
     if (!invoiceIds.length) continue;
     const invoices = await rowsOf(client.from("trade_invoices").select("id, status, xero_bill_id")
-      .in("id", invoiceIds), "load group share invoices");
+      .in("id", invoiceIds).is("pay_run_id", null), "load group share invoices");
     const live = invoices.find((inv) => !inv.xero_bill_id && inv.status === "pending_acknowledgment");
     if (live) ids.push(String(live.id));
   }
@@ -2874,12 +2874,13 @@ export async function releasedGroupSiblingInvoiceIds(client: any, invoiceId: str
   if (!released.length) return null;
   const allShares = await rowsOf(client.from("group_work_order_shares").select("id").eq("group_id", groupId), "check the group release");
   const lines = await rowsOf(client.from("trade_invoice_lines")
-    .select("trade_invoice_id, invoice:trade_invoices!inner(id, status, xero_bill_id)")
+    .select("trade_invoice_id, invoice:trade_invoices!inner(id, status, xero_bill_id, pay_run_id)")
     .in("group_share_id", allShares.map((row) => String(row.id))), "check the group release");
   const ids = new Set<string>();
   for (const row of lines) {
     const invoice = Array.isArray(row.invoice) ? row.invoice[0] : row.invoice;
-    if (invoice && String(invoice.id) !== invoiceId && !invoice.xero_bill_id && ["approved", "acknowledged"].includes(String(invoice.status))) {
+    // A pay run's invoice is the run's to push, never a released sibling's.
+    if (invoice && String(invoice.id) !== invoiceId && !invoice.xero_bill_id && !invoice.pay_run_id && ["approved", "acknowledged"].includes(String(invoice.status))) {
       ids.add(String(invoice.id));
     }
   }

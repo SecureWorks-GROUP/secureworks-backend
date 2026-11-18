@@ -5,7 +5,10 @@ import {
   commissionLineState,
   type JobCommissionRecord,
 } from "./job_commission.ts";
-import { countsAgainstWorkOrder } from "./work_order_total_cap.ts";
+import {
+  countsAgainstWorkOrder,
+  readWorkOrderBackedBilled,
+} from "./work_order_total_cap.ts";
 import { decideTradeInvoiceMode } from "./trade_invoice_mode.ts";
 import { budgetLabourPay, JOB_LABOUR_BUDGET_FLAG } from "./job_labour_cap.ts";
 import { isRestorationCard } from "./restoration_workflow_store.ts";
@@ -14,7 +17,6 @@ import {
   type ExtraRateRules,
 } from "./trade_invoice_extra_rate_rule.ts";
 import { isTradeInvoiceTimeLineType } from "./trade_invoice_time_entry.ts";
-import { JOB_WORK_ORDER_BILLED_INVOICE_STATUSES } from "./job_work_orders.ts";
 
 export const HOLD_REASONS = [
   "no_work_order",
@@ -429,14 +431,15 @@ async function readChunked(
 }
 
 /** One job's work-order balance in cents: the order's agreed labour plus its
- * approved variations and amount changes, and what backed (never held)
- * invoices have billed against it. Shared by the send and my_hours. */
+ * approved variations and amount changes, and what is already billed on the
+ * job by the database's one sum (readWorkOrderBackedBilled), the same lines
+ * the job amount guard counts. Shared by the send and my_hours. */
 function workOrderBalanceCents(
   jobId: string,
   wo: { id: string; agreed_labour_ex: unknown } | undefined,
   variations: any[],
   changes: any[],
-  billed: any[],
+  billed: ReadonlyMap<string, number>,
 ): { agreed: number | null; allowedCents: number; billedCents: number } {
   const agreed = wo?.agreed_labour_ex == null ? null : numeric(wo.agreed_labour_ex);
   const added = variations.filter((v) =>
@@ -448,19 +451,8 @@ function workOrderBalanceCents(
     (s, c) => s + cents(numeric(c.delta_ex)),
     0,
   );
-  const billedCents = billed.filter((l) =>
-    l.job_id === jobId && countsAgainstWorkOrder(l.line_type)
-  ).reduce((sum, l) => {
-    const invoice = Array.isArray(l.trade_invoices)
-      ? l.trade_invoices[0]
-      : l.trade_invoices;
-    if (!invoice) throw new LineHoldFactsUnreadable();
-    if (
-      invoice.invoice_kind === "held" ||
-      !JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(invoice.status)
-    ) return sum;
-    return sum + cents(numeric(l.override_amount ?? l.line_total_ex));
-  }, 0);
+  if (!billed.has(jobId)) throw new LineHoldFactsUnreadable();
+  const billedCents = cents(numeric(billed.get(jobId)));
   return {
     agreed,
     allowedCents: (agreed === null ? 0 : cents(agreed)) + added + changed,
@@ -511,13 +503,11 @@ export async function readLineHoldFacts(
       filter?: (q: any) => any,
     ) => readChunked(client, table, columns, field, ids, filter);
     // jobs_pkey; users_pkey; uq_work_orders_job_current; job_budgets_version_unique;
-    // uq_group_work_orders_job_work_order; idx_trade_invoice_lines_job_work_date
-    // plus trade_invoices_pkey for the join. No full scope/pricing blobs.
+    // uq_group_work_orders_job_work_order. No full scope/pricing blobs.
     const [
       users,
       jobs,
       orders,
-      billed,
       variations,
       commissions,
       receipts,
@@ -536,12 +526,6 @@ export async function readLineHoldFacts(
         "job_id",
         jobIds,
         (q) => q.eq("kind", "job"),
-      ),
-      read(
-        "trade_invoice_lines",
-        "id,job_id,line_type,line_total_ex,override_amount,trade_invoices!inner(status,invoice_kind)",
-        "job_id",
-        jobIds,
       ),
       // idx_work_order_customer_variations_job and job_commissions_version_unique.
       read(
@@ -625,15 +609,21 @@ export async function readLineHoldFacts(
       })),
       split_group_ids: lines.map(() => crypto.randomUUID()),
     };
-    // work_order_amount_changes_wo_idx, ids bounded to this send.
-    const changes = await read(
-      "work_order_amount_changes",
-      "id,work_order_id,delta_ex",
-      "work_order_id",
-      orders.map((o) => o.id),
+    const ownJobs = jobs.filter((row) =>
+      !row.org_id || row.org_id === users[0].org_id
     );
-    for (const row of jobs) {
-      if (row.org_id && row.org_id !== users[0].org_id) continue;
+    // work_order_amount_changes_wo_idx, ids bounded to this send. Billed:
+    // the database's one sum, only for jobs read above (FU49 item 8).
+    const [changes, billed] = await Promise.all([
+      read(
+        "work_order_amount_changes",
+        "id,work_order_id,delta_ex",
+        "work_order_id",
+        orders.map((o) => o.id),
+      ),
+      readWorkOrderBackedBilled(client, ownJobs.map((row) => row.id)),
+    ]);
+    for (const row of ownJobs) {
       const wo = orders.find((o) =>
         o.job_id === row.id && o.status === "approved"
       ) ?? orders.find((o) => o.job_id === row.id && o.status === "draft");
@@ -761,9 +751,8 @@ export async function readJobAmountsLeft(
     const out: Record<string, number | null> = {};
     if (ids.length === 0) return out;
     // users_pkey; jobs_pkey; uq_work_orders_job_current;
-    // idx_trade_invoice_lines_job_work_date plus trade_invoices_pkey;
     // idx_work_order_customer_variations_job.
-    const [users, jobs, orders, billed, variations] = await Promise.all([
+    const [users, jobs, orders, variations] = await Promise.all([
       readChunked(client, "users", "id,org_id", "id", [userId]),
       readChunked(client, "jobs", "id,org_id", "id", ids),
       readChunked(
@@ -776,13 +765,6 @@ export async function readJobAmountsLeft(
       ),
       readChunked(
         client,
-        "trade_invoice_lines",
-        "id,job_id,line_type,line_total_ex,override_amount,trade_invoices!inner(status,invoice_kind)",
-        "job_id",
-        ids,
-      ),
-      readChunked(
-        client,
         "work_order_customer_variations",
         "id,job_id,work_order_id,status,trade_allocation_ex",
         "job_id",
@@ -790,16 +772,22 @@ export async function readJobAmountsLeft(
       ),
     ]);
     if (users.length !== 1) throw new LineHoldFactsUnreadable();
-    // work_order_amount_changes_wo_idx, ids bounded to these orders.
-    const changes = await readChunked(
-      client,
-      "work_order_amount_changes",
-      "id,work_order_id,delta_ex",
-      "work_order_id",
-      orders.map((o) => o.id),
+    const ownJobs = jobs.filter((row) =>
+      !row.org_id || row.org_id === users[0].org_id
     );
-    for (const row of jobs) {
-      if (row.org_id && row.org_id !== users[0].org_id) continue;
+    // work_order_amount_changes_wo_idx, ids bounded to these orders. Billed:
+    // the database's one sum, the same as the send (FU49 item 8).
+    const [changes, billed] = await Promise.all([
+      readChunked(
+        client,
+        "work_order_amount_changes",
+        "id,work_order_id,delta_ex",
+        "work_order_id",
+        orders.map((o) => o.id),
+      ),
+      readWorkOrderBackedBilled(client, ownJobs.map((row) => row.id)),
+    ]);
+    for (const row of ownJobs) {
       const wo = orders.find((o) =>
         o.job_id === row.id && o.status === "approved"
       );

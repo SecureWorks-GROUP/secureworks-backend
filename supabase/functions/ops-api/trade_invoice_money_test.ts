@@ -945,15 +945,15 @@ Deno.test("inclusive super: an unidentified reimbursement is refused before Xero
   assertEquals(Math.round(total * 100) / 100, 1080);
 });
 
-Deno.test("inclusive super: the audit PDF reads Total (includes super), Paid to your super fund, Paid to you", () => {
+Deno.test("inclusive super: the audit PDF reads Total (includes super), Super on your pay, Your pay", () => {
   const m = inclusiveMoney(1120);
   const text = buildTradeInvoiceAuditText(buildTradeInvoiceAuditModel(INCLUSIVE_LINES, m, "ZZTEST Crew"), {
     invoiceNumber: "ZZTEST-1",
     tradeName: "ZZTEST Crew",
   }).join("\n");
   const total = text.indexOf("Total (includes super) $1120.00");
-  const fund = text.indexOf("Paid to your super fund $120.00");
-  const you = text.indexOf("Paid to you $1000.00");
+  const fund = text.indexOf("Super on your pay $120.00");
+  const you = text.indexOf("Your pay $1000.00");
   assert(total >= 0 && fund > total && you > fund, text);
   assert(!/withheld/i.test(text), text);
 });
