@@ -1250,6 +1250,13 @@ ops-api|supabase/migrations/20261114020000_dispatch_line_budget_cost.sql|column|
 ops-api|supabase/migrations/20261114030000_job_labour_cap.sql|table|job_labour_cap_raises
 ops-api|supabase/migrations/20261114030000_job_labour_cap.sql|function|job_labour_cap_state
 ops-api|supabase/migrations/20261114030000_job_labour_cap.sql|function|raise_job_labour_cap
+# Follow-up 49 item 9(b): the work order cap's start date. ops-api reads the scope by RPC
+# (send sorter, my_hours, office list, and with the hold switch on the code cap), reads the
+# settings row and its record, and sets it through the approver's door.
+ops-api|supabase/migrations/20261118193817_work_order_cap_start_date.sql|table|work_order_cap_settings
+ops-api|supabase/migrations/20261118193817_work_order_cap_start_date.sql|function|work_order_cap_scope
+ops-api|supabase/migrations/20261118999908_work_order_cap_start_set.sql|table|work_order_cap_start_changes
+ops-api|supabase/migrations/20261118999908_work_order_cap_start_set.sql|function|set_work_order_cap_start
 # xero-sync writes each bank transaction's lines and the chart of accounts into
 # their own service-role-only tables; ops-api's xero_tieout asks the spend and
 # revenue read beside the bills tie-out.

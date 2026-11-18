@@ -1111,7 +1111,11 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261118170100", "job_profit_read_views"),
                       # cl-payrun-escape: the release door and the run read's
                       # released_at (trade_pay_run.ts).
-                      ("20261118170500", "trade_pay_run_release")]:
+                      ("20261118170500", "trade_pay_run_release"),
+                      # FU49 9(b): the cap's scope and settings, and the
+                      # approver's door with its record (work_order_cap_*.ts).
+                      ("20261118193817", "work_order_cap_start_date"),
+                      ("20261118999908", "work_order_cap_start_set")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
