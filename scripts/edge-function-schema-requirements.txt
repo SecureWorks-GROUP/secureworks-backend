@@ -1255,8 +1255,8 @@ ops-api|supabase/migrations/20261114030000_job_labour_cap.sql|function|raise_job
 # settings row and its record, and sets it through the approver's door.
 ops-api|supabase/migrations/20261118193817_work_order_cap_start_date.sql|table|work_order_cap_settings
 ops-api|supabase/migrations/20261118193817_work_order_cap_start_date.sql|function|work_order_cap_scope
-ops-api|supabase/migrations/20261118999908_work_order_cap_start_set.sql|table|work_order_cap_start_changes
-ops-api|supabase/migrations/20261118999908_work_order_cap_start_set.sql|function|set_work_order_cap_start
+ops-api|supabase/migrations/20261118194100_work_order_cap_start_set.sql|table|work_order_cap_start_changes
+ops-api|supabase/migrations/20261118194100_work_order_cap_start_set.sql|function|set_work_order_cap_start
 # xero-sync writes each bank transaction's lines and the chart of accounts into
 # their own service-role-only tables; ops-api's xero_tieout asks the spend and
 # revenue read beside the bills tie-out.

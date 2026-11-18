@@ -1115,7 +1115,7 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # FU49 9(b): the cap's scope and settings, and the
                       # approver's door with its record (work_order_cap_*.ts).
                       ("20261118193817", "work_order_cap_start_date"),
-                      ("20261118999908", "work_order_cap_start_set")]:
+                      ("20261118194100", "work_order_cap_start_set")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

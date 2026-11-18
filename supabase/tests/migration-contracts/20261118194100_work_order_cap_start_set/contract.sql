@@ -2,9 +2,9 @@ BEGIN;
 SET LOCAL statement_timeout = '90s';
 -- Rule 17: the rollback keeps the record table, so a re-apply must find and keep it; then a
 -- second apply is a no-op.
-\ir ../../../rollbacks/20261118999908_work_order_cap_start_set_down.sql
-\ir ../../../migrations/20261118999908_work_order_cap_start_set.sql
-\ir ../../../migrations/20261118999908_work_order_cap_start_set.sql
+\ir ../../../rollbacks/20261118194100_work_order_cap_start_set_down.sql
+\ir ../../../migrations/20261118194100_work_order_cap_start_set.sql
+\ir ../../../migrations/20261118194100_work_order_cap_start_set.sql
 
 CREATE FUNCTION pg_temp.assert_ok(ok boolean, label text) RETURNS void LANGUAGE plpgsql AS $$ BEGIN
   IF ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'ZZTEST %', label; END IF;

@@ -1,4 +1,4 @@
--- Undo 20261118999908 (placeholder version): drop the approver's door, the record trigger if
+-- Undo 20261118194100 (placeholder version): drop the approver's door, the record trigger if
 -- the director installed it, and its install and remove functions. The record itself
 -- (work_order_cap_start_changes, append-only) is kept: who set the cap's start date is held
 -- nowhere else. A re-apply finds it and keeps writing to it.

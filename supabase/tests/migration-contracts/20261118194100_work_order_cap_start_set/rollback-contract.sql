@@ -14,6 +14,6 @@ DO $$ BEGIN
 END $$;
 -- A re-apply over the kept record works, inside a transaction thrown away.
 BEGIN;
-\ir ../../../migrations/20261118999908_work_order_cap_start_set.sql
+\ir ../../../migrations/20261118194100_work_order_cap_start_set.sql
 ROLLBACK;
 SELECT 'FU49-9b cap start set rollback passed' AS result;
