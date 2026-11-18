@@ -1266,6 +1266,19 @@ xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|table
 xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|column|xero_bank_transaction_lines.line_amount_types
 xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|column|xero_bank_transaction_lines.xero_type
 xero-sync|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|table|xero_accounts
+# P2-02.7: the matcher runner proposes a job for each changed bill (match/match_run.ts).
+# Without these every call would fail and requeue, so the deploy refuses instead.
+xero-sync|supabase/migrations/20261118122120_match_apply.sql|function|match_apply
+xero-sync|supabase/migrations/20261117160500_match_tables.sql|column|match_queue.reason
+xero-sync|supabase/migrations/20261117160400_job_cost_lines.sql|column|job_cost_lines.kind
+xero-sync|supabase/migrations/20261117160400_job_cost_lines.sql|index|job_cost_lines_needs_person_idx
+xero-sync|supabase/migrations/20261117160500_match_tables.sql|table|match_queue
+xero-sync|supabase/migrations/20261118060051_reconcile_tables.sql|table|reconcile_items
+xero-sync|supabase/migrations/20261118060051_reconcile_tables.sql|index|reconcile_items_open_subject_idx
+xero-sync|supabase/migrations/20261117160500_match_tables.sql|table|match_clue_types
+xero-sync|supabase/migrations/20261117160500_match_tables.sql|table|match_rules
+xero-sync|supabase/migrations/20261117173501_v_job_orders.sql|table|v_job_orders
+xero-sync|supabase/migrations/20261116080000_context_job_evidence_for_bills.sql|function|context_job_evidence_for_bills
 ops-api|supabase/migrations/20261115110000_xero_spend_revenue_tieout.sql|function|xero_spend_revenue_monthly
 # ops-api job_profit and job_profit_list ask the cost close rule beside the
 # Job Profit figures (job_cost_close.ts).
