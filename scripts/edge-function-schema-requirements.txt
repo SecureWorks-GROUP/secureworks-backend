@@ -1352,3 +1352,7 @@ ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|table|p
 ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.account_code
 ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.labour
 ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|people_account_codes.hidden_from_reconcile
+# P2-02.8: the matcher runner reads each bill through match_bill_read and keeps
+# its slow-bill counts in match_slow_bills, so xero-sync must not deploy first.
+xero-sync|supabase/migrations/20261118195800_match_apply_held_unchanged.sql|table|match_slow_bills
+xero-sync|supabase/migrations/20261118195800_match_apply_held_unchanged.sql|function|match_bill_read

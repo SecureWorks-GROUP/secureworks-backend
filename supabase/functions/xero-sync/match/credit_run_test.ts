@@ -109,10 +109,24 @@ function fake(w: World) {
       };
       return chain;
     },
+    // As the client: rpc returns a builder that takes a signal. The bill step's
+    // reads go through match_bill_read and are recorded as bill reads.
     rpc(fn: string, args: any) {
       w.rpcs.push({ fn, args });
-      if (fn === "match_apply" && w.applyError) return Promise.resolve({ data: null, error: w.applyError });
-      return Promise.resolve({ data: { applied: "shadow" }, error: null });
+      const result = () => {
+        if (fn === "match_bill_read") {
+          w.queries.push({ table: `match_bill_read:${args.p_read}`, filters: { document_kind: "xero_bill", ...args.p_args } });
+          const rows = args.p_read === "cost_lines" ? w.lines?.[String(args.p_args.document_id)] ?? [] : [];
+          return { data: rows, error: null };
+        }
+        if (fn === "match_apply" && w.applyError) return { data: null, error: w.applyError };
+        return { data: { applied: "shadow" }, error: null };
+      };
+      const builder: any = {
+        abortSignal: () => builder,
+        then: (res: any, rej: any) => Promise.resolve(result()).then(res, rej),
+      };
+      return builder;
     },
   };
 }
@@ -278,6 +292,7 @@ Deno.test("sync step: credits run after the bills, in what is left of the same 5
   const w = world({ lines: credits(5), notes: notesFor(5) });
   const out = await syncMatchStep(fake(w), { on: true, changed: bills });
   assertEquals([out.run, out.credits.taken, out.credits.run], [48, 2, 2]);
+  assertEquals(out.skipped, { no_cost_lines: 48 }, "each bill was read (it has no lines here), none failed");
   assertEquals(creditApplies(w), ["xero_credit_note:c0", "xero_credit_note:c1"], "oldest id first, after every bill");
   const lastBillRead = w.queries.findLastIndex((q) => q.filters.document_kind === "xero_bill");
   const firstCreditRead = w.queries.findIndex((q) => q.filters.document_kind === "xero_credit_note");

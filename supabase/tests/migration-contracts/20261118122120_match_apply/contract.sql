@@ -1,5 +1,10 @@
 BEGIN;
 -- Exercise this version and its guarded rollback inside the existing transaction.
+-- P2-02.8 patches match_apply on top of this one: unwind it first.
+SELECT to_regprocedure('public.match_clues_unchanged(text,text,jsonb,text)') IS NOT NULL AS held_installed \gset
+\if :held_installed
+\ir ../../../rollbacks/20261118195800_match_apply_held_unchanged_down.sql
+\endif
 SELECT to_regprocedure('public.reconcile_undo(bigint,uuid)') IS NOT NULL AS undo_installed \gset
 \if :undo_installed
 \ir ../../../rollbacks/20261118195300_reconcile_undo_down.sql
