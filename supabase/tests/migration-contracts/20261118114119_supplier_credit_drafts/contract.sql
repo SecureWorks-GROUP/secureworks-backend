@@ -1,5 +1,5 @@
 BEGIN;
-\ir ../../../migrations/20261118112406_supplier_credit_drafts.sql
+\ir ../../../migrations/20261118114119_supplier_credit_drafts.sql
 
 DO $$
 BEGIN
@@ -21,6 +21,7 @@ SET LOCAL ROLE service_role;
 DO $$
 DECLARE
   tenant uuid := gen_random_uuid();
+  refused_amount numeric;
   draft public.supplier_credit_drafts%ROWTYPE;
 BEGIN
   INSERT INTO public.supplier_credit_drafts (org_id, supplier_name, credit_number)
@@ -29,6 +30,19 @@ BEGIN
       OR draft.match_reasons <> '[]'::jsonb THEN
     RAISE EXCEPTION 'supplier_credit_defaults_incorrect';
   END IF;
+  FOREACH refused_amount IN ARRAY ARRAY[0, -0.01, 'NaN'::numeric] LOOP
+    BEGIN
+      UPDATE public.supplier_credit_drafts SET amount_ex = refused_amount WHERE id = draft.id;
+      RAISE EXCEPTION 'supplier_credit_invalid_amount_ex_accepted';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    BEGIN
+      UPDATE public.supplier_credit_drafts SET amount_inc = refused_amount WHERE id = draft.id;
+      RAISE EXCEPTION 'supplier_credit_invalid_amount_inc_accepted';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+  END LOOP;
+  UPDATE public.supplier_credit_drafts SET amount_ex = 0.01, amount_inc = 0.01 WHERE id = draft.id;
   BEGIN
     INSERT INTO public.supplier_credit_drafts (org_id, supplier_name, credit_number)
     VALUES (tenant, 'SUPPLIER', 'CN-1');
@@ -52,7 +66,7 @@ BEGIN
   IF NOT FOUND THEN RAISE EXCEPTION 'supplier_credit_corrected_retry_failed'; END IF;
 END $$;
 RESET ROLE;
-\ir ../../../migrations/20261118112406_supplier_credit_drafts.sql
+\ir ../../../migrations/20261118114119_supplier_credit_drafts.sql
 DO $$
 BEGIN
   IF (SELECT enabled FROM public.feature_flags WHERE flag_name = 'supplier_credit_drafts_v1')
