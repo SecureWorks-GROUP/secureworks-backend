@@ -4327,6 +4327,7 @@ async function computeJobIntelligence(sb: any, jobId: string) {
         things_to_know: things_to_know.slice(0, 5),
         next_actions: next_actions.slice(0, 3),
       }
+      // paid-ai-register: reporting-api-job-intelligence
       const resp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },

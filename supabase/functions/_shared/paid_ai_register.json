@@ -3,11 +3,11 @@
     "id": 1,
     "repo": "B",
     "file": "supabase/functions/ops-ai/index.ts",
-    "line": [
-      3525,
-      3605,
-      3673,
-      3691
+    "anchor": [
+      "ops-ai-chat-examples",
+      "ops-ai-chat-classify",
+      "ops-ai-chat-reply",
+      "ops-ai-chat-retry"
     ],
     "function": [
       "<request handler>",
@@ -27,8 +27,8 @@
     "id": 2,
     "repo": "B",
     "file": "supabase/functions/ops-ai/index.ts",
-    "line": [
-      2699
+    "anchor": [
+      "ops-ai-evaluate-action"
     ],
     "function": [
       "evaluateAction"
@@ -45,9 +45,9 @@
     "id": 3,
     "repo": "B",
     "file": "supabase/functions/agent-runner/index.ts",
-    "line": [
-      872,
-      895
+    "anchor": [
+      "agent-runner-turn",
+      "agent-runner-turn-retry"
     ],
     "function": [
       "<request handler>",
@@ -65,8 +65,8 @@
     "id": 4,
     "repo": "B",
     "file": "supabase/functions/daily-digest/index.ts",
-    "line": [
-      97
+    "anchor": [
+      "daily-digest-narrative"
     ],
     "function": [
       "generateNarrative"
@@ -83,9 +83,9 @@
     "id": 5,
     "repo": "B",
     "file": "supabase/functions/daily-digest/index.ts",
-    "line": [
-      322,
-      427
+    "anchor": [
+      "daily-digest-coaching",
+      "daily-digest-observation"
     ],
     "function": [
       "generateCoachingInsights",
@@ -103,11 +103,11 @@
     "id": 6,
     "repo": "B",
     "file": "supabase/functions/daily-digest/index.ts",
-    "line": [
-      898,
-      1088,
-      1235,
-      1395
+    "anchor": [
+      "daily-digest-weekly-letter",
+      "daily-digest-weekly-pulse",
+      "daily-digest-financial-snapshot",
+      "daily-digest-financial-brief"
     ],
     "function": [
       "generateWeeklyLetter",
@@ -127,8 +127,8 @@
     "id": 7,
     "repo": "B",
     "file": "supabase/functions/reporting-api/index.ts",
-    "line": [
-      4330
+    "anchor": [
+      "reporting-api-job-intelligence"
     ],
     "function": [
       "computeJobIntelligence"
@@ -145,8 +145,8 @@
     "id": 8,
     "repo": "B",
     "file": "supabase/functions/ops-api/index.ts",
-    "line": [
-      34908
+    "anchor": [
+      "ops-api-reextract"
     ],
     "function": [
       "_reextractExtractFields"
@@ -163,8 +163,8 @@
     "id": 9,
     "repo": "B",
     "file": "supabase/functions/ops-api/index.ts",
-    "line": [
-      37622
+    "anchor": [
+      "ops-api-retired-intake"
     ],
     "function": [
       "retiredPaidAiIntakeImplementation"
@@ -181,8 +181,8 @@
     "id": 10,
     "repo": "B",
     "file": "supabase/functions/ops-api/index.ts",
-    "line": [
-      61969
+    "anchor": [
+      "ops-api-supplier-quote"
     ],
     "function": [
       "analyseSupplierQuote"
@@ -199,8 +199,8 @@
     "id": 11,
     "repo": "B",
     "file": "supabase/functions/ops-api/index.ts",
-    "line": [
-      65373
+    "anchor": [
+      "ops-api-expense-receipt"
     ],
     "function": [
       "submitExpense"
@@ -217,8 +217,8 @@
     "id": 12,
     "repo": "B",
     "file": "supabase/functions/ops-api/index.ts",
-    "line": [
-      67885
+    "anchor": [
+      "ops-api-debt-draft"
     ],
     "function": [
       "_callClaude"
@@ -235,9 +235,9 @@
     "id": 13,
     "repo": "B",
     "file": "supabase/functions/transcribe-call/index.ts",
-    "line": [
-      24,
-      58
+    "anchor": [
+      "transcribe-call-doc-endpoint",
+      "transcribe-call-whisper-endpoint"
     ],
     "function": [
       "<module>",

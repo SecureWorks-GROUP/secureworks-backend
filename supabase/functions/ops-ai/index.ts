@@ -2696,6 +2696,7 @@ async function evaluateAction(
   action: string, params: any, context: { view: string; recentTools: string[]; jobContext?: any }
 ): Promise<{ approved: boolean; confidence: number; concerns: string[] }> {
   try {
+    // paid-ai-register: ops-ai-evaluate-action
     const resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -3522,6 +3523,7 @@ serve(async (req: Request) => {
       // Fire-and-forget: generate learned example from approval
       ;(async () => {
         try {
+          // paid-ai-register: ops-ai-chat-examples
           const exampleResp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
             method: 'POST',
             headers: {
@@ -3602,6 +3604,7 @@ serve(async (req: Request) => {
           lastText = lastMsg.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ')
         }
       }
+      // paid-ai-register: ops-ai-chat-classify
       const classResp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
@@ -3670,6 +3673,7 @@ serve(async (req: Request) => {
         tools: routedTools,
       }
 
+      // paid-ai-register: ops-ai-chat-reply
       const resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -3688,6 +3692,7 @@ serve(async (req: Request) => {
         // Retry once without beta header (prompt caching can cause 400 on some accounts)
         if (resp.status === 400 && round === 0) {
           console.log('[ops-ai] Retrying without prompt-caching beta header...')
+          // paid-ai-register: ops-ai-chat-retry
           const retryResp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
             method: 'POST',
             headers: {
