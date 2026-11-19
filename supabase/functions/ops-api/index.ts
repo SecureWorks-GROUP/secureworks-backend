@@ -1603,6 +1603,7 @@ import { readXeroDrafts, XeroDraftsError } from './xero_drafts_read.ts'
 import { XeroTieoutError, readXeroTieout } from './xero_tieout.ts'
 import { EffortStatsUnreadable, readPayEffortStats } from './pay_effort_stats.ts'
 import { TradePayRunCheckError, readTradePayRunCheck } from './trade_pay_run_check.ts'
+import { HELD_LINE_SWITCH, HeldTradeLineError, decideHeldTradeLine, heldLineListDepsFromClient, listHeldTradeLines } from './held_trade_lines.ts'
 import { TradePayRunError, TradePayRunRefusal, PAY_RUN_SWITCH, approvePayRun, markPayRunSuperPaid, payRunApproveDepsFromClient, payRunPushDepsFromClient, payRunReadsFromClient, payRunReleaseDepsFromClient, pushPayRunInvoice, readPayRun, releasePayRunInvoice } from './trade_pay_run.ts'
 // Named pay figures are approver-only (director ruling 18 Nov 2026, 08:14 (4)).
 import { PAY_FIGURES_APPROVER_ACTIONS, payFiguresApproverRefusal } from './pay_figures_approver.ts'
@@ -10366,17 +10367,53 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // staff by the front door (not in any trade, routine or agent-read list),
       // then the pay run approver list only (ruling 34.13), checked in readPayRun
       // before any pay is read.
+      // Ruling 16: `enabled` is trade_pay_run_v1 (true only when read on; the
+      // pay run buttons show only then), and `run` carries super_marked_paid_at.
       case 'pay_run': {
         try {
-          return json(await readPayRun(payRunReadsFromClient(client), {
+          const payRun = await readPayRun(payRunReadsFromClient(client), {
             weekStart: url.searchParams.get('week_start'),
             // Never substitute the server org for a JWT caller with a missing profile org.
             orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
             // The server key is no person: refused 403 like any non-approver.
             actorUserId: authMode === 'jwt' ? (authUser?.id || null) : null,
-          }))
+          })
+          return json({ ...payRun, enabled: (await readFlag(client, PAY_RUN_SWITCH)) === true })
         } catch (err) {
           if (err instanceof TradePayRunError) {
+            return json({ ok: false, error: err.code, message: err.message }, err.status)
+          }
+          throw err
+        }
+      }
+
+      // The office's held trade lines (P1-05.10, ruling 16). GET
+      // held_trade_lines lists the lines still waiting for the office; POST
+      // decide_held_trade_line { line_id, decision, reason, changes? } calls
+      // decide_held_trade_line as the signed-in staff person (the server key
+      // is no person: 403). The database holds every money rule.
+      case 'held_trade_lines':
+      case 'decide_held_trade_line': {
+        if (action === 'decide_held_trade_line' && req.method !== 'POST') {
+          return json({ ok: false, error: 'method_not_allowed', message: `${action} requires POST` }, 405)
+        }
+        const heldOpts = {
+          orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : '',
+          actorUserId: requestActor.source === 'jwt' && authMode === 'jwt' ? (authUser?.id || null) : null,
+        }
+        try {
+          return json(action === 'held_trade_lines'
+            ? await listHeldTradeLines(
+              heldLineListDepsFromClient(client, () => readFlag(client, HELD_LINE_SWITCH)),
+              heldOpts,
+            )
+            : await decideHeldTradeLine(
+              { decide: async (params) => await client.rpc('decide_held_trade_line', params) },
+              { ...heldOpts, lineId: body?.line_id, decision: body?.decision, reason: body?.reason, changes: body?.changes },
+            ))
+        } catch (err) {
+          if (err instanceof HeldTradeLineError) {
+            if (err.status >= 500) console.error(`[${action}] ${err.code}`)
             return json({ ok: false, error: err.code, message: err.message }, err.status)
           }
           throw err

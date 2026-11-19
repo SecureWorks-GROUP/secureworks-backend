@@ -639,6 +639,7 @@ jobs:
             supabase/functions/ops-api/trade_pay_run_hold_test.ts \
             supabase/functions/ops-api/trade_pay_run_doors_test.ts \
             supabase/functions/ops-api/trade_pay_run_release_test.ts \
+            supabase/functions/ops-api/held_trade_lines_test.ts \
             supabase/functions/ops-api/trade_pay_run_receipt_rule_parity_test.ts
 
       # One super rule (P1-01): every amount includes super, chosen by pay week

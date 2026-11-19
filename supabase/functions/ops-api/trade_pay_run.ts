@@ -378,7 +378,7 @@ export function payRunReadsFromClient(client: any): PayRunReads {
       // trade_pay_runs (org_id, week_start) unique index.
       const { data, error } = await client.from("trade_pay_runs")
         .select(
-          "id, org_id, week_start, check_rule, approved_by, approved_at, standing, invoice_count, total_pays, super_total, status",
+          "id, org_id, week_start, check_rule, approved_by, approved_at, standing, invoice_count, total_pays, super_total, status, super_marked_paid_at",
         )
         .eq("org_id", orgId).eq("week_start", week).maybeSingle();
       if (error) throw unreadable("the run record");
