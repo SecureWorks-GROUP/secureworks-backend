@@ -988,6 +988,7 @@ import {
   type InvoicePayableRoute,
   type GroupCaller,
   enrollClockGroupParticipant, nameGroupWorkOrderCrew, leaveGroupClaim, searchTradesForClaim,
+  perthToday,
 } from './group_work_order.ts'
 import { confirmGroupWorkOrderHours, decideGroupSplit } from './group_claim.ts'
 import { requestWorkOrderAmount, sendOutlookWorkOrderRequest } from './work_order_request.ts'
@@ -14397,7 +14398,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               selectedNegativeCharges,
             )
             const sourceWorkOrderDate = weeklyWorkOrderBusinessDate(wo)
-            const woInvoiceDate = new Date().toISOString().slice(0, 10)
+            // Pay day: today in Perth. The edge clock is UTC, which still reads
+            // yesterday until 8am Perth, so a UTC date would price the pay rule's
+            // start day on the old rule.
+            const woInvoiceDate = perthToday()
             // One super rule (P1-01.3): a work order claim includes super.
             // No week on this invoice: its pay day is the day it is made. A
             // retry replaces the caller's own draft and keeps its stored basis.
@@ -14975,7 +14979,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             }
             const draftWeekEnd = draftWeekStart
               ? new Date(new Date(draftWeekStart + 'T00:00:00Z').getTime() + 6 * 86400000).toISOString().slice(0, 10)
-              : new Date().toISOString().slice(0, 10)
+              : perthToday()
             // The draft this save replaces, read before pricing so a priced
             // dated draft keeps its stored basis; an undated draft takes the
             // incoming pay date's rule (trade_pay_rule.ts).
@@ -15576,10 +15580,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // or a week before the pay rule still meets the guard).
             const lineHoldFlagOn = await tradeLineHoldFlagOn(client)
             const lineHoldMode = lineHoldFlagOn && !(Array.isArray(extra_items) && extra_items.some(isGroupShareInvoiceItem)) &&
-              await lineHoldSendApplies(client, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead, true)
+              await lineHoldSendApplies(client, week_start || weekEnd || perthToday(), paySettingsRead, true)
             const lineHoldWeeklySource = weeklyInvoice
             const invoiceSuperBasis = groupInvoiceBasis.superBasis ??
-              await tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead)
+              await tradePayBasisForSave(client, priorDraft, week_start || weekEnd || perthToday(), paySettingsRead)
             // P2-06.6: the trade's own-money receipts not yet on an invoice join
             // this one through the same door (switch off: no read, main's answer).
             const ownMoney = await ownMoneyReimbursementItems(client, { userId: tradeUser.id, basis: invoiceSuperBasis, requested: Array.isArray(extra_items) ? extra_items : [], replacingDraftId: week_start ? priorDraftId : null, groupShare: Array.isArray(extra_items) && extra_items.some(isGroupShareInvoiceItem) })
@@ -34900,6 +34904,7 @@ async function _reextractExtractFields(
   } else if (ANTHROPIC_API_KEY) {
     try {
       const { default: Anthropic } = await import('https://esm.sh/@anthropic-ai/sdk@0.39.0')
+      // paid-ai-register: ops-api-reextract
       const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
       const userContent: any[] = [{ type: 'text', text: `From: ${fromName} <${fromEmail}>\nSubject: ${subject}\nBody: ${bodyPreview}` }]
       if (pdfMode === 'text') {
@@ -37614,6 +37619,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
       // keyDegraded and every subsequent email skips the call (no silent spray).
       try {
         const { default: Anthropic } = await import('https://esm.sh/@anthropic-ai/sdk@0.39.0')
+        // paid-ai-register: ops-api-retired-intake
         const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
 
         // Build message content: email text + PDF (text blocks when the text layer was
@@ -61961,6 +61967,7 @@ Return ONLY valid JSON in this exact format:
   })
 
   // Call Claude Sonnet — one call for pricing + classification + normalisation
+  // paid-ai-register: ops-api-supplier-quote
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -65365,6 +65372,7 @@ export async function submitExpense(
   try {
     const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') || ''
     if (ANTHROPIC_API_KEY) {
+      // paid-ai-register: ops-api-expense-receipt
       const visionResp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -66038,7 +66046,7 @@ export async function pushExpenseToXero(
 
 async function listExpenses(client: any, params: URLSearchParams, caller?: { id: string; role?: string }) {
   return await listExpenseReceipts(client, params, caller, () =>
-    tradePayBasisForSave(client, null, new Date().toISOString().slice(0, 10)))
+    tradePayBasisForSave(client, null, perthToday()))
 }
 
 async function listUnreconciledTransactions(client: any, params: URLSearchParams) {
@@ -67877,6 +67885,7 @@ async function triggerXeroSync() {
 
 async function _callClaude(model: string, system: string, userContent: string, maxTokens = 1024) {
   if (!ANTHROPIC_API_KEY) throw new ApiError('ANTHROPIC_API_KEY not configured', 500)
+  // paid-ai-register: ops-api-debt-draft
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
