@@ -90,6 +90,10 @@ export type TradeInvoiceJobMode = TradeInvoiceModeDecision & {
   // Every work order on the job this trade may bill, in order, with whether
   // what they billed already covers it. Only on a job with more than one.
   work_orders?: TradeWorkOrderOption[];
+  // The cap's read only (includeAdditionalOrders): every approved additional
+  // work order on the job, named for a trade or for nobody. Never on an
+  // answer a trade reads: it carries other trades' amounts.
+  additional_orders?: Array<{ assigned_user_id: string | null; agreed_ex: number }>;
 };
 
 /** The owner's rule, in order. Pure. */
@@ -164,6 +168,11 @@ export async function loadTradeInvoiceJobModes(
     jobIds: readonly string[];
     jobVertical: (job: any) => string;
     normaliseManagedVerticals: (value: unknown) => string[];
+    // The work order cap only (work_order_total_cap.ts): add every approved
+    // additional work order of a job that has one, with the trade it is named
+    // for. It carries other trades' amounts, so no answer a trade reads ever
+    // sets it.
+    includeAdditionalOrders?: boolean;
   },
 ): Promise<{ jobs: TradeInvoiceJobMode[]; not_found: string[] }> {
   const ids = [
@@ -340,6 +349,9 @@ export async function loadTradeInvoiceJobModes(
           work_orders: pick.options,
         }
         : {}),
+      ...(input.includeAdditionalOrders && multiJobs.includes(id)
+        ? { additional_orders: additionalOrdersOf(ordersByJob.get(id) || []) }
+        : {}),
       commission: commissionOfferFor(commissionRecords.get(id) ?? null, input.tradeId),
       can_claim_commission: commissionUnavailable ? null : tradeMayClaimCommission({
         job: {
@@ -355,6 +367,24 @@ export async function loadTradeInvoiceJobModes(
     });
   }
   return { jobs: out, not_found: notFound };
+}
+
+/** Pure. A job's approved additional work orders, for the cap: the trade
+ *  each is named for (null: nobody) and its agreed labour. A row with no
+ *  readable amount is not one (it is never offered either). */
+function additionalOrdersOf(rows: readonly any[]): Array<{ assigned_user_id: string | null; agreed_ex: number }> {
+  const out: Array<{ assigned_user_id: string | null; agreed_ex: number }> = [];
+  for (const row of rows) {
+    if (row?.kind !== "additional") continue;
+    const raw = row?.agreed_labour_ex;
+    const agreed = raw === null || raw === undefined || raw === "" ? NaN : Number(raw);
+    if (!Number.isFinite(agreed) || agreed < 0) continue;
+    out.push({
+      assigned_user_id: row?.assigned_user_id ? String(row.assigned_user_id) : null,
+      agreed_ex: Math.round(agreed * 100) / 100,
+    });
+  }
+  return out;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

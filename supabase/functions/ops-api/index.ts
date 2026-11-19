@@ -14158,7 +14158,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
             // Verify user is the DESIGNATED lead on this job (is_lead), never
             // via job_assignments.role — see tradeLeadJobIds.
-            const { data: lineData } = await client.from('trade_invoice_lines').select('job_id, group_share_id, line_type, line_total_ex, override_amount').eq('id', line_id).single()
+            const { data: lineData } = await client.from('trade_invoice_lines').select('job_id, group_share_id, line_type, line_total_ex, override_amount, trade_invoices(user_id)').eq('id', line_id).single()
             if (!lineData) throw new ApiError('Line not found', 404)
             if (lineData.group_share_id || String(lineData.line_type || '').toLowerCase() === 'group share') {
               throw new ApiError('A group share is only visible to its owner.', 403)
@@ -14183,7 +14183,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   job_id: lineData.job_id,
                   line_type: lineData.line_type,
                   line_total_ex: Number(overrideAmt) || 0,
-                }], [String(line_id)], true)
+                }], [String(line_id)], true, String((Array.isArray(lineData.trade_invoices) ? lineData.trade_invoices[0] : lineData.trade_invoices)?.user_id || ''))
               }
               updates.acknowledgment_status = 'acknowledged'
               updates.override_amount = Number(overrideAmt) || 0
@@ -19661,7 +19661,7 @@ export async function _assertWithinWorkOrderTotal(
   tradeUser: { id: string; orgId: string },
   lines: ReadonlyArray<{ job_id?: unknown; line_type?: unknown; line_total_ex?: unknown }>,
   excludeLineIds: readonly string[] = [],
-  force = false,
+  force = false, billingTradeId?: string | null,
 ): Promise<void> {
   const capFailed = (where: string) => {
     console.error('[ops-api] work order cap unreadable:', where)
@@ -19677,7 +19677,7 @@ export async function _assertWithinWorkOrderTotal(
       lines,
       excludeLineIds,
       force,
-      viewerId: tradeUser.id,
+      viewerId: tradeUser.id, billingTradeId,
       loadModes: async (jobIds) => {
         // Only a job with an approved job work order carrying its agreed
         // labour, or one whose job budget pays hourly up to a maximum (ruling
@@ -19718,7 +19718,7 @@ export async function _assertWithinWorkOrderTotal(
             orgId: tradeUser.orgId,
             jobIds: withWorkOrder,
             jobVertical: _jobVertical,
-            normaliseManagedVerticals: _normalizeManagedVerticals,
+            normaliseManagedVerticals: _normalizeManagedVerticals, includeAdditionalOrders: true,
           })).jobs
             // A job read back as work-order mode is held to its total only
             // when its approved order is in the scope (the pay read may move

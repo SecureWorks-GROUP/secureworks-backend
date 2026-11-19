@@ -449,7 +449,8 @@ jobs:
             supabase/functions/ops-api/job_labour_cap_test.ts \
             supabase/functions/ops-api/work_order_total_cap_test.ts \
             supabase/functions/ops-api/job_work_order_quote_fill_test.ts \
-            supabase/functions/ops-api/trade_invoice_mode_test.ts
+            supabase/functions/ops-api/trade_invoice_mode_test.ts \
+            supabase/functions/ops-api/job_additional_work_orders_test.ts
 
       # A scope draft prepare registers each sealed payer as a job party and
       # never loses the saved drafts when that registration is refused

@@ -13,12 +13,11 @@
 // whole agreed labour without change, and nothing is counted twice.
 //
 // Which work order a trade's job card bills (pickTradeWorkOrder): the job's
-// work orders in order (main first, then the additional ones by approval),
-// keeping those that are the job's own or for this trade, are covered in turn
-// by what this trade has billed on the job; the first one not yet covered is
-// the one the card bills, at exactly its agreed amount. So a trade who billed
-// the $80 inspection is next offered the $352 restoration, with no change to
-// the trade app.
+// work orders in order (those named for this trade first, then the main one,
+// then those named for nobody), are covered in turn by what this trade has
+// billed on the job; the first one not covered is the one the card bills, at
+// exactly its agreed amount. A work order named for another trade is never
+// offered, and the cap holds it for that trade (work_order_total_cap.ts).
 //
 // Super is not worked out here: every amount includes super under the one
 // super rule (trade_invoice_money.ts, inclusive_12_112_v1), which prices the
@@ -30,7 +29,7 @@ import {
   JOB_WORK_ORDER_BILLED_INVOICE_STATUSES,
   readOwnerApprovalAuthority,
 } from "./job_work_orders.ts";
-import { resolveSesOwnerDirectedApproval } from "./ses_owner_directed_approval.ts";
+import { ownerDirectiveEventStamp, resolveSesOwnerDirectedApproval } from "./ses_owner_directed_approval.ts";
 
 export const ADDITIONAL_WORK_ORDER_SCHEMA = "job-work-orders.v1";
 export const ADDITIONAL_WORK_ORDER_MAX_EX = 100_000;
@@ -95,15 +94,31 @@ export type JobWorkOrderRow = {
 };
 
 /**
- * Pure. The job's approved work orders this trade may bill, in order, each
- * marked billed once what the trade has billed on the job covers it, and the
- * first one still open (null when all are billed).
+ * Pure. An additional work order named for one trade (`assigned_user_id`).
+ * The one ownership rule: the picker offers a trade its named work orders
+ * first, and the cap (work_order_total_cap.ts, ownWorkOrderRoomEx) holds each
+ * named work order for its trade. The main work order and an additional one
+ * named for nobody belong to no single trade: they are the job's shared part.
+ */
+export function namedWorkOrderTrade(row: Pick<JobWorkOrderRow, "kind" | "assigned_user_id">): string | null {
+  if (!row || row.kind !== "additional" || !row.assigned_user_id) return null;
+  return String(row.assigned_user_id);
+}
+
+/**
+ * Pure. The job's approved work orders this trade may bill, in order (the
+ * ones named for this trade first, then the main one, then those named for
+ * nobody; each group by approval), each marked billed when what the trade has
+ * billed on the job still covers it in turn, and the first one not covered
+ * (null when all are billed). A part payment never covers a work order.
  */
 export function pickTradeWorkOrder(
   rows: readonly JobWorkOrderRow[],
   tradeId: string,
   billedEx: number,
 ): { options: TradeWorkOrderOption[]; open: TradeWorkOrderOption | null } {
+  const rank = (r: JobWorkOrderRow) =>
+    namedWorkOrderTrade(r) === String(tradeId) ? 0 : r.kind === "job" ? 1 : 2;
   const usable = rows
     .filter((r) => r && (r.kind === "job" || r.kind === "additional"))
     .filter((r) => {
@@ -111,12 +126,12 @@ export function pickTradeWorkOrder(
       return r.agreed_labour_ex !== null && r.agreed_labour_ex !== undefined &&
         r.agreed_labour_ex !== "" && Number.isFinite(n) && n >= 0;
     })
-    .filter((r) =>
-      r.kind === "job" || !r.assigned_user_id ||
-      String(r.assigned_user_id) === String(tradeId)
-    )
+    .filter((r) => {
+      const named = namedWorkOrderTrade(r);
+      return named === null || named === String(tradeId);
+    })
     .sort((a, b) => {
-      if (a.kind !== b.kind) return a.kind === "job" ? -1 : 1;
+      if (rank(a) !== rank(b)) return rank(a) - rank(b);
       const at = String(a.approved_at || "").localeCompare(String(b.approved_at || ""));
       return at !== 0 ? at : String(a.id).localeCompare(String(b.id));
     });
@@ -124,11 +139,10 @@ export function pickTradeWorkOrder(
   let open: TradeWorkOrderOption | null = null;
   const options = usable.map((r) => {
     const agreed = money(Number(r.agreed_labour_ex));
-    let billed = false;
-    if (!open && left >= cents(agreed)) {
-      left -= cents(agreed);
-      billed = true;
-    }
+    // Each one the rest still covers is billed, so a trade who billed the
+    // main work order before a named one was added reads it billed.
+    const billed = left >= cents(agreed);
+    if (billed) left -= cents(agreed);
     const option: TradeWorkOrderOption = {
       id: String(r.id),
       wo_number: r.wo_number ?? null,
@@ -162,7 +176,7 @@ export async function readTradeBilledOnJobs(
     const part = ids.slice(i, i + 50);
     for (let offset = 0;; offset += 1000) {
       const { data, error } = await client.from("trade_invoice_lines")
-        .select("id, job_id, line_type, line_total_ex, trade_invoices!inner(user_id, status)")
+        .select("id, job_id, line_type, line_total_ex, override_amount, trade_invoices!inner(user_id, status, invoice_kind)")
         .eq("trade_invoices.user_id", tradeId)
         .in("job_id", part)
         .order("id")
@@ -171,8 +185,11 @@ export async function readTradeBilledOnJobs(
       for (const row of data || []) {
         const status = String(row?.trade_invoices?.status || "");
         if (!JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(status)) continue;
+        // The cap's billed rule (work_order_total_cap.ts billedFromLines): a
+        // holding invoice's lines wait for the office, and an override wins.
+        if (row?.trade_invoices?.invoice_kind === "held") continue;
         if (NOT_WORK_LINE_TYPES.has(String(row?.line_type || "").trim().toLowerCase())) continue;
-        const n = Number(row?.line_total_ex);
+        const n = Number(row?.override_amount ?? row?.line_total_ex);
         if (!Number.isFinite(n)) continue;
         const jobId = String(row.job_id);
         out.set(jobId, money((out.get(jobId) || 0) + n));
@@ -403,7 +420,9 @@ export async function addJobWorkOrderAction(
         main_work_order_id: approved?.main_work_order_id ?? null,
         assigned_user_id: assigned || null,
         via: approver.via,
-        owner_directive: approver.evidence,
+        // Who directed it and when, never their words or address: trades
+        // read job events (ses_owner_directed_approval.ts).
+        owner_directive: ownerDirectiveEventStamp(approver.evidence, approver.userId),
       },
     });
   } catch (_e) { /* the work order is the record; the event is the audit */ }

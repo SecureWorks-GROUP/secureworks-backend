@@ -10,6 +10,7 @@ import {
   countsAgainstWorkOrder,
   incomingLabourByJob,
   isHourlyCappedMode,
+  ownWorkOrderRoomEx,
   readBilledOnJobs,
   readWorkOrderCapFacts,
   WORK_ORDER_CAP_WORDS,
@@ -272,7 +273,7 @@ Deno.test("wiring: every door that saves or changes a trade line checks the cap 
   );
   assertStringIncludes(
     src.slice(adjustCap, update),
-    "[String(line_id)], true)",
+    "[String(line_id)], true, String((Array.isArray(lineData.trade_invoices) ? lineData.trade_invoices[0] : lineData.trade_invoices)?.user_id || ''))",
   );
   assertStringIncludes(src.slice(adjust, adjustCap), "> oldAmount");
 
@@ -969,4 +970,160 @@ Deno.test("words: one label table; the shared-job words carry no figure, no code
     amountShown: () => false,
   });
   assertEquals(r?.message, WORK_ORDER_CAP_WORDS.shared_job);
+});
+
+// ── A work order named for one trade (fault in the additional work orders) ──
+// Made-up amounts; roles only. The job's main work order is 500; an
+// additional work order of 600 is named for trade B, and its approval adds
+// 600 to the main work order as an amount change (so the job allows 1,100).
+const NAMED_MODE = {
+  job_id: JOB,
+  invoice_mode: "work_order",
+  work_order_agreed_ex: 500,
+  job_work_order_id: WO,
+  cap_work_order_id: WO,
+  cap_agreed_ex: 500,
+};
+const B_ORDER = { assigned_user_id: "trade-b", agreed_ex: 600 };
+const B_CHANGE = { id: "c1", work_order_id: WO, delta_ex: 600 };
+
+function countingClient(opts: { lines?: any[]; changes?: any[] }) {
+  const reads: string[] = [];
+  const base = fakeClient(opts);
+  return {
+    reads,
+    client: { from: (table: string) => (reads.push(table), base.from(table)) },
+  };
+}
+
+function sendLine(
+  opts: { lines: any[]; changes?: any[]; mode: any; viewerId: string; amount: number; billingTradeId?: string | null },
+) {
+  const { client, reads } = countingClient({ lines: opts.lines, changes: opts.changes });
+  return checkWorkOrderTotalCap(client, {
+    viewerId: opts.viewerId,
+    ...(opts.billingTradeId === undefined ? {} : { billingTradeId: opts.billingTradeId }),
+    lines: [{ job_id: JOB, line_type: "labour", line_total_ex: opts.amount }],
+    loadModes: () => Promise.resolve([opts.mode]),
+    jobRefs: refs,
+  }).then((refusal) => ({ refusal, reads }));
+}
+
+Deno.test("own room: pure; every other trade keeps the larger of its named work orders and its billing", () => {
+  const named = new Map([["trade-b", 600]]);
+  // A billed the main work order; B's named order is held for B.
+  assertEquals(ownWorkOrderRoomEx({ allowedEx: 1100, namedEx: named, billedByTrade: new Map([["trade-a", 500]]), tradeId: "trade-a" }), 0);
+  assertEquals(ownWorkOrderRoomEx({ allowedEx: 1100, namedEx: named, billedByTrade: new Map([["trade-a", 500]]), tradeId: "trade-b" }), 600);
+  // A third trade cannot draw on the shared part twice.
+  assertEquals(ownWorkOrderRoomEx({ allowedEx: 1100, namedEx: named, billedByTrade: new Map([["trade-a", 500]]), tradeId: "trade-c" }), 0);
+  // B billing more than its named order draws on the shared part.
+  assertEquals(ownWorkOrderRoomEx({ allowedEx: 1100, namedEx: named, billedByTrade: new Map([["trade-b", 700]]), tradeId: "trade-a" }), 400);
+  // No named order: the job's own room.
+  assertEquals(ownWorkOrderRoomEx({ allowedEx: 1100, namedEx: new Map(), billedByTrade: new Map([["trade-a", 300], ["trade-b", 200]]), tradeId: "trade-a" }), 600);
+});
+
+Deno.test("named order: A bills the main order, B's order is approved, A's second main bill is refused and B's own passes", async () => {
+  // 1. A bills the main work order before any additional one: passes.
+  assertEquals((await sendLine({ lines: [], mode: NAMED_MODE, viewerId: "trade-a", amount: 500 })).refusal, null);
+  const aBilled = [tradeLine("a1", "trade-a", 500)];
+  // 2. B's order (600, at least the main order's 500) is approved. Without
+  //    the named order the job-wide cap alone lets A bill the main order
+  //    again: the fault.
+  const fault = await sendLine({ lines: aBilled, changes: [B_CHANGE], mode: NAMED_MODE, viewerId: "trade-a", amount: 500 });
+  assertEquals(fault.refusal, null, "the job-wide cap alone passes it (the fault)");
+  // 3. With the named order read, A's second bill is refused: its own work
+  //    orders are billed in full.
+  const mode = { ...NAMED_MODE, additional_orders: [B_ORDER] };
+  const again = await sendLine({ lines: aBilled, changes: [B_CHANGE], mode, viewerId: "trade-a", amount: 500 });
+  assertEquals(again.refusal?.code, "work_order_total_over_agreed");
+  assertEquals(again.refusal?.jobs, [{ job: "SWF-1", job_id: JOB, most_this_invoice_ex: 0, limit: "own_work_orders" }]);
+  assertEquals(again.refusal?.message, WORK_ORDER_CAP_WORDS.own_billed_in_full("SWF-1"));
+  // A part of it is refused too, naming nothing over A's own room.
+  assertEquals((await sendLine({ lines: aBilled, changes: [B_CHANGE], mode, viewerId: "trade-a", amount: 0.01 })).refusal?.jobs[0].most_this_invoice_ex, 0);
+  // 4. B bills its own order in full: passes (B is no longer refused).
+  assertEquals((await sendLine({ lines: aBilled, changes: [B_CHANGE], mode, viewerId: "trade-b", amount: 600 })).refusal, null);
+  // 5. B then tries the main order as well: the job is billed in full.
+  const bBilled = [...aBilled, tradeLine("b1", "trade-b", 600)];
+  const bMain = await sendLine({ lines: bBilled, changes: [B_CHANGE], mode, viewerId: "trade-b", amount: 500 });
+  assertEquals(bMain.refusal?.jobs, [{ job: "SWF-1", job_id: JOB, amount_hidden: true }]);
+});
+
+Deno.test("named order: a third trade cannot bill the main order a second time either", async () => {
+  const mode = { ...NAMED_MODE, additional_orders: [B_ORDER] };
+  const aBilled = [tradeLine("a1", "trade-a", 500)];
+  const c = await sendLine({ lines: aBilled, changes: [B_CHANGE], mode, viewerId: "trade-c", amount: 500 });
+  // Another trade billed on the job, so no figure is shown to C.
+  assertEquals(c.refusal?.jobs, [{ job: "SWF-1", job_id: JOB, amount_hidden: true }]);
+  assertEquals(c.refusal?.message, WORK_ORDER_CAP_WORDS.shared_job);
+  // B's own order still passes after that refusal.
+  assertEquals((await sendLine({ lines: aBilled, changes: [B_CHANGE], mode, viewerId: "trade-b", amount: 600 })).refusal, null);
+  // Two trades sharing the main order split it as before: C may bill what A left.
+  const split = await sendLine({ lines: [tradeLine("a1", "trade-a", 300)], changes: [B_CHANGE], mode, viewerId: "trade-c", amount: 200 });
+  assertEquals(split.refusal, null);
+});
+
+Deno.test("named order: a one-trade job, the main and its own named order, bills both and no more", async () => {
+  const mode = { ...NAMED_MODE, additional_orders: [{ assigned_user_id: "trade-a", agreed_ex: 600 }] };
+  const aBilled = [tradeLine("a1", "trade-a", 500)];
+  assertEquals((await sendLine({ lines: aBilled, changes: [B_CHANGE], mode, viewerId: "trade-a", amount: 600 })).refusal, null);
+  const over = await sendLine({ lines: [...aBilled, tradeLine("a2", "trade-a", 600)], changes: [B_CHANGE], mode, viewerId: "trade-a", amount: 0.01 });
+  // The job's own cap, by the existing words (no named order for anyone else).
+  assertEquals(over.refusal?.jobs, [{ job: "SWF-1", job_id: JOB, most_this_invoice_ex: 0 }]);
+  assertEquals(over.refusal?.message, WORK_ORDER_CAP_WORDS.billed_in_full("SWF-1"));
+});
+
+Deno.test("named order: a job with no additional order, or one named for nobody, reads and answers exactly as before", async () => {
+  const cases = [
+    { lines: [], amount: 500 },
+    { lines: [tradeLine("a1", "trade-a", 400)], amount: 100 },
+    { lines: [tradeLine("a1", "trade-a", 400)], amount: 100.01 },
+    { lines: [tradeLine("a1", "trade-a", 300), tradeLine("b1", "trade-b", 200)], amount: 1 },
+  ];
+  for (const c of cases) {
+    const before = await sendLine({ ...c, mode: NAMED_MODE, viewerId: "trade-a" });
+    for (const mode of [{ ...NAMED_MODE, additional_orders: [] }, NAMED_MODE]) {
+      const after = await sendLine({ ...c, mode, viewerId: "trade-a" });
+      assertEquals(after.refusal, before.refusal);
+      assertEquals(after.reads, before.reads, "no new read");
+    }
+  }
+  // An additional order named for nobody is the job's shared part: A may
+  // bill it after the main order, with no per-trade read.
+  const nobody = { ...NAMED_MODE, additional_orders: [{ assigned_user_id: null, agreed_ex: 600 }] };
+  const plain = await sendLine({ lines: [tradeLine("a1", "trade-a", 500)], changes: [B_CHANGE], mode: NAMED_MODE, viewerId: "trade-a", amount: 600 });
+  const shared = await sendLine({ lines: [tradeLine("a1", "trade-a", 500)], changes: [B_CHANGE], mode: nobody, viewerId: "trade-a", amount: 600 });
+  assertEquals(shared.refusal, null);
+  assertEquals(shared.reads, plain.reads);
+});
+
+Deno.test("named order: a lead's adjust holds the line's own trade to its room; no trade to read refuses as unreadable", async () => {
+  const mode = { ...NAMED_MODE, additional_orders: [B_ORDER] };
+  // The lead raises trade A's line from 400 to 500: A's room is 500 less
+  // what A billed outside the line being changed, so it passes.
+  const lines = [tradeLine("a1", "trade-a", 400)];
+  const { client } = countingClient({ lines, changes: [B_CHANGE] });
+  const raise = (amount: number, billingTradeId: string) =>
+    checkWorkOrderTotalCap(client, {
+      viewerId: "lead",
+      billingTradeId,
+      lines: [{ job_id: JOB, line_type: "labour", line_total_ex: amount }],
+      excludeLineIds: ["a1"],
+      force: true,
+      loadModes: () => Promise.resolve([mode]),
+      jobRefs: refs,
+    });
+  assertEquals(await raise(500, "trade-a"), null);
+  const over = await raise(500.01, "trade-a");
+  // A's room is 500 (the job's 1,100 less B's named 600), whatever the lead billed.
+  assertEquals(over?.jobs, [{ job: "SWF-1", job_id: JOB, most_this_invoice_ex: 500, limit: "own_work_orders" }]);
+  await assertRejects(() => raise(500, ""), WorkOrderTotalCapReadError);
+});
+
+Deno.test("named order wiring: only the cap door asks for every additional work order, and passes the invoice's trade", async () => {
+  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const start = src.indexOf("export async function _assertWithinWorkOrderTotal(");
+  const door = src.slice(start, src.indexOf("\n}\n", start));
+  assertStringIncludes(door, "includeAdditionalOrders: true");
+  assertStringIncludes(door, "viewerId: tradeUser.id, billingTradeId,");
+  assertEquals(src.split("includeAdditionalOrders").length - 1, 1, "no answer a trade reads asks for it");
 });

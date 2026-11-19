@@ -28,26 +28,44 @@ const EXTRA = "0130d614-ec87-4f9b-855b-2620b2438b68";
 const SOLO_MAIN = "0130d614-ec87-4f9b-855b-2620b2438b69";
 
 const main = { id: MAIN, kind: "job", wo_number: "WO-SWMS-261709", title: null, agreed_labour_ex: "80.00", approved_at: "2026-11-12T10:58:54Z", assigned_user_id: null };
+const nobodyExtra = (o: any) => ({ ...o, assigned_user_id: null });
 const extra = { id: EXTRA, kind: "additional", wo_number: "WO-SWRESTO-261719-2", title: "Restoration works", agreed_labour_ex: 432, approved_at: "2026-11-19T01:00:00Z", assigned_user_id: JEAN };
+
+const nobody = nobodyExtra(extra);
 
 // ── 1. The pick ─────────────────────────────────────────────────────────────
 
 Deno.test("pick: the inspection billed, the restoration is next", () => {
   const { options, open } = pickTradeWorkOrder([extra, main], JEAN, 80);
+  // The work order named for this trade is listed first; the main one the
+  // trade already billed still reads billed.
   assertEquals(options.map((o) => [o.wo_number, o.main, o.billed]), [
-    ["WO-SWMS-261709", true, true],
     ["WO-SWRESTO-261719-2", false, false],
+    ["WO-SWMS-261709", true, true],
   ]);
   assertEquals(open?.id, EXTRA);
   assertEquals(open?.agreed_ex, 432);
 });
 
-Deno.test("pick: nothing billed yet, the main work order first", () => {
-  assertEquals(pickTradeWorkOrder([extra, main], JEAN, 0).open?.id, MAIN);
+Deno.test("pick: nothing billed yet, the trade's own named work order before the main one", () => {
+  assertEquals(pickTradeWorkOrder([extra, main], JEAN, 0).open?.id, EXTRA);
+  // Named for nobody: the main work order first, as before.
+  assertEquals(pickTradeWorkOrder([nobody, main], JEAN, 0).open?.id, MAIN);
 });
 
 Deno.test("pick: a part payment never covers a work order", () => {
-  assertEquals(pickTradeWorkOrder([extra, main], JEAN, 79.99).open?.id, MAIN);
+  assertEquals(pickTradeWorkOrder([nobody, main], JEAN, 79.99).open?.id, MAIN);
+  assertEquals(pickTradeWorkOrder([extra, main], JEAN, 431.99).open?.id, EXTRA);
+});
+
+Deno.test("pick: trade B is offered its own work order first, at its own amount, never the main one", () => {
+  // Made-up amounts, roles only: main 500, B's named order 600.
+  const mainOrder = { ...main, agreed_labour_ex: 500 };
+  const forB = { ...extra, agreed_labour_ex: 600, assigned_user_id: OTHER };
+  const b = pickTradeWorkOrder([mainOrder, forB], OTHER, 0);
+  assertEquals([b.open?.id, b.open?.agreed_ex], [EXTRA, 600]);
+  // Trade A is never offered B's order: one option, the main one.
+  assertEquals(pickTradeWorkOrder([mainOrder, forB], JEAN, 500).options.map((o) => o.id), [MAIN]);
 });
 
 Deno.test("pick: every work order billed, none open", () => {
@@ -202,13 +220,49 @@ Deno.test("loader: the inspection billed, the card bills the restoration; the ca
   assertEquals(resto.invoice_mode, "work_order");
   assertEquals([resto.work_order_agreed_ex, resto.job_work_order_id], [432, EXTRA]);
   assertEquals([resto.cap_work_order_id, resto.cap_agreed_ex], [MAIN, 80]);
-  assertEquals(resto.work_orders.map((o: any) => [o.id, o.billed]), [[MAIN, true], [EXTRA, false]]);
+  assertEquals(resto.work_orders.map((o: any) => [o.id, o.billed]), [[EXTRA, false], [MAIN, true]]);
+  // Other trades' amounts never reach an answer a trade reads.
+  assert(!("additional_orders" in resto));
+});
+
+Deno.test("loader: only the cap asks for every additional work order; a one work order job never carries it", async () => {
+  const forOther = [row({ ...main, job_id: RESTO }), row({ ...extra, job_id: RESTO, assigned_user_id: OTHER }), WOS[2]];
+  const client = fakeClient({ workOrders: forOther, lines: [inspectionLine] });
+  const out = await loadTradeInvoiceJobModes(client, {
+    tradeId: JEAN,
+    orgId: ORG,
+    jobIds: [RESTO, SOLO],
+    jobVertical: (job: any) => String(job.type),
+    normaliseManagedVerticals: () => [],
+    includeAdditionalOrders: true,
+  });
+  const resto = out.jobs.find((j) => j.job_id === RESTO) as any;
+  // This trade is not offered the order named for another trade (one option,
+  // the main one), but the cap still sees it.
+  assertEquals(resto.job_work_order_id, MAIN);
+  assert(!("work_orders" in resto));
+  assertEquals(resto.additional_orders, [{ assigned_user_id: OTHER, agreed_ex: 432 }]);
+  assert(!("additional_orders" in (out.jobs.find((j) => j.job_id === SOLO) as any)));
+});
+
+Deno.test("loader: what a trade billed is read by the cap's rule (held lines wait, an override wins)", async () => {
+  const nobodyWos = [row({ ...main, job_id: RESTO }), row({ ...nobody, job_id: RESTO })];
+  const held = await load(fakeClient({
+    workOrders: nobodyWos,
+    lines: [{ ...inspectionLine, trade_invoices: { user_id: JEAN, status: "paid", invoice_kind: "held" } }],
+  }), [RESTO]);
+  assertEquals((held.jobs[0] as any).job_work_order_id, MAIN);
+  const overridden = await load(fakeClient({
+    workOrders: nobodyWos,
+    lines: [{ ...inspectionLine, line_total_ex: 70, override_amount: 80 }],
+  }), [RESTO]);
+  assertEquals((overridden.jobs[0] as any).job_work_order_id, EXTRA);
 });
 
 Deno.test("loader: a draft or rejected invoice does not count as billed", async () => {
   for (const status of ["draft", "ops-reject"]) {
     const out = await load(fakeClient({
-      workOrders: WOS,
+      workOrders: [row({ ...main, job_id: RESTO }), row({ ...nobody, job_id: RESTO })],
       lines: [{ ...inspectionLine, trade_invoices: { user_id: JEAN, status } }],
     }), [RESTO]);
     assertEquals((out.jobs[0] as any).job_work_order_id, MAIN, status);
@@ -217,7 +271,7 @@ Deno.test("loader: a draft or rejected invoice does not count as billed", async 
 
 Deno.test("loader: commission and another trade's lines never count", async () => {
   const out = await load(fakeClient({
-    workOrders: WOS,
+    workOrders: [row({ ...main, job_id: RESTO }), row({ ...nobody, job_id: RESTO })],
     lines: [
       { ...inspectionLine, line_type: "commission" },
       { ...inspectionLine, id: "l2", trade_invoices: { user_id: OTHER, status: "paid" } },
