@@ -75,8 +75,8 @@ GRANT ALL ON public.job_financials, public.aged_receivables, public.monthly_reve
   TO anon, authenticated, service_role;
 GRANT SELECT (org_id) ON public.monthly_costs TO PUBLIC;
 
--- job_events as production holds it: row security on, the 2025 rules for
--- PUBLIC, every privilege to each API role.
+-- The pre-migration shape of job_events: row security on, the 2025 rules
+-- for PUBLIC, Supabase's default grants to each API role.
 ALTER TABLE public.job_events ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "Users can view job events" ON public.job_events;
 DROP POLICY IF EXISTS "Users can create events" ON public.job_events;
