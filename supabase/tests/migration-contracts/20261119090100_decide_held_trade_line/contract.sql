@@ -170,7 +170,9 @@ BEGIN
     'invoice_id',checked->'invoice_id','verdict',checked->'verdict',
     'pays',checked->'invoice_pays','super_amount',checked->'super_amount'))));
   zz_run_id := (result->>'run_id')::uuid;
-  PERFORM pg_temp.check_true((SELECT i.user_id=crew AND i.pay_run_id=r.run_id AND i.status='approved' AND r.verdict='clean'
+  PERFORM pg_temp.check_true((SELECT i.user_id=crew AND i.pay_run_id=r.run_id
+    -- The run keeps the invoice's status (20261118163000); its own push moves it to approved.
+    AND i.status='pending_ops_review' AND r.verdict='clean'
     AND r.pays=650.32 AND r.super_amount=70.18 AND i.gst=65.50 AND i.gross_earned=655
     FROM public.trade_invoices i JOIN public.trade_pay_run_invoices r ON r.invoice_id=i.id
     WHERE i.id=follow_id AND r.run_id=zz_run_id)
