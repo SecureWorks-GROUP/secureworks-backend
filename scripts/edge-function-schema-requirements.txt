@@ -1361,3 +1361,15 @@ ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|
 # its slow-bill counts in match_slow_bills, so xero-sync must not deploy first.
 xero-sync|supabase/migrations/20261118195800_match_apply_held_unchanged.sql|table|match_slow_bills
 xero-sync|supabase/migrations/20261118195800_match_apply_held_unchanged.sql|function|match_bill_read
+# Supplier bill PDF findings. xero-sync writes the row and, when the switch is
+# on, the matcher reads the findings. The function must not deploy first.
+xero-sync|supabase/migrations/20261119091400_xero_bill_attachment_reads.sql|table|xero_bill_attachment_reads
+xero-sync|supabase/migrations/20261119091400_xero_bill_attachment_reads.sql|column|xero_bill_attachment_reads.state
+xero-sync|supabase/migrations/20261119091400_xero_bill_attachment_reads.sql|column|xero_bill_attachment_reads.source
+xero-sync|supabase/migrations/20261119091400_xero_bill_attachment_reads.sql|column|xero_bill_attachment_reads.job_numbers
+xero-sync|supabase/migrations/20261119091400_xero_bill_attachment_reads.sql|column|xero_bill_attachment_reads.po_numbers
+xero-sync|supabase/migrations/20261119091400_xero_bill_attachment_reads.sql|column|xero_bill_attachment_reads.order_ref
+xero-sync|supabase/migrations/20261119091400_xero_bill_attachment_reads.sql|column|xero_bill_attachment_reads.delivery_address
+xero-sync|supabase/migrations/20261119091400_xero_bill_attachment_reads.sql|column|xero_bill_attachment_reads.text_sha256
+xero-sync|supabase/migrations/20261119091400_xero_bill_attachment_reads.sql|column|xero_bill_attachment_reads.attachment_id
+xero-sync|supabase/migrations/20261119091400_xero_bill_attachment_reads.sql|column|xero_bill_attachment_reads.xero_invoice_id
