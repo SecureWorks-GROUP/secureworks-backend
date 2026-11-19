@@ -285,6 +285,12 @@ jobs:
         run: |
           deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts
 
+      # Ruling 13: the office job_detail carries job_overview_v2_enabled from the
+      # job_overview_v2 switch (seeded off); the Trade App detail does not.
+      - name: Check the Job Overview v2 switch field
+        run: |
+          deno test --allow-read supabase/functions/ops-api/job_overview_v2_switch_test.ts
+
       # Follow-up 56: the director's switch checks stay reads (read-only
       # session, ZZTEST only, no write verb, listed functions only).
       - name: Check switch check files stay reads
