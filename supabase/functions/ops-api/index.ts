@@ -1,6 +1,7 @@
 // JWT flag: --no-verify-jwt. Keep this line at the top: the deploy workflow reads
 // only the first 30 lines for it, and without it ops-api is deployed with JWT
 // verification on, which refuses every x-api-key caller at the gateway (401).
+import { ClientAuthorityError, clientAuthorityStatus, createClientAuthority } from './client_authority_actions.ts'
 import { deleteHoldingInvoice, guardedJobs, lineSendLogCode, holdWholeJob, isKeptDeduction, jobAmountGuardJob, lineHoldSendApplies, linesInJobOrder, raiseHeldLines, readAndSortSend, releaseStandardInvoice, saveHoldingInvoice, sendAnswer, stampHeldBookings, stampSplitGroups, stampStandardSend, tradeLineHoldFlagOn, type SendRow, type SortedSend } from './trade_line_send.ts'
 import { LEFT_HIDDEN_WORDS, readJobAmountsState, type LineHoldFacts } from './trade_line_hold.ts'
 import { REIMBURSEMENT_FLAG, loadUndatedReimbursementDraft, isReimbursementItem, resolveReimbursementExtras, receiptHasLiveTradeInvoice, retryReimbursementClaims, reimbursementDbLine, ownMoneyReimbursementItems, reimbursementSkipAnswer } from './trade_invoice_reimbursement.ts'
@@ -10918,6 +10919,25 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             return json({ error: error.message, code: (error as any).code }, (error as any).status || 400)
           }
           throw error
+        }
+      }
+      case 'client_authority_create':
+      case 'client_authority_status': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: 'An authorised operator session is required.', code: 'operator_access_required' }, 403)
+        }
+        try {
+          if (action === 'client_authority_create') {
+            if (req.method !== 'POST') return json({ error: 'client_authority_create requires POST' }, 405)
+            const operator = authMode === 'jwt'
+              ? authUser?.email || null
+              : cleanReviewedString(body?.operator_email) || null
+            return json(await createClientAuthority(client, body || {}, operator))
+          }
+          return json(await clientAuthorityStatus(client, String(url.searchParams.get('job_id') || body?.job_id || '')))
+        } catch (err) {
+          if (err instanceof ClientAuthorityError) return json({ success: false, code: err.code, error: err.message }, err.status)
+          throw err
         }
       }
       case 'restoration_plan':
