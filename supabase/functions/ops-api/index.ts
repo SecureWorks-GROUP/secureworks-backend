@@ -34904,6 +34904,7 @@ async function _reextractExtractFields(
   } else if (ANTHROPIC_API_KEY) {
     try {
       const { default: Anthropic } = await import('https://esm.sh/@anthropic-ai/sdk@0.39.0')
+      // paid-ai-register: ops-api-reextract
       const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
       const userContent: any[] = [{ type: 'text', text: `From: ${fromName} <${fromEmail}>\nSubject: ${subject}\nBody: ${bodyPreview}` }]
       if (pdfMode === 'text') {
@@ -37618,6 +37619,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
       // keyDegraded and every subsequent email skips the call (no silent spray).
       try {
         const { default: Anthropic } = await import('https://esm.sh/@anthropic-ai/sdk@0.39.0')
+        // paid-ai-register: ops-api-retired-intake
         const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
 
         // Build message content: email text + PDF (text blocks when the text layer was
@@ -61965,6 +61967,7 @@ Return ONLY valid JSON in this exact format:
   })
 
   // Call Claude Sonnet — one call for pricing + classification + normalisation
+  // paid-ai-register: ops-api-supplier-quote
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -65369,6 +65372,7 @@ export async function submitExpense(
   try {
     const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') || ''
     if (ANTHROPIC_API_KEY) {
+      // paid-ai-register: ops-api-expense-receipt
       const visionResp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -67881,6 +67885,7 @@ async function triggerXeroSync() {
 
 async function _callClaude(model: string, system: string, userContent: string, maxTokens = 1024) {
   if (!ANTHROPIC_API_KEY) throw new ApiError('ANTHROPIC_API_KEY not configured', 500)
+  // paid-ai-register: ops-api-debt-draft
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
