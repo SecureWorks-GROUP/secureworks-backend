@@ -103,3 +103,58 @@ export async function storeDivisionMonth(sb: any, report: { Rows?: ReportRow[] }
   if (error) throw new Error('division_accounts_trim_failed')
   return rows.length
 }
+
+// One run at a time stores and trims division months. Two runs at once could
+// otherwise trim each other's fresh rows: B writes a month, A overwrites it
+// with its older stamp, B's trim then removes A's rows and the month is empty.
+// The lease is a row in xero_sync_state: a run claims it when free or expired,
+// renews it (only while it still holds it) before each month's store, and
+// gives it back at the end. A run that cannot claim or renew stores nothing
+// more. Times come from the run's own clock.
+export const DIVISION_LEASE_KEY = 'division_month_accounts_lease'
+/** A claim or renewal holds this long: one month's report read and store fits well inside. */
+export const DIVISION_LEASE_MS = 5 * 60 * 1000
+const DIVISION_LEASE_FREE = '1970-01-01T00:00:00.000Z'
+
+async function leaseUpdate(q: any): Promise<boolean> {
+  const { data, error } = await q.select('key')
+  return !error && Array.isArray(data) && data.length === 1
+}
+
+/** True when this run now holds the lease; false when another run holds it or anything failed. */
+export async function claimDivisionLease(sb: any, runId: string, now: Date): Promise<boolean> {
+  try {
+    const seed = await sb.from('xero_sync_state').upsert(
+      { key: DIVISION_LEASE_KEY, cursor_at: DIVISION_LEASE_FREE, note: null, updated_at: now.toISOString() },
+      { onConflict: 'key', ignoreDuplicates: true },
+    )
+    if (seed?.error) return false
+    return await leaseUpdate(sb.from('xero_sync_state').update({
+      cursor_at: new Date(now.getTime() + DIVISION_LEASE_MS).toISOString(), note: runId, updated_at: now.toISOString(),
+    }).eq('key', DIVISION_LEASE_KEY).lt('cursor_at', now.toISOString()))
+  } catch {
+    return false
+  }
+}
+
+/** True when this run still holds the lease, now for another DIVISION_LEASE_MS. */
+export async function renewDivisionLease(sb: any, runId: string, now: Date): Promise<boolean> {
+  try {
+    return await leaseUpdate(sb.from('xero_sync_state').update({
+      cursor_at: new Date(now.getTime() + DIVISION_LEASE_MS).toISOString(), updated_at: now.toISOString(),
+    }).eq('key', DIVISION_LEASE_KEY).eq('note', runId))
+  } catch {
+    return false
+  }
+}
+
+/** Gives the lease back if this run still holds it. Never throws. */
+export async function releaseDivisionLease(sb: any, runId: string, now: Date): Promise<void> {
+  try {
+    await leaseUpdate(sb.from('xero_sync_state').update({
+      cursor_at: DIVISION_LEASE_FREE, note: null, updated_at: now.toISOString(),
+    }).eq('key', DIVISION_LEASE_KEY).eq('note', runId))
+  } catch {
+    console.error('[xero-sync] division_accounts_lease_release_failed')
+  }
+}
