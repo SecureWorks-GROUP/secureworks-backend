@@ -775,6 +775,7 @@ const QUERY_FAULTS: {
   { needle: "group_person_not_a_trade", code: "group_person_not_a_trade", message: "Choose an active trade in your company.", status: 409 },
   { needle: "group_has_hours", code: "group_has_hours", message: "You have hours on this job. Remove them first, or ask the office.", status: 409 },
   { needle: "group_claim_disabled", code: "group_claim_disabled", message: "Group claims are switched off.", status: 409 },
+  { needle: "group_office_hours_disputed", code: "group_office_hours_disputed", message: "A crew member disputes the hours the office entered for them. The office must enter them again before the split can be frozen or invoiced.", status: 409 },
   { needle: "group_member_removed_by_office", code: "group_member_removed_by_office", message: REMOVED_BY_OFFICE_MESSAGE, status: 409 },
 
   {

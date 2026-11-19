@@ -291,6 +291,12 @@ jobs:
         run: |
           deno test --allow-read supabase/functions/ops-api/job_overview_v2_switch_test.ts
 
+      # P2-03.6 / F3d: the Reconcile cost list, whole file, no filter. A bill
+      # item carries its Xero invoice id; every other item carries null.
+      - name: Check the Reconcile cost list
+        run: |
+          deno test --allow-env --allow-net=127.0.0.1 --allow-read supabase/functions/ops-api/reconcile_list_test.ts
+
       # Follow-up 56: the director's switch checks stay reads (read-only
       # session, ZZTEST only, no write verb, listed functions only).
       - name: Check switch check files stay reads
@@ -640,7 +646,9 @@ jobs:
             supabase/functions/ops-api/trade_pay_run_doors_test.ts \
             supabase/functions/ops-api/trade_pay_run_release_test.ts \
             supabase/functions/ops-api/held_trade_lines_test.ts \
-            supabase/functions/ops-api/trade_pay_run_receipt_rule_parity_test.ts
+            supabase/functions/ops-api/trade_pay_run_receipt_rule_parity_test.ts \
+            supabase/functions/ops-api/trade_pay_behind_test.ts \
+            supabase/functions/ops-api/group_office_days_test.ts
 
       # One super rule (P1-01): every amount includes super, chosen by pay week
       # behind trade_pay_inclusive_super_v1. Drives the real
@@ -909,7 +917,8 @@ jobs:
         run: |
           deno test --no-check --allow-read --allow-env \
             supabase/functions/xero-sync/match/match_run_test.ts \
-            supabase/functions/xero-sync/paused_run_log_test.ts
+            supabase/functions/xero-sync/paused_run_log_test.ts \
+            supabase/functions/xero-sync/bill_attachments_test.ts
 
       # Division months (division_tieout_v1, off): the parse, the store and
       # trim, and the lease that lets one run at a time store. Fake client only.

@@ -554,3 +554,34 @@ Deno.test("reconcile list: a failed clue read refuses, never a list without its 
     assertEquals(err.code, "reconcile_list_unreadable", broken);
   }
 });
+
+Deno.test("reconcile list: a bill carries its Xero invoice id; a credit, a receipt and a card line carry null", async () => {
+  const BILL = "zz000000-0000-4000-8000-0000000000b1";
+  const c = fakeClient((t, f) => {
+    if (t === "feature_flags") return flagOn;
+    if (t === "reconcile_item_kinds") return { data: KINDS, error: null };
+    if (t === "job_cost_lines") {
+      if (val(f, "follows_document_kind") || val(f, "follows_line_id")) return { data: [], error: null };
+      return { data: [line("XB1", "xero_bill", BILL, 120), line("XN1", "xero_credit_note", "ZZ-N1", -15),
+        line("XR1", "expense_receipt", "ZZ-R1", 30), line("XT1", "xero_bank_txn", "ZZ-T1", 45)], error: null };
+    }
+    if (t === "match_clues") return { data: [], error: null };
+    throw new Error(`unexpected read ${t}`);
+  }, {
+    reconcile_list_page: () => ({ data: [
+      item("c0000000-0000-4000-8000-0000000000d1", "bill", `xero_bill:${BILL}`, 120),
+      item("c0000000-0000-4000-8000-0000000000d2", "credit", "xero_credit_note:ZZ-N1", 15),
+      item("c0000000-0000-4000-8000-0000000000d3", "receipt", "expense_receipt:ZZ-R1", 30),
+      item("c0000000-0000-4000-8000-0000000000d4", "card_line", "xero_bank_txn:ZZ-T1", 45),
+    ], error: null }),
+    reconcile_list_counts: () => ({ data: [], error: null }),
+  });
+  const out: any = await reconcileList(c, new URLSearchParams("tab=all&limit=10"), STAFF, NOW);
+  assertEquals(out.items.map((i: any) => [i.kind, i.xero_invoice_id]), [
+    ["bill", BILL],
+    ["credit", null],
+    ["receipt", null],
+    ["card_line", null],
+  ]);
+  for (const i of out.items) assertEquals("xero_invoice_id" in i, true, "every item carries the field, null when not a bill");
+});

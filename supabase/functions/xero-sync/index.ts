@@ -65,6 +65,7 @@ import { builderReferenceAnnotation, decideBuilderReference, loadBuilderReferenc
 import { parseBankSummary } from './bank_summary.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { matchPendingRequest, matchSweepRequest, readMatcherSwitch } from './match/match_run.ts'
+import { readBillAttachmentsRequest } from './bill_attachments.ts'
 import { creditSweepRequest, syncMatchStep, type SyncMatchStepReport } from './match/credit_run.ts'
 import {
   buildMaterialsFactRow,
@@ -257,6 +258,45 @@ if (import.meta.main) serve(async (req: Request) => {
         const out = await matchSweepRequest(req, sb, SUPABASE_SERVICE_KEY)
         return json(out.body, out.status)
       }
+      case 'read_bill_attachments': {
+        // Supplier bill PDFs: email copy first, else Xero. Findings only.
+        // Off until xero_bill_attachment_read_v1. POST with the exact service key.
+        const out = await readBillAttachmentsRequest(req, sb, SUPABASE_SERVICE_KEY, {
+          orgId: DEFAULT_ORG_ID,
+          xero: {
+            async list(invoiceId: string) {
+              const { accessToken, tenantId } = await getToken(sb)
+              const body = await xeroGet(`/Invoices/${encodeURIComponent(invoiceId)}/Attachments`, accessToken, tenantId)
+              const rows = Array.isArray(body?.Attachments) ? body.Attachments : []
+              return rows.map((row: any) => ({
+                attachment_id: String(row?.AttachmentID || ''),
+                file_name: typeof row?.FileName === 'string' ? row.FileName : null,
+                mime_type: typeof row?.MimeType === 'string' ? row.MimeType : null,
+                content_length: Number.isFinite(Number(row?.ContentLength)) ? Number(row.ContentLength) : null,
+              }))
+            },
+            async download(invoiceId: string, fileName: string) {
+              const { accessToken, tenantId } = await getToken(sb)
+              const response = await xeroSyncFetch(
+                `https://api.xero.com/api.xro/2.0/Invoices/${encodeURIComponent(invoiceId)}/Attachments/${encodeURIComponent(fileName)}`,
+                {
+                  headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Xero-tenant-id': tenantId,
+                    Accept: 'application/octet-stream',
+                  },
+                },
+              )
+              if (!response.ok) {
+                void response.body?.cancel().catch(() => {})
+                throw new Error(`xero_attachment_http_${response.status}`)
+              }
+              return new Uint8Array(await response.arrayBuffer())
+            },
+          },
+        })
+        return json(out.body, out.status)
+      }
       case 'credit_sweep': {
         // Supplier credit notes left unallocated (reason credit_not_allocated),
         // with no open Reconcile item, 50 a call. A credit that follows a bill
@@ -348,7 +388,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await ingestMaterialsActuals(sb, { windowDays, limit, capped: !!limitParam }))
       }
       default:
-        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_supplier_credit_notes, sync_bank_transactions, ingest_materials, ingest_materials_recent, ingest_materials_all, bill_prematch, check_invoice_mirror, sync_customer_allocations' }, 400)
+        return json({ error: 'Unknown action. Use: token_refresh, sync_invoices, sync_reports, sync_projects, sync_tracking_pl, match_contacts, backfill_contacts, backfill_invoices, sync_purchase_orders, sync_suppliers, create_or_find_contact, match_invoices_by_reference, backfill_xero_contacts, sync_bank_balances, sync_aged_payables, sync_supplier_credit_notes, sync_bank_transactions, ingest_materials, ingest_materials_recent, ingest_materials_all, bill_prematch, check_invoice_mirror, sync_customer_allocations, read_bill_attachments' }, 400)
     }
   } catch (err: any) {
     if (err instanceof XeroCooldownError) {

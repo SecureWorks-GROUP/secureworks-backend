@@ -15,6 +15,9 @@ import {
 import type { Clue, Stop } from "./types.ts";
 import { type LabourAccounts, onLabourAccount } from "../../_shared/people_accounts.ts";
 
+/** Off until a person turns it on. The matcher reads bill-PDF findings only then. */
+export const BILL_ATTACHMENT_READ_FLAG = "xero_bill_attachment_read_v1";
+
 export interface MatchDocument {
   subject_id: string;
   document_kind: string;
@@ -32,6 +35,8 @@ export interface MatchDocument {
     tracking_option: string | null;
     amount_ex: number | null;
   }>;
+  /** Findings already extracted from a bill PDF. Absent when the switch is off. */
+  attachment_texts?: Array<{ where: string; text: string }>;
 }
 export interface MatchJob extends PrematchJob {
   site_suburb: string | null;
@@ -56,7 +61,46 @@ export function documentTexts(
       where: `line ${i + 1} description`,
       text: line.description ?? "",
     })),
+    ...(doc.attachment_texts ?? []),
   ];
+}
+
+export interface AttachmentFinding {
+  job_numbers?: string[] | null;
+  po_numbers?: string[] | null;
+  order_ref?: string | null;
+  delivery_address?: string | null;
+}
+
+function clipFinding(raw: unknown, max: number): string {
+  return String(raw ?? "").trim().slice(0, max);
+}
+
+/** Clue texts from stored PDF findings. The document text itself is never here. */
+export function attachmentFindingTexts(
+  rows: AttachmentFinding[],
+): Array<{ where: string; text: string }> {
+  const jobs: string[] = [];
+  const pos: string[] = [];
+  const refs: string[] = [];
+  const addresses: string[] = [];
+  const add = (into: string[], raw: unknown, max: number) => {
+    const value = clipFinding(raw, max);
+    if (value && !into.includes(value)) into.push(value);
+  };
+  for (const row of rows ?? []) {
+    for (const n of row?.job_numbers ?? []) add(jobs, n, 40);
+    for (const n of row?.po_numbers ?? []) add(pos, n, 40);
+    add(refs, row?.order_ref, 80);
+    add(addresses, row?.delivery_address, 160);
+  }
+  const where = "bill attachment";
+  const out: Array<{ where: string; text: string }> = [];
+  if (jobs.length) out.push({ where, text: jobs.join(" ") });
+  if (pos.length) out.push({ where, text: pos.join(" ") });
+  if (refs.length) out.push({ where, text: refs.join(" ") });
+  if (addresses.length) out.push({ where, text: addresses.join(" ") });
+  return out;
 }
 const live = (job: PrematchJob) =>
   !job.holding && !DEAD_JOB_STATUSES.has((job.status ?? "").toLowerCase());
