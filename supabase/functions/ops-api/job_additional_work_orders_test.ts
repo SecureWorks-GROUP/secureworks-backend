@@ -1,0 +1,234 @@
+// More than one work order on a job (job_additional_work_orders.ts,
+// migration 20261119090000):
+//   1. which work order a trade's card bills next (pickTradeWorkOrder),
+//   2. the next work order number,
+//   3. the words a trade reads carry no amount,
+//   4. the invoice mode loader: one work order reads exactly as before; with
+//      an additional one the card bills the first one the trade has not
+//      billed, while the cap reads the main work order (whose amount changes
+//      carry the additional one); a failed billed read never degrades.
+import { assert, assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
+import {
+  AdditionalWorkOrderError,
+  assertNoMoneyInText,
+  nextAdditionalWorkOrderNumber,
+  parseAdditionalAgreed,
+  parseScopeItems,
+  pickTradeWorkOrder,
+} from "./job_additional_work_orders.ts";
+import { loadTradeInvoiceJobModes, TradeInvoiceModeReadError } from "./trade_invoice_mode.ts";
+
+const ORG = "00000000-0000-0000-0000-000000000001";
+const JEAN = "44c1f557-f7b2-4f99-9b6b-d7a0f904a0f5";
+const OTHER = "9913309f-35ae-4a71-8e1f-f704ecc526ea";
+const RESTO = "b94fe335-6047-43eb-bd8c-a6df770eb505";
+const SOLO = "b94fe335-6047-43eb-bd8c-a6df770eb506";
+const MAIN = "0130d614-ec87-4f9b-855b-2620b2438b67";
+const EXTRA = "0130d614-ec87-4f9b-855b-2620b2438b68";
+const SOLO_MAIN = "0130d614-ec87-4f9b-855b-2620b2438b69";
+
+const main = { id: MAIN, kind: "job", wo_number: "WO-SWMS-261709", title: null, agreed_labour_ex: "80.00", approved_at: "2026-11-12T10:58:54Z", assigned_user_id: null };
+const extra = { id: EXTRA, kind: "additional", wo_number: "WO-SWRESTO-261719-2", title: "Restoration works", agreed_labour_ex: 432, approved_at: "2026-11-19T01:00:00Z", assigned_user_id: JEAN };
+
+// ── 1. The pick ─────────────────────────────────────────────────────────────
+
+Deno.test("pick: the inspection billed, the restoration is next", () => {
+  const { options, open } = pickTradeWorkOrder([extra, main], JEAN, 80);
+  assertEquals(options.map((o) => [o.wo_number, o.main, o.billed]), [
+    ["WO-SWMS-261709", true, true],
+    ["WO-SWRESTO-261719-2", false, false],
+  ]);
+  assertEquals(open?.id, EXTRA);
+  assertEquals(open?.agreed_ex, 432);
+});
+
+Deno.test("pick: nothing billed yet, the main work order first", () => {
+  assertEquals(pickTradeWorkOrder([extra, main], JEAN, 0).open?.id, MAIN);
+});
+
+Deno.test("pick: a part payment never covers a work order", () => {
+  assertEquals(pickTradeWorkOrder([extra, main], JEAN, 79.99).open?.id, MAIN);
+});
+
+Deno.test("pick: every work order billed, none open", () => {
+  const { options, open } = pickTradeWorkOrder([extra, main], JEAN, 512);
+  assertEquals(open, null);
+  assert(options.every((o) => o.billed));
+});
+
+Deno.test("pick: a work order for another trade is not offered", () => {
+  const { options, open } = pickTradeWorkOrder([extra, main], OTHER, 80);
+  assertEquals(options.map((o) => o.id), [MAIN]);
+  assertEquals(open, null);
+});
+
+Deno.test("pick: draft or crew rows and a missing amount are never offered", () => {
+  const { options } = pickTradeWorkOrder([
+    main,
+    { ...extra, agreed_labour_ex: null },
+    { ...extra, id: "x", kind: "crew" },
+  ], JEAN, 0);
+  assertEquals(options.map((o) => o.id), [MAIN]);
+});
+
+// ── 2. Numbers ──────────────────────────────────────────────────────────────
+
+Deno.test("number: the second, then one past the highest", () => {
+  assertEquals(nextAdditionalWorkOrderNumber("SWRESTO-261719", [{ kind: "job", wo_number: "WO-SWMS-261709" }]), "WO-SWRESTO-261719-2");
+  assertEquals(
+    nextAdditionalWorkOrderNumber("SWRESTO-261719", [
+      { kind: "job", wo_number: "WO-SWMS-261709" },
+      { kind: "additional", wo_number: "WO-SWRESTO-261719-2" },
+      { kind: "additional", wo_number: "WO-SWRESTO-261719-4" },
+    ]),
+    "WO-SWRESTO-261719-5",
+  );
+});
+
+// ── 3. Words a trade reads ──────────────────────────────────────────────────
+
+Deno.test("words: no amount or rate in what a trade reads", () => {
+  assertThrows(() => assertNoMoneyInText("Demo day $352", "The title"), AdditionalWorkOrderError);
+  assertThrows(() => assertNoMoneyInText("8 hours at 44/hr", "The title"), AdditionalWorkOrderError);
+  assertThrows(() => assertNoMoneyInText("44 per hour", "The title"), AdditionalWorkOrderError);
+  assertNoMoneyInText("Strip linings to 1.5 m, 3 RCD boxes, 8 hours", "Scope");
+  assertThrows(() => parseScopeItems([{ description: "Tip run $250" }]), AdditionalWorkOrderError);
+  assertEquals(parseScopeItems([{ description: " Strip out ", hours: "8" }, "Pickup"]), [
+    { description: "Strip out", hours: 8 },
+    { description: "Pickup" },
+  ]);
+});
+
+Deno.test("amount: more than 0, to the cent", () => {
+  assertEquals(parseAdditionalAgreed("432"), 432);
+  assertEquals(parseAdditionalAgreed(352.004), 352);
+  assertThrows(() => parseAdditionalAgreed(0), AdditionalWorkOrderError);
+  assertThrows(() => parseAdditionalAgreed(""), AdditionalWorkOrderError);
+});
+
+// ── 4. The invoice mode loader ──────────────────────────────────────────────
+
+type World = { workOrders: any[]; lines?: any[]; failLines?: boolean };
+
+function fakeClient(world: World) {
+  return {
+    from(table: string) {
+      const filters: Array<[string, string, unknown]> = [];
+      const rows = (): any[] => {
+        if (table === "users") return [{ id: JEAN, org_id: ORG, invoice_type: "hourly", managed_verticals: [], invoice_any_job: null }];
+        if (table === "jobs") {
+          return [RESTO, SOLO].map((id, i) => ({
+            id, org_id: ORG, type: "makesafe", job_number: `SWRESTO-26171${9 + i}`,
+            metadata: { makesafe_job_family: "restoration" }, created_by: null,
+          }));
+        }
+        if (table === "work_orders") return world.workOrders;
+        if (table === "trade_invoice_lines") return world.lines ?? [];
+        return [];
+      };
+      const value = (row: any, col: string) =>
+        col.split(".").reduce((v: any, k) => (v == null ? v : v[k]), row);
+      const result = () => {
+        if (table === "trade_invoice_lines" && world.failLines) return { data: null, error: { message: "boom" } };
+        return {
+          data: rows().filter((row) =>
+            filters.every(([op, col, val]) =>
+              op === "eq"
+                ? String(value(row, col)) === String(val)
+                : (val as unknown[]).map(String).includes(String(value(row, col)))
+            )
+          ),
+          error: null,
+        };
+      };
+      const builder: any = {
+        select: () => builder,
+        neq: () => builder,
+        order: () => builder,
+        range: () => builder,
+        eq(col: string, val: unknown) {
+          filters.push(["eq", col, val]);
+          return builder;
+        },
+        in(col: string, val: unknown[]) {
+          filters.push(["in", col, val]);
+          return builder;
+        },
+        maybeSingle() {
+          const r = result();
+          return Promise.resolve(r.error ? r : { data: r.data?.[0] ?? null, error: null });
+        },
+        then(resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) {
+          return Promise.resolve(result()).then(resolve, reject);
+        },
+      };
+      return builder;
+    },
+    rpc: () => Promise.resolve({ data: null, error: null }),
+  };
+}
+
+const row = (o: any) => ({ org_id: ORG, status: "approved", ...o });
+const WOS = [
+  row({ ...main, job_id: RESTO }),
+  row({ ...extra, job_id: RESTO }),
+  row({ id: SOLO_MAIN, kind: "job", job_id: SOLO, agreed_labour_ex: 160, approved_at: "2026-11-12T00:00:00Z" }),
+];
+const inspectionLine = {
+  id: "l1", job_id: RESTO, line_type: "work order", line_total_ex: 80,
+  trade_invoices: { user_id: JEAN, status: "paid" },
+};
+
+const load = (client: any, jobIds = [RESTO, SOLO]) =>
+  loadTradeInvoiceJobModes(client, {
+    tradeId: JEAN,
+    orgId: ORG,
+    jobIds,
+    jobVertical: (job: any) => String(job.type),
+    normaliseManagedVerticals: () => [],
+  });
+
+Deno.test("loader: one work order on a job reads exactly as before", async () => {
+  const out = await load(fakeClient({ workOrders: WOS, lines: [inspectionLine] }), [SOLO]);
+  const solo = out.jobs[0] as any;
+  assertEquals(solo.invoice_mode, "work_order");
+  assertEquals([solo.work_order_agreed_ex, solo.job_work_order_id], [160, SOLO_MAIN]);
+  assert(!("cap_work_order_id" in solo) && !("work_orders" in solo));
+});
+
+Deno.test("loader: the inspection billed, the card bills the restoration; the cap reads the main order", async () => {
+  const out = await load(fakeClient({ workOrders: WOS, lines: [inspectionLine] }));
+  const resto = out.jobs.find((j) => j.job_id === RESTO) as any;
+  assertEquals(resto.invoice_mode, "work_order");
+  assertEquals([resto.work_order_agreed_ex, resto.job_work_order_id], [432, EXTRA]);
+  assertEquals([resto.cap_work_order_id, resto.cap_agreed_ex], [MAIN, 80]);
+  assertEquals(resto.work_orders.map((o: any) => [o.id, o.billed]), [[MAIN, true], [EXTRA, false]]);
+});
+
+Deno.test("loader: a draft or rejected invoice does not count as billed", async () => {
+  for (const status of ["draft", "ops-reject"]) {
+    const out = await load(fakeClient({
+      workOrders: WOS,
+      lines: [{ ...inspectionLine, trade_invoices: { user_id: JEAN, status } }],
+    }), [RESTO]);
+    assertEquals((out.jobs[0] as any).job_work_order_id, MAIN, status);
+  }
+});
+
+Deno.test("loader: commission and another trade's lines never count", async () => {
+  const out = await load(fakeClient({
+    workOrders: WOS,
+    lines: [
+      { ...inspectionLine, line_type: "commission" },
+      { ...inspectionLine, id: "l2", trade_invoices: { user_id: OTHER, status: "paid" } },
+    ],
+  }), [RESTO]);
+  assertEquals((out.jobs[0] as any).job_work_order_id, MAIN);
+});
+
+Deno.test("loader: what was billed cannot be read, so nothing is decided", async () => {
+  await assertRejects(
+    () => load(fakeClient({ workOrders: WOS, failLines: true }), [RESTO]),
+    TradeInvoiceModeReadError,
+  );
+});

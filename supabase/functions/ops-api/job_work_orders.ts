@@ -2548,12 +2548,27 @@ export async function tradeJobWorkOrderRead(
   if (error) {
     fail(500, "variations_unreadable", "Your variations could not be read");
   }
+  // The job's other work orders (job_additional_work_orders.ts), approved
+  // only, through the same allowlist: never an amount.
+  const { data: additionalRows, error: additionalErr } = await client.from("work_orders")
+    .select(`${WO_COLUMNS}, title, assigned_user_id`)
+    .eq("job_id", jobId).eq("kind", "additional").eq("status", "approved")
+    .order("approved_at", { ascending: true });
+  if (additionalErr) {
+    fail(500, "work_orders_unreadable", "The job's other work orders could not be read");
+  }
+  const additional = (additionalRows || []).map((wo: any) => ({
+    ...projectTradeJobWorkOrder(wo, job, redact),
+    title: typeof wo.title === "string" ? redact.text(wo.title, "title") : null,
+    for_me: !wo.assigned_user_id || String(wo.assigned_user_id) === String(viewerId),
+  }));
   return {
     schema: TRADE_JOB_WORK_ORDER_SCHEMA,
     job_id: jobId,
     work_order: live
       ? projectTradeJobWorkOrder(live, job, redact, addenda)
       : null,
+    additional_work_orders: additional,
     reason: live ? null : "no_approved_work_order",
     can_report_variation: JOB_WORK_ORDER_JOB_TYPES.has(String(job.type || "")),
     my_variations: (mine || []).map((v: any) => ({

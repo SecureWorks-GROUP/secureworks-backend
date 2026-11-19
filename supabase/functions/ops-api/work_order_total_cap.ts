@@ -394,6 +394,12 @@ export type WorkOrderCapMode = {
   invoice_mode_reason?: string | null;
   work_order_agreed_ex: number | null;
   job_work_order_id: string | null;
+  /** The job's main work order and its own agreed labour (more than one
+   *  work order on the job: job_additional_work_orders.ts). The cap is the
+   *  main order plus its amount changes, which carry every additional order.
+   *  Absent from an older answer: the two fields above. */
+  cap_work_order_id?: string | null;
+  cap_agreed_ex?: number | null;
 };
 
 /** A job paid by the hour up to the maximum its job budget seals. */
@@ -472,8 +478,8 @@ export async function checkWorkOrderTotalCap(client: any, input: {
     capped.map((m) => ({
       jobId: m.job_id,
       ref: refs.get(m.job_id) || m.job_id,
-      agreedEx: Number(m.work_order_agreed_ex),
-      workOrderId: String(m.job_work_order_id),
+      agreedEx: Number(m.cap_agreed_ex ?? m.work_order_agreed_ex),
+      workOrderId: String(m.cap_work_order_id ?? m.job_work_order_id),
     })),
     { excludeLineIds: input.excludeLineIds },
   );

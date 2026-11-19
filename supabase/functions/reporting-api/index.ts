@@ -908,7 +908,7 @@ async function marketingSummary(sb: any) {
   // Attributed acquisitions (have GCLID = confirmed Google Ads source)
   const gclMatches = (allContactMatches || []).filter((m: any) => m.gclid)
   const attributedJobIds = new Set(gclMatches.map((m: any) => m.job_id))
-  const attributedAcquisitions = [...attributedJobIds].filter(id => wonJobIds.has(id)).length
+  const attributedAcquisitions = [...attributedJobIds].filter(id => wonJobIds.has(String(id))).length
 
   // CPA: use total acquisitions (blended) since most historical jobs lack GCLID attribution
   const cpa = totalAcquisitions > 0 ? Math.round(totalSpend90 / totalAcquisitions) : 0
@@ -3985,7 +3985,7 @@ async function cashLeakDetection(sb: any) {
   const totalLosses = (underperforming || []).reduce((s: number, j: any) => s + (j.loss || 0), 0)
   const totalUnbilledValue = (unbilled as any[]).reduce((s: number, j: any) => s + (j.estimated_value || 0), 0)
   const totalBadDebt = (badDebt || []).reduce((s: number, d: any) => s + (Number(d.amount_due) || 0), 0)
-  const totalNoDeposit = noDeposit.reduce((s, j) => s + j.po_value, 0)
+  const totalNoDeposit = noDeposit.reduce((s: number, j: any) => s + j.po_value, 0)
   const totalLeaked = totalLosses + totalBadDebt
 
   const actions: string[] = []
@@ -4059,7 +4059,7 @@ async function computeJobIntelligence(sb: any, jobId: string) {
     sb.from('work_orders')
       .select('id, wo_number, status, scope_items, scheduled_date, completed_at')
       .eq('job_id', jobId)
-      .neq('kind', 'job'),
+      .neq('kind', 'job').neq('kind', 'additional'),
     // Job assignments
     sb.from('job_assignments')
       .select('id, user_id, crew_name, scheduled_date, scheduled_end, status')
