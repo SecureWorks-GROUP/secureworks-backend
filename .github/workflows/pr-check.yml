@@ -594,11 +594,18 @@ jobs:
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ops-api/expense_capture_v2_test.ts \
             supabase/functions/ops-api/expense_own_job_test.ts \
-            supabase/functions/ops-api/expense_reimbursement_lines_test.ts
-          # This file's source-slice test fails on main already; run the
-          # not-booked case on its own until that test is repaired.
-          deno test --no-check --allow-read --allow-env --filter "cl-receipt-ownjob" \
+            supabase/functions/ops-api/expense_reimbursement_lines_test.ts \
             supabase/functions/ops-api/trade_invoice_reimbursement_test.ts
+
+      # Five tests that were red on main (the tests were wrong, the code right;
+      # director 19 Nov). Every case runs, with no filter.
+      - name: Test the paid AI register, make-safe access shape, pay effort and trade invoice rejection
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/_shared/paid_ai_register_test.ts \
+            supabase/functions/ops-api/makesafe_access_shape_test.ts \
+            supabase/functions/ops-api/pay_effort_stats_test.ts \
+            supabase/functions/ops-api/trade_invoice_rejection_test.ts
 
       - name: Test trade recurring deductions
         run: |
@@ -892,7 +899,15 @@ jobs:
       - name: Test the bill matcher runner
         run: |
           deno test --no-check --allow-read --allow-env \
-            supabase/functions/xero-sync/match/match_run_test.ts
+            supabase/functions/xero-sync/match/match_run_test.ts \
+            supabase/functions/xero-sync/paused_run_log_test.ts
+
+      # Division months (division_tieout_v1, off): the parse, the store and
+      # trim, and the lease that lets one run at a time store. Fake client only.
+      - name: Test the division month accounts
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/xero-sync/pl_by_division_test.ts
 
       # The email reader (EM2) and its group history walk (W7): cursor
       # handling, the restart loop of 5 Oct 2026 and resume-where-it-stopped,

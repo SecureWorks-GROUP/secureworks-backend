@@ -23,6 +23,7 @@ import {
   myHours,
 } from "./index.ts";
 import { LEFT_HIDDEN_WORDS } from "./trade_line_hold.ts";
+import { perthToday } from "./trade_invoice_time_entry.ts";
 import {
   decideTradeInvoiceMode,
   isWorkOrderInvoiceItem,
@@ -761,7 +762,10 @@ handlerTest("self_allocate_for_invoice: a plain trade passes the front door (the
   const out = await call("self_allocate_for_invoice", {
     method: "POST",
     role: "installer",
-    body: { job_id: FOREIGN, work_date: "2026-11-10" },
+    // A worked day nine days before the route's own clock (Perth today), so
+    // the date rule passes whatever the real date. The handler reads that
+    // clock itself; a fixed date turns "more than a year ago" in Nov 2027.
+    body: { job_id: FOREIGN, work_date: perthToday(new Date(Date.now() - 9 * 86_400_000)) },
   });
   // Never the staff-role refusal: the route itself answers (the job is
   // another company's, so it is not found).
@@ -799,7 +803,7 @@ Deno.test("loader: a work-order job with an approved job work order says its agr
   const woReads = client.reads.filter((r) => r.table === "work_orders");
   assertEquals(woReads.length, 1);
   const filters = woReads[0].filters;
-  assert(filters.some(([op, col, val]) => op === "eq" && col === "kind" && val === "job"));
+  assertEquals(filters.find(([op, col]) => op === "in" && col === "kind")?.[2], ["job", "additional"]);
   assert(filters.some(([op, col, val]) => op === "eq" && col === "status" && val === "approved"));
   assert(filters.some(([op, col, val]) => op === "eq" && col === "org_id" && val === ORG));
   assertEquals(filters.find(([op, col]) => op === "in" && col === "job_id")?.[2], [FENCE]);

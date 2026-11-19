@@ -26,11 +26,12 @@ import { automationLaneEnabled } from '../_shared/automation_switch.ts'
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldownError, xeroAppKey } from '../_shared/xero_cooldown.ts'
+import { logPausedRun } from './paused_run_log.ts'
 import { createXeroSyncTransport } from './xero_transport.ts'
 import { syncBankTransactionLines } from './bank_transactions.ts'
 import { syncXeroAccounts } from './accounts.ts'
 import { trackingOptionRows } from './tracking_options.ts'
-import { divisionSyncOfficeHours, storeDivisionMonth } from './pl_by_division.ts'
+import { claimDivisionLease, divisionSyncOfficeHours, releaseDivisionLease, renewDivisionLease, storeDivisionMonth } from './pl_by_division.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
 import { runInvoiceMirrorCheck } from './xero_mirror_check.ts'
 import { autoReleaseVoidedTradeInvoices } from '../ops-api/trade_invoice_voided_release.ts'
@@ -1270,192 +1271,204 @@ async function syncInvoices(sb: any) {
     { onConflict: 'key' },
   )
 
-  // P2-02.7: propose a job for the bills this sync changed, then queued and
-  // waiting bills, then unallocated supplier credits (Follow-up 66), after the
-  // paging and with one budget. Proposals only;
-  // never fails the sync.
-  if (matcher.on) {
-    try {
-      matchRun = await syncMatchStep(sb, { on: true, changed: [...matchChanged] })
-    } catch {
-      matchRun = { switch: 'off', error: 'match_step_threw' }
-      console.error('[xero-sync] matcher step threw')
+  // A Xero pause from here to the log write still logs the run, as 'paused',
+  // with the matcher's counts, and is thrown again (still 429). A pause during
+  // the paging above, before the matcher, is not logged.
+  return await logPausedRun(sb, DEFAULT_ORG_ID, () => ({
+    synced: totalSynced,
+    cost_lines: { lines_written: costLinesWritten, mirrors_stopped: costMirrorStops },
+    cost_lines_changed: [...costLinesChanged],
+    cost_lines_errors: costLinesErrors,
+    cost_lines_match: matchRun,
+    modified_since: modifiedSince,
+  }), async () => {
+    // P2-02.7: propose a job for the bills this sync changed, then queued and
+    // waiting bills, then unallocated supplier credits (Follow-up 66), after the
+    // paging and with one budget. Proposals only;
+    // never fails the sync.
+    if (matcher.on) {
+      try {
+        matchRun = await syncMatchStep(sb, { on: true, changed: [...matchChanged] })
+      } catch {
+        matchRun = { switch: 'off', error: 'match_step_threw' }
+        console.error('[xero-sync] matcher step threw')
+      }
     }
-  }
 
-  // ── Paid close-out catch-up: invoiced and final_payment fencing and patio cards whose
-  //    last invoice was paid before the card got there (switch on only; ops-api decides).
-  let closeoutCatchUp: unknown = { ran: false, reason: 'switch_off' }
-  if (await closeoutMoveEnabled(sb)) {
-    closeoutCatchUp = await postOpsApi('job_closeout_catch_up', { source: 'job_closeout_catch_up' })
-  }
-  const closeout = { on_paid: closeoutResults, catch_up: closeoutCatchUp }
+    // ── Paid close-out catch-up: invoiced and final_payment fencing and patio cards whose
+    //    last invoice was paid before the card got there (switch on only; ops-api decides).
+    let closeoutCatchUp: unknown = { ran: false, reason: 'switch_off' }
+    if (await closeoutMoveEnabled(sb)) {
+      closeoutCatchUp = await postOpsApi('job_closeout_catch_up', { source: 'job_closeout_catch_up' })
+    }
+    const closeout = { on_paid: closeoutResults, catch_up: closeoutCatchUp }
 
-  // ── Deposit advance catch-up: accepted and awaiting_deposit fencing and patio cards whose
-  //    deposits were paid before the card got there or before the switch was on, accepted
-  //    cards whose deposit Xero marks sent (landed in Awaiting Deposit), and moved cards
-  //    whose deposit was since voided (switch on only; ops-api decides).
-  let depositCatchUp: unknown = { ran: false, reason: 'switch_off' }
-  if (await depositAdvanceOn(sb)) {
-    depositCatchUp = await postOpsApi('job_deposit_catch_up', { source: 'job_deposit_catch_up' })
-  }
-  const depositAdvance = { on_change: depositResults, catch_up: depositCatchUp }
+    // ── Deposit advance catch-up: accepted and awaiting_deposit fencing and patio cards whose
+    //    deposits were paid before the card got there or before the switch was on, accepted
+    //    cards whose deposit Xero marks sent (landed in Awaiting Deposit), and moved cards
+    //    whose deposit was since voided (switch on only; ops-api decides).
+    let depositCatchUp: unknown = { ran: false, reason: 'switch_off' }
+    if (await depositAdvanceOn(sb)) {
+      depositCatchUp = await postOpsApi('job_deposit_catch_up', { source: 'job_deposit_catch_up' })
+    }
+    const depositAdvance = { on_change: depositResults, catch_up: depositCatchUp }
 
-  // ── Paid-invoice receipt catch-up: in-window paid invoices with no receipt claim yet
-  //    (switch on only; ops-api job_receipt.ts decides).
-  let receiptCatchUp: unknown = { ran: false, reason: 'sender_off' }
-  if (await receiptSenderOn(sb)) {
-    receiptCatchUp = await postOpsApi('job_receipt_catch_up', { source: 'job_receipt_catch_up' })
-  }
-  const receipts = { on_paid: receiptResults, catch_up: receiptCatchUp }
+    // ── Paid-invoice receipt catch-up: in-window paid invoices with no receipt claim yet
+    //    (switch on only; ops-api job_receipt.ts decides).
+    let receiptCatchUp: unknown = { ran: false, reason: 'sender_off' }
+    if (await receiptSenderOn(sb)) {
+      receiptCatchUp = await postOpsApi('job_receipt_catch_up', { source: 'job_receipt_catch_up' })
+    }
+    const receipts = { on_paid: receiptResults, catch_up: receiptCatchUp }
 
-  // ── Trade bill PDFs: targeted sweep for bills the incremental loop never re-reads ──
-  const tradePdfSweep = await sweepTradeBillPdfs(sb, accessToken, tenantId)
-  // Crew bills paid in Xero that the incremental window passed over.
-  let tradeBillCatchUp: unknown = null
-  try { tradeBillCatchUp = await catchUpTradeBillStatusFromMirror(sb) } catch (e) { console.log('[xero-sync] trade bill catch-up failed:', (e as Error).message) }
-  // Standing policy (owner, 6 Nov 2026): a trade bill voided or deleted in Xero
-  // with nothing paid frees its week. Each bill is re-read from Xero first; one
-  // with any payment or credit, or a group share, is left for the office.
-  let tradeBillVoidRelease: unknown = null
-  try {
-    tradeBillVoidRelease = await autoReleaseVoidedTradeInvoices(sb, { getToken, xeroGet })
-  } catch (e) {
-    if (e instanceof XeroCooldownError) throw e
-    console.log('[xero-sync] voided trade bill release failed:', (e as Error).message)
-  }
+    // ── Trade bill PDFs: targeted sweep for bills the incremental loop never re-reads ──
+    const tradePdfSweep = await sweepTradeBillPdfs(sb, accessToken, tenantId)
+    // Crew bills paid in Xero that the incremental window passed over.
+    let tradeBillCatchUp: unknown = null
+    try { tradeBillCatchUp = await catchUpTradeBillStatusFromMirror(sb) } catch (e) { console.log('[xero-sync] trade bill catch-up failed:', (e as Error).message) }
+    // Standing policy (owner, 6 Nov 2026): a trade bill voided or deleted in Xero
+    // with nothing paid frees its week. Each bill is re-read from Xero first; one
+    // with any payment or credit, or a group share, is left for the office.
+    let tradeBillVoidRelease: unknown = null
+    try {
+      tradeBillVoidRelease = await autoReleaseVoidedTradeInvoices(sb, { getToken, xeroGet })
+    } catch (e) {
+      if (e instanceof XeroCooldownError) throw e
+      console.log('[xero-sync] voided trade bill release failed:', (e as Error).message)
+    }
 
-  // ── Customer contacts created without a postal address: heal a few per run ──
-  const contactAddressSweep = await sweepContactAddresses(sb, accessToken, tenantId)
+    // ── Customer contacts created without a postal address: heal a few per run ──
+    const contactAddressSweep = await sweepContactAddresses(sb, accessToken, tenantId)
 
-  // ── Match unlinked invoices after sync ──
-  const matchResult = await matchUnlinkedInvoicesOnChange(sb, totalSynced)
+    // ── Match unlinked invoices after sync ──
+    const matchResult = await matchUnlinkedInvoicesOnChange(sb, totalSynced)
 
-  // ── Invoice evidence onto its job (B-4) ──
-  // Rows about an invoice that now has a job go to that job in this pass, so a payment
-  // recorded before its invoice was linked follows the link above (B3). The reference
-  // matcher's plan and review queue stay off until context_xero_evidence_place_v1.
-  // Moves only evidence rows; never links an invoice. A failure never breaks the sync.
-  let invoiceEvidence: unknown
-  try {
-    invoiceEvidence = await placeRecentInvoiceEvidence(sb)
-  } catch (e: any) {
-    invoiceEvidence = { ran: false, reason: 'error', error: (e as Error).message }
-    console.error('[xero-sync] Invoice evidence placement error:', (e as Error).message)
-  }
+    // ── Invoice evidence onto its job (B-4) ──
+    // Rows about an invoice that now has a job go to that job in this pass, so a payment
+    // recorded before its invoice was linked follows the link above (B3). The reference
+    // matcher's plan and review queue stay off until context_xero_evidence_place_v1.
+    // Moves only evidence rows; never links an invoice. A failure never breaks the sync.
+    let invoiceEvidence: unknown
+    try {
+      invoiceEvidence = await placeRecentInvoiceEvidence(sb)
+    } catch (e: any) {
+      invoiceEvidence = { ran: false, reason: 'error', error: (e as Error).message }
+      console.error('[xero-sync] Invoice evidence placement error:', (e as Error).message)
+    }
 
-  // ── Materials-actuals ingestion (U3) and the bill pre-match run on their own schedules ──
-  // (3 Nov 2026, migration 20261103170000: xero-materials-ingest, xero-bill-prematch and
-  // xero-materials-ingest-all). Inside this run, with every bill read (#1184), they used up the
-  // run's CPU time from 29 Oct: each run was stopped there, so the bank feed copy, the stale
-  // invoice re-check and settlement capture below never ran and no proposal was written after 31 Oct.
-  const materialsResult = { ran: false, reason: 'own_schedule' }
+    // ── Materials-actuals ingestion (U3) and the bill pre-match run on their own schedules ──
+    // (3 Nov 2026, migration 20261103170000: xero-materials-ingest, xero-bill-prematch and
+    // xero-materials-ingest-all). Inside this run, with every bill read (#1184), they used up the
+    // run's CPU time from 29 Oct: each run was stopped there, so the bank feed copy, the stale
+    // invoice re-check and settlement capture below never ran and no proposal was written after 31 Oct.
+    const materialsResult = { ran: false, reason: 'own_schedule' }
 
-  // ── Bank-transactions sync (M9 data substrate) — early-enabled so real
-  //    bank-feed SPEND lines accumulate for M9 receipt-pairing tolerances.
-  //    Isolated like the materials step: any failure here can NEVER break the
-  //    invoice sync. (syncBankTransactions can throw — unlike ingestMaterialsActuals
-  //    which swallows internally — so the try/catch reproduces that isolation here.)
-  let bankTxnResult: any
-  try {
-    bankTxnResult = await syncBankTransactions(sb)
-  } catch (e: any) {
-    if (e instanceof XeroCooldownError) throw e
-    bankTxnResult = { success: false, error: (e as Error).message }
-    console.error('[xero-sync] Bank-transactions sync error:', (e as Error).message)
-  }
+    // ── Bank-transactions sync (M9 data substrate) — early-enabled so real
+    //    bank-feed SPEND lines accumulate for M9 receipt-pairing tolerances.
+    //    Isolated like the materials step: any failure here can NEVER break the
+    //    invoice sync. (syncBankTransactions can throw — unlike ingestMaterialsActuals
+    //    which swallows internally — so the try/catch reproduces that isolation here.)
+    let bankTxnResult: any
+    try {
+      bankTxnResult = await syncBankTransactions(sb)
+    } catch (e: any) {
+      if (e instanceof XeroCooldownError) throw e
+      bankTxnResult = { success: false, error: (e as Error).message }
+      console.error('[xero-sync] Bank-transactions sync error:', (e as Error).message)
+    }
 
-  // ── Reconciliation: verify stale local invoices against Xero ──
-  // Find local AUTHORISED/SUBMITTED invoices that haven't been synced in one hour
-  // and check if they still exist in Xero with that status
-  // One unverifiable invoice used to break the loop, and the same row is first
-  // in every selection, so a single bad identity froze reconciliation forever.
-  // reconcileStaleXeroInvoices continues past per-invoice provider failures,
-  // records them, and only a cooldown or a token failure stops the batch.
-  let reconciled = 0
-  let reconciliationError: Record<string, unknown> | null = null
-  let reconciliationSummary: Record<string, unknown> | null = null
-  const stampCounts = { stamps: 0, contradictions: 0 }
-  try {
-    // A token failure here is a run-wide fact and still stops reconciliation.
-    const { accessToken: at2, tenantId: tid2 } = await getToken(sb)
-    const summary = await reconcileStaleXeroInvoices(
-      sb,
-      DEFAULT_ORG_ID,
-      (invoiceId: string) => xeroGet(`/Invoices/${invoiceId}`, at2, tid2, {}),
-      undefined,
-      depositStampHook(sb, stampCounts),
-    )
-    reconciled = summary.reconciled
-    reconciliationSummary = { ...summary }
-    if (summary.failed > 0) reconciliationError = summary.last_error
-  } catch (e: any) {
-    if (e instanceof XeroCooldownError) throw e
-    reconciliationError = { error: e.message }
-    console.error('[xero-sync] Reconciliation error:', (e as Error).message)
-  }
+    // ── Reconciliation: verify stale local invoices against Xero ──
+    // Find local AUTHORISED/SUBMITTED invoices that haven't been synced in one hour
+    // and check if they still exist in Xero with that status
+    // One unverifiable invoice used to break the loop, and the same row is first
+    // in every selection, so a single bad identity froze reconciliation forever.
+    // reconcileStaleXeroInvoices continues past per-invoice provider failures,
+    // records them, and only a cooldown or a token failure stops the batch.
+    let reconciled = 0
+    let reconciliationError: Record<string, unknown> | null = null
+    let reconciliationSummary: Record<string, unknown> | null = null
+    const stampCounts = { stamps: 0, contradictions: 0 }
+    try {
+      // A token failure here is a run-wide fact and still stops reconciliation.
+      const { accessToken: at2, tenantId: tid2 } = await getToken(sb)
+      const summary = await reconcileStaleXeroInvoices(
+        sb,
+        DEFAULT_ORG_ID,
+        (invoiceId: string) => xeroGet(`/Invoices/${invoiceId}`, at2, tid2, {}),
+        undefined,
+        depositStampHook(sb, stampCounts),
+      )
+      reconciled = summary.reconciled
+      reconciliationSummary = { ...summary }
+      if (summary.failed > 0) reconciliationError = summary.last_error
+    } catch (e: any) {
+      if (e instanceof XeroCooldownError) throw e
+      reconciliationError = { error: e.message }
+      console.error('[xero-sync] Reconciliation error:', (e as Error).message)
+    }
 
-  // ── Customer allocations (A4 V27): at most once an hour, re-read each sales invoice
-  //    whose credit note, overpayment or prepayment allocations in Xero our copy lacks
-  //    (customer_allocations.ts). Reads Xero only; a failure never breaks the sync.
-  let customerAllocations: unknown
-  try {
-    const { accessToken: at3, tenantId: tid3 } = await getToken(sb)
-    customerAllocations = await syncCustomerAllocations(sb, DEFAULT_ORG_ID, tid3,
-      (path, params, headers) => xeroGet(path, at3, tid3, params, headers),
-      (invoiceId: string) => xeroGet(`/Invoices/${invoiceId}`, at3, tid3, {}),
-      undefined, depositStampHook(sb, stampCounts))
-  } catch (e: any) {
-    if (e instanceof XeroCooldownError) throw e
-    customerAllocations = { ran: false, reason: 'error', error: e.message }
-    console.error('[xero-sync] Customer allocation check failed:', e.message)
-  }
-  depositStamps += stampCounts.stamps
-  depositStampContradictions += stampCounts.contradictions
+    // ── Customer allocations (A4 V27): at most once an hour, re-read each sales invoice
+    //    whose credit note, overpayment or prepayment allocations in Xero our copy lacks
+    //    (customer_allocations.ts). Reads Xero only; a failure never breaks the sync.
+    let customerAllocations: unknown
+    try {
+      const { accessToken: at3, tenantId: tid3 } = await getToken(sb)
+      customerAllocations = await syncCustomerAllocations(sb, DEFAULT_ORG_ID, tid3,
+        (path, params, headers) => xeroGet(path, at3, tid3, params, headers),
+        (invoiceId: string) => xeroGet(`/Invoices/${invoiceId}`, at3, tid3, {}),
+        undefined, depositStampHook(sb, stampCounts))
+    } catch (e: any) {
+      if (e instanceof XeroCooldownError) throw e
+      customerAllocations = { ran: false, reason: 'error', error: e.message }
+      console.error('[xero-sync] Customer allocation check failed:', e.message)
+    }
+    depositStamps += stampCounts.stamps
+    depositStampContradictions += stampCounts.contradictions
 
-  // Independent payment/batch modification cursor. This capture never calls a
-  // provider write or changes invoice amounts, attribution, debt or job state.
-  // It runs after every existing step on purpose: a Xero cooldown it hits is
-  // rethrown, and must not skip the deposit stamps or reconciliation above.
-  let settlementEvidence: unknown
-  try {
-    settlementEvidence = await syncSettlementEvidence(sb, DEFAULT_ORG_ID, tenantId,
-      (path, params, headers) => xeroGet(path, accessToken, tenantId, params, headers))
-  } catch (e: any) {
-    if (e instanceof XeroCooldownError) throw e
-    settlementEvidence = { success: false, error: e.message }
-    console.error('[xero-sync] Settlement evidence capture failed:', e.message)
-  }
+    // Independent payment/batch modification cursor. This capture never calls a
+    // provider write or changes invoice amounts, attribution, debt or job state.
+    // It runs after every existing step on purpose: a Xero cooldown it hits is
+    // rethrown, and must not skip the deposit stamps or reconciliation above.
+    let settlementEvidence: unknown
+    try {
+      settlementEvidence = await syncSettlementEvidence(sb, DEFAULT_ORG_ID, tenantId,
+        (path, params, headers) => xeroGet(path, accessToken, tenantId, params, headers))
+    } catch (e: any) {
+      if (e instanceof XeroCooldownError) throw e
+      settlementEvidence = { success: false, error: e.message }
+      console.error('[xero-sync] Settlement evidence capture failed:', e.message)
+    }
 
-  // Supplier credit notes (TP-07 slice 1): off until xero_supplier_credit_notes_v1.
-  // Reads Xero only and copies ACCPAYCREDIT notes and their allocations; counts no
-  // money. A failure never breaks the sync; a cooldown is rethrown like the step above.
-  let supplierCreditNotes: unknown
-  try {
-    supplierCreditNotes = await syncSupplierCreditNotes(sb, DEFAULT_ORG_ID, tenantId,
-      (path, params, headers) => xeroGet(path, accessToken, tenantId, params, headers))
-  } catch (e: any) {
-    if (e instanceof XeroCooldownError) throw e
-    supplierCreditNotes = { ran: false, reason: 'error', error: e.message }
-    console.error('[xero-sync] Supplier credit note copy failed:', e.message)
-  }
+    // Supplier credit notes (TP-07 slice 1): off until xero_supplier_credit_notes_v1.
+    // Reads Xero only and copies ACCPAYCREDIT notes and their allocations; counts no
+    // money. A failure never breaks the sync; a cooldown is rethrown like the step above.
+    let supplierCreditNotes: unknown
+    try {
+      supplierCreditNotes = await syncSupplierCreditNotes(sb, DEFAULT_ORG_ID, tenantId,
+        (path, params, headers) => xeroGet(path, accessToken, tenantId, params, headers))
+    } catch (e: any) {
+      if (e instanceof XeroCooldownError) throw e
+      supplierCreditNotes = { ran: false, reason: 'error', error: e.message }
+      console.error('[xero-sync] Supplier credit note copy failed:', e.message)
+    }
 
-  // ── Mirror check: does our copy owe the same as Xero? At most once an hour. ──
-  // Last on purpose: it reads Xero's open list, heals our copy where Xero says money is
-  // owed and the copy disagrees, and records the result for the Debt tab. It never
-  // throws, so it cannot break the sync or skip any step above.
-  const mirrorCheck = await invoiceMirrorCheck(sb, false)
+    // ── Mirror check: does our copy owe the same as Xero? At most once an hour. ──
+    // Last on purpose: it reads Xero's open list, heals our copy where Xero says money is
+    // owed and the copy disagrees, and records the result for the Debt tab. It never
+    // throws, so it cannot break the sync or skip any step above.
+    const mirrorCheck = await invoiceMirrorCheck(sb, false)
 
-  // Log sync
-  await sb.from('webhook_log').insert({
-    org_id: DEFAULT_ORG_ID,
-    source: 'xero',
-    event_type: 'sync_invoices',
-    payload: { synced: totalSynced, cost_lines: { lines_written: costLinesWritten, mirrors_stopped: costMirrorStops }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, cost_lines_match: matchRun, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
-    status: 'processed',
+    // Log sync
+    await sb.from('webhook_log').insert({
+      org_id: DEFAULT_ORG_ID,
+      source: 'xero',
+      event_type: 'sync_invoices',
+      payload: { synced: totalSynced, cost_lines: { lines_written: costLinesWritten, mirrors_stopped: costMirrorStops }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, cost_lines_match: matchRun, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance },
+      status: 'processed',
+    })
+
+    return { success: true, synced: totalSynced, cost_lines: { lines_written: costLinesWritten, mirrors_stopped: costMirrorStops }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, cost_lines_match: matchRun, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
   })
-
-  return { success: true, synced: totalSynced, cost_lines: { lines_written: costLinesWritten, mirrors_stopped: costMirrorStops }, cost_lines_changed: [...costLinesChanged], cost_lines_errors: costLinesErrors, cost_lines_match: matchRun, mirror_check: mirrorCheck, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, customer_allocations: customerAllocations, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, supplier_credit_notes: supplierCreditNotes, trade_pdf_sweep: tradePdfSweep, trade_bill_catch_up: tradeBillCatchUp, trade_bill_void_release: tradeBillVoidRelease, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout, receipts, deposit_advance: depositAdvance }
 }
 
 
@@ -2938,6 +2951,17 @@ export async function syncTrackingPL(sb: any, readXero = xeroGet, clock = () => 
   }
   let accountRows = 0
   let accountMonths = 0
+  // One run at a time stores division months (pl_by_division.ts). Asked only
+  // when the switch would store: with it off nothing here runs.
+  let leaseRunId: string | null = null
+  let leaseHeld = false
+  if (storeAccounts) {
+    leaseRunId = crypto.randomUUID()
+    const claim = await claimDivisionLease(sb, leaseRunId, now)
+    leaseHeld = claim === 'claimed'
+    if (claim === 'held') console.error('[xero-sync] division_accounts_lease_held')
+    if (claim === 'failed') console.error('[xero-sync] division_accounts_lease_unwritable')
+  }
 
   let optionsSynced: number | null = null
   try {
@@ -2952,96 +2976,105 @@ export async function syncTrackingPL(sb: any, readXero = xeroGet, clock = () => 
     console.error('[xero-sync] tracking options not stored', error)
   }
 
-  // Fetch P&L by tracking category for last 12 months (one month at a time)
-  for (let i = 0; i < 12; i++) {
-    const monthStart = new Date(now.getFullYear(), now.getMonth() - i, 1)
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() - i + 1, 0)
-    const fromDate = monthStart.toISOString().split('T')[0]
-    const toDate = monthEnd.toISOString().split('T')[0]
+  try {
+    // Fetch P&L by tracking category for last 12 months (one month at a time)
+    for (let i = 0; i < 12; i++) {
+      const monthStart = new Date(now.getFullYear(), now.getMonth() - i, 1)
+      const monthEnd = new Date(now.getFullYear(), now.getMonth() - i + 1, 0)
+      const fromDate = monthStart.toISOString().split('T')[0]
+      const toDate = monthEnd.toISOString().split('T')[0]
 
-    try {
-      const plData = await readXero('/Reports/ProfitAndLoss', accessToken, tenantId, {
-        fromDate,
-        toDate,
-        trackingCategoryID: TRACKING_CATEGORY_ID,
-        standardLayout: 'true',
-      })
+      try {
+        const plData = await readXero('/Reports/ProfitAndLoss', accessToken, tenantId, {
+          fromDate,
+          toDate,
+          trackingCategoryID: TRACKING_CATEGORY_ID,
+          standardLayout: 'true',
+        })
 
-      // Parse the report to extract per-unit figures
-      const report = plData?.Reports?.[0]
-      if (!report) continue
+        // Parse the report to extract per-unit figures
+        const report = plData?.Reports?.[0]
+        if (!report) continue
 
-      // Get column headers (tracking category options)
-      const headerRow = report.Rows?.find((r: any) => r.RowType === 'Header')
-      const columns = (headerRow?.Cells || []).map((c: any) => c.Value).filter((v: string) => v)
+        // Get column headers (tracking category options)
+        const headerRow = report.Rows?.find((r: any) => r.RowType === 'Header')
+        const columns = (headerRow?.Cells || []).map((c: any) => c.Value).filter((v: string) => v)
 
-      // Parse income and cost sections
-      const parsed: Record<string, { revenue: number; costs: number; gross_profit: number }> = {}
-      for (const col of columns) {
-        parsed[col] = { revenue: 0, costs: 0, gross_profit: 0 }
-      }
+        // Parse income and cost sections
+        const parsed: Record<string, { revenue: number; costs: number; gross_profit: number }> = {}
+        for (const col of columns) {
+          parsed[col] = { revenue: 0, costs: 0, gross_profit: 0 }
+        }
 
-      for (const section of (report.Rows || [])) {
-        if (section.Title === 'Income' || section.Title === 'Less Cost of Sales') {
-          for (const row of (section.Rows || [])) {
-            if (row.RowType === 'SummaryRow') {
-              // Summary row has totals
-              const cells = row.Cells || []
-              const label = cells[0]?.Value || ''
-              if (label.includes('Total Income') || label.includes('Total Cost')) {
-                for (let c = 1; c < cells.length && c - 1 < columns.length; c++) {
-                  const val = parseFloat(cells[c]?.Value || '0')
+        for (const section of (report.Rows || [])) {
+          if (section.Title === 'Income' || section.Title === 'Less Cost of Sales') {
+            for (const row of (section.Rows || [])) {
+              if (row.RowType === 'SummaryRow') {
+                // Summary row has totals
+                const cells = row.Cells || []
+                const label = cells[0]?.Value || ''
+                if (label.includes('Total Income') || label.includes('Total Cost')) {
+                  for (let c = 1; c < cells.length && c - 1 < columns.length; c++) {
+                    const val = parseFloat(cells[c]?.Value || '0')
+                    const unit = columns[c - 1]
+                    if (!parsed[unit]) continue
+                    if (label.includes('Income')) parsed[unit].revenue = val
+                    else parsed[unit].costs = val
+                  }
+                }
+              }
+            }
+          }
+          // Gross Profit row
+          if (section.RowType === 'Section' && !section.Title) {
+            for (const row of (section.Rows || [])) {
+              const label = row.Cells?.[0]?.Value || ''
+              if (label === 'Gross Profit') {
+                for (let c = 1; c < (row.Cells?.length || 0) && c - 1 < columns.length; c++) {
+                  const val = parseFloat(row.Cells[c]?.Value || '0')
                   const unit = columns[c - 1]
-                  if (!parsed[unit]) continue
-                  if (label.includes('Income')) parsed[unit].revenue = val
-                  else parsed[unit].costs = val
+                  if (parsed[unit]) parsed[unit].gross_profit = val
                 }
               }
             }
           }
         }
-        // Gross Profit row
-        if (section.RowType === 'Section' && !section.Title) {
-          for (const row of (section.Rows || [])) {
-            const label = row.Cells?.[0]?.Value || ''
-            if (label === 'Gross Profit') {
-              for (let c = 1; c < (row.Cells?.length || 0) && c - 1 < columns.length; c++) {
-                const val = parseFloat(row.Cells[c]?.Value || '0')
-                const unit = columns[c - 1]
-                if (parsed[unit]) parsed[unit].gross_profit = val
-              }
+
+        // Store as a report
+        const totals = await sb.from('xero_reports').upsert({
+          org_id: DEFAULT_ORG_ID,
+          report_type: 'pl_by_tracking',
+          report_date: toDate,
+          period_start: fromDate,
+          period_end: toDate,
+          report_json: { columns, data: parsed, raw: plData },
+          synced_at: new Date().toISOString(),
+        }, { onConflict: 'org_id,report_type,report_date' })
+
+        if (storeAccounts && leaseHeld && !divisionSyncOfficeHours(clock())) {
+          try {
+            if (totals.error) throw totals.error
+            if (!(await renewDivisionLease(sb, leaseRunId!, clock()))) {
+              leaseHeld = false
+              console.error('[xero-sync] division_accounts_lease_lost')
+              throw new Error('division_accounts_lease_lost')
             }
+            accountRows += await storeDivisionMonth(sb, report, DEFAULT_ORG_ID, fromDate, now.toISOString())
+            accountMonths++
+          } catch {
+            console.error('[xero-sync] division_account_month_not_stored', fromDate)
           }
         }
+
+        results.push({ month: fromDate, columns: Object.keys(parsed), status: 'ok' })
+      } catch (e: any) {
+        if (e instanceof XeroCooldownError) throw e
+        console.error(`Tracking P&L sync failed for ${fromDate}:`, e.message)
+        results.push({ month: fromDate, status: 'error', error: e.message })
       }
-
-      // Store as a report
-      const totals = await sb.from('xero_reports').upsert({
-        org_id: DEFAULT_ORG_ID,
-        report_type: 'pl_by_tracking',
-        report_date: toDate,
-        period_start: fromDate,
-        period_end: toDate,
-        report_json: { columns, data: parsed, raw: plData },
-        synced_at: new Date().toISOString(),
-      }, { onConflict: 'org_id,report_type,report_date' })
-
-      if (storeAccounts && !divisionSyncOfficeHours(clock())) {
-        try {
-          if (totals.error) throw totals.error
-          accountRows += await storeDivisionMonth(sb, report, DEFAULT_ORG_ID, fromDate, now.toISOString())
-          accountMonths++
-        } catch {
-          console.error('[xero-sync] division_account_month_not_stored', fromDate)
-        }
-      }
-
-      results.push({ month: fromDate, columns: Object.keys(parsed), status: 'ok' })
-    } catch (e: any) {
-      if (e instanceof XeroCooldownError) throw e
-      console.error(`Tracking P&L sync failed for ${fromDate}:`, e.message)
-      results.push({ month: fromDate, status: 'error', error: e.message })
     }
+  } finally {
+    if (leaseRunId) await releaseDivisionLease(sb, leaseRunId, clock())
   }
 
   // P3-01.10: drafts Xero now shows approved, from our own copy only. Its own

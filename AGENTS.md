@@ -4883,6 +4883,20 @@ the scoping tool's cost table. Filled lines are read by trades, so a line's desc
 carry a rate, amount, percent or money word. Rules:
 `docs/quote-work-order-lines-v1.md`.
 
+## A Job Has One Main Work Order; Further Ones Are Kind `additional`
+
+Owner, 19 Nov 2026: one job can carry several work orders (make-safe, roof
+report, restoration, repair). The main one stays `kind = 'job'` (unique per
+job, every rule above unchanged). Every further one is `kind = 'additional'`,
+sealed by `work_orders_additional_guard` and approved only through
+`approve_additional_work_order`, which adds its amount to the main work order
+as a `work_order_amount_changes` row. Job-level money therefore stays one pot:
+never add an additional order's amount into a cap, room or pay check by hand,
+and never read `kind <> 'job'` as "crew" (read `kind = 'crew'`). The trade's
+card bills the first work order they have not billed (`pickTradeWorkOrder`);
+the cap reads `cap_work_order_id` / `cap_agreed_ex`. Contract and gaps:
+`docs/job-additional-work-orders-v1.md`.
+
 ## Price And Work Order Issue On Two Owner Decisions
 
 `20261109040000_scope_owner_approvals.sql` owns the policy. `scope_owner_approvals`

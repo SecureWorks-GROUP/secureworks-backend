@@ -3,6 +3,11 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { syncMatchStep } from "./credit_run.ts";
 import {
+  BACKLOG_MIXED_CUT,
+  BACKLOG_MIXED_PAGE_CAP,
+  BACKLOG_OVER_DEADLINE,
+  MATCH_BACKLOG_MIXED_PAGES,
+  MATCH_BACKLOG_LINE_PAGE,
   MATCH_BACKLOG_STATE_KEY,
   matchPending,
   matchPendingRequest,
@@ -41,6 +46,11 @@ type World = {
   openItems?: string[]; // subject_ids with an open item
   switchOn?: boolean | "fail";
   tradeUsers?: string[]; // xero_contact_ids that are Trade App users
+  rowCap?: number; // the server's row cap on the backlog's other-contact read
+  mixedIgnoresNarrowing?: boolean; // that read answers every page for the first ids asked
+  mixedFirstIds?: string[];
+  mixedPages?: number[]; // ids asked per other-contact page
+  mixedNoCount?: boolean; // that read answers with no count
   people?: Array<Record<string, unknown>>; // people_account_codes rows (default: as migrated)
   xeroLines?: Record<string, any[]>; // xero_invoices.line_items by bill id
   backlogAt?: { cursor_at: string | null; note: string | null } | null; // xero_sync_state row
@@ -49,7 +59,9 @@ type World = {
   upserts?: Array<{ table: string; rows: any; timed: boolean }>;
   // A slow request: `abort` answers only when its signal fires (as the client does);
   // `late` ignores the signal and answers after `ms`.
-  slow?: { target: string; ms: number; mode: "abort" | "late"; only?: string };
+  // `abortMs`: how far an abort moves the clock (default: past any budget);
+  // `once`: only the first such request is slow.
+  slow?: { target: string; ms: number; mode: "abort" | "late"; only?: string; abortMs?: number; once?: boolean };
   // A read Postgres ends at its statement_timeout (57014), by table or function name.
   timeout?: string;
   // match_slow_bills rows, kept across calls like the table.
@@ -116,6 +128,7 @@ function billReadRows(w: World, name: string, args: any): any[] {
 function answer(w: World, target: string, signal: AbortSignal | null, result: () => any, doc?: string): Promise<any> {
   if (w.slow?.target !== target || (w.slow.only !== undefined && w.slow.only !== doc)) return Promise.resolve(result());
   const slow = w.slow;
+  if (slow.once) w.slow = undefined;
   return new Promise((done) => {
     const timer = setTimeout(() => {
       w.clock.t += slow.ms;
@@ -124,7 +137,7 @@ function answer(w: World, target: string, signal: AbortSignal | null, result: ()
     if (slow.mode === "abort") {
       signal?.addEventListener("abort", () => {
         clearTimeout(timer);
-        w.clock.t += 1_000_000; // past any budget in these tests
+        w.clock.t += slow.abortMs ?? 1_000_000; // past any budget in these tests, unless the test says
         done({ data: null, error: { message: "AbortError: signal is aborted without reason" } });
       });
     }
@@ -169,7 +182,9 @@ function fake(w: World) {
             return { data: w.backlogAt ?? null, error: null };
           case "users":
             return {
-              data: (w.tradeUsers ?? []).filter((c) => c === filters.xero_contact_id).map((c) => ({ id: `u-${c}`, xero_contact_id: c })),
+              data: (w.tradeUsers ?? [])
+                .filter((c) => c === filters.xero_contact_id || ((filters["in:xero_contact_id"] as string[]) ?? []).includes(c))
+                .map((c) => ({ id: `u-${c}`, xero_contact_id: c })),
               error: null,
             };
           case "match_clue_types":
@@ -178,6 +193,33 @@ function fake(w: World) {
             return { data: w.people ?? peopleRows(), error: null };
           case "job_cost_lines":
             if (filters.document_number) return { data: [], error: null };
+            if (filters["in:account_code"]) {
+              // The backlog's hidden-account read: cost lines on an exact code.
+              const ids = filters["in:document_id"] as string[];
+              const codes = filters["in:account_code"] as string[];
+              return {
+                data: ids.flatMap((id) => (w.lines?.[id] ?? []).filter((l) => codes.includes(l.account_code)).map(() => ({ document_id: id }))),
+                error: null,
+              };
+            }
+            if (filters["not:party_id"]) {
+              // The backlog's other-contact read: lines whose contact is set and not in the list.
+              // One row per line, cut silently at the request's limit and at the
+              // server's row cap, as PostgREST does. `mixedIgnoresNarrowing`
+              // answers every page for the first ids asked.
+              const asked = filters["in:document_id"] as string[];
+              const ids = w.mixedIgnoresNarrowing ? (w.mixedFirstIds ??= asked) : asked;
+              const { v } = filters["not:party_id"] as { op: string; v: string };
+              const listed = v.replace(/^\(|\)$/g, "").split(",").map((x) => x.replace(/^"|"$/g, ""));
+              const rows = ids.flatMap((id) =>
+                (w.lines?.[id] ?? []).filter((l) => l.party_id != null && !listed.includes(l.party_id)).map(() => ({ document_id: id }))
+              );
+              const cap = Math.min(Number(filters.limit ?? Infinity), w.rowCap ?? Infinity);
+              (w.mixedPages ??= []).push(asked.length);
+              // An exact count, when asked, counts every matching line, not the page.
+              const count = filters.count === "exact" && !w.mixedNoCount ? rows.length : null;
+              return { data: rows.slice(0, cap), error: null, count };
+            }
             if (filters["in:kind"]) {
               // The backlog's labour read.
               const ids = filters["in:document_id"] as string[];
@@ -201,7 +243,15 @@ function fake(w: World) {
                     : (String(a.created_at) < String(b.created_at) ? -1 : 1)
                 )
                 .slice(0, Number(filters.limit ?? 1e9));
-              return { data: rows.map((r) => ({ document_id: r.document_id, created_at: r.created_at })), error: null };
+              // A bill's lines share its contact (one Xero contact per bill).
+              return {
+                data: rows.map((r) => ({
+                  document_id: r.document_id,
+                  created_at: r.created_at,
+                  party_id: w.lines?.[r.document_id]?.find((l) => l.state === "needs_person")?.party_id ?? null,
+                })),
+                error: null,
+              };
             }
             if (filters.state === "needs_person" && filters.document_id === undefined) {
               const rows = (w.waiting ?? [])
@@ -255,7 +305,7 @@ function fake(w: World) {
         }
       };
       const chain: any = {
-        select: (c = "") => ((cols = c), chain),
+        select: (c = "", o?: { count?: string }) => ((cols = c), o?.count && (filters.count = o.count), chain),
         delete: () => ((op = "delete"), chain),
         upsert: (rows: any) => ((op = "upsert"), (upserted = rows), chain),
         abortSignal: (s: AbortSignal) => ((timed = true), (signal = s), chain),
@@ -263,7 +313,7 @@ function fake(w: World) {
         eq: (k: string, v: unknown) => ((filters[k] = v), chain),
         like: (k: string, v: string) => ((filters[`like:${k}`] = v), chain),
         neq: () => chain,
-        not: () => chain,
+        not: (k: string, op: string, v: string) => ((filters[`not:${k}`] = { op, v }), chain),
         or: () => chain,
         in: (k: string, v: unknown) => ((filters[`in:${k}`] = v), chain),
         lt: (k: string, v: unknown) => ((filters[`lt:${k}`] = v), chain),
@@ -323,7 +373,7 @@ const billLines = (id = BILL) => ({
     state: "needs_person",
     document_number: "INV-9",
     document_date: "2026-11-10",
-    party_id: "supplier-1",
+    party_id: "supplier-1" as string | null,
     party_name: "Supplier",
   }],
 });
@@ -609,6 +659,7 @@ Deno.test("sync, switch on: the budget starts when matching starts; out of time,
     changed: ["xero_bill:a", "xero_bill:b", "xero_bill:c"],
     budgetMs: 25,
     now: () => (t += 10),
+    planClock: () => 0, // the plan's own clock stands still: only the run's clock decides
   });
   assertEquals(out.run, 1);
   assertEquals(requeues(w).length, 1);
@@ -661,7 +712,7 @@ Deno.test("sync backlog: the budget ends mid-backlog: it stops cleanly, requeues
   let t = 0;
   // Each clock read costs 10 ms; the budget lets three bills run.
   const w = world({ waiting, lines, backlogAt: null });
-  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 45, now: () => (t += 10) });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 45, now: () => (t += 10), planClock: () => 0 });
   assertEquals([out.run, out.backlog, out.requeued], [3, 3, 0]);
   assertEquals(requeues(w).length, 0, "a backlog bill not reached is not put on the queue");
   assertEquals(w.backlogAt, { cursor_at: at(1), note: "b2" }, "the position stops at the last bill run");
@@ -671,7 +722,7 @@ Deno.test("sync backlog: the budget ends mid-backlog: it stops cleanly, requeues
   // Nothing reached at all: the position does not move.
   const w3 = world({ waiting, lines, backlogAt: { cursor_at: at(1), note: "b2" } });
   let t3 = 0;
-  const none = await syncMatchRun(fake(w3), { on: true, changed: [], budgetMs: 15, now: () => (t3 += 10) });
+  const none = await syncMatchRun(fake(w3), { on: true, changed: [], budgetMs: 15, now: () => (t3 += 10), planClock: () => 0 });
   assertEquals([none.run, none.backlog], [0, 0]);
   assertEquals(w3.backlogAt, { cursor_at: at(1), note: "b2" });
 });
@@ -894,10 +945,15 @@ Deno.test("parking: a statement Postgres ended at its 5 s limit is a cut and cou
 });
 
 Deno.test("parking: the queue and the backlog pass over a parked bill; the sync runs it again once its lines change, and clears it", async () => {
-  const parked = [{ subject_id: "xero_bill:a", cuts: 2, reason: "parked_slow_bill", parked_at: "2026-11-18T00:00:00Z" }];
+  // The test's own clock: parked an hour before it, so under the 24-hour retry
+  // whatever the real date (a fixed date on the real clock failed once a day old).
+  const parkedAt = "2026-11-18T00:00:00.000Z";
+  const t = Date.parse(parkedAt) + 60 * 60 * 1000;
+  const at1h = () => ({ t });
+  const parked = [{ subject_id: "xero_bill:a", cuts: 2, reason: "parked_slow_bill", parked_at: parkedAt }];
   // Queued: taken off the queue, passed over, not requeued.
-  const q = world({ lines: billLines("a"), queue: [{ subject_kind: "cost_document", subject_id: "xero_bill:a" }], slowBills: [...parked] });
-  const out = await syncMatchRun(fake(q), { on: true, changed: [] });
+  const q = world({ lines: billLines("a"), queue: [{ subject_kind: "cost_document", subject_id: "xero_bill:a" }], slowBills: [...parked], clock: at1h() });
+  const out = await syncMatchRun(fake(q), { on: true, changed: [], now: clockOf(q) });
   assertEquals([applies(q).length, out.skipped, requeues(q).length], [0, { parked_slow_bill: 1 }, 0]);
   assertEquals(q.slowBills?.length, 1, "still parked");
   // Backlog: passed over, and the position moves past it.
@@ -906,21 +962,29 @@ Deno.test("parking: the queue and the backlog pass over a parked bill; the sync 
     waiting: [waitingAt("a", 1), waitingAt("b", 2)],
     backlogAt: { cursor_at: at(0), note: "x0" },
     slowBills: [...parked],
+    clock: at1h(),
   });
-  const bo = await syncMatchRun(fake(b), { on: true, changed: [] });
+  const bo = await syncMatchRun(fake(b), { on: true, changed: [], now: clockOf(b) });
   assertEquals(applies(b).map((x) => x.args.p_subject_id), ["xero_bill:b"]);
   assertEquals(bo.skipped, { parked_slow_bill: 1 });
   assertEquals(b.backlogAt, { cursor_at: null, note: null }, "the position reached the end past the parked bill");
   // Changed: it runs, and its count is cleared.
-  const c = world({ lines: billLines("a"), slowBills: [...parked] });
-  const co = await syncMatchRun(fake(c), { on: true, changed: ["xero_bill:a"] });
+  const c = world({ lines: billLines("a"), slowBills: [...parked], clock: at1h() });
+  const co = await syncMatchRun(fake(c), { on: true, changed: ["xero_bill:a"], now: clockOf(c) });
   assertEquals([applies(c).length, co.skipped], [1, {}]);
   assertEquals(c.slowBills, []);
-  // match_pending and match_sweep pass over it too.
+  // match_pending and match_sweep pass over it too. match_pending takes no
+  // clock, so the test holds Date.now at its own instant for that call.
   const m = world({ lines: billLines("a"), queue: [{ subject_kind: "cost_document", subject_id: "xero_bill:a" }], slowBills: [...parked] });
-  await matchPending(fake(m));
-  const s = world({ lines: billLines("a"), waiting: waitingBills(["a"]), slowBills: [...parked] });
-  await matchSweep(fake(s));
+  const realNow = Date.now;
+  Date.now = () => t;
+  try {
+    await matchPending(fake(m));
+  } finally {
+    Date.now = realNow;
+  }
+  const s = world({ lines: billLines("a"), waiting: waitingBills(["a"]), slowBills: [...parked], clock: at1h() });
+  await matchSweep(fake(s), { now: clockOf(s) });
   assertEquals([applies(m).length, applies(s).length], [0, 0]);
 });
 
@@ -973,11 +1037,11 @@ Deno.test("parking through the sync step (what xero-sync calls): a slow backlog 
     return out;
   };
   const one = await sync();
-  assertEquals([one.failed, one.parked, w.queue.map((q: any) => q.subject_id)], [{ over_run_time: 1 }, 0, ["xero_bill:a"]]);
+  assertEquals([one.failed, one.parked, (w.queue ?? []).map((q: any) => q.subject_id)], [{ over_run_time: 1 }, 0, ["xero_bill:a"]]);
   assertEquals(w.slowBills?.map((b) => [b.cuts, b.reason]), [[1, "slow_bill_cut"]]);
   assertEquals(applies(w).length, 0, "the cut took the budget: b and c wait");
   const two = await sync();
-  assertEquals([two.queued, two.parked, w.queue.length], [1, 1, 0], "off the queue first, cut again, parked, not requeued");
+  assertEquals([two.queued, two.parked, (w.queue ?? []).length], [1, 1, 0], "off the queue first, cut again, parked, not requeued");
   assertEquals(w.slowBills?.map((b) => [b.cuts, b.reason]), [[2, "parked_slow_bill"]]);
   const three = await sync();
   assertEquals([three.backlog, three.skipped, three.failed], [2, {}, {}]);
@@ -1076,3 +1140,305 @@ Deno.test("people accounts: an unreadable or empty set runs nothing, writes noth
     assert(!w.queries.some((q) => q.table === "xero_invoices" || q.table === "job_cost_lines"), code);
   }
 });
+
+// The backlog pick leaves out hidden bills (director 09:14). A bill on `code`:
+const linesOn = (id: string, code: string, state = "needs_person") => {
+  const l = billLines(id);
+  l[id][0] = { ...l[id][0], account_code: code, state };
+  return l;
+};
+const billReadsFor = (w: World, id: string) =>
+  w.rpcs.filter((r) => r.fn === "match_bill_read" && r.args.p_args?.document_id === id).length;
+
+Deno.test("backlog: a bill with a cost line on a hidden account is never picked, lap after lap; the position moves past it and its neighbours run as before", async () => {
+  const waiting = [waitingAt("h1", 1), waitingAt("a1", 1), waitingAt("a2", 2), waitingAt("h2", 2), waitingAt("a3", 3)];
+  const lines = Object.assign({}, billLines("a1"), billLines("a2"), billLines("a3"), linesOn("h1", "475"), linesOn("h2", "301"));
+  // Lap one, from the oldest, to the end.
+  const w = world({ waiting, lines, backlogAt: null });
+  const one = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:a1", "xero_bill:a2", "xero_bill:a3"]);
+  assertEquals([one.backlog, one.run, one.skipped], [3, 3, {}], "no hidden_account_bill or labour_bill: the hidden bills never ran");
+  assertEquals([billReadsFor(w, "h1"), billReadsFor(w, "h2")], [0, 0], "no bill read for a hidden bill");
+  assertEquals(w.queries.filter((q) => q.table === "people_account_codes").length, 1, "one people read: the pick and the skip share it");
+  // The wrap: the next lap starts from the oldest again and still never picks them.
+  const w2 = world({ waiting, lines, backlogAt: w.backlogAt });
+  await syncMatchRun(fake(w2), { on: true, changed: [] });
+  assertEquals(applies(w2).map((a) => a.args.p_subject_id), ["xero_bill:a1", "xero_bill:a2", "xero_bill:a3"]);
+  assertEquals([billReadsFor(w2, "h1"), billReadsFor(w2, "h2")], [0, 0]);
+  // Room for one bill: the pick looks past the hidden h1 and the position stops at a1.
+  const w3 = world({ waiting, lines, backlogAt: null });
+  let t = 0;
+  const r3 = await syncMatchRun(fake(w3), { on: true, changed: [], budgetMs: 25, now: () => (t += 10) });
+  assertEquals([r3.backlog, applies(w3).map((a) => a.args.p_subject_id)], [1, ["xero_bill:a1"]]);
+  assertEquals(w3.backlogAt, { cursor_at: at(1), note: "a1" });
+});
+
+Deno.test("MUST NOT CHANGE: a changed bill still runs and keeps its skip code, hidden or not; a hidden backlog bill beside it is not picked", async () => {
+  const waiting = [waitingAt("hb", 1), waitingAt("ok", 1)];
+  const lines = Object.assign({}, linesOn("hb", "475"), billLines("ok"), linesOn("done", "300", "on_job"), linesOn("hc", "475"));
+  const w = world({ waiting, lines, backlogAt: null });
+  const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:done", "xero_bill:hc"] });
+  assertEquals(out.skipped, { nothing_waiting: 1, hidden_account_bill: 1 }, "the changed bills' skip codes, as on main");
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:ok"], "only the non-hidden backlog bill is proposed");
+  assertEquals([out.changed, out.backlog, billReadsFor(w, "hb")], [2, 1, 0]);
+  assertEquals(writes(w).filter((r) => r.args?.p_subject_id === "xero_bill:hc").length, 0, "a changed hidden bill writes nothing");
+});
+
+Deno.test("backlog: only an exact hidden code on a cost line leaves a bill out; a padded code or a hidden line only on Xero's bill is still picked and skipped as before, writing nothing", async () => {
+  const padded = linesOn("pad", " 475 ");
+  const waiting = [waitingAt("pad", 1), waitingAt("xo", 1)];
+  const w = world({ waiting, lines: { ...padded, ...billLines("xo") }, xeroLines: { xo: [{ AccountCode: "305", LineAmount: 90 }, { AccountCode: "475", LineAmount: 0 }] }, backlogAt: null });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals([out.backlog, out.skipped, writes(w).length], [2, { hidden_account_bill: 2 }, 0]);
+});
+
+Deno.test("backlog: an unreadable people set picks nothing and keeps the position; a changed bill is requeued exactly as on main", async () => {
+  const waiting = [waitingAt("a1", 1)];
+  const pos = { cursor_at: at(0), note: "a0" };
+  for (const over of [{ fail: "people_account_codes" }, { people: [] as Array<Record<string, unknown>> }]) {
+    const w = world({ waiting, lines: { ...billLines("a1"), ...billLines("c1") }, backlogAt: { ...pos }, ...over });
+    const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:c1"] });
+    const code = over.fail ? "people_accounts_unreadable" : "people_accounts_empty";
+    assertEquals([out.backlog, out.requeued, out.failed, applies(w).length], [0, 1, { [code]: 1 }, 0], code);
+    assertEquals(out.errors, [code], code);
+    assertEquals(w.backlogAt, pos, code);
+  }
+});
+
+Deno.test("backlog: nothing waiting adds no people read", async () => {
+  const w = world({ waiting: [], backlogAt: null });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals([out.run, out.backlog], [0, 0]);
+  assert(!w.queries.some((q) => q.table === "people_account_codes"));
+});
+
+// ZZTEST contacts only: no real contact, name or rate.
+const onContact = (id: string, ...parties: Array<string | null>) => {
+  const l = billLines(id);
+  l[id] = parties.map((p, i) => ({ ...l[id][0], line_key: `n:${i + 1}`, line_no: i + 1, party_id: p }));
+  return l;
+};
+
+Deno.test("backlog: a Trade App user's own bill is never picked, lap after lap; its neighbours run as before", async () => {
+  const waiting = [waitingAt("tu", 1), waitingAt("s1", 1), waitingAt("tn", 2), waitingAt("s2", 2)];
+  const lines = Object.assign({}, onContact("tu", "zztest-trade-1"), billLines("s1"), onContact("tn", "zztest-trade-1", null), billLines("s2"));
+  const w = world({ waiting, lines, tradeUsers: ["zztest-trade-1"], backlogAt: null });
+  const one = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:s1", "xero_bill:s2"]);
+  assertEquals([one.backlog, one.skipped], [2, {}], "no labour_bill: the trade user's bills never ran");
+  assertEquals([billReadsFor(w, "tu"), billReadsFor(w, "tn")], [0, 0], "no bill read for them");
+  const w2 = world({ waiting, lines, tradeUsers: ["zztest-trade-1"], backlogAt: w.backlogAt });
+  await syncMatchRun(fake(w2), { on: true, changed: [] });
+  assertEquals(applies(w2).map((a) => a.args.p_subject_id), ["xero_bill:s1", "xero_bill:s2"], "the wrap");
+});
+
+Deno.test("backlog: a bill with any other contact on a line stays picked, and the run skips it exactly as before", async () => {
+  // mx: the first line (the skip's contact) is a trade user's, another line a supplier's.
+  // rv: the pick's waiting line is the supplier's, the first line a trade user's.
+  const mx = onContact("mx", "zztest-trade-1", "zztest-supplier-2");
+  const rv = onContact("rv", "zztest-trade-1", "zztest-supplier-2");
+  rv.rv[0] = { ...rv.rv[0], state: "on_job" };
+  const w = world({ waiting: [waitingAt("mx", 1), waitingAt("rv", 1)], lines: { ...mx, ...rv }, tradeUsers: ["zztest-trade-1"], backlogAt: null });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals([out.backlog, out.skipped, writes(w).length], [2, { labour_bill: 2 }, 0]);
+});
+
+Deno.test("MUST NOT CHANGE: a changed Trade App user's bill still runs and keeps labour_bill; a supplier's bill is proposed as before", async () => {
+  const w = world({
+    waiting: [waitingAt("tu", 1), waitingAt("ok", 1)],
+    lines: { ...onContact("tu", "zztest-trade-1"), ...billLines("ok"), ...onContact("tc", "zztest-trade-1") },
+    tradeUsers: ["zztest-trade-1"],
+    backlogAt: null,
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:tc"] });
+  assertEquals(out.skipped, { labour_bill: 1 }, "the changed bill's skip code, as on main");
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:ok"]);
+  assertEquals([out.changed, out.backlog, billReadsFor(w, "tu")], [1, 1, 0]);
+});
+
+Deno.test("backlog: an unreadable user list picks nothing and keeps the position", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({ waiting: [waitingAt("tu", 1), waitingAt("s1", 1)], lines: { ...onContact("tu", "zztest-trade-1"), ...billLines("s1") }, tradeUsers: ["zztest-trade-1"], backlogAt: { ...pos }, fail: "users" });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, ["backlog_trade_users"]]);
+  assertEquals(w.backlogAt, pos);
+});
+
+// Many lines on one bill: one row per line, cut at the page and the server's cap.
+const manyLines = (id: string, first: string, other: string, n: number) => {
+  const l = onContact(id, first, ...Array(n).fill(other));
+  return l;
+};
+
+Deno.test("backlog: a bill with more other-contact lines than a page hides no bill behind it", async () => {
+  // big: a trade user's first line and more supplier lines than a page (and the server's cap).
+  // sp: a supplier bill whose waiting line is a trade user's. Its first line is the
+  // supplier's, so the run proposes it; a cut read would have dropped it from the pick.
+  const sp = onContact("sp", "zztest-supplier-2", "zztest-trade-1");
+  sp.sp[0] = { ...sp.sp[0], state: "on_job" };
+  const w = world({
+    waiting: [waitingAt("big", 1), waitingAt("sp", 1)],
+    lines: { ...manyLines("big", "zztest-trade-1", "zztest-supplier-2", MATCH_BACKLOG_LINE_PAGE + 5), ...sp },
+    tradeUsers: ["zztest-trade-1"],
+    rowCap: MATCH_BACKLOG_LINE_PAGE,
+    backlogAt: null,
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals(w.mixedPages, [2, 1], "a full page drops the bill it named and reads again for the rest");
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:sp"], "the supplier bill is proposed as on main");
+  assertEquals([out.backlog, out.skipped, out.errors], [2, { labour_bill: 1 }, []]);
+});
+
+Deno.test("backlog: a full other-contact page that names no new bill could be cut: nothing picked, position kept", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({
+    waiting: [waitingAt("big", 1), waitingAt("tu", 1), waitingAt("s1", 1)],
+    lines: { ...manyLines("big", "zztest-trade-1", "zztest-supplier-2", MATCH_BACKLOG_LINE_PAGE + 5), ...onContact("tu", "zztest-trade-1"), ...billLines("s1") },
+    tradeUsers: ["zztest-trade-1"],
+    mixedIgnoresNarrowing: true,
+    backlogAt: { ...pos },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_MIXED_CUT]]);
+  assertEquals(w.backlogAt, pos);
+  assertEquals(w.mixedPages, [2, 1], "it stops at the second full page, never loops");
+});
+
+Deno.test("backlog: a chunk needing more other-contact pages than the cap fails closed with its own code", async () => {
+  // Three bills, each with a trade user's first line and more supplier lines than a page:
+  // page one names one, page two the next, and a third page is past the cap.
+  assertEquals(MATCH_BACKLOG_MIXED_PAGES, 2);
+  const pos = { cursor_at: at(0), note: "a0" };
+  const big = (id: string) => manyLines(id, "zztest-trade-1", "zztest-supplier-2", MATCH_BACKLOG_LINE_PAGE + 5);
+  const w = world({
+    waiting: [waitingAt("b1", 1), waitingAt("b2", 1), waitingAt("b3", 1), waitingAt("s1", 1)],
+    lines: { ...big("b1"), ...big("b2"), ...big("b3"), ...billLines("s1") },
+    tradeUsers: ["zztest-trade-1"],
+    rowCap: MATCH_BACKLOG_LINE_PAGE,
+    backlogAt: { ...pos },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals(w.mixedPages, [3, 2], "two pages read, the third never asked");
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_MIXED_PAGE_CAP]]);
+  assertEquals(w.backlogAt, pos);
+});
+
+Deno.test("backlog: an API row cap below the page is caught by the count: no bill hidden behind a cut page", async () => {
+  // The server cuts at 100 rows, below the 300 asked for: the short page looks complete
+  // by its length, but its count says more lines match.
+  const sp = onContact("sp", "zztest-supplier-2", "zztest-trade-1");
+  sp.sp[0] = { ...sp.sp[0], state: "on_job" };
+  const w = world({
+    waiting: [waitingAt("big", 1), waitingAt("sp", 1)],
+    lines: { ...manyLines("big", "zztest-trade-1", "zztest-supplier-2", 150), ...sp },
+    tradeUsers: ["zztest-trade-1"],
+    rowCap: 100,
+    backlogAt: null,
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals(w.mixedPages, [2, 1], "the cut page is read again for the rest");
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:sp"], "the supplier bill is proposed as on main");
+  assertEquals([out.backlog, out.skipped, out.errors], [2, { labour_bill: 1 }, []]);
+});
+
+Deno.test("backlog: an other-contact page with no count fails closed", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({
+    waiting: [waitingAt("tu", 1), waitingAt("s1", 1)],
+    lines: { ...onContact("tu", "zztest-trade-1"), ...billLines("s1") },
+    tradeUsers: ["zztest-trade-1"],
+    mixedNoCount: true,
+    backlogAt: { ...pos },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_MIXED_CUT]]);
+  assertEquals(w.backlogAt, pos);
+});
+
+// The backlog plan keeps to the run's deadline (director 11:24). The plan runs
+// on the world's fake clock here, so a slow read decides, never machine speed.
+Deno.test("backlog: a slow plan is cut at half of what the run has left; the changed bill still runs in the same run", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({
+    waiting: [waitingAt("a1", 1)],
+    lines: { ...billLines("a1"), ...billLines("c1") },
+    backlogAt: { ...pos },
+    // The waiting-lines read hangs until its signal fires, as the client does;
+    // the cut lands at 80 of the run's 150, past the plan's 75.
+    slow: { target: "job_cost_lines", ms: 60_000, mode: "abort", abortMs: 80, once: true },
+  });
+  const started = Date.now();
+  const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:c1"], budgetMs: 150, now: clockOf(w), planClock: clockOf(w) });
+  const took = Date.now() - started;
+  assert(took < 1_500, `cut at the plan's deadline, not the 5 s read limit (took ${took} ms)`);
+  assertEquals([out.backlog, out.errors, out.backlog_skip], [0, [BACKLOG_OVER_DEADLINE], undefined]);
+  assertEquals(w.backlogAt, pos, "position kept");
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:c1"], "the changed bill ran");
+  assertEquals(requeues(w).length, 0, "nothing requeued");
+});
+
+Deno.test("backlog: no plan read starts once the deadline has passed", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({
+    waiting: [waitingAt("a1", 1)],
+    lines: billLines("a1"),
+    backlogAt: { ...pos },
+    // The position read answers after the deadline, whatever its signal says.
+    slow: { target: "xero_sync_state", ms: 300, mode: "late" },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 150, now: clockOf(w), planClock: clockOf(w) });
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_OVER_DEADLINE]]);
+  assert(!w.queries.some((q) => q.table === "job_cost_lines"), "the waiting-lines read never started");
+  assertEquals(w.backlogAt, pos, "position kept");
+});
+
+Deno.test("backlog: a plan whose last read answers past the deadline hands the run nothing", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  // A supplier contact: the user-list read is the plan's last, and finds no trade user.
+  const w = world({
+    waiting: [waitingAt("s1", 1)],
+    lines: onContact("s1", "zztest-supplier-2"),
+    backlogAt: { ...pos },
+    slow: { target: "users", ms: 300, mode: "late" },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 150, now: clockOf(w), planClock: clockOf(w) });
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_OVER_DEADLINE]]);
+  assertEquals(w.backlogAt, pos, "position kept");
+});
+
+Deno.test("MUST NOT CHANGE: a plan inside the deadline picks and moves the position as on main", async () => {
+  const w = world({ waiting: [waitingAt("s1", 1)], lines: onContact("s1", "zztest-supplier-2"), backlogAt: null });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 60_000, now: clockOf(w), planClock: clockOf(w) });
+  assertEquals([out.backlog, out.errors], [1, []]);
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:s1"]);
+});
+
+Deno.test("backlog: a people read cut at the plan's deadline is the deadline, not an unreadable people set", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({
+    waiting: [waitingAt("s1", 1)],
+    lines: { ...onContact("s1", "zztest-supplier-2"), ...billLines("c1") },
+    backlogAt: { ...pos },
+    slow: { target: "people_account_codes", ms: 60_000, mode: "abort", abortMs: 80, once: true },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:c1"], budgetMs: 150, now: clockOf(w), planClock: clockOf(w) });
+  assertEquals([out.backlog, out.errors], [0, [BACKLOG_OVER_DEADLINE]]);
+  assertEquals(w.backlogAt, pos, "position kept");
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:c1"], "the run read its own people set and ran the changed bill");
+});
+
+Deno.test("backlog: a run with no room, or none of its time left, names why the backlog had no plan", async () => {
+  const ids = Array.from({ length: 50 }, (_, i) => `xero_bill:f${i}`);
+  const full = world({ lines: Object.assign({}, ...ids.map((id) => billLines(id.slice(10)))), waiting: [waitingAt("a1", 1)], backlogAt: null });
+  const one = await syncMatchRun(fake(full), { on: true, changed: ids });
+  assertEquals([one.backlog, one.backlog_skip], [0, "no_room"]);
+  let t = 0;
+  const late = world({ waiting: [waitingAt("a1", 1)], lines: billLines("a1"), backlogAt: null });
+  // The run's deadline is already behind it when the backlog's turn comes.
+  const two = await syncMatchRun(fake(late), { on: true, changed: [], deadline: 5, now: () => (t += 10) });
+  assertEquals([two.backlog, two.backlog_skip, two.errors], [0, "over_deadline", []]);
+  assert(!late.queries.some((q) => q.table === "job_cost_lines"), "no plan read");
+  const ran = await syncMatchRun(fake(world({ waiting: [waitingAt("a1", 1)], lines: billLines("a1"), backlogAt: null })), { on: true, changed: [] });
+  assertEquals([ran.backlog, "backlog_skip" in ran], [1, false], "a run with a plan carries no skip");
+});
+

@@ -1,3 +1,4 @@
+import { commissionCapCodeFromDbError } from "./job_commission.ts";
 import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   loadUndatedReimbursementDraft,
@@ -230,6 +231,9 @@ Deno.test("ZZTEST receipt-bearing dated hourly submission uses atomic save; swit
       client: {}, reimbursements: result, priorDraftId: "ZZTEST-draft", week_start: "2026-11-16",
       weeklyInvoice: null, invoicePayload: { status: "pending_acknowledgment" }, tradeUser: { orgId: "ZZTEST-org" },
       lineItems: [{ line_total_ex: 560 }], extraLineItems: result.lines,
+      // PR 1640 declares lineJobOrder one line above the slice read here;
+      // PR 1426's catch reads the commission cap code. Both come from index.ts.
+      lineJobOrder: { jobOrder: false }, commissionCapCodeFromDbError,
       retryReimbursementClaims: (_client: unknown, _result: unknown, persist: () => Promise<string>) => persist(),
       persistWithFreeNumber: async (persist: () => Promise<string>) => await persist(),
       toTradeInvoiceLineRow: (_id: string, row: unknown) => row,
