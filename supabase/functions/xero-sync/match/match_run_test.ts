@@ -364,7 +364,7 @@ const billLines = (id = BILL) => ({
     state: "needs_person",
     document_number: "INV-9",
     document_date: "2026-11-10",
-    party_id: "supplier-1",
+    party_id: "supplier-1" as string | null,
     party_name: "Supplier",
   }],
 });
@@ -1027,11 +1027,11 @@ Deno.test("parking through the sync step (what xero-sync calls): a slow backlog 
     return out;
   };
   const one = await sync();
-  assertEquals([one.failed, one.parked, w.queue.map((q: any) => q.subject_id)], [{ over_run_time: 1 }, 0, ["xero_bill:a"]]);
+  assertEquals([one.failed, one.parked, (w.queue ?? []).map((q: any) => q.subject_id)], [{ over_run_time: 1 }, 0, ["xero_bill:a"]]);
   assertEquals(w.slowBills?.map((b) => [b.cuts, b.reason]), [[1, "slow_bill_cut"]]);
   assertEquals(applies(w).length, 0, "the cut took the budget: b and c wait");
   const two = await sync();
-  assertEquals([two.queued, two.parked, w.queue.length], [1, 1, 0], "off the queue first, cut again, parked, not requeued");
+  assertEquals([two.queued, two.parked, (w.queue ?? []).length], [1, 1, 0], "off the queue first, cut again, parked, not requeued");
   assertEquals(w.slowBills?.map((b) => [b.cuts, b.reason]), [[2, "parked_slow_bill"]]);
   const three = await sync();
   assertEquals([three.backlog, three.skipped, three.failed], [2, {}, {}]);
