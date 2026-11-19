@@ -892,7 +892,8 @@ jobs:
       - name: Test the bill matcher runner
         run: |
           deno test --no-check --allow-read --allow-env \
-            supabase/functions/xero-sync/match/match_run_test.ts
+            supabase/functions/xero-sync/match/match_run_test.ts \
+            supabase/functions/xero-sync/paused_run_log_test.ts
 
       # The email reader (EM2) and its group history walk (W7): cursor
       # handling, the restart loop of 5 Oct 2026 and resume-where-it-stopped,

@@ -169,7 +169,9 @@ function fake(w: World) {
             return { data: w.backlogAt ?? null, error: null };
           case "users":
             return {
-              data: (w.tradeUsers ?? []).filter((c) => c === filters.xero_contact_id).map((c) => ({ id: `u-${c}`, xero_contact_id: c })),
+              data: (w.tradeUsers ?? [])
+                .filter((c) => c === filters.xero_contact_id || ((filters["in:xero_contact_id"] as string[]) ?? []).includes(c))
+                .map((c) => ({ id: `u-${c}`, xero_contact_id: c })),
               error: null,
             };
           case "match_clue_types":
@@ -184,6 +186,18 @@ function fake(w: World) {
               const codes = filters["in:account_code"] as string[];
               return {
                 data: ids.flatMap((id) => (w.lines?.[id] ?? []).filter((l) => codes.includes(l.account_code)).map(() => ({ document_id: id }))),
+                error: null,
+              };
+            }
+            if (filters["not:party_id"]) {
+              // The backlog's other-contact read: lines whose contact is set and not in the list.
+              const ids = filters["in:document_id"] as string[];
+              const { v } = filters["not:party_id"] as { op: string; v: string };
+              const listed = v.replace(/^\(|\)$/g, "").split(",").map((x) => x.replace(/^"|"$/g, ""));
+              return {
+                data: ids.flatMap((id) =>
+                  (w.lines?.[id] ?? []).filter((l) => l.party_id != null && !listed.includes(l.party_id)).map(() => ({ document_id: id }))
+                ),
                 error: null,
               };
             }
@@ -210,7 +224,15 @@ function fake(w: World) {
                     : (String(a.created_at) < String(b.created_at) ? -1 : 1)
                 )
                 .slice(0, Number(filters.limit ?? 1e9));
-              return { data: rows.map((r) => ({ document_id: r.document_id, created_at: r.created_at })), error: null };
+              // A bill's lines share its contact (one Xero contact per bill).
+              return {
+                data: rows.map((r) => ({
+                  document_id: r.document_id,
+                  created_at: r.created_at,
+                  party_id: w.lines?.[r.document_id]?.find((l) => l.state === "needs_person")?.party_id ?? null,
+                })),
+                error: null,
+              };
             }
             if (filters.state === "needs_person" && filters.document_id === undefined) {
               const rows = (w.waiting ?? [])
@@ -272,7 +294,7 @@ function fake(w: World) {
         eq: (k: string, v: unknown) => ((filters[k] = v), chain),
         like: (k: string, v: string) => ((filters[`like:${k}`] = v), chain),
         neq: () => chain,
-        not: () => chain,
+        not: (k: string, op: string, v: string) => ((filters[`not:${k}`] = { op, v }), chain),
         or: () => chain,
         in: (k: string, v: unknown) => ((filters[`in:${k}`] = v), chain),
         lt: (k: string, v: unknown) => ((filters[`lt:${k}`] = v), chain),
@@ -1157,4 +1179,56 @@ Deno.test("backlog: nothing waiting adds no people read", async () => {
   const out = await syncMatchRun(fake(w), { on: true, changed: [] });
   assertEquals([out.run, out.backlog], [0, 0]);
   assert(!w.queries.some((q) => q.table === "people_account_codes"));
+});
+
+// ZZTEST contacts only: no real contact, name or rate.
+const onContact = (id: string, ...parties: Array<string | null>) => {
+  const l = billLines(id);
+  l[id] = parties.map((p, i) => ({ ...l[id][0], line_key: `n:${i + 1}`, line_no: i + 1, party_id: p }));
+  return l;
+};
+
+Deno.test("backlog: a Trade App user's own bill is never picked, lap after lap; its neighbours run as before", async () => {
+  const waiting = [waitingAt("tu", 1), waitingAt("s1", 1), waitingAt("tn", 2), waitingAt("s2", 2)];
+  const lines = Object.assign({}, onContact("tu", "zztest-trade-1"), billLines("s1"), onContact("tn", "zztest-trade-1", null), billLines("s2"));
+  const w = world({ waiting, lines, tradeUsers: ["zztest-trade-1"], backlogAt: null });
+  const one = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:s1", "xero_bill:s2"]);
+  assertEquals([one.backlog, one.skipped], [2, {}], "no labour_bill: the trade user's bills never ran");
+  assertEquals([billReadsFor(w, "tu"), billReadsFor(w, "tn")], [0, 0], "no bill read for them");
+  const w2 = world({ waiting, lines, tradeUsers: ["zztest-trade-1"], backlogAt: w.backlogAt });
+  await syncMatchRun(fake(w2), { on: true, changed: [] });
+  assertEquals(applies(w2).map((a) => a.args.p_subject_id), ["xero_bill:s1", "xero_bill:s2"], "the wrap");
+});
+
+Deno.test("backlog: a bill with any other contact on a line stays picked, and the run skips it exactly as before", async () => {
+  // mx: the first line (the skip's contact) is a trade user's, another line a supplier's.
+  // rv: the pick's waiting line is the supplier's, the first line a trade user's.
+  const mx = onContact("mx", "zztest-trade-1", "zztest-supplier-2");
+  const rv = onContact("rv", "zztest-trade-1", "zztest-supplier-2");
+  rv.rv[0] = { ...rv.rv[0], state: "on_job" };
+  const w = world({ waiting: [waitingAt("mx", 1), waitingAt("rv", 1)], lines: { ...mx, ...rv }, tradeUsers: ["zztest-trade-1"], backlogAt: null });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals([out.backlog, out.skipped, writes(w).length], [2, { labour_bill: 2 }, 0]);
+});
+
+Deno.test("MUST NOT CHANGE: a changed Trade App user's bill still runs and keeps labour_bill; a supplier's bill is proposed as before", async () => {
+  const w = world({
+    waiting: [waitingAt("tu", 1), waitingAt("ok", 1)],
+    lines: { ...onContact("tu", "zztest-trade-1"), ...billLines("ok"), ...onContact("tc", "zztest-trade-1") },
+    tradeUsers: ["zztest-trade-1"],
+    backlogAt: null,
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:tc"] });
+  assertEquals(out.skipped, { labour_bill: 1 }, "the changed bill's skip code, as on main");
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:ok"]);
+  assertEquals([out.changed, out.backlog, billReadsFor(w, "tu")], [1, 1, 0]);
+});
+
+Deno.test("backlog: an unreadable user list picks nothing and keeps the position", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({ waiting: [waitingAt("tu", 1), waitingAt("s1", 1)], lines: { ...onContact("tu", "zztest-trade-1"), ...billLines("s1") }, tradeUsers: ["zztest-trade-1"], backlogAt: { ...pos }, fail: "users" });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, ["backlog_trade_users"]]);
+  assertEquals(w.backlogAt, pos);
 });

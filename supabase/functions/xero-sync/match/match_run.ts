@@ -700,7 +700,7 @@ export async function readMatcherSwitch(sb: Sb): Promise<{ on: boolean; error?: 
   }
 }
 
-type BacklogLine = { document_id: string; created_at: string };
+type BacklogLine = { document_id: string; created_at: string; party_id?: string | null };
 
 async function timedRead<T>(code: string, q: { abortSignal: (s: AbortSignal) => PromiseLike<{ data: T; error: unknown }> }) {
   return await read<T>(code, q.abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS)));
@@ -720,14 +720,17 @@ type BacklogPlan = {
 
 /**
  * Up to `room` waiting bills (documents) with no open item, no labour line and
- * no cost line on an account hidden from Reconcile, oldest first by (line
+ * no cost line on an account hidden from Reconcile and not a Trade App user's
+ * own bill, oldest first by (line
  * created_at, document id), from the position kept in xero_sync_state. Reads
  * only; the caller moves the position after the run, to the last bill it
  * reached. Bills in `exclude` (run already this sync) are passed over. A failed
  * read (the people accounts included) takes nothing and leaves the position
  * alone. A bill left out here is one the run's skip would skip: same lines, the
  * same set, an exact code (a padded code or a hidden line only on Xero's own
- * bill is still picked, and skipped by the run as before).
+ * bill is still picked, and skipped by the run as before). A Trade App user's
+ * bill is left out only when every contact on its lines is a Trade App user's,
+ * so the contact the skip reads (its first line's) is one.
  */
 async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<BacklogPlan> {
   const none: BacklogPlan = { picks: [], after: null, hadPosition: false };
@@ -738,7 +741,7 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
         .abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS)).maybeSingle());
     const at = state?.cursor_at ?? null;
     const after = at ? state?.note ?? "" : "";
-    const base = () => sb.from("job_cost_lines").select("document_id,created_at")
+    const base = () => sb.from("job_cost_lines").select("document_id,created_at,party_id")
       .eq("document_kind", "xero_bill").eq("state", "needs_person");
     let lines: BacklogLine[] = [];
     let full = false;
@@ -808,6 +811,36 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
       for (const r of labour ?? []) labourSet.add(r.document_id);
       for (const r of hidden ?? []) hiddenSet.add(r.document_id);
     }
+    // A Trade App user's own bill is their pay (the skip's second labour path).
+    // users is small (the skip reads it unindexed too); then
+    // job_cost_lines_document_idx for any other contact on those bills, which
+    // keeps the bill picked.
+    const tradeSet = new Set<string>();
+    const partyOf = new Map<string, string>();
+    for (const d of docs) {
+      if (typeof d.party_id === "string" && d.party_id && !labourSet.has(d.document_id) && !hiddenSet.has(d.document_id)) {
+        partyOf.set(d.document_id, d.party_id);
+      }
+    }
+    const parties = [...new Set(partyOf.values())];
+    if (parties.length) {
+      const users = await timedRead<Array<{ xero_contact_id: string | null }>>("backlog_trade_users",
+        sb.from("users").select("xero_contact_id").in("xero_contact_id", parties));
+      const tradeParties = new Set((users ?? []).map((u) => u.xero_contact_id).filter((x): x is string => !!x));
+      const candidates = [...partyOf].filter(([, p]) => tradeParties.has(p)).map(([id]) => id);
+      if (candidates.length) {
+        const mixed = new Set<string>();
+        const quoted = [...tradeParties].map((p) => `"${p.replace(/["\\]/g, "")}"`).join(",");
+        for (let i = 0; i < candidates.length; i += MATCH_BACKLOG_CHUNK) {
+          const chunk = candidates.slice(i, i + MATCH_BACKLOG_CHUNK);
+          const other = await timedRead<Array<{ document_id: string }>>("backlog_trade_mixed",
+            sb.from("job_cost_lines").select("document_id").eq("document_kind", "xero_bill")
+              .in("document_id", chunk).not("party_id", "in", `(${quoted})`));
+          for (const r of other ?? []) mixed.add(r.document_id);
+        }
+        for (const id of candidates) if (!mixed.has(id)) tradeSet.add(id);
+      }
+    }
     const picks: BacklogPick[] = [];
     let last = docs[docs.length - 1];
     let stopped = false;
@@ -818,7 +851,10 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
       }
       last = d;
       const subject = `xero_bill:${d.document_id}`;
-      if (openSet.has(subject) || labourSet.has(d.document_id) || hiddenSet.has(d.document_id) || exclude.has(subject)) continue;
+      if (
+        openSet.has(subject) || labourSet.has(d.document_id) || hiddenSet.has(d.document_id) ||
+        tradeSet.has(d.document_id) || exclude.has(subject)
+      ) continue;
       picks.push({ subject, created_at: d.created_at, document_id: d.document_id });
     }
     const reachedEnd = !full && !capped && !stopped;
