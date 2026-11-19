@@ -291,6 +291,12 @@ jobs:
         run: |
           deno test --allow-read supabase/functions/ops-api/job_overview_v2_switch_test.ts
 
+      # P2-03.6 / F3d: the Reconcile cost list, whole file, no filter. A bill
+      # item carries its Xero invoice id; every other item carries null.
+      - name: Check the Reconcile cost list
+        run: |
+          deno test --allow-env --allow-net=127.0.0.1 --allow-read supabase/functions/ops-api/reconcile_list_test.ts
+
       # Follow-up 56: the director's switch checks stay reads (read-only
       # session, ZZTEST only, no write verb, listed functions only).
       - name: Check switch check files stay reads
