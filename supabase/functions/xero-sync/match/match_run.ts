@@ -824,9 +824,12 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
     }
     const parties = [...new Set(partyOf.values())];
     if (parties.length) {
-      const users = await timedRead<Array<{ xero_contact_id: string | null }>>("backlog_trade_users",
-        sb.from("users").select("xero_contact_id").in("xero_contact_id", parties));
-      const tradeParties = new Set((users ?? []).map((u) => u.xero_contact_id).filter((x): x is string => !!x));
+      const tradeParties = new Set<string>();
+      for (let i = 0; i < parties.length; i += MATCH_BACKLOG_CHUNK) {
+        const users = await timedRead<Array<{ xero_contact_id: string | null }>>("backlog_trade_users",
+          sb.from("users").select("xero_contact_id").in("xero_contact_id", parties.slice(i, i + MATCH_BACKLOG_CHUNK)));
+        for (const u of users ?? []) if (u.xero_contact_id) tradeParties.add(u.xero_contact_id);
+      }
       const candidates = [...partyOf].filter(([, p]) => tradeParties.has(p)).map(([id]) => id);
       if (candidates.length) {
         const mixed = new Set<string>();
