@@ -172,7 +172,7 @@ BEGIN
      OR has_table_privilege('authenticated', 'public.object_grant_changes', 'SELECT')
      OR has_function_privilege('anon', 'public.object_grant_open()', 'EXECUTE')
      OR has_function_privilege('authenticated', 'public.object_grant_open()', 'EXECUTE') THEN
-    RAISE EXCEPTION 'contract 6: the record or the rule is reachable through the API';
+    RAISE EXCEPTION 'contract 6: an API role can use the record or the rule';
   END IF;
 END
 $c6$;
