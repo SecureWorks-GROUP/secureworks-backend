@@ -160,6 +160,9 @@ BEGIN
      OR NOT EXISTS (SELECT 1 FROM public.object_grant_changes
                     WHERE object_kind = 'default' AND object = '*' AND object_type = 'FUNCTIONS'
                       AND grantee = 'PUBLIC' AND privilege = 'EXECUTE' AND change = 'revoked')
+     OR (SELECT count(*) FROM public.object_grant_changes
+          WHERE object_kind = 'default' AND object = '*' AND object_type = 'FUNCTIONS'
+            AND grantee IN ('authenticated', 'service_role') AND privilege = 'EXECUTE' AND change = 'granted') <> 2
      OR EXISTS (SELECT 1 FROM public.object_grant_changes
                 WHERE object_kind = 'default' AND grantee IN ('authenticated', 'service_role')
                   AND object_type <> 'FUNCTIONS') THEN
@@ -183,6 +186,8 @@ CREATE SEQUENCE public.zgs_new_seq;
 CREATE FUNCTION public.zgs_new_definer() RETURNS int
   LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$ SELECT 4 $$;
 CREATE FUNCTION public.zgs_new_invoker() RETURNS int LANGUAGE sql AS $$ SELECT 5 $$;
+CREATE SCHEMA zgs_other;
+CREATE FUNCTION zgs_other.zgs_elsewhere() RETURNS int LANGUAGE sql AS $$ SELECT 6 $$;
 DO $c7$
 DECLARE
   v_rel text;
@@ -195,7 +200,7 @@ BEGIN
       RAISE EXCEPTION 'contract 7: a new relation is granted to anon or PUBLIC: %', v_rel;
     END IF;
   END LOOP;
-  FOREACH v_fn IN ARRAY ARRAY['public.zgs_new_definer()', 'public.zgs_new_invoker()'] LOOP
+  FOREACH v_fn IN ARRAY ARRAY['public.zgs_new_definer()', 'public.zgs_new_invoker()', 'zgs_other.zgs_elsewhere()'] LOOP
     IF EXISTS (SELECT 1 FROM pg_proc p
                CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
                WHERE p.oid = v_fn::regprocedure AND a.grantee IN (0, 'anon'::regrole))

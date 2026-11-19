@@ -13,16 +13,17 @@
 --      executable by PUBLIC. A schema's default privileges can only add to the
 --      role's global ones, and the built-in global default lets PUBLIC execute
 --      every new function, so PUBLIC's EXECUTE is removed from postgres's
---      global function defaults; the other removals are made in schema public.
+--      global function defaults (authenticated and service_role receive it
+--      there as their own); the other removals are made in schema public.
 --      Default privileges of other creating roles are not changed here.
 --
 -- Where PUBLIC held a privilege, authenticated and service_role first receive
 -- it as their own when they do not already hold it, so no signed-in caller and
 -- no server caller loses anything: on a function, EXECUTE; on a sequence,
 -- USAGE, SELECT and UPDATE (so an insert into a table whose serial column uses
--- the sequence keeps working); in the defaults for new functions in schema
--- public, EXECUTE. authenticated's and service_role's own default privileges
--- are otherwise unchanged.
+-- the sequence keeps working); in the defaults for new functions, EXECUTE, at
+-- the level PUBLIC held it. authenticated's and service_role's own default
+-- privileges are otherwise unchanged.
 --
 -- Every grant removed or added is recorded in public.object_grant_changes,
 -- which supabase/rollbacks/20261119091300_tighten_default_function_sequence_grants_down.sql
@@ -242,26 +243,29 @@ BEGIN
   END LOOP;
 
   -- C. Default privileges for what postgres creates from now on. Whatever
-  -- PUBLIC would have been given on a new object in schema public,
-  -- authenticated and service_role keep as their own default there.
+  -- PUBLIC would have been given on a new object, authenticated and
+  -- service_role keep as their own default at the same level: in schema
+  -- public, or for every schema where the built-in global default gave it.
   FOR g IN
-    SELECT DISTINCT o.object_type, o.privilege
+    SELECT DISTINCT o.object, o.object_type, o.privilege
     FROM public.object_grant_open() o
     WHERE o.object_kind = 'default' AND o.grantee = 'PUBLIC'
-    ORDER BY 1, 2
+    ORDER BY 1, 2, 3
   LOOP
     FOREACH v_role IN ARRAY ARRAY['authenticated', 'service_role'] LOOP
       IF NOT EXISTS (
         SELECT 1 FROM pg_default_acl d
         CROSS JOIN LATERAL aclexplode(d.defaclacl) a
-        WHERE d.defaclrole = v_postgres AND d.defaclnamespace IN (0, 'public'::regnamespace)
+        WHERE d.defaclrole = v_postgres
+          AND d.defaclnamespace = CASE g.object WHEN '*' THEN 0 ELSE 'public'::regnamespace END
           AND d.defaclobjtype = CASE g.object_type WHEN 'TABLES' THEN 'r' WHEN 'SEQUENCES' THEN 'S' ELSE 'f' END::"char"
           AND a.grantee = to_regrole(v_role) AND a.privilege_type = g.privilege
       ) THEN
-        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT %s ON %s TO %I',
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE postgres %s GRANT %s ON %s TO %I',
+                       CASE g.object WHEN '*' THEN '' ELSE 'IN SCHEMA public' END,
                        g.privilege, g.object_type, v_role);
         INSERT INTO public.object_grant_changes (object_kind, object, object_type, grantee, privilege, change)
-        VALUES ('default', 'public', g.object_type, v_role, g.privilege, 'granted');
+        VALUES ('default', g.object, g.object_type, v_role, g.privilege, 'granted');
       END IF;
     END LOOP;
   END LOOP;

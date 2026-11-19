@@ -10,7 +10,13 @@ BEGIN;
 CREATE FUNCTION public.zz_truth_set_default_probe() RETURNS integer LANGUAGE sql AS 'SELECT 1';
 DO $$
 BEGIN
- IF NOT has_function_privilege('anon', 'public.zz_truth_set_default_probe()', 'EXECUTE')
+ -- A later migration (20261119091300) takes anon out of these defaults; its record then shows anon held
+ -- them, so they were in force when this migration ran.
+ IF NOT (has_function_privilege('anon', 'public.zz_truth_set_default_probe()', 'EXECUTE')
+         OR (to_regclass('public.object_grant_changes') IS NOT NULL
+             AND EXISTS (SELECT 1 FROM public.object_grant_changes
+                         WHERE object_kind = 'default' AND object = 'public' AND object_type = 'FUNCTIONS'
+                           AND grantee = 'anon' AND privilege = 'EXECUTE' AND change = 'revoked')))
   OR NOT has_function_privilege('authenticated', 'public.zz_truth_set_default_probe()', 'EXECUTE') THEN
   RAISE EXCEPTION 'truth set contract: the setup''s default privileges are not in force, so the grant checks prove nothing';
  END IF;
