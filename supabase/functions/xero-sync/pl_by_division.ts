@@ -116,24 +116,35 @@ export const DIVISION_LEASE_KEY = 'division_month_accounts_lease'
 export const DIVISION_LEASE_MS = 5 * 60 * 1000
 const DIVISION_LEASE_FREE = '1970-01-01T00:00:00.000Z'
 
-async function leaseUpdate(q: any): Promise<boolean> {
+/** 'held' when the update changed the one row, 'missed' when it changed none, 'failed' when it could not run. */
+async function leaseWrite(q: any): Promise<'held' | 'missed' | 'failed'> {
   const { data, error } = await q.select('key')
-  return !error && Array.isArray(data) && data.length === 1
+  if (error || !Array.isArray(data)) return 'failed'
+  return data.length === 1 ? 'held' : 'missed'
 }
 
-/** True when this run now holds the lease; false when another run holds it or anything failed. */
-export async function claimDivisionLease(sb: any, runId: string, now: Date): Promise<boolean> {
+async function leaseUpdate(q: any): Promise<boolean> {
+  return (await leaseWrite(q)) === 'held'
+}
+
+/**
+ * 'claimed' when this run now holds the lease, 'held' when another run holds
+ * it, 'failed' when the lease row could not be written or read. Only
+ * 'claimed' lets the run store.
+ */
+export async function claimDivisionLease(sb: any, runId: string, now: Date): Promise<'claimed' | 'held' | 'failed'> {
   try {
     const seed = await sb.from('xero_sync_state').upsert(
       { key: DIVISION_LEASE_KEY, cursor_at: DIVISION_LEASE_FREE, note: null, updated_at: now.toISOString() },
       { onConflict: 'key', ignoreDuplicates: true },
     )
-    if (seed?.error) return false
-    return await leaseUpdate(sb.from('xero_sync_state').update({
+    if (seed?.error) return 'failed'
+    const claim = await leaseWrite(sb.from('xero_sync_state').update({
       cursor_at: new Date(now.getTime() + DIVISION_LEASE_MS).toISOString(), note: runId, updated_at: now.toISOString(),
     }).eq('key', DIVISION_LEASE_KEY).lt('cursor_at', now.toISOString()))
+    return claim === 'held' ? 'claimed' : claim === 'missed' ? 'held' : 'failed'
   } catch {
-    return false
+    return 'failed'
   }
 }
 

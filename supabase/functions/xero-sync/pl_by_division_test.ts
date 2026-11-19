@@ -1,7 +1,7 @@
 import { assertEquals, assertRejects } from 'jsr:@std/assert@1'
 import { syncTrackingPL } from './index.ts'
 import { XeroCooldownError } from '../_shared/xero_cooldown.ts'
-import { DIVISION_LEASE_KEY, DIVISION_LEASE_MS, divisionSyncOfficeHours, plByDivisionRows, storeDivisionMonth } from './pl_by_division.ts'
+import { claimDivisionLease, DIVISION_LEASE_KEY, DIVISION_LEASE_MS, divisionSyncOfficeHours, plByDivisionRows, storeDivisionMonth } from './pl_by_division.ts'
 
 type AccountRow = ReturnType<typeof plByDivisionRows>[number]
 
@@ -329,6 +329,18 @@ Deno.test('lease: lost mid-run, the run stores no further month and leaves the n
   const result = await f.run()
   assertEquals([result.account_rows, monthsWithRows(f.accounts), f.trims.length], [null, 1, 1])
   assertEquals(f.db.lease?.note, 'zztest-other-run')
+})
+
+Deno.test('lease: the claim tells a held lease from a lease row it cannot write', async () => {
+  const run = (lease: Lease, leaseFault = '') => {
+    const f = syncFixture()
+    Object.assign(f.db, { lease, leaseFault })
+    return claimDivisionLease(f.client, 'zztest-run', now)
+  }
+  assertEquals(await run(null), 'claimed')
+  assertEquals(await run(otherLease(new Date(now.getTime() + 1).toISOString())), 'held')
+  assertEquals(await run(null, 'seed'), 'failed')
+  assertEquals(await run(null, 'update'), 'failed')
 })
 
 Deno.test('lease: a failed seed or claim stores nothing', async () => {

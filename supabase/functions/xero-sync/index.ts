@@ -2957,8 +2957,10 @@ export async function syncTrackingPL(sb: any, readXero = xeroGet, clock = () => 
   let leaseHeld = false
   if (storeAccounts) {
     leaseRunId = crypto.randomUUID()
-    leaseHeld = await claimDivisionLease(sb, leaseRunId, now)
-    if (!leaseHeld) console.error('[xero-sync] division_accounts_lease_held')
+    const claim = await claimDivisionLease(sb, leaseRunId, now)
+    leaseHeld = claim === 'claimed'
+    if (claim === 'held') console.error('[xero-sync] division_accounts_lease_held')
+    if (claim === 'failed') console.error('[xero-sync] division_accounts_lease_unwritable')
   }
 
   let optionsSynced: number | null = null
