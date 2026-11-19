@@ -1336,6 +1336,12 @@ ops-api|supabase/migrations/20261118194200_trade_pay_run_xero_found.sql|function
 # calls the function, so ops-api must not deploy ahead of the migration.
 ops-api|supabase/migrations/20261118115852_trade_pay_runs.sql|column|trade_pay_runs.super_marked_paid_at
 ops-api|supabase/migrations/20261119091000_decide_held_trade_line.sql|function|decide_held_trade_line
+ops-api|supabase/migrations/20261119091500_group_office_day_entry_and_behind.sql|column|group_work_order_time_entries.entered_by_office
+ops-api|supabase/migrations/20261119091500_group_office_day_entry_and_behind.sql|column|group_work_order_time_entries.disputed_at
+ops-api|supabase/migrations/20261119091500_group_office_day_entry_and_behind.sql|column|group_work_order_time_entries.dispute_resolved_at
+ops-api|supabase/migrations/20261119091500_group_office_day_entry_and_behind.sql|function|group_office_enter_hours
+ops-api|supabase/migrations/20261119091500_group_office_day_entry_and_behind.sql|function|group_office_dispute_hours
+ops-api|supabase/migrations/20261119091500_group_office_day_entry_and_behind.sql|trigger|group_work_orders.trg_group_work_orders_office_dispute_hold
 # P2-03.6: ops-api reconcile_list reads one page and the per-kind counts
 # through these two functions (the switch off answers before either is called).
 ops-api|supabase/migrations/20261118195200_reconcile_list_page.sql|function|reconcile_list_page
