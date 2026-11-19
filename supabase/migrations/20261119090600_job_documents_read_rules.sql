@@ -92,7 +92,7 @@ CREATE POLICY job_documents_office_update
     )
   );
 
-REVOKE ALL ON TABLE public.job_documents FROM anon;
+REVOKE ALL ON TABLE public.job_documents FROM anon, PUBLIC;
 
 DO $post$
 BEGIN
