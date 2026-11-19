@@ -1,4 +1,10 @@
 BEGIN;
+-- 20261119090200 adds a pay run check to the reject body this case pins:
+-- stand this case's body back up first (a no-op while that change is absent).
+-- Its 5 s limits are put back so this case keeps the runner's own.
+\ir ../../../rollbacks/20261119090200_trade_invoice_reject_pay_run_down.sql
+RESET statement_timeout;
+RESET lock_timeout;
 -- Exercise the same query with a controlled history. Restore the original
 -- tables, indexes, grants and functions together at the transaction boundary.
 CREATE SCHEMA effort_original;
