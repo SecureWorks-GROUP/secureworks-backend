@@ -4893,8 +4893,13 @@ sealed by `work_orders_additional_guard` and approved only through
 as a `work_order_amount_changes` row. Job-level money therefore stays one pot:
 never add an additional order's amount into a cap, room or pay check by hand,
 and never read `kind <> 'job'` as "crew" (read `kind = 'crew'`). The trade's
-card bills the first work order they have not billed (`pickTradeWorkOrder`);
-the cap reads `cap_work_order_id` / `cap_agreed_ex`. Contract and gaps:
+card bills the first work order they have not billed (`pickTradeWorkOrder`),
+those named for the trade before the main one; the cap reads
+`cap_work_order_id` / `cap_agreed_ex`, and on a job with an order named for a
+trade it also holds each named order for its trade (`ownWorkOrderRoomEx`:
+another trade never bills into it, and the shared part is drawn on once). The
+named orders reach the cap only through `includeAdditionalOrders`, never an
+answer a trade reads. Contract and gaps:
 `docs/job-additional-work-orders-v1.md`.
 
 ## Price And Work Order Issue On Two Owner Decisions

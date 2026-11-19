@@ -49,17 +49,60 @@ seal and approval: `supabase/migrations/20261119090000_additional_job_work_order
 The trade app's Pay tab bills one agreed amount per job card
 (`work_order_agreed_ex` on `my_hours` and `trade_invoice_job_modes`). With
 more than one work order on the job, that amount is the first work order this
-trade has not billed yet (`pickTradeWorkOrder`): the job's work orders in
-order (main first, then additional ones by approval), keeping the main one and
-those for this trade or for nobody in particular, are covered in turn by what
-this trade has billed on the job (lines on invoices in
-`job_work_order_billed_invoice_statuses`, commission and reimbursement left
-out). A part payment never covers a work order. Once every one is billed, the
-card shows the main work order again and the cap refuses more.
+trade has not billed yet (`pickTradeWorkOrder`). The job's work orders a trade
+may bill are, in order: those named for this trade (`assigned_user_id`), then
+the main one, then those named for nobody, each group by approval. A work
+order named for another trade is never offered. What this trade has billed on
+the job (lines on invoices in `job_work_order_billed_invoice_statuses`, not on
+a holding invoice, an override first, commission and reimbursement left out:
+the cap's own rule) covers the set of them whose agreed amounts add up to the
+most without going over it (equal totals: the earliest approved), whichever
+order they were billed in. So a trade who billed the main work order before a
+smaller named one was added is offered the named one, and a trade who billed a
+larger named one first is offered the main one next. A part payment never
+covers a work order. Once every one is billed, the card shows the main work order again and
+the cap refuses more.
 
-So no screen changes: a trade who billed the $80 inspection is next offered
-the restoration at its agreed amount, and `generate_trade_invoice` refuses
-any other figure (`work_order_amount_not_agreed`), exactly as before.
+So a trade with a work order named for them is offered it first, at its
+agreed amount, even when the same trade also holds the main work order, and
+`generate_trade_invoice` refuses any other figure
+(`work_order_amount_not_agreed`), exactly as before.
+
+## The cap holds a named work order for its trade
+
+The job-wide cap allows the main work order plus its amount changes, which
+carry every additional work order. On its own that would let one trade bill
+into another trade's named work order (trade A bills the main order; trade
+B's order is approved; A bills the main order again and passes while B's
+amount is at least the main one's). So on a job with an approved additional
+work order named for a trade, the cap also checks the trade whose invoice the
+line is on (`ownWorkOrderRoomEx`, `work_order_total_cap.ts`): every other
+trade keeps the larger of its named work orders and what it has billed, and
+this trade may bill what is left of the job's allowance after those and its
+own billing. A named work order stays its trade's however much room the job
+has, and the job's shared part (the main work order, its customer variations
+and raises, and any additional order named for nobody) is drawn on once in
+all, however many trades bill it. The refusal is the cap's code
+(`work_order_total_over_agreed`) with `limit: "own_work_orders"` on the job;
+the figure (`most_this_invoice_ex`, the trade's own room) is shown only on a
+job where every billed line is theirs, as for the job-wide cap. On such a job
+a refusal shows the trade's own room even when the job itself is over: the
+job's room carries the other trade's named amount and is never shown. On a
+job whose named work orders are all the billing trade's own, its room is the
+job's, so the job check alone answers, with the words it always had.
+
+It can only add a refusal: the job-wide check runs first and unchanged. A job
+with no additional work order, or with additional ones named for nobody,
+reads nothing more and answers exactly as before. The named orders reach the
+cap only through `loadTradeInvoiceJobModes`'s `includeAdditionalOrders`,
+which only the cap door sets: they carry other trades' amounts and are never
+on an answer a trade reads. A lead's adjust of a crew line
+(`review_crew_charge`) holds the line's own trade, never the lead. With
+`trade_line_hold_v1` on, the job's billed total is the database's
+(`work_order_backed_billed`) and each trade's share is read from the lines by
+the same rule as with the switch off; that share can only be larger, so it can
+only add a refusal. The database's own job amount guard is job-wide and does
+not know a named work order (not built yet).
 
 A job with more than one work order adds three fields to its mode answer:
 `cap_work_order_id` and `cap_agreed_ex` (the main work order, which the cap
@@ -84,9 +127,16 @@ server key with the owner-directed fence (`owner_email` + `owner_statement`,
 | `job_work_orders` | GET | `job_id` or `job_number` | `{schema:"job-work-orders.v1", job, work_orders[] (main and additional: id, kind, main, wo_number, title, status, agreed_labour_ex, assigned_user_id, trade_name, scheduled_date, approved_at, approved_via, updated_at), agreed_total_ex}` |
 
 `job_events` rows (`job_work_order_added`, `job_work_order_drafted`) carry ids
-and the title only, never an amount: trades read job events.
+and the title only, never an amount: trades read job events. An owner's
+direction through the server key is kept there as who and when only
+(`owner_directive: {kind, owner_user_id, recorded_at}`,
+`ownerDirectiveEventStamp`), never their words or email address.
 
 ## Not built yet
+
+- The database's job amount guard (`trade_invoice_lines_job_amount_guard`)
+  and `job_backed_room` are job-wide: a line written straight to the database
+  past the ops-api doors is not held to a trade's named work order.
 
 - The trade app shows the next work order's amount on the job card but does
   not list the job's work orders or let the trade choose one; it reads
