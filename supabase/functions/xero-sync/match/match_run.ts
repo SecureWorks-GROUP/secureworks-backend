@@ -95,6 +95,16 @@ export const MATCH_BACKLOG_LINE_PAGE = 300;
 /** Bills of a page looked at per run (open-item and labour reads in chunks of MATCH_BACKLOG_CHUNK). */
 export const MATCH_BACKLOG_DOCS = 100;
 const MATCH_BACKLOG_CHUNK = 50;
+/** The backlog's other-contact read came back cut short with no new bill named, or with no count. */
+export const BACKLOG_MIXED_CUT = "backlog_trade_mixed_cut";
+/**
+ * Other-contact pages read per chunk at most: one, and one more for the rest
+ * after a bill that filled a page. Two chunks at most, each page under its 5 s
+ * limit: 4 pages, 20 s, inside the run's budget (MATCH_RUN_BUDGET_MS).
+ */
+export const MATCH_BACKLOG_MIXED_PAGES = 2;
+/** The other-contact read needed more pages than MATCH_BACKLOG_MIXED_PAGES. */
+export const BACKLOG_MIXED_PAGE_CAP = "backlog_trade_mixed_page_cap";
 /** Client-side limit on the batched requeue and the backlog reads. */
 export const MATCH_STATEMENT_TIMEOUT_MS = 5_000;
 /** A person's labour: never matched or raised here (#1678 hides these bills from the list). */
@@ -706,6 +716,21 @@ async function timedRead<T>(code: string, q: { abortSignal: (s: AbortSignal) => 
   return await read<T>(code, q.abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS)));
 }
 
+/** timedRead for a request that also asks for an exact count (the count comes back beside the rows). */
+async function timedCountedRead<T>(
+  code: string,
+  q: { abortSignal: (s: AbortSignal) => PromiseLike<{ data: T; error: unknown; count?: number | null }> },
+): Promise<{ data: T; count: number | null }> {
+  let res: { data: T; error: unknown; count?: number | null };
+  try {
+    res = await q.abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS));
+  } catch {
+    throw new ReadFailed(code);
+  }
+  if (res.error) throw new ReadFailed(statementTimedOut(res.error) ? OVER_TIME : code);
+  return { data: res.data, count: res.count ?? null };
+}
+
 type BacklogPick = { subject: string; created_at: string; document_id: string };
 type BacklogPlan = {
   picks: BacklogPick[];
@@ -834,12 +859,32 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
       if (candidates.length) {
         const mixed = new Set<string>();
         const quoted = [...tradeParties].map((p) => `"${p.replace(/["\\]/g, "")}"`).join(",");
+        // One row comes back per line, so a bill with many lines could fill a
+        // page and hide another bill behind it. Each page asks for an exact
+        // count of its lines, so a page cut short by our limit or by the API's
+        // own row cap is known, whatever that cap is. A cut page drops the
+        // bills it named and reads again for the rest, so each page names new
+        // bills. A cut page that names none, a page with no count, or a chunk
+        // needing more than MATCH_BACKLOG_MIXED_PAGES pages fails the plan
+        // closed (no pick, position kept), each with its own code.
         for (let i = 0; i < candidates.length; i += MATCH_BACKLOG_CHUNK) {
-          const chunk = candidates.slice(i, i + MATCH_BACKLOG_CHUNK);
-          const other = await timedRead<Array<{ document_id: string }>>("backlog_trade_mixed",
-            sb.from("job_cost_lines").select("document_id").eq("document_kind", "xero_bill")
-              .in("document_id", chunk).not("party_id", "in", `(${quoted})`));
-          for (const r of other ?? []) mixed.add(r.document_id);
+          let rest = candidates.slice(i, i + MATCH_BACKLOG_CHUNK);
+          let pages = 0;
+          while (rest.length) {
+            if (pages >= MATCH_BACKLOG_MIXED_PAGES) throw new ReadFailed(BACKLOG_MIXED_PAGE_CAP);
+            pages++;
+            const page = await timedCountedRead<Array<{ document_id: string }>>("backlog_trade_mixed",
+              sb.from("job_cost_lines").select("document_id", { count: "exact" }).eq("document_kind", "xero_bill")
+                .in("document_id", rest).not("party_id", "in", `(${quoted})`)
+                .limit(MATCH_BACKLOG_LINE_PAGE));
+            const other = page.data ?? [];
+            if (typeof page.count !== "number") throw new ReadFailed(BACKLOG_MIXED_CUT);
+            const named = new Set(other.map((r) => r?.document_id).filter((d) => rest.includes(d)));
+            for (const d of named) mixed.add(d);
+            if (other.length >= page.count) break;
+            if (!named.size) throw new ReadFailed(BACKLOG_MIXED_CUT);
+            rest = rest.filter((d) => !named.has(d));
+          }
         }
         for (const id of candidates) if (!mixed.has(id)) tradeSet.add(id);
       }
