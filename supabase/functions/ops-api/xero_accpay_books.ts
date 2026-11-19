@@ -16,13 +16,26 @@ import {
 import { readSwitch } from "../_shared/switch_cache.ts";
 import { recordXeroDraft } from "../_shared/xero_draft_register.ts";
 import {
+  assertStorageObjectRef,
+  attachFileToXeroDocument,
   attachPdfBase64ToXeroInvoice,
+  decodePdfBase64,
   hasXeroPdfBase64Payload,
+  isXeroEntityUuid,
+  MAX_XERO_FILE_BYTES,
+  sniffXeroAttachmentType,
   XeroPdfAttachError,
 } from "./xero_attachment.ts";
+import {
+  findAttachedXeroDocument,
+  recordXeroDocumentAttachment,
+  sha256Hex,
+} from "./xero_document_attachment_store.ts";
+import { XeroCooldownError } from "../_shared/xero_cooldown.ts";
 import { xeroInvoiceRefOrNumberWhere } from "./xero_where_clause.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
+const CREDIT_NOTE_PDF_FLAG = "xero_credit_note_pdf_attach_v1";
 const ACCPAY_ACCOUNT_DEFAULT = "306";
 
 export class SupplierBillError extends Error {
@@ -869,10 +882,132 @@ export async function attachSupplierBillPdf(
   }
 }
 
+function creditNotePdfRequested(body: any): boolean {
+  if (hasXeroPdfBase64Payload(body?.pdf_base64)) return true;
+  return String(body?.storage_path || body?.pdf_storage_path || "").trim().length > 0;
+}
+
+function attachmentErrorCode(error: unknown): string {
+  if (error instanceof XeroPdfAttachError || error instanceof XeroCooldownError) return error.code;
+  return "XERO_FILE_ATTACH_FAILED";
+}
+
+async function readStorageFile(
+  client: any,
+  bucket: string,
+  path: string,
+  downloadStorage?: (bucket: string, path: string) => Promise<Uint8Array>,
+): Promise<Uint8Array> {
+  if (downloadStorage) return await downloadStorage(bucket, path);
+  const storage = client?.storage;
+  if (!storage?.from) {
+    throw new XeroPdfAttachError("Receipt file is not in storage", 404, "RECEIPT_FILE_MISSING");
+  }
+  const { data, error } = await storage.from(bucket).download(path);
+  if (error || !data) {
+    throw new XeroPdfAttachError("Receipt file is not in storage", 404, "RECEIPT_FILE_MISSING");
+  }
+  return new Uint8Array(await data.arrayBuffer());
+}
+
+type CreditNotePdfResult = {
+  attached: boolean;
+  skipped?: "already_attached";
+  filename?: string;
+  file_sha256?: string;
+  error_code?: string;
+};
+
+/** When the switch is off, or no PDF was offered, this returns null and calls no attachment API. */
+async function attachSupplierCreditNotePdf(
+  client: any,
+  body: any,
+  creditNoteId: string,
+  accessToken: string,
+  tenantId: string,
+  deps: {
+    fetchImpl?: typeof fetch;
+    downloadStorage?: (bucket: string, path: string) => Promise<Uint8Array>;
+  },
+): Promise<CreditNotePdfResult | null> {
+  if (!creditNotePdfRequested(body)) return null;
+  if (!await readSwitch(client, CREDIT_NOTE_PDF_FLAG)) return null;
+  if (!isXeroEntityUuid(creditNoteId)) {
+    return { attached: false, error_code: "XERO_ENTITY_ID_INVALID" };
+  }
+  let bytes: Uint8Array;
+  let filename = String(body?.pdf_filename || body?.reference || body?.ref || "credit-note");
+  try {
+    const storagePath = String(body?.storage_path || body?.pdf_storage_path || "").trim();
+    if (hasXeroPdfBase64Payload(body?.pdf_base64)) {
+      bytes = decodePdfBase64(body.pdf_base64);
+    } else {
+      const ref = assertStorageObjectRef(body?.storage_bucket, storagePath);
+      bytes = await readStorageFile(client, ref.bucket, ref.path, deps.downloadStorage);
+      if (!filename || filename === "credit-note") filename = ref.path.split("/").pop() || filename;
+    }
+  } catch (error) {
+    return { attached: false, error_code: attachmentErrorCode(error) };
+  }
+  if (bytes.length === 0 || bytes.length > MAX_XERO_FILE_BYTES ||
+    sniffXeroAttachmentType(bytes) !== "application/pdf") {
+    return { attached: false, error_code: bytes.length > MAX_XERO_FILE_BYTES ? "FILE_TOO_LARGE" : "FILE_TYPE_NOT_ALLOWED" };
+  }
+  const fileSha256 = await sha256Hex(bytes);
+  const key = {
+    orgId: DEFAULT_ORG_ID,
+    entityType: "CreditNotes" as const,
+    entityId: creditNoteId,
+    fileSha256,
+  };
+  const existing = await findAttachedXeroDocument(client, key);
+  if (existing === "unreadable") return { attached: false, error_code: "AUDIT_UNREADABLE" };
+  if (existing === "attached") {
+    return { attached: true, skipped: "already_attached", file_sha256: fileSha256 };
+  }
+  try {
+    const attached = await attachFileToXeroDocument(
+      { accessToken, tenantId, fetchImpl: deps.fetchImpl },
+      {
+        endpoint: "CreditNotes",
+        documentId: creditNoteId,
+        filename,
+        bytes,
+        contentType: "application/pdf",
+      },
+    );
+    filename = attached.filename;
+  } catch (error) {
+    await recordXeroDocumentAttachment(client, {
+      ...key,
+      fileName: filename.slice(0, 200),
+      contentType: "application/pdf",
+      byteSize: bytes.length,
+      status: "failed",
+      errorCode: attachmentErrorCode(error),
+    });
+    return { attached: false, error_code: attachmentErrorCode(error) };
+  }
+  await recordXeroDocumentAttachment(client, {
+    ...key,
+    fileName: filename,
+    contentType: "application/pdf",
+    byteSize: bytes.length,
+    status: "attached",
+  });
+  return { attached: true, filename, file_sha256: fileSha256 };
+}
+
 export async function createSupplierCreditNote(
   client: any,
   body: any,
-  deps: { getToken: GetTokenFn; xeroGet: XeroGetFn; xeroPost: XeroPostFn },
+  deps: {
+    getToken: GetTokenFn;
+    xeroGet: XeroGetFn;
+    xeroPost: XeroPostFn;
+    fetchImpl?: typeof fetch;
+    downloadStorage?: (bucket: string, path: string) => Promise<Uint8Array>;
+  },
 ) {
   requireDraftStatus(
     body?.status || body?.xero_status,
@@ -916,7 +1051,15 @@ export async function createSupplierCreditNote(
     );
   }
   requireDraftStatus(note.Status, "created supplier credit note");
-  // P3-01.9: no document is attached to a credit note until P3-02.4.
+  // The PDF switch defaults off. A missing file or a failed attach leaves the DRAFT in place.
+  const pdf = await attachSupplierCreditNotePdf(
+    client,
+    body,
+    String(note.CreditNoteID),
+    accessToken,
+    tenantId,
+    deps,
+  );
   await recordXeroDraft(client, {
     orgId: DEFAULT_ORG_ID,
     xeroDocumentId: note.CreditNoteID,
@@ -927,8 +1070,14 @@ export async function createSupplierCreditNote(
     jobIds: await supplierDraftJobIds(client, body),
     payload: payload.CreditNotes[0],
     returned: note,
-    hasSourceDocument: false,
+    hasSourceDocument: pdf?.attached === true,
     raise: true,
   });
-  return { ok: true, status: "DRAFT", credit_note: presentCreditNote(note), ...diagnostics };
+  return {
+    ok: true,
+    status: "DRAFT",
+    credit_note: presentCreditNote(note),
+    ...(pdf ? { pdf } : {}),
+    ...diagnostics,
+  };
 }
