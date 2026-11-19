@@ -1,8 +1,9 @@
 -- An inclusive group (inclusive_12_112_v1) takes hourly pay billed on an
 -- old-rule invoice off its pot at the gross plus the company's own super on
 -- it; hourly pay billed on the one super rule at its gross, as before; every
--- older group basis exactly as main. Synthetic records only (ZZTEST amounts);
--- rolled back. Case 1 is the break target.
+-- older group basis exactly as main; hourly pay with no super record refuses
+-- rather than reading as 0. Synthetic records only (ZZTEST amounts); rolled
+-- back. Case 0 (the no-split refusal) is the break target.
 BEGIN;
 SET LOCAL statement_timeout = '60s';
 
@@ -24,6 +25,7 @@ DECLARE
   job_kept uuid := 'f1119095-0000-4000-8000-000000000113';
   job_mix uuid := 'f1119095-0000-4000-8000-000000000114';
   job_none uuid := 'f1119095-0000-4000-8000-000000000115';
+  job_bare uuid := 'f1119095-0000-4000-8000-000000000116';
   wo_old uuid := 'f1119095-0000-4000-8000-000000000311';
   wo_new uuid := 'f1119095-0000-4000-8000-000000000312';
   wo_kept uuid := 'f1119095-0000-4000-8000-000000000313';
@@ -41,6 +43,7 @@ DECLARE
   split jsonb;
   st jsonb;
   b text;
+  refused text;
 BEGIN
   INSERT INTO public.users(id,org_id,name,role) VALUES
     (office,org,'ZZTEST Office','admin'),(crew_a,org,'ZZTEST Crew A','crew'),
@@ -52,7 +55,8 @@ BEGIN
     (job_new,org,'patio','quoted','ZZTEST-OLD-RULE-2'),
     (job_kept,org,'patio','quoted','ZZTEST-OLD-RULE-3'),
     (job_mix,org,'patio','quoted','ZZTEST-OLD-RULE-4'),
-    (job_none,org,'patio','quoted','ZZTEST-OLD-RULE-5');
+    (job_none,org,'patio','quoted','ZZTEST-OLD-RULE-5'),
+    (job_bare,org,'patio','quoted','ZZTEST-OLD-RULE-6');
   INSERT INTO public.work_orders(id,org_id,job_id,wo_number,kind,status,agreed_labour_ex,scope_items,special_instructions) VALUES
     (wo_old,org,job_old,'ZZTEST-OLD-RULE-WO-1','job','draft',1000,'[]','ZZTEST old-rule hourly proof'),
     (wo_new,org,job_new,'ZZTEST-OLD-RULE-WO-2','job','draft',1000,'[]','ZZTEST old-rule hourly proof'),
@@ -67,7 +71,7 @@ BEGIN
   -- Billed hourly pay, one invoice shape each (gross 100 unless stated):
   --   inv_old / inv_kept / inv_mix_old: old rule, 12% fund less 6% withheld
   --   inv_new / inv_mix_new: the one super rule (gross 50 on inv_mix_new)
-  --   inv_carve: old full 12% carve-out;  inv_bare: no split stored
+  --   inv_carve: old full 12% carve-out;  inv_bare: no split stored (own job)
   --   inv_comm: old rule with 50 of commission outside the super base
   INSERT INTO public.trade_invoices(id,org_id,user_id,status,subtotal_ex,gross_earned,gst,total_inc,gst_on,super_rate,super_amount,net_pay,super_basis,super_base_ex,invoice_number) VALUES
     (inv_old,org,paid_old,'draft',100,100,0,100,false,0.12,12,94,NULL,NULL,'ZZTEST-OLD-RULE-INV-1'),
@@ -86,11 +90,35 @@ BEGIN
     (inv_mix_old,job_mix,'labour','ZZTEST hours',100),
     (inv_mix_new,job_mix,'labour','ZZTEST hours',50),
     (inv_carve,job_none,'labour','ZZTEST hours',100),
-    (inv_bare,job_none,'labour','ZZTEST hours',100),
+    (inv_bare,job_bare,'labour','ZZTEST hours',100),
     (inv_comm,job_none,'labour','ZZTEST hours',100),
     (inv_comm,job_none,'commission','ZZTEST commission',50);
   UPDATE public.trade_invoices SET status='paid', xero_bill_id='ZZTEST-BILL-'||invoice_number, xero_bill_status='PAID'
     WHERE id IN (inv_old,inv_new,inv_kept,inv_mix_old,inv_mix_new,inv_carve,inv_bare,inv_comm);
+
+  -- 0. Hourly pay with no super record (no split stored): an inclusive group
+  --    refuses, by name, rather than pay on a guess. Removing the refusal
+  --    would pass a pot of 1000 less 100 (break-contract).
+  refused := NULL;
+  BEGIN
+    PERFORM public.group_work_order_hours_paid_total(job_bare, 'inclusive_12_112_v1');
+  EXCEPTION WHEN OTHERS THEN refused := SQLERRM; END;
+  IF refused IS NULL OR position('group_hours_paid_super_unknown' IN refused) = 0 THEN
+    RAISE EXCEPTION 'no-split hourly: an inclusive group passed a wrong pot instead of refusing (%)',
+      coalesce(refused, 'no refusal');
+  END IF;
+  refused := NULL;
+  BEGIN
+    PERFORM public.group_work_order_hours_paid_company_super(job_bare);
+  EXCEPTION WHEN OTHERS THEN refused := SQLERRM; END;
+  IF refused IS NULL OR position('group_hours_paid_super_unknown' IN refused) = 0 THEN
+    RAISE EXCEPTION 'no-split hourly: the helper must refuse (%)', coalesce(refused, 'no refusal');
+  END IF;
+  -- Older bases never read the record: unchanged on that job.
+  IF public.group_work_order_hours_paid_total(job_bare, 'all_in_12_v2') IS DISTINCT FROM 112
+     OR public.group_work_order_hours_paid_total(job_bare, 'gross_v1') IS DISTINCT FROM 100 THEN
+    RAISE EXCEPTION 'no-split hourly: an older basis moved';
+  END IF;
 
   -- 1. Old-rule hourly, then an inclusive group: the gross plus the
   --    company's 6% (12% fund less 6% withheld) comes off the pot.
@@ -139,7 +167,7 @@ BEGIN
      OR public.group_work_order_hours_paid_total(job_kept, 'all_in_12_6_v1') IS DISTINCT FROM 106
      OR public.group_work_order_hours_paid_total(job_kept, 'gross_v1') IS DISTINCT FROM 100
      OR public.group_work_order_hours_paid_total(job_new, 'all_in_12_v2') IS DISTINCT FROM 112
-     OR public.group_work_order_hours_paid_total(job_none, 'all_in_12_v2') IS DISTINCT FROM 336 THEN
+     OR public.group_work_order_hours_paid_total(job_none, 'all_in_12_v2') IS DISTINCT FROM 224 THEN
     RAISE EXCEPTION 'old-basis group: the hourly deduction moved';
   END IF;
   INSERT INTO public.group_work_orders(id,org_id,job_id,work_order_id,share_token,pay_basis)
@@ -159,7 +187,10 @@ BEGIN
         FROM public.group_work_order_hours_paid(job_mix) h)
        OR public.group_work_order_hours_paid_total(job_none, b) IS DISTINCT FROM
        (SELECT COALESCE(sum(public.group_work_order_hours_paid_budget(b, h.gross_ex)), 0)
-        FROM public.group_work_order_hours_paid(job_none) h) THEN
+        FROM public.group_work_order_hours_paid(job_none) h)
+       OR public.group_work_order_hours_paid_total(job_bare, b) IS DISTINCT FROM
+       (SELECT COALESCE(sum(public.group_work_order_hours_paid_budget(b, h.gross_ex)), 0)
+        FROM public.group_work_order_hours_paid(job_bare) h) THEN
       RAISE EXCEPTION 'old-basis group: % no longer matches main', b;
     END IF;
   END LOOP;
@@ -168,10 +199,10 @@ BEGIN
   IF public.group_work_order_hours_paid_total(job_mix, 'inclusive_12_112_v1') IS DISTINCT FROM 156 THEN
     RAISE EXCEPTION 'mixed hourly: an inclusive group must deduct 150 plus 6';
   END IF;
-  -- Carve-out (0), no split stored (0), commission outside the base (6 on the
-  -- 100 of hours only): 300 gross plus 6.
+  -- Carve-out (0), commission outside the base (6 on the 100 of hours only):
+  -- 200 gross plus 6.
   IF public.group_work_order_hours_paid_company_super(job_none) IS DISTINCT FROM 6
-     OR public.group_work_order_hours_paid_total(job_none, 'inclusive_12_112_v1') IS DISTINCT FROM 306 THEN
+     OR public.group_work_order_hours_paid_total(job_none, 'inclusive_12_112_v1') IS DISTINCT FROM 206 THEN
     RAISE EXCEPTION 'old-rule shapes: company super read wrong (%)',
       public.group_work_order_hours_paid_company_super(job_none);
   END IF;

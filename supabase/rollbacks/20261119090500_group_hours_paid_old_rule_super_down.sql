@@ -17,7 +17,7 @@ DECLARE v_md5 text;
   END IF;
   SELECT md5(p.prosrc) INTO v_md5 FROM pg_catalog.pg_proc p
   WHERE p.oid = pg_catalog.to_regprocedure('public.group_work_order_hours_paid_company_super(uuid)');
-  IF v_md5 IS NOT NULL AND v_md5 <> '2b9e41c9a55b676b07931fa5048a4979' THEN
+  IF v_md5 IS NOT NULL AND v_md5 <> '9d912a362656e6d1a4458d5bca519f73' THEN
     RAISE EXCEPTION 'p1_13_4b_rollback_mismatch: group_work_order_hours_paid_company_super(uuid) (%)', v_md5;
   END IF;
 END $guard$;

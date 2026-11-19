@@ -15,11 +15,14 @@
 --   inclusive_12_112_v1                  0 (super inside the gross)
 --   null, 12% fund less 6% withheld      round(G x 12%) - round(G x 6%)
 --   null, full 12% withheld (carve-out)  0 (the person paid it all)
---   null, no split stored (before super) 0 (no super was recorded)
 --   employer_12_v2                       round(G x 12%)
--- A null-basis invoice whose split matches none of these refuses
--- (group_hours_invoice_split_unknown); an unknown basis refuses
--- (group_pay_basis_unsupported). Neither reads as 0.
+-- Three cases refuse; none reads as 0 (director's ruling, 19 Nov 2026: never
+-- pay on a guess):
+--   null, no split stored (super_amount and the rest null): no super record,
+--     so what it cost is not known; the owner rules
+--     (group_hours_paid_super_unknown)
+--   null, a split matching none of the above (group_hours_invoice_split_unknown)
+--   any other stamped rule (group_pay_basis_unsupported)
 --
 -- Replaces group_work_order_hours_paid_total(uuid,text) only, and only its
 -- inclusive branch: every other basis runs main's expression, character for
@@ -44,7 +47,7 @@ DECLARE v_md5 text;
   END IF;
   SELECT md5(p.prosrc) INTO v_md5 FROM pg_catalog.pg_proc p
   WHERE p.oid = pg_catalog.to_regprocedure('public.group_work_order_hours_paid_company_super(uuid)');
-  IF v_md5 IS NOT NULL AND v_md5 <> '2b9e41c9a55b676b07931fa5048a4979' THEN
+  IF v_md5 IS NOT NULL AND v_md5 <> '9d912a362656e6d1a4458d5bca519f73' THEN
     RAISE EXCEPTION 'p1_13_4b_preimage_mismatch: group_work_order_hours_paid_company_super(uuid) (%)', v_md5;
   END IF;
 END $guard$;
@@ -82,7 +85,7 @@ BEGIN
     ELSIF r.super_basis IS NOT NULL THEN
       RAISE EXCEPTION 'group_pay_basis_unsupported';
     ELSIF r.gross_earned IS NULL THEN
-      CONTINUE;
+      RAISE EXCEPTION 'group_hours_paid_super_unknown: %', r.id;
     ELSIF r.net_pay = round(r.gross_earned - round(COALESCE(r.super_base_ex, r.gross_earned) * 0.06, 2), 2) THEN
       v_total := v_total + round(v_g * .12)::bigint - round(v_g * .06)::bigint;
     ELSIF r.super_base_ex IS NULL AND r.net_pay = round(r.gross_earned - r.super_amount, 2) THEN
