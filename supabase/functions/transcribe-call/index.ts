@@ -21,6 +21,7 @@ import { sourceTime } from "../_shared/source_time.ts";
 //     succeeds, then this becomes company-wide automatic capture.
 //
 // Provider: OpenAI Whisper API (whisper-1 model).
+// paid-ai-register: transcribe-call-doc-endpoint
 //   - Endpoint: POST https://api.openai.com/v1/audio/transcriptions
 //   - ~$0.006/min audio
 //   - Max 25MB per file (longer calls get a 'too_large' error; chunking
@@ -55,6 +56,7 @@ const CORS = {
 
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const WHISPER_MODEL = 'whisper-1'
+// paid-ai-register: transcribe-call-whisper-endpoint
 const WHISPER_ENDPOINT = 'https://api.openai.com/v1/audio/transcriptions'
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024 // 25MB OpenAI limit
 

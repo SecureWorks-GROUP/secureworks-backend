@@ -869,6 +869,7 @@ serve(async (req: Request) => {
     const startTime = Date.now()
 
     for (let round = 0; round < MAX_ROUNDS; round++) {
+      // paid-ai-register: agent-runner-turn
       const resp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -892,6 +893,7 @@ serve(async (req: Request) => {
 
         // Retry without prompt caching on 400
         if (resp.status === 400 && round === 0) {
+          // paid-ai-register: agent-runner-turn-retry
           const retryResp = await fetch('https://api.anthropic.com/v1/messages', {
             method: 'POST',
             headers: {
