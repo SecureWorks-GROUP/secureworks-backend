@@ -218,7 +218,7 @@ export const HELD_LINE_REFUSAL_STATUS: Readonly<Record<string, number>> = {
 export const HELD_LINE_REFUSAL_WORDS: Readonly<Record<string, string>> = {
   held_line_switch_off: "Held lines cannot be decided yet: the switch is off.",
   held_line_staff_required: "Only office staff can decide a held line.",
-  approver_required: "Only a pay run approver can approve this line.",
+  approver_required: "Only a pay run approver can decide this line.",
   held_line_own_claim: "You cannot decide a line on your own invoice.",
   held_line_not_found: "That held line was not found, or is no longer waiting for the office.",
   held_line_already_decided: "That line has already been decided.",
