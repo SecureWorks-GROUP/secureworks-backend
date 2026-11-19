@@ -3,6 +3,8 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { syncMatchStep } from "./credit_run.ts";
 import {
+  BACKLOG_MIXED_CUT,
+  MATCH_BACKLOG_LINE_PAGE,
   MATCH_BACKLOG_STATE_KEY,
   matchPending,
   matchPendingRequest,
@@ -41,6 +43,10 @@ type World = {
   openItems?: string[]; // subject_ids with an open item
   switchOn?: boolean | "fail";
   tradeUsers?: string[]; // xero_contact_ids that are Trade App users
+  rowCap?: number; // the server's row cap on the backlog's other-contact read
+  mixedIgnoresNarrowing?: boolean; // that read answers every page for the first ids asked
+  mixedFirstIds?: string[];
+  mixedPages?: number[]; // ids asked per other-contact page
   people?: Array<Record<string, unknown>>; // people_account_codes rows (default: as migrated)
   xeroLines?: Record<string, any[]>; // xero_invoices.line_items by bill id
   backlogAt?: { cursor_at: string | null; note: string | null } | null; // xero_sync_state row
@@ -191,15 +197,19 @@ function fake(w: World) {
             }
             if (filters["not:party_id"]) {
               // The backlog's other-contact read: lines whose contact is set and not in the list.
-              const ids = filters["in:document_id"] as string[];
+              // One row per line, cut silently at the request's limit and at the
+              // server's row cap, as PostgREST does. `mixedIgnoresNarrowing`
+              // answers every page for the first ids asked.
+              const asked = filters["in:document_id"] as string[];
+              const ids = w.mixedIgnoresNarrowing ? (w.mixedFirstIds ??= asked) : asked;
               const { v } = filters["not:party_id"] as { op: string; v: string };
               const listed = v.replace(/^\(|\)$/g, "").split(",").map((x) => x.replace(/^"|"$/g, ""));
-              return {
-                data: ids.flatMap((id) =>
-                  (w.lines?.[id] ?? []).filter((l) => l.party_id != null && !listed.includes(l.party_id)).map(() => ({ document_id: id }))
-                ),
-                error: null,
-              };
+              const rows = ids.flatMap((id) =>
+                (w.lines?.[id] ?? []).filter((l) => l.party_id != null && !listed.includes(l.party_id)).map(() => ({ document_id: id }))
+              );
+              const cap = Math.min(Number(filters.limit ?? Infinity), w.rowCap ?? Infinity);
+              (w.mixedPages ??= []).push(asked.length);
+              return { data: rows.slice(0, cap), error: null };
             }
             if (filters["in:kind"]) {
               // The backlog's labour read.
@@ -1243,3 +1253,44 @@ Deno.test("backlog: an unreadable user list picks nothing and keeps the position
   assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, ["backlog_trade_users"]]);
   assertEquals(w.backlogAt, pos);
 });
+
+// Many lines on one bill: one row per line, cut at the page and the server's cap.
+const manyLines = (id: string, first: string, other: string, n: number) => {
+  const l = onContact(id, first, ...Array(n).fill(other));
+  return l;
+};
+
+Deno.test("backlog: a bill with more other-contact lines than a page hides no bill behind it", async () => {
+  // big: a trade user's first line and more supplier lines than a page (and the server's cap).
+  // sp: a supplier bill whose waiting line is a trade user's. Its first line is the
+  // supplier's, so the run proposes it; a cut read would have dropped it from the pick.
+  const sp = onContact("sp", "zztest-supplier-2", "zztest-trade-1");
+  sp.sp[0] = { ...sp.sp[0], state: "on_job" };
+  const w = world({
+    waiting: [waitingAt("big", 1), waitingAt("sp", 1)],
+    lines: { ...manyLines("big", "zztest-trade-1", "zztest-supplier-2", MATCH_BACKLOG_LINE_PAGE + 5), ...sp },
+    tradeUsers: ["zztest-trade-1"],
+    rowCap: MATCH_BACKLOG_LINE_PAGE,
+    backlogAt: null,
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals(w.mixedPages, [2, 1], "a full page drops the bill it named and reads again for the rest");
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:sp"], "the supplier bill is proposed as on main");
+  assertEquals([out.backlog, out.skipped, out.errors], [2, { labour_bill: 1 }, []]);
+});
+
+Deno.test("backlog: a full other-contact page that names no new bill could be cut: nothing picked, position kept", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({
+    waiting: [waitingAt("big", 1), waitingAt("tu", 1), waitingAt("s1", 1)],
+    lines: { ...manyLines("big", "zztest-trade-1", "zztest-supplier-2", MATCH_BACKLOG_LINE_PAGE + 5), ...onContact("tu", "zztest-trade-1"), ...billLines("s1") },
+    tradeUsers: ["zztest-trade-1"],
+    mixedIgnoresNarrowing: true,
+    backlogAt: { ...pos },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_MIXED_CUT]]);
+  assertEquals(w.backlogAt, pos);
+  assertEquals(w.mixedPages, [2, 1], "it stops at the second full page, never loops");
+});
+

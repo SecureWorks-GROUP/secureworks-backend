@@ -95,6 +95,8 @@ export const MATCH_BACKLOG_LINE_PAGE = 300;
 /** Bills of a page looked at per run (open-item and labour reads in chunks of MATCH_BACKLOG_CHUNK). */
 export const MATCH_BACKLOG_DOCS = 100;
 const MATCH_BACKLOG_CHUNK = 50;
+/** The backlog's other-contact read came back full with no new bill named: it could be cut short. */
+export const BACKLOG_MIXED_CUT = "backlog_trade_mixed_cut";
 /** Client-side limit on the batched requeue and the backlog reads. */
 export const MATCH_STATEMENT_TIMEOUT_MS = 5_000;
 /** A person's labour: never matched or raised here (#1678 hides these bills from the list). */
@@ -834,12 +836,24 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
       if (candidates.length) {
         const mixed = new Set<string>();
         const quoted = [...tradeParties].map((p) => `"${p.replace(/["\\]/g, "")}"`).join(",");
+        // One row comes back per line, so a bill with many lines could fill a
+        // page and hide another bill behind it. A full page drops the bills it
+        // named and reads again for the rest, so each page names new bills
+        // and the read ends within the chunk. A full page that names none could
+        // be cut short: the plan fails closed (no pick, position kept).
         for (let i = 0; i < candidates.length; i += MATCH_BACKLOG_CHUNK) {
-          const chunk = candidates.slice(i, i + MATCH_BACKLOG_CHUNK);
-          const other = await timedRead<Array<{ document_id: string }>>("backlog_trade_mixed",
-            sb.from("job_cost_lines").select("document_id").eq("document_kind", "xero_bill")
-              .in("document_id", chunk).not("party_id", "in", `(${quoted})`));
-          for (const r of other ?? []) mixed.add(r.document_id);
+          let rest = candidates.slice(i, i + MATCH_BACKLOG_CHUNK);
+          while (rest.length) {
+            const other = (await timedRead<Array<{ document_id: string }>>("backlog_trade_mixed",
+              sb.from("job_cost_lines").select("document_id").eq("document_kind", "xero_bill")
+                .in("document_id", rest).not("party_id", "in", `(${quoted})`)
+                .limit(MATCH_BACKLOG_LINE_PAGE))) ?? [];
+            const named = new Set(other.map((r) => r?.document_id).filter((d) => rest.includes(d)));
+            for (const d of named) mixed.add(d);
+            if (other.length < MATCH_BACKLOG_LINE_PAGE) break;
+            if (!named.size) throw new ReadFailed(BACKLOG_MIXED_CUT);
+            rest = rest.filter((d) => !named.has(d));
+          }
         }
         for (const id of candidates) if (!mixed.has(id)) tradeSet.add(id);
       }
