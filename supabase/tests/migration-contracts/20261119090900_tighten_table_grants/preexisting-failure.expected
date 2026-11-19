@@ -1,0 +1,2 @@
+tighten table grants: still reachable after revoke
+public.ztg_other_grantor_table

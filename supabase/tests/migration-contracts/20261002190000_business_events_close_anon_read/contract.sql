@@ -3,7 +3,9 @@
 -- 2. Signed-in office staff can; trades, estimator, roleless and unknown
 --    sessions read nothing.
 -- 3. service_role is unaffected.
--- 4. anon INSERT behaves as before for the patio tool's return=minimal post.
+-- 4. anon INSERT behaves as before for the patio tool's return=minimal post,
+--    until 20261119090900_tighten_table_grants removes it; after that anon
+--    INSERT is refused.
 -- 5. Neither the public key nor a signed-in session can empty the table:
 --    anon cannot TRUNCATE, UPDATE or DELETE; authenticated cannot TRUNCATE.
 
@@ -35,7 +37,8 @@ BEGIN
   IF has_table_privilege('anon', 'public.business_events', 'TRIGGER') THEN
     problems := array_append(problems, 'anon still holds TRIGGER'::text);
   END IF;
-  IF NOT has_table_privilege('anon', 'public.business_events', 'INSERT') THEN
+  IF NOT has_table_privilege('anon', 'public.business_events', 'INSERT')
+     AND to_regclass('public.table_grant_changes') IS NULL THEN
     problems := array_append(problems, 'anon lost INSERT (out of scope for this change)'::text);
   END IF;
   IF has_table_privilege('authenticated', 'public.business_events', 'TRUNCATE') THEN
@@ -107,6 +110,8 @@ EXCEPTION WHEN insufficient_privilege THEN NULL;
 END $$;
 ROLLBACK TO SAVEPOINT anon_read;
 
+SELECT to_regclass('public.table_grant_changes') IS NULL AS be_anon_insert_kept \gset
+\if :be_anon_insert_kept
 -- 2b. anon INSERT as the patio tool sends it (PostgREST return=minimal is
 -- INSERT ... RETURNING 1): still accepted.
 SAVEPOINT anon_insert;
@@ -142,6 +147,20 @@ BEGIN
   END IF;
 END $$;
 ROLLBACK TO SAVEPOINT anon_insert;
+\else
+-- 2b. After 20261119090900_tighten_table_grants, anon INSERT is refused.
+SAVEPOINT anon_insert;
+SET LOCAL ROLE anon;
+DO $$
+BEGIN
+  INSERT INTO public.business_events (event_type, source, entity_type, entity_id, payload)
+  VALUES ('scope.decision', 'patio-tool', 'scope', 'no-job', '{}');
+  RAISE EXCEPTION 'be-close: anon inserted after the grants were tightened';
+EXCEPTION WHEN insufficient_privilege THEN NULL;
+END $$;
+RESET ROLE;
+ROLLBACK TO SAVEPOINT anon_insert;
+\endif
 
 -- 2b2. anon cannot empty or change the table, even by a route row rules
 -- would not stop (TRUNCATE ignores row level security).
