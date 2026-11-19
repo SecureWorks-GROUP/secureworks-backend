@@ -19,6 +19,7 @@ import {
   syncMatchRun,
 } from "./match_run.ts";
 import { peopleRows } from "../../_shared/people_accounts_test_support.ts";
+import { BILL_ATTACHMENT_READ_FLAG } from "./doc_clues.ts";
 
 const JOB = "11111111-1111-4111-8111-111111111111";
 const BILL = "bill-1";
@@ -53,6 +54,9 @@ type World = {
   mixedNoCount?: boolean; // that read answers with no count
   people?: Array<Record<string, unknown>>; // people_account_codes rows (default: as migrated)
   xeroLines?: Record<string, any[]>; // xero_invoices.line_items by bill id
+  billReference?: string | null; // xero reference box; unset keeps the fixture reference
+  attachmentReadsOn?: boolean; // xero_bill_attachment_read_v1
+  attachmentRows?: Array<Record<string, unknown>>;
   backlogAt?: { cursor_at: string | null; note: string | null } | null; // xero_sync_state row
   queries: Array<{ table: string; op: string }>;
   rpcs: Array<{ fn: string; args: any }>;
@@ -108,7 +112,7 @@ function billReadRows(w: World, name: string, args: any): any[] {
       return [{
         xero_invoice_id: args.document_id,
         invoice_number: "INV-9",
-        reference: "SWF-26123",
+        reference: w.billReference === undefined ? "SWF-26123" : w.billReference,
         xero_contact_id: "supplier-1",
         contact_name: "Supplier",
         invoice_date: "2026-11-10",
@@ -176,8 +180,19 @@ function fake(w: World) {
         }
         switch (table) {
           case "feature_flags":
+            if (filters.flag_name === BILL_ATTACHMENT_READ_FLAG) {
+              return { data: { enabled: w.attachmentReadsOn === true }, error: null };
+            }
             if (w.switchOn === "fail") return { data: null, error: { code: "XX000" } };
             return { data: w.switchOn === undefined ? null : { enabled: w.switchOn }, error: null };
+          case "xero_bill_attachment_reads":
+            return {
+              data: (w.attachmentRows ?? []).filter((r) =>
+                r.xero_invoice_id === filters.xero_invoice_id &&
+                (filters.state === undefined || r.state === filters.state)
+              ),
+              error: null,
+            };
           case "xero_sync_state":
             return { data: w.backlogAt ?? null, error: null };
           case "users":
@@ -267,7 +282,7 @@ function fake(w: World) {
               data: {
                 xero_invoice_id: filters.xero_invoice_id,
                 invoice_number: "INV-9",
-                reference: "SWF-26123",
+                reference: w.billReference === undefined ? "SWF-26123" : w.billReference,
                 xero_contact_id: "supplier-1",
                 contact_name: "Supplier",
                 invoice_date: "2026-11-10",
@@ -420,6 +435,69 @@ Deno.test("job number only: a suggestion with one clue", async () => {
   await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
   const r = applies(w)[0].args.p_result;
   assertEquals([r.result, r.reason, r.job_id, r.would_place], ["suggest", "one_clue", JOB, undefined]);
+});
+
+const attachmentBill = () => {
+  const lines = billLines();
+  lines[BILL][0] = { ...lines[BILL][0], description: "Timber" };
+  return lines;
+};
+const attachmentFindings = [{
+  xero_invoice_id: BILL,
+  state: "text_read",
+  job_numbers: ["SWF-26123"],
+  po_numbers: ["PO-1000999"],
+  order_ref: null,
+  delivery_address: "12 Test Street ZZTEST",
+}];
+const namedPo = {
+  order_kind: "purchase_order",
+  order_id: "po-1",
+  order_number: "PO-1000999",
+  job_id: JOB,
+  job_live: true,
+  party_id: "supplier-1",
+  party_name_key: "supplier",
+  sent_on: "2026-11-01",
+  cost_ex: 1,
+  from_sealed_scope: false,
+  matched: false,
+};
+
+Deno.test("bill PDF findings stay out of the matcher while the switch is off", async () => {
+  const w = world({
+    lines: attachmentBill(),
+    billReference: "",
+    orders: [namedPo],
+    attachmentRows: attachmentFindings,
+  });
+  await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  const clues = applies(w)[0].args.p_clues.map((c: any) => c.clue_code);
+  assertEquals(clues.includes("job_number"), false);
+  assertEquals(clues.includes("order_number"), false);
+  assertEquals(w.queries.some((q) => q.table === "xero_bill_attachment_reads"), false);
+  assertEquals(applies(w)[0].args.p_result.result === "auto", false);
+});
+
+Deno.test("bill PDF findings are proposals when the switch is on, never a placement", async () => {
+  const w = world({
+    lines: attachmentBill(),
+    billReference: "",
+    orders: [namedPo],
+    attachmentReadsOn: true,
+    attachmentRows: attachmentFindings,
+  });
+  await runMatchFor(fake(w), [`xero_bill:${BILL}`], { ruleVersion: "v1" });
+  const clues = applies(w)[0].args.p_clues;
+  const job = clues.find((c: any) => c.clue_code === "job_number");
+  const po = clues.find((c: any) => c.clue_code === "order_number");
+  assertEquals(job?.seen_where, "bill attachment");
+  assertEquals(job?.seen_value, "SWF-26123");
+  assertEquals(po?.seen_value, "PO-1000999");
+  assertEquals(w.queries.some((q) => q.table === "xero_bill_attachment_reads"), true);
+  const result = applies(w)[0].args.p_result;
+  assertEquals(result.result === "auto", false);
+  assertEquals(result.outcome, "job");
 });
 
 Deno.test("60 subjects: 50 run, 10 requeued", async () => {

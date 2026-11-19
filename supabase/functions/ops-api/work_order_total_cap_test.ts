@@ -1157,3 +1157,21 @@ Deno.test("named order: the figure shown to a trade is its own room, never the j
     assertEquals(r.refusal?.message.includes("$400.00"), false);
   }
 });
+
+// Pinned with SQL: the same numbers are asserted on public.job_backed_trade_room
+// by supabase/tests/migration-contracts/20261119091100_held_line_trade_room
+// (the office's held line decision reads that twin inside the job lock). Change
+// one, change both. A main work order of 200 plus 100 named for trade two.
+Deno.test("own room: pinned with SQL job_backed_trade_room (held line decision)", () => {
+  const named = new Map([["trade-two", 100]]);
+  const room = (allowedEx: number, billed: Array<[string, number]>, tradeId: string) =>
+    ownWorkOrderRoomEx({ allowedEx, namedEx: named, billedByTrade: new Map(billed), tradeId });
+  assertEquals(room(300, [], "trade-one"), 200);
+  assertEquals(room(300, [], "trade-two"), 300);
+  assertEquals(room(300, [["trade-one", 150]], "trade-one"), 50);
+  assertEquals(room(300, [["trade-one", 150]], "trade-two"), 150);
+  // Trade one's 100 more raised the allowance by its 50 shortfall.
+  assertEquals(room(350, [["trade-one", 250]], "trade-one"), 0);
+  assertEquals(room(350, [["trade-one", 250]], "trade-two"), 100);
+  assertEquals(room(350, [["trade-one", 250], ["trade-two", 100]], "trade-two"), 0);
+});

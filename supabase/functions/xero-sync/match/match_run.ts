@@ -61,6 +61,9 @@ import { jobNumbersIn } from "../bill_prematch.ts";
 import { hiddenSkip, type PeopleAccounts, peopleAccountsCode, readPeopleAccounts } from "../../_shared/people_accounts.ts";
 import { decideMatch } from "./decide.ts";
 import {
+  type AttachmentFinding,
+  attachmentFindingTexts,
+  BILL_ATTACHMENT_READ_FLAG,
   deliveryAddressClue,
   documentStops,
   groupTagClue,
@@ -188,6 +191,30 @@ function billReader(sb: Sb, signal: AbortSignal) {
     read<Row[]>(code, on(sb.rpc("match_bill_read", { p_read: name, p_args: args })), signal);
 }
 
+/** One read per run. Missing or unreadable is off, and the bill reads stay as they were. */
+async function attachmentReadsEnabled(sb: Sb): Promise<boolean> {
+  try {
+    const { data, error } = await sb.from("feature_flags").select("enabled")
+      .eq("flag_name", BILL_ATTACHMENT_READ_FLAG)
+      .abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS))
+      .maybeSingle();
+    if (error) return false;
+    return data?.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
+async function attachmentTextsFor(sb: Sb, documentId: string, signal: AbortSignal) {
+  const rows = await read<Row[]>("read_bill_attachment_clues",
+    bound(signal)(sb.from("xero_bill_attachment_reads")
+      .select("job_numbers,po_numbers,order_ref,delivery_address")
+      .eq("xero_invoice_id", documentId)
+      .eq("state", "text_read")
+      .limit(20)), signal);
+  return attachmentFindingTexts(Array.isArray(rows) ? rows as AttachmentFinding[] : []);
+}
+
 /** Pure. The matcher proposes; it never places. */
 export function proposalOnly(result: MatchResult): Record<string, unknown> {
   if (result.result !== "auto") return result as unknown as Record<string, unknown>;
@@ -228,6 +255,7 @@ async function matchOne(
   types: Record<string, ClueType>,
   accounts: PeopleAccounts,
   signal: AbortSignal,
+  attachmentOn: boolean,
 ): Promise<{ applied: string } | { skipped: string }> {
   const billRead = billReader(sb, signal);
   const kind = subjectId.split(":", 1)[0];
@@ -278,8 +306,13 @@ async function matchOne(
     })),
   };
 
+  // PDF findings join the same texts the clues already read. The switch is read
+  // once per run; off, this table is not read and the texts stay as they were.
+  const extra = attachmentOn ? await attachmentTextsFor(sb, documentId, signal) : [];
+  if (extra.length) doc.attachment_texts = extra;
+
   // Jobs named in the texts, by number and by shared digits (a twin stops the clue).
-  const texts = [doc.document_number, doc.reference, ...doc.lines.map((l) => l.description)].join("\n");
+  const texts = [doc.document_number, doc.reference, ...doc.lines.map((l) => l.description), ...extra.map((t) => t.text)].join("\n");
   const digits = [...new Set(jobNumbersIn(texts).map((n) => n.replace(/\D/g, "")).filter(Boolean))].slice(0, 10);
   let jobs: MatchJob[] = [];
   if (digits.length) {
@@ -624,6 +657,7 @@ async function runCore(
     for (const id of fresh) slow.clear.add(id);
   }
   if (slowRows) for (const id of fresh) if (slowRows.has(id)) slow.clear.add(id);
+  const attachmentOn = await attachmentReadsEnabled(sb);
   for (const [i, id] of ids.entries()) {
     if (i >= MATCH_RUN_LIMIT) {
       out.push({ id, reason: "over_run_cap" });
@@ -655,7 +689,7 @@ async function runCore(
     reached.add(id);
     try {
       // The bill gets the time left in the run, not a fresh budget.
-      const res = await matchOne(sb, id, types, accounts, AbortSignal.timeout(Math.max(0, deadline - at)));
+      const res = await matchOne(sb, id, types, accounts, AbortSignal.timeout(Math.max(0, deadline - at)), attachmentOn);
       if ("applied" in res) bump(report.applied, res.applied);
       else bump(report.skipped, res.skipped);
       if (known) slow.clear.add(id);

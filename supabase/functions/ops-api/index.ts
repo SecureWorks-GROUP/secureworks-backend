@@ -992,6 +992,8 @@ import {
   perthToday,
 } from './group_work_order.ts'
 import { confirmGroupWorkOrderHours, decideGroupSplit } from './group_claim.ts'
+import { disputeOfficeGroupHours, officeEnterGroupHours, withOwnOfficeEntryMarks } from './group_office_days.ts'
+import { readWhoIsBehind, payBehindReadsFromClient } from './trade_pay_behind.ts'
 import { requestWorkOrderAmount, sendOutlookWorkOrderRequest } from './work_order_request.ts'
 import { signatureImageTag } from '../_shared/signature_image.ts'
 import {
@@ -5443,6 +5445,7 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'approve_group_split',
   'dispute_group_split',
   'group_work_order_my_share',
+  'dispute_office_group_hours',
   'my_group_work_orders',
   'capture_group_client_signoff',
   'freeze_group_work_order',
@@ -10392,6 +10395,36 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
       }
 
+      // G3: who is behind on invoicing, and which group work orders are stuck
+      // on a crew member. Read only, approvers only (trade_pay_behind.ts).
+      case 'pay_run_who_is_behind': {
+        if (req.method !== 'GET') return json({ error: 'GET required' }, 405)
+        try {
+          return json(await readWhoIsBehind(payBehindReadsFromClient(client), {
+            orgId: authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID,
+            actorUserId: authMode === 'jwt' ? (authUser?.id || null) : null,
+            weeks: url.searchParams.get('weeks'),
+            asOf: url.searchParams.get('as_of'),
+          }))
+        } catch (err) {
+          if (err instanceof TradePayRunError) {
+            return json({ ok: false, error: err.code, message: err.message }, err.status)
+          }
+          throw err
+        }
+      }
+
+      // G4: the office enters a missing crew member's days, with a reason
+      // (group_office_days.ts). A signed-in person only.
+      case 'office_enter_group_hours': {
+        if (req.method !== 'POST') return json({ error: 'POST required' }, 405)
+        return await groupWorkOrderJson(officeEnterGroupHours(client, {
+          // A person's own session; the server key and a named actor header are not one.
+          userId: requestActor.source === 'jwt' && authMode === 'jwt' ? (authUser?.id || null) : null,
+          isStaff: _opsApiCallerIsStaffOperator(authMode, authUser),
+        }, groupBody(body), getAWSTDate()))
+      }
+
       // The office's held trade lines (P1-05.10, ruling 16). GET
       // held_trade_lines lists the lines still waiting for the office; POST
       // decide_held_trade_line { line_id, decision, reason, changes? } calls
@@ -13786,6 +13819,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'approve_group_split':
       case 'dispute_group_split':
       case 'group_work_order_my_share':
+      case 'dispute_office_group_hours':
       case 'capture_group_client_signoff':
       case 'freeze_group_work_order':
       case 'group_work_order_preview_client_link':
@@ -14000,6 +14034,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           case 'approve_group_split':
           case 'dispute_group_split':
           case 'group_work_order_my_share':
+          case 'dispute_office_group_hours':
           case 'capture_group_client_signoff':
           case 'freeze_group_work_order':
           case 'group_work_order_preview_client_link': {
@@ -14045,7 +14080,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               return await groupWorkOrderJson(readMyGroupWorkOrders(client, groupCaller))
             }
             if (action === 'group_work_order_my_share') {
-              return await groupWorkOrderJson(readTradeGroupWorkOrder(client, groupCaller, groupPayload))
+              return await groupWorkOrderJson(readTradeGroupWorkOrder(client, groupCaller, groupPayload)
+                .then(share => withOwnOfficeEntryMarks(client, groupCaller.userId, share)))
+            }
+            if (action === 'dispute_office_group_hours') {
+              if (req.method !== 'POST') return json({ error: 'POST required' }, 405)
+              return await groupWorkOrderJson(disputeOfficeGroupHours(client, groupCaller.userId, groupPayload))
             }
             if (action === 'capture_group_client_signoff') {
               return await groupWorkOrderJson(captureGroupClientSignoff(client, groupCaller, groupPayload))

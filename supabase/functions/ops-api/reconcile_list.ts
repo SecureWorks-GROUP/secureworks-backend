@@ -29,6 +29,8 @@
 // mixed bill: the item's kind and reason miss it) is not listed either, nor a
 // credit that follows one: the database functions leave them out of the page
 // and the counts (20261118195400), and this read drops one that ever came back.
+// A bill carries xero_invoice_id (its Xero InvoiceID, read from the item's own
+// subject, so a link opens it in Xero); every other item carries null.
 // Each item carries the matcher's current clues (match_clues) and, as
 // `against`, the words of the stops it stored. Every read is capped at READ_CAP (1000, the
 // PostgREST row limit): a read, or the lines and parts of one answer, reaching
@@ -458,6 +460,9 @@ export async function reconcileList(
       reason_words: RECONCILE_REASON_WORDS[it.reason] ?? null,
       party: first?.party_name ?? null,
       document_number: first?.document_number ?? null,
+      // The bill's own Xero InvoiceID, so the screen can open it in Xero
+      // (AccountsPayable/View.aspx?InvoiceID=). Null on anything but a bill.
+      xero_invoice_id: doc?.kind === "xero_bill" ? doc.id : null,
       document_date: it.document_date ?? first?.document_date ?? null,
       amount_ex: money(it.amount_ex),
       waiting_days: daysSince(String(it.raised_at), now),
