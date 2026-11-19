@@ -3181,6 +3181,29 @@ Deno.test("paid by the hour: the work order drops by that pay and the rest is sp
   assertEquals(over.rows("group_work_orders")[0].split_frozen_at, undefined);
 });
 
+Deno.test("older hourly pay with no super record holds an inclusive group's freeze, in plain words", async () => {
+  // The database refuses (20261119090500); this pins what the office reads.
+  const db = new Memory();
+  seedSplit(db);
+  db.rows("group_work_orders")[0].pay_basis = "inclusive_12_112_v1";
+  db.rows("group_work_order_time_entries").push(
+    { group_id: GROUP, user_id: USER_A, work_date: "2026-10-20", hours: 2 },
+  );
+  db.writeSplit = () => {
+    throw new Error("group_hours_paid_super_unknown: f1119095-0000-4000-8000-000000000417");
+  };
+  const held = await freezeGroupWorkOrder(db.client(), trade(USER_A), { group_id: GROUP })
+    .then(() => null, (err) => err as GroupWorkOrderError);
+  assertEquals(held?.code, "group_hours_paid_super_unknown");
+  assertEquals(held?.status, 409);
+  assertEquals(
+    held?.message,
+    "This job has older hourly pay with no super record. The crew split needs the owner's ruling.",
+  );
+  assertEquals(db.rows("group_work_order_shares").length, 0);
+  assertEquals(db.rows("group_work_orders")[0].split_frozen_at, undefined);
+});
+
 
 // ---- Fix round 4 (6 Nov 2026): office removal, own drafts, card notes, on-site not happy ----
 

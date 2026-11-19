@@ -791,6 +791,15 @@ const QUERY_FAULTS: {
     status: 409,
   },
   {
+    // 20261119090500: an inclusive group on a job where hourly pay was billed
+    // on an older invoice with no super record never pays on a guess.
+    needle: "group_hours_paid_super_unknown",
+    code: "group_hours_paid_super_unknown",
+    message:
+      "This job has older hourly pay with no super record. The crew split needs the owner's ruling.",
+    status: 409,
+  },
+  {
     needle: "group_split_frozen",
     code: "group_split_frozen",
     message:
