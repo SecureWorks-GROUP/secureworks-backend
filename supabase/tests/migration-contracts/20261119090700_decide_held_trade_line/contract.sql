@@ -1,7 +1,7 @@
 BEGIN;
 SET LOCAL statement_timeout='120s';
-\ir ../../../rollbacks/20261119090100_decide_held_trade_line_down.sql
-\ir ../../../migrations/20261119090100_decide_held_trade_line.sql
+\ir ../../../rollbacks/20261119090700_decide_held_trade_line_down.sql
+\ir ../../../migrations/20261119090700_decide_held_trade_line.sql
 CREATE FUNCTION pg_temp.check_true(answer boolean, label text) RETURNS void LANGUAGE plpgsql AS $$ BEGIN
   IF answer IS DISTINCT FROM true THEN RAISE EXCEPTION 'ZZTEST %',label; END IF;
 END $$;
