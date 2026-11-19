@@ -122,7 +122,7 @@ Deno.test("owner directive: a job event keeps who and when, never the words or t
   const { ownerDirectiveEventStamp } = await import("./ses_owner_directed_approval.ts");
   const evidence = {
     kind: "owner_directive",
-    owner_email: "owner@example.test",
+    owner_email: "OWNER-ADDRESS-TOKEN",
     owner_statement: "Approve it now",
     relayed_by: "agent",
     recorded_at: "2026-11-19T08:00:00.000Z",
@@ -130,7 +130,7 @@ Deno.test("owner directive: a job event keeps who and when, never the words or t
   const stamp = ownerDirectiveEventStamp(evidence, "owner-user-id");
   assertEquals(stamp, { kind: "owner_directive", owner_user_id: "owner-user-id", recorded_at: "2026-11-19T08:00:00.000Z" });
   const text = JSON.stringify(stamp);
-  for (const leaked of ["owner@example.test", "Approve it now", "agent"]) {
+  for (const leaked of ["OWNER-ADDRESS-TOKEN", "Approve it now", "agent"]) {
     assertEquals(text.includes(leaked), false, leaked);
   }
   // A signed-in session directed nothing.

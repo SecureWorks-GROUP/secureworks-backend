@@ -86,14 +86,6 @@ export type WorkOrderCapJob = {
   limit?: "hourly_maximum";
 };
 
-/**
- * One trade's room on a job that has a work order named for a trade
- * (ownWorkOrderRoomEx): what that trade may still bill before this invoice.
- */
-export type OwnWorkOrderRoom = {
-  jobId: string;
-  roomEx: number;
-};
 
 export type WorkOrderTotalCapRefusal = {
   code: "work_order_total_over_agreed";
