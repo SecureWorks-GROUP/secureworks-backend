@@ -163,30 +163,100 @@ export async function attachPdfToXeroInvoice(input: {
   }
 }
 
-/** Unused supplier-document transport. Callers must establish ACCPAY or ACCPAYCREDIT ownership, never ACCREC. */
+export const MAX_XERO_FILE_BYTES = 10 * 1024 * 1024;
+export const XERO_ATTACHMENT_BUCKET = "expense-receipts";
+
+export type XeroAttachmentEndpoint = "Invoices" | "CreditNotes" | "BankTransactions";
+export type XeroAttachmentContentType =
+  | "application/pdf"
+  | "image/jpeg"
+  | "image/png"
+  | "image/webp";
+
+const XERO_ENTITY_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isXeroEntityUuid(value: unknown): boolean {
+  return XERO_ENTITY_UUID.test(String(value || "").trim());
+}
+
+export function sniffXeroAttachmentType(
+  bytes: Uint8Array,
+): XeroAttachmentContentType | null {
+  if (bytes.length >= 5 &&
+    bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 &&
+    bytes[3] === 0x46 && bytes[4] === 0x2d) {
+    return "application/pdf";
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 &&
+    bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 &&
+    bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return "image/png";
+  }
+  if (bytes.length >= 12 &&
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 &&
+    bytes[3] === 0x46 && bytes[8] === 0x57 && bytes[9] === 0x45 &&
+    bytes[10] === 0x42 && bytes[11] === 0x50) {
+    return "image/webp";
+  }
+  return null;
+}
+
+export function xeroAttachmentFilename(
+  raw: string,
+  contentType: XeroAttachmentContentType,
+): string {
+  const extension = contentType === "application/pdf"
+    ? "pdf"
+    : contentType === "image/jpeg"
+    ? "jpg"
+    : contentType === "image/png"
+    ? "png"
+    : "webp";
+  // Reuse the existing filename cleaning without appending .pdf to photos.
+  const cleaned = sanitizeXeroPdfFilename(raw).replace(/\.pdf$/i, "");
+  const suffix = extension === "jpg"
+    ? /\.jpe?g$/i
+    : new RegExp(`\\.${extension}$`, "i");
+  return suffix.test(cleaned) ? cleaned : `${cleaned}.${extension}`;
+}
+
+/** Receipt bytes live in the expense-receipts bucket. A path cannot climb out of it. */
+export function assertStorageObjectRef(
+  bucket: unknown,
+  path: unknown,
+): { bucket: string; path: string } {
+  const chosenBucket = String(bucket || XERO_ATTACHMENT_BUCKET).trim();
+  const chosenPath = String(path || "").trim();
+  const pathOk = /^[A-Za-z0-9._/-]{1,400}$/.test(chosenPath) &&
+    !chosenPath.includes("..") && !chosenPath.startsWith("/");
+  if (chosenBucket !== XERO_ATTACHMENT_BUCKET || !pathOk) {
+    throw new XeroPdfAttachError("Storage path is invalid", 400, "STORAGE_PATH_INVALID");
+  }
+  return { bucket: chosenBucket, path: chosenPath };
+}
+
+/** File attach for a supplier bill, a supplier credit note, or a bank transaction. Callers prove ownership first. One PUT; a 429 is not retried. */
 export async function attachFileToXeroDocument(
   deps: Pick<
     Parameters<typeof attachPdfToXeroInvoice>[0],
     "accessToken" | "tenantId" | "fetchImpl" | "signal"
   >,
   input: {
-    endpoint: "Invoices" | "CreditNotes";
+    endpoint: XeroAttachmentEndpoint;
     documentId: string;
     filename: string;
     bytes: Uint8Array;
-    contentType: "application/pdf" | "image/jpeg" | "image/png";
+    contentType: XeroAttachmentContentType;
   },
-): Promise<void> {
-  if (input.bytes.length > 10 * 1024 * 1024) {
+): Promise<{ filename: string }> {
+  if (input.bytes.length > MAX_XERO_FILE_BYTES) {
     throw new XeroPdfAttachError("File exceeds 10 MB", 413, "FILE_TOO_LARGE");
   }
-  const signatures = {
-    "application/pdf": [0x25, 0x50, 0x44, 0x46, 0x2d],
-    "image/jpeg": [0xff, 0xd8, 0xff],
-    "image/png": [0x89, 0x50, 0x4e, 0x47],
-  };
-  const signature = signatures[input.contentType];
-  if (!signature || !signature.every((byte, i) => input.bytes[i] === byte)) {
+  if (sniffXeroAttachmentType(input.bytes) !== input.contentType) {
     throw new XeroPdfAttachError(
       "File does not match its type",
       400,
@@ -194,41 +264,57 @@ export async function attachFileToXeroDocument(
     );
   }
   const documentId = String(input.documentId || "").trim();
-  if (!documentId || !["Invoices", "CreditNotes"].includes(input.endpoint)) {
+  if (!documentId ||
+    !["Invoices", "CreditNotes", "BankTransactions"].includes(input.endpoint)) {
     throw new XeroPdfAttachError("Xero document id and endpoint required", 400);
   }
-  const extension = input.contentType === "application/pdf"
-    ? "pdf"
-    : input.contentType === "image/jpeg"
-    ? "jpg"
-    : "png";
-  // Reuse the existing filename cleaning without appending .pdf to photos.
-  const cleaned = sanitizeXeroPdfFilename(input.filename).replace(
-    /\.pdf$/i,
-    "",
-  );
-  const suffix = extension === "jpg"
-    ? /\.jpe?g$/i
-    : new RegExp(`\\.${extension}$`, "i");
-  const filename = suffix.test(cleaned) ? cleaned : `${cleaned}.${extension}`;
+  if (!isXeroEntityUuid(documentId)) {
+    throw new XeroPdfAttachError(
+      "Xero document id must be a UUID",
+      400,
+      "XERO_ENTITY_ID_INVALID",
+    );
+  }
+  const filename = xeroAttachmentFilename(input.filename, input.contentType);
   const fetchImpl = deps.fetchImpl || fetch;
-  const response = await fetchImpl(
-    `${XERO_API_BASE}/${input.endpoint}/${
-      encodeURIComponent(documentId)
-    }/Attachments/${encodeURIComponent(filename)}`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${deps.accessToken}`,
-        "Xero-tenant-id": deps.tenantId,
-        "Content-Type": input.contentType,
-        "Content-Length": String(input.bytes.length),
-      },
-      body: new Uint8Array(input.bytes),
-      signal: deps.signal,
-    },
-  );
-  if (response.status === 429) throw xeroRateLimitError(response);
+  const headers = {
+    Authorization: `Bearer ${deps.accessToken}`,
+    "Xero-tenant-id": deps.tenantId,
+    "Content-Type": input.contentType,
+    "Content-Length": String(input.bytes.length),
+  };
+  const body = new Uint8Array(input.bytes);
+  // Each URL is a literal so the write register sees the endpoint.
+  // A 429 throws once. This function does not retry it.
+  const response = input.endpoint === "CreditNotes"
+    ? await fetchImpl(
+      `${XERO_API_BASE}/CreditNotes/${encodeURIComponent(documentId)}/Attachments/${
+        encodeURIComponent(filename)
+      }`,
+      { method: "PUT", headers, body, signal: deps.signal },
+    )
+    : input.endpoint === "BankTransactions"
+    ? await fetchImpl(
+      `${XERO_API_BASE}/BankTransactions/${encodeURIComponent(documentId)}/Attachments/${
+        encodeURIComponent(filename)
+      }`,
+      { method: "PUT", headers, body, signal: deps.signal },
+    )
+    : await fetchImpl(
+      `${XERO_API_BASE}/Invoices/${encodeURIComponent(documentId)}/Attachments/${
+        encodeURIComponent(filename)
+      }`,
+      { method: "PUT", headers, body, signal: deps.signal },
+    );
+  if (response.status === 429) {
+    const limited = xeroRateLimitError(response);
+    throw new XeroCooldownError(limited.message, limited.status, limited.code, {
+      ...limited.details,
+      provider_operation: "document_file_attachment",
+      xero_endpoint: input.endpoint,
+      xero_document_id: documentId,
+    });
+  }
   if (!response.ok) {
     throw new XeroPdfAttachError(
       `Xero attachment failed: ${response.status} ${await response.text()}`
@@ -237,6 +323,7 @@ export async function attachFileToXeroDocument(
       "XERO_FILE_ATTACH_FAILED",
     );
   }
+  return { filename };
 }
 
 function isRetryablePdfAttachError(error: unknown): boolean {

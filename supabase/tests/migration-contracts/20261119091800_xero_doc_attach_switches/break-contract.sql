@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS public.xero_document_attachments_attached_sha_uidx;

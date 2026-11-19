@@ -1151,3 +1151,16 @@ Deno.test("debt workshop actions are staff JWT or server secret only; trades and
     assertEquals(scopedDispatchStatus(action, "agent_read"), 403, action);
   }
 });
+
+Deno.test("bank transaction receipt attachment admits bookkeeping roles and refuses everyone else", () => {
+  const action = "attach_bank_transaction_receipt";
+  for (const role of ["owner", "admin", "ops_manager", "bookkeeper"]) {
+    assertEquals(authorizationStatus({ action, authMode: "jwt", role }), 200, role);
+  }
+  for (const role of ["crew", "installer", "lead_installer"]) {
+    assertEquals(authorizationStatus({ action, authMode: "jwt", role }), 403, role);
+  }
+  assertEquals(authorizationStatus({ action, authMode: "none" }), 403);
+  assertEquals(authorizationStatus({ action, authMode: "api_key", serverSecretPresented: true }), 403);
+  assertEquals(scopedDispatchStatus(action, "agent_read"), 403);
+});

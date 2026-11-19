@@ -31,6 +31,7 @@ Every place in `supabase/functions` that can write to Xero, grouped into the row
 | X14 | Have Xero email a paid invoice to the customer as a receipt (fencing and patio) **(new: found by INT-33, not in the first register)** | Bookkeeping (new row found by INT-33; the CFO desk takes it) | job_closeout_settings.receipt_sender_mode (off, dry_run, live); server key only (job_receipt_paid, job_receipt_catch_up, posted by xero-sync); one claim per invoice. Contract docs/job-receipt-v1.md. receipt_sender_mode going to live is a send gate for Marnin | no | yes |
 | X15 | Correct tracking on existing AUTHORISED/PAID supplier bills | Bookkeeping / CFO | Owner/admin in the default org or dedicated server secret; POST; confirm=true, tenant and snapshot checks; tracking-only preservation and readback | yes (division classification only) | no |
 | X16 | Add a Business Unit tracking option (allow-listed name: SW - RESTORATION) **(new, owner 12 Nov 2026)** | Bookkeeping | Ops server key only; POST; name on an allow-list; an existing option is returned, never changed | no | no |
+| X17 | Attach a receipt file to a Xero bank transaction | Bookkeeping | Owner, admin, ops_manager or bookkeeper. Off unless xero_bank_txn_receipt_attach_v1 is on. One attached sha is kept. A 429 is not retried. | no | no |
 
 **Recorded 27 October, before X15:** Over the SecureSuite MCP connector, Jarvis added its own yes only for X4. For the X2, X3, X5, X7 and X8 tools the Claude client's permission prompt is the only human gate, and that is intended: on 27 Oct 2026 Jan decided that agent tools which move money or write to Xero get no named-person yes, so INT-19's first PR (jarvis #267) is parked and will not merge.
 
@@ -88,9 +89,16 @@ X15 now has separate read-only preview and privileged apply tools. Apply require
 - `ops-api/xero_accpay_books.ts :: updateSupplierBill :: POST /Invoices/{id}`
 - `ops-api/xero_accpay_books.ts :: createSupplierCreditNote :: PUT /CreditNotes`
 - `ops-api/xero_attachment.ts :: attachPdfToXeroInvoice :: PUT /Invoices/{id}/Attachments/{id}`
-- `ops-api/xero_attachment.ts :: attachFileToXeroDocument :: PUT /{id}/{id}/Attachments/{id}`
+- `ops-api/xero_attachment.ts :: attachFileToXeroDocument :: PUT /Invoices/{id}/Attachments/{id}`
+- `ops-api/xero_attachment.ts :: attachFileToXeroDocument :: PUT /CreditNotes/{id}/Attachments/{id}`
 
-P3-01.5 adds the last transport for PDF, JPEG or PNG files up to 10 MB on supplier bills or credit notes. It has no caller and does not inspect document ownership; a future caller must prove ACCPAY or ACCPAYCREDIT, never ACCREC, before invoking it. The dynamic endpoint is limited to `Invoices` or `CreditNotes`. It makes one PUT and surfaces failures, including 429, without retrying. This registration does not activate a route or extend the earlier CFO confirmation: the director's word and exact-head money review are required before this addition ships.
+P3-01.5 adds the file transport for PDF, JPEG, PNG or WebP files up to 10 MB.
+A caller must prove the document is the supplier bill or supplier credit note it means to attach, never a customer invoice.
+Each endpoint is one PUT and surfaces failures, including 429, without retrying.
+Credit note PDF attachment runs only while `xero_credit_note_pdf_attach_v1` is on.
+While that switch is off, creating a credit note does not attach a file.
+A failed attachment does not undo the DRAFT credit note.
+This registration does not turn the switch on.
 
 ### X10 · Customer variation invoice draft
 
@@ -131,6 +139,16 @@ P3-01.5 adds the last transport for PDF, JPEG or PNG files up to 10 MB on suppli
 
 - `ops-api/index.ts :: case ensure_xero_tracking_option :: PUT /TrackingCategories/{id}/Options`
 - Adds only a name on `XERO_TRACKING_OPTIONS_WE_MAY_ADD` (today `SW - RESTORATION`, for SWRESTO- jobs: `docs/restoration-board-v1.md`). It never renames, archives or changes an option.
+
+### X17 · Attach a receipt file to a Xero bank transaction
+
+- `ops-api/xero_attachment.ts :: attachFileToXeroDocument :: PUT /BankTransactions/{id}/Attachments/{id}`
+- The route is `attach_bank_transaction_receipt`.
+- It admits the owner, an admin, an ops manager, or the bookkeeper, and refuses other callers.
+- It stays off unless `xero_bank_txn_receipt_attach_v1` is on.
+- The same file sha on the same bank transaction is not attached twice.
+- A 429 is not retried.
+- Registration does not turn the switch on.
 
 ### Not writes
 

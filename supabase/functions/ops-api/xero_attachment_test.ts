@@ -24,6 +24,10 @@ import {
   type XeroCooldownStore,
 } from "../_shared/xero_cooldown.ts";
 
+const BILL_ID = "11111111-1111-4111-8111-111111111111";
+const CREDIT_ID = "22222222-2222-4222-8222-222222222222";
+const BANK_ID = "33333333-3333-4333-8333-333333333333";
+
 const PDF_BYTES = (() => {
   const encoded = new TextEncoder().encode("%PDF-1.4\n1 0 obj\nendobj\n");
   const bytes = new Uint8Array(encoded.byteLength);
@@ -46,7 +50,7 @@ Deno.test("file attachment accepts bounded PDF and photos on bills or credit not
   jpeg.set([0xff, 0xd8, 0xff]);
   await attachFileToXeroDocument(deps, {
     endpoint: "Invoices",
-    documentId: "ZZTEST-bill/1",
+    documentId: BILL_ID,
     filename: "../receipt photo.jpg",
     bytes: jpeg,
     contentType: "image/jpeg",
@@ -54,7 +58,7 @@ Deno.test("file attachment accepts bounded PDF and photos on bills or credit not
   assertEquals(calls.length, 1);
   assertEquals(
     calls[0].url,
-    "https://api.xero.com/api.xro/2.0/Invoices/ZZTEST-bill%2F1/Attachments/_receipt_photo.jpg",
+    `https://api.xero.com/api.xro/2.0/Invoices/${BILL_ID}/Attachments/_receipt_photo.jpg`,
   );
   assertEquals(calls[0].init.method, "PUT");
   assertEquals(
@@ -67,7 +71,7 @@ Deno.test("file attachment accepts bounded PDF and photos on bills or credit not
   png.set([0x89, 0x50, 0x4e, 0x47]);
   await attachFileToXeroDocument(deps, {
     endpoint: "CreditNotes",
-    documentId: "ZZTEST-credit",
+    documentId: CREDIT_ID,
     filename: "receipt.png",
     bytes: png,
     contentType: "image/png",
@@ -75,7 +79,7 @@ Deno.test("file attachment accepts bounded PDF and photos on bills or credit not
   assertEquals(calls.length, 2);
   assertEquals(
     calls[1].url,
-    "https://api.xero.com/api.xro/2.0/CreditNotes/ZZTEST-credit/Attachments/receipt.png",
+    `https://api.xero.com/api.xro/2.0/CreditNotes/${CREDIT_ID}/Attachments/receipt.png`,
   );
   assertEquals(
     new Headers(calls[1].init.headers).get("Content-Type"),
@@ -83,7 +87,7 @@ Deno.test("file attachment accepts bounded PDF and photos on bills or credit not
   );
   await attachFileToXeroDocument(deps, {
     endpoint: "CreditNotes",
-    documentId: "ZZTEST-credit",
+    documentId: CREDIT_ID,
     filename: "credit",
     bytes: PDF_BYTES,
     contentType: "application/pdf",
@@ -102,7 +106,7 @@ Deno.test("file attachment accepts bounded PDF and photos on bills or credit not
     const error = await assertRejects(() =>
       attachFileToXeroDocument(deps, {
         endpoint: "Invoices",
-        documentId: "ZZTEST-bill",
+        documentId: BILL_ID,
         filename: "receipt",
         bytes,
         contentType,
@@ -147,7 +151,7 @@ Deno.test("file attachment surfaces refusal once and lets an explicit retry repl
   };
   const input = {
     endpoint: "Invoices" as const,
-    documentId: "ZZTEST-bill",
+    documentId: BILL_ID,
     filename: "receipt.pdf",
     bytes: PDF_BYTES,
     contentType: "application/pdf" as const,
@@ -358,4 +362,57 @@ Deno.test("push can retry PDF attach onto an existing bill after pushed_to_xero"
   assertEquals(canEnterPushTradeInvoiceToXero("paid", "bill-1"), false);
   assertEquals(mustReuseExistingXeroBillForPdfRetry("pushed_to_xero"), true);
   assertEquals(mustReuseExistingXeroBillForPdfRetry("approved"), false);
+});
+
+Deno.test("bank transaction and webp attachments require a UUID and do not retry a 429", async () => {
+  const calls: string[] = [];
+  const deps = {
+    accessToken: "fixture-token",
+    tenantId: "fixture-tenant",
+    fetchImpl: ((url) => {
+      calls.push(String(url));
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as typeof fetch,
+  };
+  const webp = new Uint8Array(12);
+  webp.set([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]);
+  await attachFileToXeroDocument(deps, {
+    endpoint: "BankTransactions",
+    documentId: BANK_ID,
+    filename: "ZZTEST receipt.webp",
+    bytes: webp,
+    contentType: "image/webp",
+  });
+  assertEquals(
+    calls,
+    [`https://api.xero.com/api.xro/2.0/BankTransactions/${BANK_ID}/Attachments/ZZTEST_receipt.webp`],
+  );
+  const refused = await assertRejects(
+    () =>
+      attachFileToXeroDocument(deps, {
+        endpoint: "BankTransactions",
+        documentId: "ZZTEST-not-a-uuid",
+        filename: "receipt.webp",
+        bytes: webp,
+        contentType: "image/webp",
+      }),
+    XeroPdfAttachError,
+  );
+  assertEquals(refused.code, "XERO_ENTITY_ID_INVALID");
+  assertEquals(calls.length, 1);
+  let limited = 0;
+  deps.fetchImpl = (() => {
+    limited += 1;
+    return Promise.resolve(new Response(null, { status: 429, headers: { "Retry-After": "30" } }));
+  }) as typeof fetch;
+  const once = () =>
+    attachFileToXeroDocument(deps, {
+      endpoint: "BankTransactions",
+      documentId: BANK_ID,
+      filename: "receipt.webp",
+      bytes: webp,
+      contentType: "image/webp",
+    });
+  await assertRejects(once, XeroCooldownError);
+  assertEquals(limited, 1);
 });

@@ -1101,3 +1101,138 @@ Deno.test("an inferred division absent from the active list leaves a gap; an act
   assertEquals(missing.Tracking, undefined);
   assertEquals(supplied.Tracking, [{ Name: "Business Unit", Option: "SW - PATIOS" }]);
 });
+
+const CREDIT_PDF = (() => {
+  const encoded = new TextEncoder().encode("%PDF-1.4\nZZTEST\n");
+  const bytes = new Uint8Array(encoded.byteLength);
+  bytes.set(encoded);
+  return bytes;
+})();
+const CREDIT_PDF_B64 = btoa(String.fromCharCode(...CREDIT_PDF));
+const CREDIT_ID = "33333333-3333-4333-8333-333333333333";
+
+function creditClient(flags: Record<string, boolean>, attached = false) {
+  const inserts: any[] = [];
+  const tables: string[] = [];
+  const client = {
+    from(table: string) {
+      tables.push(table);
+      if (table === "feature_flags") {
+        return {
+          select() {
+            return {
+              eq(_column: string, name: string) {
+                return {
+                  limit: () => Promise.resolve({
+                    data: [{ enabled: flags[name] === true }],
+                    error: null,
+                  }),
+                };
+              },
+            };
+          },
+        };
+      }
+      if (table === "xero_document_attachments") {
+        const node: any = {
+          select() { return node; },
+          eq() { return node; },
+          limit: () => Promise.resolve({ data: attached ? [{ id: "ZZTEST" }] : [], error: null }),
+          insert(row: any) {
+            inserts.push(row);
+            return Promise.resolve({ error: null });
+          },
+        };
+        return node;
+      }
+      return { upsert: async () => ({ error: null }) };
+    },
+  };
+  return { client, inserts, tables };
+}
+
+function creditDeps(fetchImpl?: typeof fetch, downloadStorage?: (bucket: string, path: string) => Promise<Uint8Array>) {
+  return {
+    getToken: async () => ({ accessToken: "fixture-token", tenantId: "fixture-tenant" }),
+    xeroGet: (async () => ({ Contacts: [] })) as any,
+    xeroPost: (async (_p: string, _a: string, _t: string, body: any) => ({
+      CreditNotes: [{
+        CreditNoteID: CREDIT_ID,
+        Type: "ACCPAYCREDIT",
+        Status: "DRAFT",
+        Contact: { ContactID: "c1", Name: "ZZTEST" },
+        LineItems: body.CreditNotes[0].LineItems,
+      }],
+    })) as any,
+    fetchImpl,
+    downloadStorage,
+  };
+}
+
+Deno.test("a credit note PDF is not attached while the switch is off", async () => {
+  let fetches = 0;
+  const { client, inserts } = creditClient({ xero_credit_note_pdf_attach_v1: false });
+  const created = await createSupplierCreditNote(client, {
+    xero_contact_id: "c1",
+    reference: "ZZTEST-CN",
+    pdf_base64: CREDIT_PDF_B64,
+    line_items: [{ description: "Credit", quantity: 1, unit_price: 50 }],
+  }, creditDeps((() => {
+    fetches += 1;
+    return Promise.resolve(new Response("{}", { status: 200 }));
+  }) as typeof fetch));
+  assertEquals(created.status, "DRAFT");
+  assertEquals("pdf" in created, false);
+  assertEquals(fetches, 0);
+  assertEquals(inserts, []);
+});
+
+Deno.test("a credit note PDF attaches when the switch is on and a failure leaves the draft", async () => {
+  const urls: string[] = [];
+  const on = creditClient({ xero_credit_note_pdf_attach_v1: true });
+  const created = await createSupplierCreditNote(on.client, {
+    xero_contact_id: "c1",
+    reference: "ZZTEST-CN",
+    pdf_filename: "ZZTEST-credit.pdf",
+    pdf_base64: CREDIT_PDF_B64,
+    line_items: [{ description: "Credit", quantity: 1, unit_price: 50 }],
+  }, creditDeps(((url) => {
+    urls.push(String(url));
+    return Promise.resolve(new Response("{}", { status: 200 }));
+  }) as typeof fetch));
+  assertEquals(created.status, "DRAFT");
+  assertEquals(created.credit_note.xero_credit_note_id, CREDIT_ID);
+  if (!created.pdf) throw new Error("expected credit note pdf result");
+  assertEquals(created.pdf.attached, true);
+  assertEquals(urls, [
+    `https://api.xero.com/api.xro/2.0/CreditNotes/${CREDIT_ID}/Attachments/ZZTEST-credit.pdf`,
+  ]);
+  assertEquals(on.inserts[0].status, "attached");
+
+  let fetches = 0;
+  const again = creditClient({ xero_credit_note_pdf_attach_v1: true }, true);
+  const skipped = await createSupplierCreditNote(again.client, {
+    xero_contact_id: "c1",
+    pdf_base64: CREDIT_PDF_B64,
+    line_items: [{ description: "Credit", quantity: 1, unit_price: 50 }],
+  }, creditDeps((() => {
+    fetches += 1;
+    return Promise.resolve(new Response("{}", { status: 200 }));
+  }) as typeof fetch));
+  if (!skipped.pdf) throw new Error("expected skipped credit note pdf");
+  assertEquals(skipped.pdf.skipped, "already_attached");
+  assertEquals(fetches, 0);
+
+  const failed = creditClient({ xero_credit_note_pdf_attach_v1: true });
+  const broken = await createSupplierCreditNote(failed.client, {
+    xero_contact_id: "c1",
+    storage_path: "ZZTEST/credit.pdf",
+    line_items: [{ description: "Credit", quantity: 1, unit_price: 50 }],
+  }, creditDeps((( ) => Promise.resolve(new Response("unavailable", { status: 502 }))) as typeof fetch, () => Promise.resolve(CREDIT_PDF)));
+  assertEquals(broken.ok, true);
+  assertEquals(broken.status, "DRAFT");
+  if (!broken.pdf) throw new Error("expected failed credit note pdf");
+  assertEquals(broken.pdf.attached, false);
+  assertEquals(broken.pdf.error_code, "XERO_FILE_ATTACH_FAILED");
+  assertEquals(failed.inserts[0].status, "failed");
+});

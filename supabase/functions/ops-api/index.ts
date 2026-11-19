@@ -797,6 +797,11 @@ import {
   updateSupplierBill,
 } from './xero_accpay_books.ts'
 import {
+  attachBankTransactionReceipt,
+  BANK_RECEIPT_ATTACH_ACTION,
+  bankReceiptDoorDecision,
+} from './xero_bank_receipt_attach.ts'
+import {
   getXeroReceivable,
   listXeroBankTransactions,
   readXeroAgedPayables,
@@ -5680,6 +5685,9 @@ export function _authorizeOpsApiAction(input: {
   serverSecretPresented?: boolean
 }): { ok: true } | { ok: false; status: 401 | 403; code: string; error: string } {
   const { url, authMode, authUser, serverSecretPresented = false } = input
+  if ((url.searchParams.get('action') || '') === BANK_RECEIPT_ATTACH_ACTION) {
+    return bankReceiptDoorDecision(authMode, authUser?.role)
+  }
   if (!_opsApiActionNeedsSignedCaller(url)) return { ok: true }
 
   // Scoped routine callers retain their existing default-deny allow-list below.
@@ -10092,10 +10100,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'create_supplier_credit_note':
       case 'create_xero_credit_note': {
         try {
-          return json(await createSupplierCreditNote(client, body, { getToken, xeroGet, xeroPost }))
+          return json(await createSupplierCreditNote(client, body, { getToken, xeroGet, xeroPost, fetchImpl: xeroAccountingFetch }))
         } catch (error) {
           return supplierBillApiError(error)
         }
+      }
+      case 'attach_bank_transaction_receipt': {
+        const result = await attachBankTransactionReceipt(client, body, {
+          caller: { authMode, role: authUser?.role ?? null, orgId: authUser?.orgId ?? null },
+          getToken,
+          fetchImpl: xeroAccountingFetch,
+        })
+        return json(result.body, result.status)
       }
       case 'get_xero_invoice': {
         try {
