@@ -5,6 +5,7 @@ import { syncMatchStep } from "./credit_run.ts";
 import {
   BACKLOG_MIXED_CUT,
   BACKLOG_MIXED_PAGE_CAP,
+  BACKLOG_OVER_DEADLINE,
   MATCH_BACKLOG_MIXED_PAGES,
   MATCH_BACKLOG_LINE_PAGE,
   MATCH_BACKLOG_STATE_KEY,
@@ -1348,5 +1349,62 @@ Deno.test("backlog: an other-contact page with no count fails closed", async () 
   const out = await syncMatchRun(fake(w), { on: true, changed: [] });
   assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_MIXED_CUT]]);
   assertEquals(w.backlogAt, pos);
+});
+
+// The backlog plan keeps to the run's deadline (director 11:24). The plan is
+// timed on the real clock from its start, so these budgets are real ms.
+Deno.test("backlog: a plan read slower than the run's deadline is cut at it: nothing picked, position kept, the changed bill requeued as on main", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({
+    waiting: [waitingAt("a1", 1)],
+    lines: { ...billLines("a1"), ...billLines("c1") },
+    backlogAt: { ...pos },
+    // The waiting-lines read hangs until its signal fires, as the client does.
+    slow: { target: "job_cost_lines", ms: 60_000, mode: "abort" },
+  });
+  const started = Date.now();
+  const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:c1"], budgetMs: 150, now: clockOf(w) });
+  const took = Date.now() - started;
+  assert(took < 1_500, `cut at the run's deadline, not the 5 s read limit (took ${took} ms)`);
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_OVER_DEADLINE]]);
+  assertEquals(w.backlogAt, pos, "position kept");
+  assertEquals(requeues(w).length, 1);
+  assertEquals(requeues(w)[0].rows.map((r: any) => [r.subject_id, r.reason]), [["xero_bill:c1", "over_run_time"]]);
+});
+
+Deno.test("backlog: no plan read starts once the deadline has passed", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({
+    waiting: [waitingAt("a1", 1)],
+    lines: billLines("a1"),
+    backlogAt: { ...pos },
+    // The position read answers after the deadline, whatever its signal says.
+    slow: { target: "xero_sync_state", ms: 300, mode: "late" },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 150, now: clockOf(w) });
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_OVER_DEADLINE]]);
+  assert(!w.queries.some((q) => q.table === "job_cost_lines"), "the waiting-lines read never started");
+  assertEquals(w.backlogAt, pos, "position kept");
+});
+
+Deno.test("backlog: a plan whose last read answers past the deadline hands the run nothing", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  // A supplier contact: the user-list read is the plan's last, and finds no trade user.
+  const w = world({
+    waiting: [waitingAt("s1", 1)],
+    lines: onContact("s1", "zztest-supplier-2"),
+    backlogAt: { ...pos },
+    slow: { target: "users", ms: 300, mode: "late" },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 150, now: clockOf(w) });
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_OVER_DEADLINE]]);
+  assertEquals(w.backlogAt, pos, "position kept");
+});
+
+Deno.test("MUST NOT CHANGE: a plan inside the deadline picks and moves the position as on main", async () => {
+  const w = world({ waiting: [waitingAt("s1", 1)], lines: onContact("s1", "zztest-supplier-2"), backlogAt: null });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 60_000, now: clockOf(w) });
+  assertEquals([out.backlog, out.errors], [1, []]);
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:s1"]);
 });
 
