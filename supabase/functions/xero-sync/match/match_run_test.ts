@@ -4,6 +4,8 @@ import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.t
 import { syncMatchStep } from "./credit_run.ts";
 import {
   BACKLOG_MIXED_CUT,
+  BACKLOG_MIXED_PAGE_CAP,
+  MATCH_BACKLOG_MIXED_PAGES,
   MATCH_BACKLOG_LINE_PAGE,
   MATCH_BACKLOG_STATE_KEY,
   matchPending,
@@ -47,6 +49,7 @@ type World = {
   mixedIgnoresNarrowing?: boolean; // that read answers every page for the first ids asked
   mixedFirstIds?: string[];
   mixedPages?: number[]; // ids asked per other-contact page
+  mixedNoCount?: boolean; // that read answers with no count
   people?: Array<Record<string, unknown>>; // people_account_codes rows (default: as migrated)
   xeroLines?: Record<string, any[]>; // xero_invoices.line_items by bill id
   backlogAt?: { cursor_at: string | null; note: string | null } | null; // xero_sync_state row
@@ -209,7 +212,9 @@ function fake(w: World) {
               );
               const cap = Math.min(Number(filters.limit ?? Infinity), w.rowCap ?? Infinity);
               (w.mixedPages ??= []).push(asked.length);
-              return { data: rows.slice(0, cap), error: null };
+              // An exact count, when asked, counts every matching line, not the page.
+              const count = filters.count === "exact" && !w.mixedNoCount ? rows.length : null;
+              return { data: rows.slice(0, cap), error: null, count };
             }
             if (filters["in:kind"]) {
               // The backlog's labour read.
@@ -296,7 +301,7 @@ function fake(w: World) {
         }
       };
       const chain: any = {
-        select: (c = "") => ((cols = c), chain),
+        select: (c = "", o?: { count?: string }) => ((cols = c), o?.count && (filters.count = o.count), chain),
         delete: () => ((op = "delete"), chain),
         upsert: (rows: any) => ((op = "upsert"), (upserted = rows), chain),
         abortSignal: (s: AbortSignal) => ((timed = true), (signal = s), chain),
@@ -1292,5 +1297,56 @@ Deno.test("backlog: a full other-contact page that names no new bill could be cu
   assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_MIXED_CUT]]);
   assertEquals(w.backlogAt, pos);
   assertEquals(w.mixedPages, [2, 1], "it stops at the second full page, never loops");
+});
+
+Deno.test("backlog: a chunk needing more other-contact pages than the cap fails closed with its own code", async () => {
+  // Three bills, each with a trade user's first line and more supplier lines than a page:
+  // page one names one, page two the next, and a third page is past the cap.
+  assertEquals(MATCH_BACKLOG_MIXED_PAGES, 2);
+  const pos = { cursor_at: at(0), note: "a0" };
+  const big = (id: string) => manyLines(id, "zztest-trade-1", "zztest-supplier-2", MATCH_BACKLOG_LINE_PAGE + 5);
+  const w = world({
+    waiting: [waitingAt("b1", 1), waitingAt("b2", 1), waitingAt("b3", 1), waitingAt("s1", 1)],
+    lines: { ...big("b1"), ...big("b2"), ...big("b3"), ...billLines("s1") },
+    tradeUsers: ["zztest-trade-1"],
+    rowCap: MATCH_BACKLOG_LINE_PAGE,
+    backlogAt: { ...pos },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals(w.mixedPages, [3, 2], "two pages read, the third never asked");
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_MIXED_PAGE_CAP]]);
+  assertEquals(w.backlogAt, pos);
+});
+
+Deno.test("backlog: an API row cap below the page is caught by the count: no bill hidden behind a cut page", async () => {
+  // The server cuts at 100 rows, below the 300 asked for: the short page looks complete
+  // by its length, but its count says more lines match.
+  const sp = onContact("sp", "zztest-supplier-2", "zztest-trade-1");
+  sp.sp[0] = { ...sp.sp[0], state: "on_job" };
+  const w = world({
+    waiting: [waitingAt("big", 1), waitingAt("sp", 1)],
+    lines: { ...manyLines("big", "zztest-trade-1", "zztest-supplier-2", 150), ...sp },
+    tradeUsers: ["zztest-trade-1"],
+    rowCap: 100,
+    backlogAt: null,
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals(w.mixedPages, [2, 1], "the cut page is read again for the rest");
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:sp"], "the supplier bill is proposed as on main");
+  assertEquals([out.backlog, out.skipped, out.errors], [2, { labour_bill: 1 }, []]);
+});
+
+Deno.test("backlog: an other-contact page with no count fails closed", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({
+    waiting: [waitingAt("tu", 1), waitingAt("s1", 1)],
+    lines: { ...onContact("tu", "zztest-trade-1"), ...billLines("s1") },
+    tradeUsers: ["zztest-trade-1"],
+    mixedNoCount: true,
+    backlogAt: { ...pos },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_MIXED_CUT]]);
+  assertEquals(w.backlogAt, pos);
 });
 
