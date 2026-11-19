@@ -291,6 +291,12 @@ jobs:
         run: |
           deno test --allow-read supabase/functions/ops-api/job_overview_v2_switch_test.ts
 
+      # Cost watchdog trips: staff can read which switch is off and acknowledge
+      # a trip. The acknowledgement does not turn a switch on.
+      - name: Check cost watchdog status
+        run: |
+          deno test --allow-read supabase/functions/ops-api/cost_watchdog_status_test.ts
+
       # Follow-up 56: the director's switch checks stay reads (read-only
       # session, ZZTEST only, no write verb, listed functions only).
       - name: Check switch check files stay reads

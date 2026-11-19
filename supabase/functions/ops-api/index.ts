@@ -653,6 +653,7 @@ import { resolveDossierAudience } from './dossier_audience.ts'
 import { readJobFreshness } from './job_freshness.ts'
 import { STORY_SECTIONS_VERSION, StoryReadError, buildStoryDossier, clientStoryAction, jobStoryAction, storyScorecardAction } from './job_story_read.ts'
 import { jobOverviewAction, requestJobStoryAction } from './job_overview_read.ts'
+import { ackCostWatchdogTripAction, costWatchdogStatusAction } from './cost_watchdog_status.ts'
 import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
@@ -9356,6 +9357,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw error
         }
       }
+      case 'cost_watchdog_status':
+        return await costWatchdogStatusAction(client, req.method, authMode, authUser)
+      case 'ack_cost_watchdog_trip':
+        return await ackCostWatchdogTripAction(client, req.method, authMode, authUser, body)
       // ── Email capture sources (slice EM1, email.md §13a): the one door that
       // changes which Outlook mailboxes the new poller reads. Server key or a
       // company admin/owner only; the actor is recorded on the row and its

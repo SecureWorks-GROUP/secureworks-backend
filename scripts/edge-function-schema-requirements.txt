@@ -1361,3 +1361,24 @@ ops-api|supabase/migrations/20261118195700_reconcile_people_accounts.sql|column|
 # its slow-bill counts in match_slow_bills, so xero-sync must not deploy first.
 xero-sync|supabase/migrations/20261118195800_match_apply_held_unchanged.sql|table|match_slow_bills
 xero-sync|supabase/migrations/20261118195800_match_apply_held_unchanged.sql|function|match_bill_read
+# Cost watchdog status reads the trip audit and the switch snapshot. The tick
+# function is what the timers call; ops-api does not call it.
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|table|cost_watchdog_trips
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.id
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.org_id
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.watchdog_name
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.switch_key
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.previous_value
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.new_value
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.metric_name
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.metric_value
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.threshold
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.reason
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.tripped_at
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.acknowledged_at
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.acknowledged_by
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|column|cost_watchdog_trips.ack_note
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|index|cost_watchdog_trips_tripped_at_idx
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|index|cost_watchdog_trips_switch_tripped_at_idx
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|function|cost_watchdog_switches
+ops-api|supabase/migrations/20261119091700_cost_watchdog_trip_audit.sql|function|director_cost_watchdog_tick
