@@ -47,6 +47,12 @@ import {
   tradeMayClaimCommission,
 } from "./trade_invoice_extra_job_authority.ts";
 import { JobLabourPayReadError, readHourlyCappedJobs } from "./job_labour_cap.ts";
+import {
+  AdditionalWorkOrderError,
+  pickTradeWorkOrder,
+  readTradeBilledOnJobs,
+  type TradeWorkOrderOption,
+} from "./job_additional_work_orders.ts";
 
 export type TradeInvoiceMode = "group_work_order" | "work_order" | "hourly";
 
@@ -71,8 +77,19 @@ export type TradeInvoiceJobMode = TradeInvoiceModeDecision & {
   // Only on a work_order job with an approved job work order that has its
   // agreed labour set: the agreed labour, ex GST, and that work order's id.
   // Otherwise both null. The trade bills the work order at exactly this.
+  // With more than one work order on the job (job_additional_work_orders.ts)
+  // this is the first one this trade has not billed yet; once every one is
+  // billed, the job's main work order (and the cap refuses more).
   work_order_agreed_ex: number | null;
   job_work_order_id: string | null;
+  // The job's main work order and its own agreed labour: what the job-level
+  // cap reads (its amount changes carry every additional work order). Only on
+  // a job with more than one work order.
+  cap_work_order_id?: string | null;
+  cap_agreed_ex?: number | null;
+  // Every work order on the job this trade may bill, in order, with whether
+  // what they billed already covers it. Only on a job with more than one.
+  work_orders?: TradeWorkOrderOption[];
 };
 
 /** The owner's rule, in order. Pure. */
@@ -194,6 +211,9 @@ export async function loadTradeInvoiceJobModes(
   // restoration jobs (whose mode it decides). More than one approved job work
   // order on a job is never guessed between.
   const agreedByJob = new Map<string, { id: string; agreed: number }>();
+  // Every approved work order (main and additional) on those jobs, for the
+  // trade's pick (pickTradeWorkOrder).
+  const ordersByJob = new Map<string, any[]>();
   const readAgreed = async (jobIds: string[]) => {
     for (const part of chunks(jobIds.filter((id) => !agreedReadFor.has(id)))) {
       for (const id of part) agreedReadFor.add(id);
@@ -222,9 +242,9 @@ export async function loadTradeInvoiceJobModes(
   };
   const readAgreedPart = async (part: string[]) => {
     const { data, error } = await client.from("work_orders")
-      .select("id, job_id, agreed_labour_ex")
+      .select("id, job_id, kind, wo_number, title, agreed_labour_ex, approved_at, assigned_user_id")
       .eq("org_id", orgId)
-      .eq("kind", "job")
+      .in("kind", ["job", "additional"])
       .eq("status", "approved")
       .in("job_id", part);
     if (error) throw new TradeInvoiceModeReadError("the job work orders");
@@ -232,6 +252,9 @@ export async function loadTradeInvoiceJobModes(
     for (const row of data || []) {
       const jobId = String(row?.job_id || "");
       if (!jobId) continue;
+      if (!ordersByJob.has(jobId)) ordersByJob.set(jobId, []);
+      ordersByJob.get(jobId)!.push(row);
+      if (row?.kind !== "job") continue;
       if (seen.has(jobId)) throw new TradeInvoiceModeReadError("the job work orders");
       seen.add(jobId);
       const raw = row?.agreed_labour_ex;
@@ -258,6 +281,21 @@ export async function loadTradeInvoiceJobModes(
     [...decided.entries()].filter(([, d]) => d.invoice_mode === "work_order").map(([id]) => id),
   );
 
+  // A job with an additional work order: which one this trade bills next
+  // depends on what they have billed there. Read only for those jobs.
+  const multiJobs = [...ordersByJob.entries()]
+    .filter(([id, rows]) => agreedByJob.has(id) && rows.some((r: any) => r?.kind === "additional"))
+    .map(([id]) => id);
+  let billedByJob = new Map<string, number>();
+  if (multiJobs.length > 0) {
+    try {
+      billedByJob = await readTradeBilledOnJobs(client, input.tradeId, multiJobs);
+    } catch (error) {
+      if (error instanceof AdditionalWorkOrderError) throw new TradeInvoiceModeReadError("what you have billed on these jobs");
+      throw error;
+    }
+  }
+
   const trade = {
     id: String(user.id),
     orgId,
@@ -283,11 +321,25 @@ export async function loadTradeInvoiceJobModes(
     }
     const { vertical, ...mode } = decision;
     const agreed = mode.invoice_mode === "work_order" ? agreedByJob.get(id) : undefined;
+    const pick = agreed
+      ? pickTradeWorkOrder(ordersByJob.get(id) || [], input.tradeId, billedByJob.get(id) ?? 0)
+      : null;
+    // One work order (every job before 19 Nov 2026): exactly as before.
+    const next = pick && pick.options.length > 1 ? pick.open : null;
     out.push({
       job_id: id,
       ...mode,
-      work_order_agreed_ex: agreed ? agreed.agreed : null,
-      job_work_order_id: agreed ? agreed.id : null,
+      work_order_agreed_ex: next ? next.agreed_ex : agreed ? agreed.agreed : null,
+      job_work_order_id: next ? next.id : agreed ? agreed.id : null,
+      // Only a job with more than one work order carries these, so every
+      // other answer is byte for byte what it was.
+      ...(pick && pick.options.length > 1
+        ? {
+          cap_work_order_id: agreed!.id,
+          cap_agreed_ex: agreed!.agreed,
+          work_orders: pick.options,
+        }
+        : {}),
       commission: commissionOfferFor(commissionRecords.get(id) ?? null, input.tradeId),
       can_claim_commission: commissionUnavailable ? null : tradeMayClaimCommission({
         job: {
