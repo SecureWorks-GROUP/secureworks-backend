@@ -24,6 +24,7 @@ const failures: Record<string, [number, string]> = {
   group_hours_required: [400, "Enter at least one day, or leave the claim."],
   group_reason_invalid: [400, "Give a reason between 3 and 500 characters."],
   group_pot_missing: [409, "The office needs to check the work order amount."],
+  group_office_hours_disputed: [409, "A crew member disputes the hours the office entered for them. The office must enter them again first."],
 };
 function refuse(code: string): never {
   const [status, message] = failures[code] ||

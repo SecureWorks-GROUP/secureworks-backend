@@ -234,6 +234,8 @@ DECLARE
   edits integer := 0;
   resolved integer := 0;
   dates date[] := ARRAY[]::date[];
+  written jsonb := '[]'::jsonb;
+  replaced jsonb;
   prior_hash text;
   complete boolean;
   next_state text;
@@ -305,8 +307,18 @@ BEGIN
     prior_hash := public.group_claim_current_hash(g.id);
   END IF;
 
+  -- What the office is replacing, for the log.
+  SELECT coalesce(jsonb_agg(jsonb_build_object('work_date', e.work_date, 'start_time', e.start_time,
+      'finish_time', e.finish_time, 'break_minutes', e.break_minutes, 'hours', e.hours,
+      'entered_by_office', e.entered_by_office) ORDER BY e.work_date), '[]'::jsonb)
+    INTO replaced
+    FROM public.group_work_order_time_entries e
+    WHERE e.group_id = g.id AND e.user_id = p_target AND e.work_date = ANY (dates);
+
   FOR day_row IN SELECT * FROM jsonb_to_recordset(p_days)
       AS d(work_date date, start_time text, finish_time text, break_minutes int, hours numeric) LOOP
+    written := written || jsonb_build_object('work_date', day_row.work_date, 'start_time', day_row.start_time,
+      'finish_time', day_row.finish_time, 'break_minutes', day_row.break_minutes, 'hours', round(day_row.hours, 2));
     INSERT INTO public.group_work_order_time_entries AS e
       (group_id, user_id, work_date, start_time, finish_time, break_minutes, hours,
        entered_by_office, office_entered_by, office_entered_at, office_entry_reason)
@@ -354,6 +366,8 @@ BEGIN
   VALUES (g.id, g.job_id, 'office_enter_hours', p_actor, jsonb_build_object(
     'user_id', p_target,
     'work_dates', to_jsonb(dates),
+    'days', written,
+    'replaced', replaced,
     'reason', reason,
     'resolved_disputes', resolved));
 

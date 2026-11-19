@@ -63,7 +63,8 @@ BEGIN
      OR (SELECT claim_deadline_at FROM public.group_work_orders WHERE id = grp) <= clock_timestamp() THEN
     RAISE EXCEPTION 'claim_not_moved_on'; END IF;
   IF NOT EXISTS (SELECT 1 FROM public.group_work_order_events WHERE group_id = grp AND action = 'office_enter_hours'
-      AND actor_user_id = office AND detail->>'user_id' = c::text AND detail->>'reason' = 'ZZTEST trade away, foreman confirmed') THEN
+      AND actor_user_id = office AND detail->>'user_id' = c::text AND detail->>'reason' = 'ZZTEST trade away, foreman confirmed'
+      AND (detail->'days'->0->>'hours')::numeric = 7.5 AND detail->'replaced' = '[]'::jsonb) THEN
     RAISE EXCEPTION 'office_entry_not_logged'; END IF;
 
   -- Nobody but the two functions can set or alter the office columns.
@@ -110,6 +111,9 @@ BEGIN
     'ZZTEST checked with the crew');
   IF (answer->>'resolved_disputes')::int <> 1 OR public.group_work_order_office_dispute_open(grp) THEN
     RAISE EXCEPTION 'reentry_did_not_resolve'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.group_work_order_events WHERE group_id = grp AND action = 'office_enter_hours'
+      AND (detail->'replaced'->0->>'hours')::numeric = 7.5 AND (detail->'days'->0->>'hours')::numeric = 8.5) THEN
+    RAISE EXCEPTION 'replaced_hours_not_logged'; END IF;
   SELECT * INTO STRICT row_now FROM public.group_work_order_time_entries WHERE group_id = grp AND user_id = c;
   IF row_now.disputed_at IS NOT NULL OR row_now.hours <> 8.5 OR row_now.office_entry_reason <> 'ZZTEST checked with the crew' THEN
     RAISE EXCEPTION 'reentry_not_fresh'; END IF;
