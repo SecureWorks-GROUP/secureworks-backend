@@ -94,6 +94,7 @@ interface Alert {
 async function generateNarrative(digest: any): Promise<string> {
   if (!ANTHROPIC_API_KEY) return ''
   try {
+    // paid-ai-register: daily-digest-narrative
     const resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -319,6 +320,7 @@ async function generateDeepDiagnostics(sb: any): Promise<Record<string, any>> {
 async function generateCoachingInsights(diagnostics: Record<string, any>, digest: any): Promise<any> {
   if (!ANTHROPIC_API_KEY) return null
   try {
+    // paid-ai-register: daily-digest-coaching
     const resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -424,6 +426,7 @@ async function generateObservationReport(sb: any): Promise<string> {
 
     if (!ANTHROPIC_API_KEY) return `Observation: ${events.length} decisions, ${shadows.length} shadow proposals, ${feedback.length} feedback items this week.`
 
+    // paid-ai-register: daily-digest-observation
     const resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -895,6 +898,7 @@ async function generateWeeklyLetter(sb: any, pulseData: any, aiPerformance?: Rec
   if (!isMondayPerth(new Date())) return '' // Monday only (Perth)
 
   try {
+    // paid-ai-register: daily-digest-weekly-letter
     const resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -1085,6 +1089,7 @@ async function generateWeeklyPulse(sb: any) {
   let narrative = ''
   if (ANTHROPIC_API_KEY) {
     try {
+      // paid-ai-register: daily-digest-weekly-pulse
       const resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -1232,6 +1237,7 @@ async function generateFinancialSnapshot(sb: any) {
         })),
       }
 
+      // paid-ai-register: daily-digest-financial-snapshot
       const resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -1392,6 +1398,7 @@ export async function _dailyDigestRequestHandlerForTest(req: Request): Promise<R
         benchmarks_this_month: benchmarks?.this_month,
         benchmarks_comparison: benchmarks?.comparison,
       }, null, 2)
+      // paid-ai-register: daily-digest-financial-brief
       const aiResp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
