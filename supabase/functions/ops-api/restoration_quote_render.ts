@@ -180,7 +180,7 @@ export async function renderRestorationQuotePdf(
   }
 
   // Ruled price table: item | description | qty | unit | rate | amount.
-  const widths = [12, CONTENT_W - 12 - 14 - 16 - 26 - 28, 14, 16, 26, 28];
+  const widths = [12, CONTENT_W - 12 - 14 - 20 - 26 - 28, 14, 20, 26, 28];
   const head: TableCell[] = [
     { text: "Item", bold: true, shade: true },
     { text: "Description", bold: true, shade: true },
@@ -213,11 +213,28 @@ export async function renderRestorationQuotePdf(
       align: "right",
     }],
   ];
-  // When the table and its totals fit on one page they are never split.
+  // The table starts where it is. It is kept whole only when it fits in the
+  // room left on this page; otherwise it starts here with its header and the
+  // first lines and breaks row by row (the header repeats on the next page),
+  // so a long table never leaves most of a page blank.
   const tableH = canvas.tableHeight(widths, rows) + 3 + canvas.tableHeight(totalsW, totals);
-  const freshPageRoom = REPORT_PAGE.BODY_BOTTOM - REPORT_PAGE.RUNNING_TOP - 15;
-  canvas.section("Quoted works", tableH <= freshPageRoom ? tableH : 30);
-  canvas.table(widths, rows, { header: true });
+  const startH = canvas.tableHeight(widths, rows.slice(0, Math.min(rows.length, 3)));
+  canvas.section(
+    "Quoted works",
+    tableH <= canvas.remaining() - 15 ? tableH : startH,
+  );
+  // The last line travels with the totals, so the totals never sit alone at
+  // the top of a page.
+  const last = rows[rows.length - 1];
+  const tailH = canvas.tableHeight(widths, [last]) + 3 +
+    canvas.tableHeight(totalsW, totals);
+  if (rows.length > 2) canvas.table(widths, rows.slice(0, -1), { header: true });
+  if (rows.length > 2 && tailH > canvas.remaining()) {
+    canvas.newPage();
+    canvas.table(widths, [head, last], { header: true });
+  } else {
+    canvas.table(widths, rows.length > 2 ? [last] : rows, { header: rows.length <= 2 });
+  }
   canvas.gap(3);
   canvas.ensure(canvas.tableHeight(totalsW, totals));
   canvas.table(totalsW, totals, {
