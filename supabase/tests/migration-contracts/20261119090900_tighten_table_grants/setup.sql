@@ -80,6 +80,15 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
 AS $$ SELECT note FROM public.ztg_open_read WHERE id = p_id $$;
 REVOKE ALL ON FUNCTION public.ztg_definer_read(int) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.ztg_definer_read(int) TO anon, authenticated, service_role;
+-- A caller that holds no grant on the table, only EXECUTE on the reader
+-- (anon loses EXECUTE on owner-rights routines in a later step).
+DO $reader$
+BEGIN
+  IF to_regrole('ztg_link_reader') IS NULL THEN CREATE ROLE ztg_link_reader NOLOGIN; END IF;
+END
+$reader$;
+GRANT USAGE ON SCHEMA public TO ztg_link_reader;
+GRANT EXECUTE ON FUNCTION public.ztg_definer_read(int) TO ztg_link_reader;
 
 -- Every table and column grant in schema public just before the migration.
 CREATE SCHEMA ztg_before;

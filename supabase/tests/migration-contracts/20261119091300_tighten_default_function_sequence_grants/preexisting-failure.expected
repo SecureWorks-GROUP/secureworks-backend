@@ -1,0 +1,2 @@
+tighten default, function and sequence grants: still granted to anon or PUBLIC after revoke
+public.zgs_other_grantor_fn()
