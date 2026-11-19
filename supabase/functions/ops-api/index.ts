@@ -21909,6 +21909,7 @@ async function jobDetail(
   return {
     job: jobLite,
     group_work_order_enabled: await groupFeatureOn(client),
+    job_overview_v2_enabled: await readSwitch(client, 'job_overview_v2'),
     trade_time_entries: tradeTimeEntries.entries,
     trade_time_entries_error: tradeTimeEntries.error,
     trade_invoice_lines: tradeInvoiceLines,
