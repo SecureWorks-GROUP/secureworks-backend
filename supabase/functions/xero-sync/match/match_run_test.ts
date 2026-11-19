@@ -5,6 +5,7 @@ import { syncMatchStep } from "./credit_run.ts";
 import {
   BACKLOG_MIXED_CUT,
   BACKLOG_MIXED_PAGE_CAP,
+  BACKLOG_OVER_DEADLINE,
   MATCH_BACKLOG_MIXED_PAGES,
   MATCH_BACKLOG_LINE_PAGE,
   MATCH_BACKLOG_STATE_KEY,
@@ -58,7 +59,9 @@ type World = {
   upserts?: Array<{ table: string; rows: any; timed: boolean }>;
   // A slow request: `abort` answers only when its signal fires (as the client does);
   // `late` ignores the signal and answers after `ms`.
-  slow?: { target: string; ms: number; mode: "abort" | "late"; only?: string };
+  // `abortMs`: how far an abort moves the clock (default: past any budget);
+  // `once`: only the first such request is slow.
+  slow?: { target: string; ms: number; mode: "abort" | "late"; only?: string; abortMs?: number; once?: boolean };
   // A read Postgres ends at its statement_timeout (57014), by table or function name.
   timeout?: string;
   // match_slow_bills rows, kept across calls like the table.
@@ -125,6 +128,7 @@ function billReadRows(w: World, name: string, args: any): any[] {
 function answer(w: World, target: string, signal: AbortSignal | null, result: () => any, doc?: string): Promise<any> {
   if (w.slow?.target !== target || (w.slow.only !== undefined && w.slow.only !== doc)) return Promise.resolve(result());
   const slow = w.slow;
+  if (slow.once) w.slow = undefined;
   return new Promise((done) => {
     const timer = setTimeout(() => {
       w.clock.t += slow.ms;
@@ -133,7 +137,7 @@ function answer(w: World, target: string, signal: AbortSignal | null, result: ()
     if (slow.mode === "abort") {
       signal?.addEventListener("abort", () => {
         clearTimeout(timer);
-        w.clock.t += 1_000_000; // past any budget in these tests
+        w.clock.t += slow.abortMs ?? 1_000_000; // past any budget in these tests, unless the test says
         done({ data: null, error: { message: "AbortError: signal is aborted without reason" } });
       });
     }
@@ -655,6 +659,7 @@ Deno.test("sync, switch on: the budget starts when matching starts; out of time,
     changed: ["xero_bill:a", "xero_bill:b", "xero_bill:c"],
     budgetMs: 25,
     now: () => (t += 10),
+    planClock: () => 0, // the plan's own clock stands still: only the run's clock decides
   });
   assertEquals(out.run, 1);
   assertEquals(requeues(w).length, 1);
@@ -707,7 +712,7 @@ Deno.test("sync backlog: the budget ends mid-backlog: it stops cleanly, requeues
   let t = 0;
   // Each clock read costs 10 ms; the budget lets three bills run.
   const w = world({ waiting, lines, backlogAt: null });
-  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 45, now: () => (t += 10) });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 45, now: () => (t += 10), planClock: () => 0 });
   assertEquals([out.run, out.backlog, out.requeued], [3, 3, 0]);
   assertEquals(requeues(w).length, 0, "a backlog bill not reached is not put on the queue");
   assertEquals(w.backlogAt, { cursor_at: at(1), note: "b2" }, "the position stops at the last bill run");
@@ -717,7 +722,7 @@ Deno.test("sync backlog: the budget ends mid-backlog: it stops cleanly, requeues
   // Nothing reached at all: the position does not move.
   const w3 = world({ waiting, lines, backlogAt: { cursor_at: at(1), note: "b2" } });
   let t3 = 0;
-  const none = await syncMatchRun(fake(w3), { on: true, changed: [], budgetMs: 15, now: () => (t3 += 10) });
+  const none = await syncMatchRun(fake(w3), { on: true, changed: [], budgetMs: 15, now: () => (t3 += 10), planClock: () => 0 });
   assertEquals([none.run, none.backlog], [0, 0]);
   assertEquals(w3.backlogAt, { cursor_at: at(1), note: "b2" });
 });
@@ -1348,5 +1353,92 @@ Deno.test("backlog: an other-contact page with no count fails closed", async () 
   const out = await syncMatchRun(fake(w), { on: true, changed: [] });
   assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_MIXED_CUT]]);
   assertEquals(w.backlogAt, pos);
+});
+
+// The backlog plan keeps to the run's deadline (director 11:24). The plan runs
+// on the world's fake clock here, so a slow read decides, never machine speed.
+Deno.test("backlog: a slow plan is cut at half of what the run has left; the changed bill still runs in the same run", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({
+    waiting: [waitingAt("a1", 1)],
+    lines: { ...billLines("a1"), ...billLines("c1") },
+    backlogAt: { ...pos },
+    // The waiting-lines read hangs until its signal fires, as the client does;
+    // the cut lands at 80 of the run's 150, past the plan's 75.
+    slow: { target: "job_cost_lines", ms: 60_000, mode: "abort", abortMs: 80, once: true },
+  });
+  const started = Date.now();
+  const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:c1"], budgetMs: 150, now: clockOf(w), planClock: clockOf(w) });
+  const took = Date.now() - started;
+  assert(took < 1_500, `cut at the plan's deadline, not the 5 s read limit (took ${took} ms)`);
+  assertEquals([out.backlog, out.errors, out.backlog_skip], [0, [BACKLOG_OVER_DEADLINE], undefined]);
+  assertEquals(w.backlogAt, pos, "position kept");
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:c1"], "the changed bill ran");
+  assertEquals(requeues(w).length, 0, "nothing requeued");
+});
+
+Deno.test("backlog: no plan read starts once the deadline has passed", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({
+    waiting: [waitingAt("a1", 1)],
+    lines: billLines("a1"),
+    backlogAt: { ...pos },
+    // The position read answers after the deadline, whatever its signal says.
+    slow: { target: "xero_sync_state", ms: 300, mode: "late" },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 150, now: clockOf(w), planClock: clockOf(w) });
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_OVER_DEADLINE]]);
+  assert(!w.queries.some((q) => q.table === "job_cost_lines"), "the waiting-lines read never started");
+  assertEquals(w.backlogAt, pos, "position kept");
+});
+
+Deno.test("backlog: a plan whose last read answers past the deadline hands the run nothing", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  // A supplier contact: the user-list read is the plan's last, and finds no trade user.
+  const w = world({
+    waiting: [waitingAt("s1", 1)],
+    lines: onContact("s1", "zztest-supplier-2"),
+    backlogAt: { ...pos },
+    slow: { target: "users", ms: 300, mode: "late" },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 150, now: clockOf(w), planClock: clockOf(w) });
+  assertEquals([out.backlog, applies(w).length, out.errors], [0, 0, [BACKLOG_OVER_DEADLINE]]);
+  assertEquals(w.backlogAt, pos, "position kept");
+});
+
+Deno.test("MUST NOT CHANGE: a plan inside the deadline picks and moves the position as on main", async () => {
+  const w = world({ waiting: [waitingAt("s1", 1)], lines: onContact("s1", "zztest-supplier-2"), backlogAt: null });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [], budgetMs: 60_000, now: clockOf(w), planClock: clockOf(w) });
+  assertEquals([out.backlog, out.errors], [1, []]);
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:s1"]);
+});
+
+Deno.test("backlog: a people read cut at the plan's deadline is the deadline, not an unreadable people set", async () => {
+  const pos = { cursor_at: at(0), note: "a0" };
+  const w = world({
+    waiting: [waitingAt("s1", 1)],
+    lines: { ...onContact("s1", "zztest-supplier-2"), ...billLines("c1") },
+    backlogAt: { ...pos },
+    slow: { target: "people_account_codes", ms: 60_000, mode: "abort", abortMs: 80, once: true },
+  });
+  const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:c1"], budgetMs: 150, now: clockOf(w), planClock: clockOf(w) });
+  assertEquals([out.backlog, out.errors], [0, [BACKLOG_OVER_DEADLINE]]);
+  assertEquals(w.backlogAt, pos, "position kept");
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:c1"], "the run read its own people set and ran the changed bill");
+});
+
+Deno.test("backlog: a run with no room, or none of its time left, names why the backlog had no plan", async () => {
+  const ids = Array.from({ length: 50 }, (_, i) => `xero_bill:f${i}`);
+  const full = world({ lines: Object.assign({}, ...ids.map((id) => billLines(id.slice(10)))), waiting: [waitingAt("a1", 1)], backlogAt: null });
+  const one = await syncMatchRun(fake(full), { on: true, changed: ids });
+  assertEquals([one.backlog, one.backlog_skip], [0, "no_room"]);
+  let t = 0;
+  const late = world({ waiting: [waitingAt("a1", 1)], lines: billLines("a1"), backlogAt: null });
+  // The run's deadline is already behind it when the backlog's turn comes.
+  const two = await syncMatchRun(fake(late), { on: true, changed: [], deadline: 5, now: () => (t += 10) });
+  assertEquals([two.backlog, two.backlog_skip, two.errors], [0, "over_deadline", []]);
+  assert(!late.queries.some((q) => q.table === "job_cost_lines"), "no plan read");
+  const ran = await syncMatchRun(fake(world({ waiting: [waitingAt("a1", 1)], lines: billLines("a1"), backlogAt: null })), { on: true, changed: [] });
+  assertEquals([ran.backlog, "backlog_skip" in ran], [1, false], "a run with a plan carries no skip");
 });
 

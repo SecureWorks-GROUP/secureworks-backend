@@ -105,6 +105,15 @@ export const BACKLOG_MIXED_CUT = "backlog_trade_mixed_cut";
 export const MATCH_BACKLOG_MIXED_PAGES = 2;
 /** The other-contact read needed more pages than MATCH_BACKLOG_MIXED_PAGES. */
 export const BACKLOG_MIXED_PAGE_CAP = "backlog_trade_mixed_page_cap";
+/** The backlog plan reached its deadline: nothing picked, position kept. */
+export const BACKLOG_OVER_DEADLINE = "backlog_over_deadline";
+/**
+ * The backlog plan may spend at most this share of what is left of the run when
+ * it starts, so the run's bills always keep the rest (director 14:43).
+ */
+export const MATCH_BACKLOG_PLAN_SHARE = 0.5;
+/** Why the backlog had no plan this run (`backlog_skip`); absent when it had one. */
+export type BacklogSkip = "no_room" | "over_deadline";
 /** Client-side limit on the batched requeue and the backlog reads. */
 export const MATCH_STATEMENT_TIMEOUT_MS = 5_000;
 /** A person's labour: never matched or raised here (#1678 hides these bills from the list). */
@@ -712,18 +721,23 @@ export async function readMatcherSwitch(sb: Sb): Promise<{ on: boolean; error?: 
 
 type BacklogLine = { document_id: string; created_at: string; party_id?: string | null };
 
-async function timedRead<T>(code: string, q: { abortSignal: (s: AbortSignal) => PromiseLike<{ data: T; error: unknown }> }) {
-  return await read<T>(code, q.abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS)));
+async function timedRead<T>(
+  code: string,
+  q: { abortSignal: (s: AbortSignal) => PromiseLike<{ data: T; error: unknown }> },
+  ms = MATCH_STATEMENT_TIMEOUT_MS,
+) {
+  return await read<T>(code, q.abortSignal(AbortSignal.timeout(ms)));
 }
 
 /** timedRead for a request that also asks for an exact count (the count comes back beside the rows). */
 async function timedCountedRead<T>(
   code: string,
   q: { abortSignal: (s: AbortSignal) => PromiseLike<{ data: T; error: unknown; count?: number | null }> },
+  ms = MATCH_STATEMENT_TIMEOUT_MS,
 ): Promise<{ data: T; count: number | null }> {
   let res: { data: T; error: unknown; count?: number | null };
   try {
-    res = await q.abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS));
+    res = await q.abortSignal(AbortSignal.timeout(ms));
   } catch {
     throw new ReadFailed(code);
   }
@@ -756,14 +770,36 @@ type BacklogPlan = {
  * bill is still picked, and skipped by the run as before). A Trade App user's
  * bill is left out only when every contact on its lines is a Trade App user's,
  * so the contact the skip reads (its first line's) is one.
+ *
+ * The plan runs before the run's bills, so it ends by its own deadline:
+ * `leftMs`, a share of what the run has left when the plan starts. Each read
+ * is cut at it, none starts after it, and a plan that reaches it picks
+ * nothing and keeps the position (BACKLOG_OVER_DEADLINE). It is timed on its
+ * own clock (`clock`, the real one unless a test passes another) from its
+ * start, so it adds no read of the run's clock.
  */
-async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<BacklogPlan> {
+async function backlogPlan(
+  sb: Sb,
+  room: number,
+  exclude: Set<string>,
+  leftMs = Infinity,
+  clock: () => number = Date.now,
+): Promise<BacklogPlan> {
   const none: BacklogPlan = { picks: [], after: null, hadPosition: false };
   if (room <= 0) return none;
+  const endsAt = clock() + leftMs;
+  // The limit for the next read: the statement limit, or the time left before
+  // the deadline when that is shorter. None starts once the deadline passed.
+  const limitMs = () => {
+    const left = endsAt - clock();
+    if (!(left > 0)) throw new ReadFailed(BACKLOG_OVER_DEADLINE);
+    return Math.min(MATCH_STATEMENT_TIMEOUT_MS, left);
+  };
+  const overDeadline = () => !(endsAt - clock() > 0);
   try {
     const state = await read<{ cursor_at: string | null; note: string | null } | null>("backlog_state",
       sb.from("xero_sync_state").select("cursor_at,note").eq("key", MATCH_BACKLOG_STATE_KEY)
-        .abortSignal(AbortSignal.timeout(MATCH_STATEMENT_TIMEOUT_MS)).maybeSingle());
+        .abortSignal(AbortSignal.timeout(limitMs())).maybeSingle());
     const at = state?.cursor_at ?? null;
     const after = at ? state?.note ?? "" : "";
     const base = () => sb.from("job_cost_lines").select("document_id,created_at,party_id")
@@ -775,7 +811,7 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
       // breaks the tie.
       const same = await timedRead<BacklogLine[]>("backlog_lines",
         base().eq("created_at", at).gt("document_id", after).order("document_id", { ascending: true })
-          .limit(MATCH_BACKLOG_LINE_PAGE));
+          .limit(MATCH_BACKLOG_LINE_PAGE), limitMs());
       lines = same ?? [];
       full = lines.length >= MATCH_BACKLOG_LINE_PAGE;
     }
@@ -784,7 +820,7 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
       if (at) q = q.gt("created_at", at);
       const later = await timedRead<BacklogLine[]>("backlog_lines",
         q.order("created_at", { ascending: true }).order("document_id", { ascending: true })
-          .limit(MATCH_BACKLOG_LINE_PAGE));
+          .limit(MATCH_BACKLOG_LINE_PAGE), limitMs());
       lines = [...lines, ...(later ?? [])];
       full = (later ?? []).length >= MATCH_BACKLOG_LINE_PAGE;
     }
@@ -805,9 +841,11 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
     if (!docs.length) return { picks: [], after: null, hadPosition: !!at };
     // Once a pick, only when there is a bill to pick; handed to the run.
     let accounts: PeopleAccounts;
+    const peopleMs = limitMs();
     try {
-      accounts = await readPeopleAccounts(sb, { timeoutMs: MATCH_STATEMENT_TIMEOUT_MS });
+      accounts = await readPeopleAccounts(sb, { timeoutMs: peopleMs });
     } catch (e) {
+      if (overDeadline()) throw new ReadFailed(BACKLOG_OVER_DEADLINE);
       return { ...none, error: peopleAccountsCode(e) ?? "people_accounts_unreadable" };
     }
     const hiddenCodes = [...accounts.hidden];
@@ -819,17 +857,18 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
     // hidden). In chunks, so a request URL stays short.
     for (let i = 0; i < ids.length; i += MATCH_BACKLOG_CHUNK) {
       const chunk = ids.slice(i, i + MATCH_BACKLOG_CHUNK);
+      const ms = limitMs();
       const [open, labour, hidden] = await Promise.all([
         timedRead<Array<{ subject_id: string }>>("backlog_items",
           sb.from("reconcile_items").select("subject_id").eq("subject_table", "cost_document").eq("status", "open")
-            .in("subject_id", chunk.map((d) => `xero_bill:${d}`))),
+            .in("subject_id", chunk.map((d) => `xero_bill:${d}`)), ms),
         timedRead<Array<{ document_id: string }>>("backlog_labour",
           sb.from("job_cost_lines").select("document_id").eq("document_kind", "xero_bill")
-            .in("kind", [...LABOUR_LINE_KINDS]).in("document_id", chunk)),
+            .in("kind", [...LABOUR_LINE_KINDS]).in("document_id", chunk), ms),
         hiddenCodes.length
           ? timedRead<Array<{ document_id: string }>>("backlog_hidden",
             sb.from("job_cost_lines").select("document_id").eq("document_kind", "xero_bill")
-              .in("account_code", hiddenCodes).in("document_id", chunk))
+              .in("account_code", hiddenCodes).in("document_id", chunk), ms)
           : Promise.resolve([] as Array<{ document_id: string }>),
       ]);
       for (const r of open ?? []) openSet.add(r.subject_id);
@@ -852,7 +891,8 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
       const tradeParties = new Set<string>();
       for (let i = 0; i < parties.length; i += MATCH_BACKLOG_CHUNK) {
         const users = await timedRead<Array<{ xero_contact_id: string | null }>>("backlog_trade_users",
-          sb.from("users").select("xero_contact_id").in("xero_contact_id", parties.slice(i, i + MATCH_BACKLOG_CHUNK)));
+          sb.from("users").select("xero_contact_id").in("xero_contact_id", parties.slice(i, i + MATCH_BACKLOG_CHUNK)),
+          limitMs());
         for (const u of users ?? []) if (u.xero_contact_id) tradeParties.add(u.xero_contact_id);
       }
       const candidates = [...partyOf].filter(([, p]) => tradeParties.has(p)).map(([id]) => id);
@@ -876,7 +916,7 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
             const page = await timedCountedRead<Array<{ document_id: string }>>("backlog_trade_mixed",
               sb.from("job_cost_lines").select("document_id", { count: "exact" }).eq("document_kind", "xero_bill")
                 .in("document_id", rest).not("party_id", "in", `(${quoted})`)
-                .limit(MATCH_BACKLOG_LINE_PAGE));
+                .limit(MATCH_BACKLOG_LINE_PAGE), limitMs());
             const other = page.data ?? [];
             if (typeof page.count !== "number") throw new ReadFailed(BACKLOG_MIXED_CUT);
             const named = new Set(other.map((r) => r?.document_id).filter((d) => rest.includes(d)));
@@ -906,6 +946,8 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
       picks.push({ subject, created_at: d.created_at, document_id: d.document_id });
     }
     const reachedEnd = !full && !capped && !stopped;
+    // A plan that ends past the deadline hands the run nothing.
+    if (overDeadline()) throw new ReadFailed(BACKLOG_OVER_DEADLINE);
     return {
       picks,
       after: reachedEnd ? null : { created_at: last.created_at, document_id: last.document_id },
@@ -913,6 +955,8 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
       accounts,
     };
   } catch (e) {
+    // A read cut at the deadline is the deadline, whatever code it carried.
+    if (overDeadline()) return { ...none, error: BACKLOG_OVER_DEADLINE };
     return { ...none, error: e instanceof ReadFailed ? e.code : "backlog_failed" };
   }
 }
@@ -931,6 +975,8 @@ export type SyncMatchReport = MatchRunReport & {
   changed: number;
   queued: number;
   backlog: number;
+  /** Set only when the backlog had no plan this run, so repeated starvation shows. */
+  backlog_skip?: BacklogSkip;
   errors: string[];
 };
 
@@ -942,7 +988,15 @@ export type SyncMatchReport = MatchRunReport & {
  */
 export async function syncMatchRun(
   sb: Sb,
-  opts: { on: boolean; changed: string[]; now?: () => number; budgetMs?: number; deadline?: number },
+  opts: {
+    on: boolean;
+    changed: string[];
+    now?: () => number;
+    budgetMs?: number;
+    deadline?: number;
+    /** The backlog plan's own clock (the real one); a test passes its fake clock. */
+    planClock?: () => number;
+  },
 ): Promise<SyncMatchReport> {
   const report: SyncMatchReport = { ...emptyReport(), switch: opts.on ? "on" : "off", changed: 0, queued: 0, backlog: 0, errors: [] };
   if (!opts.on) return report;
@@ -981,8 +1035,14 @@ export async function syncMatchRun(
 
   room = Math.min(MATCH_BACKLOG_LIMIT, MATCH_RUN_LIMIT - run.length);
   let plan: BacklogPlan | null = null;
-  if (room > 0 && now() <= deadline) {
-    plan = await backlogPlan(sb, room, new Set([...run, ...requeue.map((r) => r.id)]));
+  // One read of the run's clock, as before. The plan may spend at most
+  // MATCH_BACKLOG_PLAN_SHARE of what is left; the run's bills keep the rest.
+  const leftAtPlan = room > 0 ? deadline - now() : 0;
+  if (room <= 0) report.backlog_skip = "no_room";
+  else if (!(leftAtPlan > 0)) report.backlog_skip = "over_deadline";
+  else {
+    const planMs = Math.floor(leftAtPlan * MATCH_BACKLOG_PLAN_SHARE);
+    plan = await backlogPlan(sb, room, new Set([...run, ...requeue.map((r) => r.id)]), planMs, opts.planClock);
     if (plan.error) report.errors.push(plan.error);
     run.push(...plan.picks.map((p) => p.subject));
   }
