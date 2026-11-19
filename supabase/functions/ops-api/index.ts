@@ -12088,9 +12088,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         const rejHold = payRunHeldRefusalFor(rejInv)
         if (rejHold) return json({ ok: false, code: rejHold.code, error: rejHold.message }, rejHold.status)
-        const { data: rejected, error: rejErr } = await rejectTradeInvoiceStorage(client, rejInvId, officeSentBackNote(rejNote), reviewActorLabel(authUser))
+        const { data: rejected, error: rejErr, via: rejVia } = await rejectTradeInvoiceStorage(client, rejInvId, officeSentBackNote(rejNote), reviewActorLabel(authUser))
         if (rejErr) throw new Error('Failed to reject: ' + rejErr.message)
         if (rejected?.id !== rejInvId) {
+          // The database reject refuses a run-held invoice (20261119090200). On
+          // an empty answer from it, read the row again (trade_invoices_pkey):
+          // a run that approved it since the read above gets the pay run's own
+          // 409. Any other case, a failed re-read included, keeps this 409.
+          if (rejVia === 'rpc') {
+            const { data: rejNow, error: rejNowErr } = await client.from('trade_invoices')
+              .select('id, pay_run_id').eq('id', rejInvId).maybeSingle()
+            const rejHeldNow = !rejNowErr && rejNow ? payRunHeldRefusalFor(rejNow) : null
+            if (rejHeldNow?.code === PAY_RUN_HELD_CODE) {
+              return json({ ok: false, code: rejHeldNow.code, error: rejHeldNow.message }, rejHeldNow.status)
+            }
+          }
           throw new ApiError('Cannot reject an invoice while its Xero identity is being recorded', 409)
         }
         return json({ success: true, invoice_id: rejInvId, status: 'ops-reject' })
