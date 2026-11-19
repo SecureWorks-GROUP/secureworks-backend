@@ -27,7 +27,7 @@ import {
   readOwnerApprovalAuthority,
   splitOwnerApprovalResult,
 } from "./job_work_orders.ts";
-import { resolveSesOwnerDirectedApproval } from "./ses_owner_directed_approval.ts";
+import { ownerDirectiveEventStamp, resolveSesOwnerDirectedApproval } from "./ses_owner_directed_approval.ts";
 import { RestorationWorkflowError } from "./restoration_workflow.ts";
 import { isRestorationCard } from "./restoration_workflow_store.ts";
 
@@ -224,7 +224,8 @@ export async function setRestorationWorkOrderAction(
         approved_by: approver.userId,
         via: approver.via,
         issued,
-        owner_directive: approver.evidence,
+        // Who and when only, never the owner's words or address.
+        owner_directive: ownerDirectiveEventStamp(approver.evidence, approver.userId),
       },
     });
   } catch (_e) { /* the work order is the record; the event is the audit */ }
