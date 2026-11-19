@@ -165,7 +165,9 @@ Deno.test("fencing manager is denied a managed vertical in another tenant", asyn
       { orgId: "tenant-a", managedVerticals: ["fencing"] },
     ),
     Error,
-    "not authorized",
+    // PR 782 (7 Sep): another tenant's job answers 404 "Job not found" on
+    // purpose, so a job's existence is not confirmed across tenants.
+    "Job not found",
   );
 });
 

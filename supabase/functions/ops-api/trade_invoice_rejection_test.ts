@@ -1,3 +1,4 @@
+import { commissionCapCodeFromDbError } from "./job_commission.ts";
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { officeSentBackNote } from "./trade_invoice_office_note.ts";
 
@@ -112,6 +113,9 @@ Deno.test("FU17 hourly submit passes labour, group share and receipt to the same
   const id = await submit({ client: {}, reimbursements: { lines: [receipt], skipped_items: [] },
     week_start: "2026-11-16", priorDraftId: null, weeklyInvoice: null,
     invoicePayload: header, tradeUser: { orgId: "ZZTEST-org" }, lineItems: [labour], extraLineItems: [group, receipt],
+    // PR 1640 declares lineJobOrder one line above the slice read here;
+    // PR 1426's catch reads the commission cap code. Both come from index.ts.
+    lineJobOrder: { jobOrder: false }, commissionCapCodeFromDbError,
     retryReimbursementClaims: (_c: unknown, _r: unknown, persist: () => Promise<string>) => persist(),
     persistWithFreeNumber: async (persist: () => Promise<string>) => await persist(),
     toTradeInvoiceLineRow: (_id: string, row: unknown) => row,
