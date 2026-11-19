@@ -31,7 +31,7 @@ import { createXeroSyncTransport } from './xero_transport.ts'
 import { syncBankTransactionLines } from './bank_transactions.ts'
 import { syncXeroAccounts } from './accounts.ts'
 import { trackingOptionRows } from './tracking_options.ts'
-import { divisionSyncOfficeHours, storeDivisionMonth } from './pl_by_division.ts'
+import { claimDivisionLease, divisionSyncOfficeHours, releaseDivisionLease, renewDivisionLease, storeDivisionMonth } from './pl_by_division.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
 import { runInvoiceMirrorCheck } from './xero_mirror_check.ts'
 import { autoReleaseVoidedTradeInvoices } from '../ops-api/trade_invoice_voided_release.ts'
@@ -2951,6 +2951,17 @@ export async function syncTrackingPL(sb: any, readXero = xeroGet, clock = () => 
   }
   let accountRows = 0
   let accountMonths = 0
+  // One run at a time stores division months (pl_by_division.ts). Asked only
+  // when the switch would store: with it off nothing here runs.
+  let leaseRunId: string | null = null
+  let leaseHeld = false
+  if (storeAccounts) {
+    leaseRunId = crypto.randomUUID()
+    const claim = await claimDivisionLease(sb, leaseRunId, now)
+    leaseHeld = claim === 'claimed'
+    if (claim === 'held') console.error('[xero-sync] division_accounts_lease_held')
+    if (claim === 'failed') console.error('[xero-sync] division_accounts_lease_unwritable')
+  }
 
   let optionsSynced: number | null = null
   try {
@@ -2965,96 +2976,105 @@ export async function syncTrackingPL(sb: any, readXero = xeroGet, clock = () => 
     console.error('[xero-sync] tracking options not stored', error)
   }
 
-  // Fetch P&L by tracking category for last 12 months (one month at a time)
-  for (let i = 0; i < 12; i++) {
-    const monthStart = new Date(now.getFullYear(), now.getMonth() - i, 1)
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() - i + 1, 0)
-    const fromDate = monthStart.toISOString().split('T')[0]
-    const toDate = monthEnd.toISOString().split('T')[0]
+  try {
+    // Fetch P&L by tracking category for last 12 months (one month at a time)
+    for (let i = 0; i < 12; i++) {
+      const monthStart = new Date(now.getFullYear(), now.getMonth() - i, 1)
+      const monthEnd = new Date(now.getFullYear(), now.getMonth() - i + 1, 0)
+      const fromDate = monthStart.toISOString().split('T')[0]
+      const toDate = monthEnd.toISOString().split('T')[0]
 
-    try {
-      const plData = await readXero('/Reports/ProfitAndLoss', accessToken, tenantId, {
-        fromDate,
-        toDate,
-        trackingCategoryID: TRACKING_CATEGORY_ID,
-        standardLayout: 'true',
-      })
+      try {
+        const plData = await readXero('/Reports/ProfitAndLoss', accessToken, tenantId, {
+          fromDate,
+          toDate,
+          trackingCategoryID: TRACKING_CATEGORY_ID,
+          standardLayout: 'true',
+        })
 
-      // Parse the report to extract per-unit figures
-      const report = plData?.Reports?.[0]
-      if (!report) continue
+        // Parse the report to extract per-unit figures
+        const report = plData?.Reports?.[0]
+        if (!report) continue
 
-      // Get column headers (tracking category options)
-      const headerRow = report.Rows?.find((r: any) => r.RowType === 'Header')
-      const columns = (headerRow?.Cells || []).map((c: any) => c.Value).filter((v: string) => v)
+        // Get column headers (tracking category options)
+        const headerRow = report.Rows?.find((r: any) => r.RowType === 'Header')
+        const columns = (headerRow?.Cells || []).map((c: any) => c.Value).filter((v: string) => v)
 
-      // Parse income and cost sections
-      const parsed: Record<string, { revenue: number; costs: number; gross_profit: number }> = {}
-      for (const col of columns) {
-        parsed[col] = { revenue: 0, costs: 0, gross_profit: 0 }
-      }
+        // Parse income and cost sections
+        const parsed: Record<string, { revenue: number; costs: number; gross_profit: number }> = {}
+        for (const col of columns) {
+          parsed[col] = { revenue: 0, costs: 0, gross_profit: 0 }
+        }
 
-      for (const section of (report.Rows || [])) {
-        if (section.Title === 'Income' || section.Title === 'Less Cost of Sales') {
-          for (const row of (section.Rows || [])) {
-            if (row.RowType === 'SummaryRow') {
-              // Summary row has totals
-              const cells = row.Cells || []
-              const label = cells[0]?.Value || ''
-              if (label.includes('Total Income') || label.includes('Total Cost')) {
-                for (let c = 1; c < cells.length && c - 1 < columns.length; c++) {
-                  const val = parseFloat(cells[c]?.Value || '0')
+        for (const section of (report.Rows || [])) {
+          if (section.Title === 'Income' || section.Title === 'Less Cost of Sales') {
+            for (const row of (section.Rows || [])) {
+              if (row.RowType === 'SummaryRow') {
+                // Summary row has totals
+                const cells = row.Cells || []
+                const label = cells[0]?.Value || ''
+                if (label.includes('Total Income') || label.includes('Total Cost')) {
+                  for (let c = 1; c < cells.length && c - 1 < columns.length; c++) {
+                    const val = parseFloat(cells[c]?.Value || '0')
+                    const unit = columns[c - 1]
+                    if (!parsed[unit]) continue
+                    if (label.includes('Income')) parsed[unit].revenue = val
+                    else parsed[unit].costs = val
+                  }
+                }
+              }
+            }
+          }
+          // Gross Profit row
+          if (section.RowType === 'Section' && !section.Title) {
+            for (const row of (section.Rows || [])) {
+              const label = row.Cells?.[0]?.Value || ''
+              if (label === 'Gross Profit') {
+                for (let c = 1; c < (row.Cells?.length || 0) && c - 1 < columns.length; c++) {
+                  const val = parseFloat(row.Cells[c]?.Value || '0')
                   const unit = columns[c - 1]
-                  if (!parsed[unit]) continue
-                  if (label.includes('Income')) parsed[unit].revenue = val
-                  else parsed[unit].costs = val
+                  if (parsed[unit]) parsed[unit].gross_profit = val
                 }
               }
             }
           }
         }
-        // Gross Profit row
-        if (section.RowType === 'Section' && !section.Title) {
-          for (const row of (section.Rows || [])) {
-            const label = row.Cells?.[0]?.Value || ''
-            if (label === 'Gross Profit') {
-              for (let c = 1; c < (row.Cells?.length || 0) && c - 1 < columns.length; c++) {
-                const val = parseFloat(row.Cells[c]?.Value || '0')
-                const unit = columns[c - 1]
-                if (parsed[unit]) parsed[unit].gross_profit = val
-              }
+
+        // Store as a report
+        const totals = await sb.from('xero_reports').upsert({
+          org_id: DEFAULT_ORG_ID,
+          report_type: 'pl_by_tracking',
+          report_date: toDate,
+          period_start: fromDate,
+          period_end: toDate,
+          report_json: { columns, data: parsed, raw: plData },
+          synced_at: new Date().toISOString(),
+        }, { onConflict: 'org_id,report_type,report_date' })
+
+        if (storeAccounts && leaseHeld && !divisionSyncOfficeHours(clock())) {
+          try {
+            if (totals.error) throw totals.error
+            if (!(await renewDivisionLease(sb, leaseRunId!, clock()))) {
+              leaseHeld = false
+              console.error('[xero-sync] division_accounts_lease_lost')
+              throw new Error('division_accounts_lease_lost')
             }
+            accountRows += await storeDivisionMonth(sb, report, DEFAULT_ORG_ID, fromDate, now.toISOString())
+            accountMonths++
+          } catch {
+            console.error('[xero-sync] division_account_month_not_stored', fromDate)
           }
         }
+
+        results.push({ month: fromDate, columns: Object.keys(parsed), status: 'ok' })
+      } catch (e: any) {
+        if (e instanceof XeroCooldownError) throw e
+        console.error(`Tracking P&L sync failed for ${fromDate}:`, e.message)
+        results.push({ month: fromDate, status: 'error', error: e.message })
       }
-
-      // Store as a report
-      const totals = await sb.from('xero_reports').upsert({
-        org_id: DEFAULT_ORG_ID,
-        report_type: 'pl_by_tracking',
-        report_date: toDate,
-        period_start: fromDate,
-        period_end: toDate,
-        report_json: { columns, data: parsed, raw: plData },
-        synced_at: new Date().toISOString(),
-      }, { onConflict: 'org_id,report_type,report_date' })
-
-      if (storeAccounts && !divisionSyncOfficeHours(clock())) {
-        try {
-          if (totals.error) throw totals.error
-          accountRows += await storeDivisionMonth(sb, report, DEFAULT_ORG_ID, fromDate, now.toISOString())
-          accountMonths++
-        } catch {
-          console.error('[xero-sync] division_account_month_not_stored', fromDate)
-        }
-      }
-
-      results.push({ month: fromDate, columns: Object.keys(parsed), status: 'ok' })
-    } catch (e: any) {
-      if (e instanceof XeroCooldownError) throw e
-      console.error(`Tracking P&L sync failed for ${fromDate}:`, e.message)
-      results.push({ month: fromDate, status: 'error', error: e.message })
     }
+  } finally {
+    if (leaseRunId) await releaseDivisionLease(sb, leaseRunId, clock())
   }
 
   // P3-01.10: drafts Xero now shows approved, from our own copy only. Its own
