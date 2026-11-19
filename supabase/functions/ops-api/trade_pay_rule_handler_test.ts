@@ -18,7 +18,10 @@
 import "./trade_app_visibility_rules_test_env.ts";
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 import { calculateTradeInvoiceMoney } from "./trade_invoice_money.ts";
+import { FakeTime } from "https://deno.land/std@0.224.0/testing/time.ts";
 import { _opsApiRequestHandlerForTest } from "./index.ts";
+import { perthToday } from "./group_work_order.ts";
+import { tradePayBasisFor } from "./trade_pay_rule.ts";
 
 const TRADE_ID = "6c2f0a52-0000-4000-8000-00000000aa01";
 const OTHER_USER = "6c2f0a52-0000-4000-8000-00000000aa02";
@@ -86,6 +89,7 @@ type World = {
   payRuleOn?: boolean;
   payRuleFrom?: string | null;
   failPaySettings?: boolean;
+  // Present and undefined: the request carries no week (an undated invoice).
   weekStart?: string;
   // The stored draft a save replaces (returned for a draft lookup).
   priorDraft?: Record<string, unknown>;
@@ -223,7 +227,7 @@ async function submit(extra_items: any[], world: World = {}): Promise<Captured> 
     const res = await _opsApiRequestHandlerForTest(new Request(url, {
       method: "POST",
       headers: { authorization: "Bearer trade-jwt", "content-type": "application/json" },
-      body: JSON.stringify({ week_start: world.weekStart ?? WEEK_START, draft_id: world.draftId, gst_on: false, extra_items }),
+      body: JSON.stringify({ week_start: "weekStart" in world ? world.weekStart : WEEK_START, draft_id: world.draftId, gst_on: false, extra_items }),
     }));
     const text = await res.text();
     let parsed: any;
@@ -463,7 +467,7 @@ handlerTest("pay rule: every save door and the work order retry use the one deci
   assertEquals(src.match(/tradePayBasisForSave\(/g)?.length, 5); // definition + three save doors + switched-on receipt list
   assertStringIncludes(src, "tradePayBasisForSave(client, retryDrafts[0] ?? null, woInvoiceDate)");
   assertStringIncludes(src, "tradePayBasisForSave(client, existingDraft, draftWeekStart || draftWeekEnd)");
-  assertStringIncludes(src, "tradePayBasisForSave(client, priorDraft, week_start || weekEnd || new Date().toISOString().slice(0, 10), paySettingsRead)");
+  assertStringIncludes(src, "tradePayBasisForSave(client, priorDraft, week_start || weekEnd || perthToday(), paySettingsRead)");
   assert(src.includes("const draftSuperBasis = resolvedShares.length > 0\n              ? null"), "group shares retain their existing draft pricing");
   assertStringIncludes(src, ".select(`id, user_id, status, ${TRADE_PAY_PRIOR_INVOICE_COLUMNS}`)");
 });
@@ -550,4 +554,55 @@ handlerTest("pay rule: dating an undated draft with unreadable start refuses wit
   assertEquals(out.invoiceRows, []);
   assertEquals(out.lineRows, []);
   assertEquals(out.writes.filter((write) => write.includes("trade_invoice") || write.startsWith("RPC ")), []);
+});
+
+// ── The start day is a Perth day ────────────────────────────────────────────
+// The edge clock is UTC: its date is still Sunday until 8am Perth on Monday.
+// A pay day with no week of its own is today in Perth, so the rule starts at
+// midnight Perth on its start day, never at 8am. Clock injected (FakeTime);
+// the start day is a made-up Monday.
+
+const PERTH_START = "2026-11-23";
+const PERTH_INSTANTS = [
+  { label: "Sun 22 Nov 23:59 Perth", utc: "2026-11-22T15:59:00Z", basis: null },
+  { label: "Mon 23 Nov 00:30 Perth", utc: "2026-11-22T16:30:00Z", basis: "inclusive_12_112_v1" },
+  { label: "Mon 23 Nov 07:59 Perth", utc: "2026-11-22T23:59:00Z", basis: "inclusive_12_112_v1" },
+];
+
+for (const at of PERTH_INSTANTS) {
+  handlerTest(`pay day is Perth's: the rule's decision at ${at.label}`, () => {
+    using _time = new FakeTime(at.utc);
+    assertEquals(perthToday(), at.utc.startsWith("2026-11-22T15") ? "2026-11-22" : "2026-11-23");
+    assertEquals(tradePayBasisFor({ on: true, from: PERTH_START }, perthToday()), at.basis);
+    // The UTC date was still Sunday at every one of these instants.
+    assertEquals(new Date().toISOString().slice(0, 10), "2026-11-22");
+    return Promise.resolve();
+  });
+
+  for (const action of ["save_trade_invoice_draft", "generate_trade_invoice"]) {
+    handlerTest(`pay day is Perth's: an undated ${action} at ${at.label}`, async () => {
+      using _time = new FakeTime(at.utc);
+      const out = await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 20, 56)], {
+        payRuleOn: true, payRuleFrom: PERTH_START, weekStart: undefined, action,
+      });
+      assert(out.status === 200, `status ${out.status}: ${JSON.stringify(out.body)}`);
+      // An undated draft is a plain insert, not the weekly persist RPC.
+      const inv = out.invoiceRows[0];
+      assert(inv, `no saved header: ${out.writes.join(", ")}`);
+      assertEquals(inv.week_start ?? null, null, "an undated invoice");
+      assertEquals(inv.super_basis ?? null, at.basis);
+    });
+  }
+}
+
+handlerTest("pay day is Perth's: no pay door reads the UTC date", async () => {
+  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assertStringIncludes(src, "const woInvoiceDate = perthToday()");
+  assertStringIncludes(src, "lineHoldSendApplies(client, week_start || weekEnd || perthToday(), paySettingsRead, true)");
+  assertStringIncludes(src, "tradePayBasisForSave(client, null, perthToday()))");
+  assert(/const draftWeekEnd = draftWeekStart\n[^\n]*\n\s*: perthToday\(\)/.test(src), "an undated draft's pay day");
+  // No call into the pay rule carries a UTC date.
+  for (const call of src.matchAll(/(tradePayBasisForSave|lineHoldSendApplies|resolveTradePayBasisForPreview)\([^\n]*/g)) {
+    assert(!call[0].includes("toISOString"), call[0]);
+  }
 });
