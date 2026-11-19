@@ -174,3 +174,22 @@ export async function resolveSesOwnerDirectedApproval(
     },
   };
 }
+
+/**
+ * Pure. What a job event keeps of an owner's direction: who (the owner's user
+ * id) and when, never their words or email address, because trades read job
+ * events. The full evidence_ref above stays the SES approval ledger's record.
+ * null when the approval was a signed-in session (nothing was directed).
+ */
+export function ownerDirectiveEventStamp(
+  evidence: Record<string, unknown> | null | undefined,
+  ownerUserId: string,
+): { kind: "owner_directive"; owner_user_id: string; recorded_at: string | null } | null {
+  if (!evidence) return null;
+  const at = evidence.recorded_at;
+  return {
+    kind: "owner_directive",
+    owner_user_id: String(ownerUserId),
+    recorded_at: typeof at === "string" && at ? at : null,
+  };
+}
