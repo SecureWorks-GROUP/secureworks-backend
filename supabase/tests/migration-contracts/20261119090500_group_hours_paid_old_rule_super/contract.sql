@@ -81,8 +81,13 @@ BEGIN
     (inv_mix_new,org,paid_mix,'draft',50,50,0,50,false,0.12,5.36,44.64,'inclusive_12_112_v1',NULL,'ZZTEST-OLD-RULE-INV-5'),
     (inv_carve,org,paid_old,'draft',100,100,0,100,false,0.12,12,88,NULL,NULL,'ZZTEST-OLD-RULE-INV-6'),
     (inv_comm,org,paid_new,'draft',150,150,0,150,false,0.12,12,144,NULL,100,'ZZTEST-OLD-RULE-INV-8');
+  -- An invoice from before super was recorded: the insert guard (20260827112928)
+  -- refuses a new one, so it is set aside for this one row, as such rows were
+  -- written before the guard existed.
+  ALTER TABLE public.trade_invoices DISABLE TRIGGER trg_trade_invoices_require_money_split;
   INSERT INTO public.trade_invoices(id,org_id,user_id,status,subtotal_ex,total_inc,invoice_number) VALUES
     (inv_bare,org,paid_mix,'draft',100,100,'ZZTEST-OLD-RULE-INV-7');
+  ALTER TABLE public.trade_invoices ENABLE TRIGGER trg_trade_invoices_require_money_split;
   INSERT INTO public.trade_invoice_lines(trade_invoice_id,job_id,line_type,description,line_total_ex) VALUES
     (inv_old,job_old,'labour','ZZTEST hours',100),
     (inv_new,job_new,'labour','ZZTEST hours',100),
