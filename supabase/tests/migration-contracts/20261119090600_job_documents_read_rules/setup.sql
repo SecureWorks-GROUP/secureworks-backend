@@ -66,3 +66,7 @@ CREATE POLICY "Public can view shared docs"
 
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 GRANT ALL ON public.job_documents TO anon, authenticated, service_role;
+-- The rules read jobs and users as the caller. Production grants both to
+-- anon and authenticated (Supabase's default privileges); neither has row
+-- rules in the registered stack.
+GRANT SELECT ON public.jobs, public.users TO anon, authenticated;
