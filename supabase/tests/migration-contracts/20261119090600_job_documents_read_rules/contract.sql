@@ -3,8 +3,9 @@
 --   2. a signed-in trade reads 0 rows, and cannot insert or update one.
 --   3. office staff in the company read its rows, and can insert and update.
 --   4. office staff of another company read 0 of them.
--- Then the shape: no row rule applies to anon or PUBLIC, anon holds no
--- privilege on the table, and the 2025 rules are gone.
+-- Then the shape: no row rule applies to anon or PUBLIC, neither anon nor
+-- PUBLIC holds a privilege on the table, authenticated and service_role keep
+-- theirs, and the 2025 rules are gone.
 
 BEGIN;
 
@@ -162,6 +163,14 @@ BEGIN
   IF has_table_privilege('anon', 'public.job_documents', 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
      OR has_any_column_privilege('anon', 'public.job_documents', 'SELECT, INSERT, UPDATE, REFERENCES') THEN
     problems := array_append(problems, 'anon still holds a privilege on job_documents'::text);
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_class c, aclexplode(c.relacl) a
+             WHERE c.oid = 'public.job_documents'::regclass AND a.grantee = 0) THEN
+    problems := array_append(problems, 'PUBLIC holds a privilege on job_documents'::text);
+  END IF;
+  IF NOT has_table_privilege('authenticated', 'public.job_documents', 'SELECT, INSERT, UPDATE')
+     OR NOT has_table_privilege('service_role', 'public.job_documents', 'SELECT, INSERT, UPDATE, DELETE') THEN
+    problems := array_append(problems, 'authenticated or service_role lost its grant on job_documents'::text);
   END IF;
   IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.job_documents'::regclass) THEN
     problems := array_append(problems, 'row level security is off'::text);

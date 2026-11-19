@@ -14,7 +14,9 @@
 --      users.role is admin, owner, ops_manager, sales or sales_manager, the
 --      office set of 20261002190000_business_events_close_anon_read.sql:89.
 --      estimator is left out: new accounts are given it.
---   3. Revokes every table privilege on job_documents from anon.
+--   3. Revokes every table privilege on job_documents from anon. PUBLIC holds
+--      no grant on this table in a database built from main (no migration
+--      grants it); the post-check refuses if one exists, since anon inherits it.
 --
 -- What this deliberately does NOT change:
 --   - authenticated and service_role grants.
@@ -104,6 +106,12 @@ BEGIN
   IF has_table_privilege('anon', 'public.job_documents', 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
      OR has_any_column_privilege('anon', 'public.job_documents', 'SELECT, INSERT, UPDATE, REFERENCES') THEN
     RAISE EXCEPTION 'job_documents_read_rules: anon still holds a privilege on job_documents';
+  END IF;
+  -- anon inherits PUBLIC. No migration on main grants PUBLIC anything on this
+  -- table; if a database holds such a grant, stop rather than leave anon a way in.
+  IF EXISTS (SELECT 1 FROM pg_class c, aclexplode(c.relacl) a
+             WHERE c.oid = 'public.job_documents'::regclass AND a.grantee = 0) THEN
+    RAISE EXCEPTION 'job_documents_read_rules: PUBLIC holds a privilege on job_documents';
   END IF;
 END
 $post$;
