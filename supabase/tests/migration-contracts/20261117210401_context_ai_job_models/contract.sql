@@ -86,19 +86,19 @@ BEGIN
     END IF;
   END LOOP;
   UPDATE public.context_ai_job_models SET chosen_from_run = 'zztest-406' WHERE ai_job = 'read-notes';
-  IF public.context_ai_harness_trim('2027-01-01', 200) <> 0 THEN
+  IF public.context_ai_harness_trim(now() + interval '1 day', 200) <> 0 THEN
     RAISE EXCEPTION 'ai models contract: selected run was trimmed';
   END IF;
   UPDATE public.context_ai_job_models SET chosen_from_run = NULL WHERE ai_job = 'read-notes';
   IF public.context_ai_harness_trim('2026-11-17T00:00:00Z', 200) <> 0
-     OR public.context_ai_harness_trim('2027-01-01', 1) <> 1
+     OR public.context_ai_harness_trim(now() + interval '1 day', 1) <> 1
      OR NOT EXISTS (SELECT 1 FROM public.context_ai_harness_runs WHERE ai_job = 'read-notes' AND run_id = 'zztest-406') THEN
     RAISE EXCEPTION 'ai models contract: bounded trim crossed cutoff or order';
   END IF;
   SELECT jsonb_agg(jsonb_set(v_rows->0, '{run_id}', to_jsonb('zztest-trim-' || i)))
     INTO v_rows FROM generate_series(1, 200) i;
   PERFORM public.context_ai_harness_save(v_rows);
-  v_count := public.context_ai_harness_trim('2027-01-01', 201);
+  v_count := public.context_ai_harness_trim(now() + interval '1 day', 201);
   IF v_count <> 200 OR (SELECT count(*) FROM public.context_ai_harness_runs) <> 1 THEN
     RAISE EXCEPTION 'ai models contract: trim exceeded two hundred rows';
   END IF;
