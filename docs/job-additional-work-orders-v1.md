@@ -55,10 +55,12 @@ the main one, then those named for nobody, each group by approval. A work
 order named for another trade is never offered. What this trade has billed on
 the job (lines on invoices in `job_work_order_billed_invoice_statuses`, not on
 a holding invoice, an override first, commission and reimbursement left out:
-the cap's own rule) covers them in the order they were approved, so a trade
-who billed the main work order before a named one was added has the main one
-covered and is offered the named one; a part payment never covers a work
-order. Once every one is billed, the card shows the main work order again and
+the cap's own rule) covers the set of them whose agreed amounts add up to the
+most without going over it (equal totals: the earliest approved), whichever
+order they were billed in. So a trade who billed the main work order before a
+smaller named one was added is offered the named one, and a trade who billed a
+larger named one first is offered the main one next. A part payment never
+covers a work order. Once every one is billed, the card shows the main work order again and
 the cap refuses more.
 
 So a trade with a work order named for them is offered it first, at its

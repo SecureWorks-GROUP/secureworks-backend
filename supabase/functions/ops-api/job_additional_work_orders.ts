@@ -136,19 +136,16 @@ export function pickTradeWorkOrder(
       const named = namedWorkOrderTrade(r);
       return named === null || named === String(tradeId);
     });
-  // What the trade billed covers their work orders in the order they were
-  // approved: a trade who billed the main work order before a named one was
-  // added has the main one covered, never the newer one. A part payment never
-  // covers a work order.
-  let left = cents(Number.isFinite(billedEx) ? billedEx : 0);
-  const covered = new Set<JobWorkOrderRow>();
-  for (const r of [...usable].sort(byApproval)) {
-    const agreed = cents(money(Number(r.agreed_labour_ex)));
-    if (left >= agreed) {
-      left -= agreed;
-      covered.add(r);
-    }
-  }
+  // What the trade billed covers the set of their work orders whose agreed
+  // amounts add up to the most without going over it, so a work order is
+  // covered only when it fits what was billed whichever order it was billed
+  // in (main 500 billed then a named 200 added: the main one is covered; a
+  // named 432 billed before the main 80: the named one is). Equal totals go
+  // to the earliest approved. A part payment never covers a work order.
+  const covered = coveredWorkOrders(
+    [...usable].sort(byApproval),
+    cents(Number.isFinite(billedEx) ? billedEx : 0),
+  );
   // Then the one offered is the first not covered, the trade's own named work
   // orders before the main one, then those named for nobody.
   let open: TradeWorkOrderOption | null = null;
@@ -167,6 +164,57 @@ export function pickTradeWorkOrder(
       return option;
     });
   return { options, open };
+}
+
+/** Above this many work orders on one job the cover is read in approval
+ *  order instead of trying every set. */
+const MAX_COVER_SET = 12;
+
+/**
+ * Pure. The work orders (in approval order) that `billedCents` covers: the
+ * set with the largest agreed total not above it; equal totals go to the set
+ * whose work orders were approved earliest.
+ */
+function coveredWorkOrders(
+  ordered: readonly JobWorkOrderRow[],
+  billedCents: number,
+): Set<JobWorkOrderRow> {
+  const amounts = ordered.map((r) => cents(money(Number(r.agreed_labour_ex))));
+  if (ordered.length > MAX_COVER_SET) {
+    const out = new Set<JobWorkOrderRow>();
+    let left = billedCents;
+    ordered.forEach((r, i) => {
+      if (left >= amounts[i]) {
+        left -= amounts[i];
+        out.add(r);
+      }
+    });
+    return out;
+  }
+  let best: number[] = [];
+  let bestTotal = 0;
+  for (let mask = 1; mask < 1 << ordered.length; mask++) {
+    const picked: number[] = [];
+    let total = 0;
+    for (let i = 0; i < ordered.length; i++) {
+      if (mask & (1 << i)) {
+        picked.push(i);
+        total += amounts[i];
+      }
+    }
+    if (total > billedCents) continue;
+    const earlier = () => {
+      for (let k = 0; k < Math.min(picked.length, best.length); k++) {
+        if (picked[k] !== best[k]) return picked[k] < best[k];
+      }
+      return picked.length < best.length;
+    };
+    if (total > bestTotal || (total === bestTotal && best.length > 0 && earlier())) {
+      best = picked;
+      bestTotal = total;
+    }
+  }
+  return new Set(best.map((i) => ordered[i]));
 }
 
 /** Lines that are not paid work: never counted against a work order. */

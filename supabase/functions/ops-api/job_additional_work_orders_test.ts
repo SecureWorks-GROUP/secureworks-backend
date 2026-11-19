@@ -287,7 +287,7 @@ Deno.test("loader: what was billed cannot be read, so nothing is decided", async
   );
 });
 
-Deno.test("pick: billed covers the work orders in approval order; a smaller named order added later is open", () => {
+Deno.test("pick: billed covers the work orders it fits; a smaller named order added later is open", () => {
   // Made-up amounts: the trade billed the main work order (500); a named
   // work order of 200 for the same trade is approved after. The 500 covers
   // the main one, never the newer 200, so the card offers the 200.
@@ -300,6 +300,24 @@ Deno.test("pick: billed covers the work orders in approval order; a smaller name
   assertEquals(pickTradeWorkOrder([small, mainOrder], JEAN, 0).open?.id, EXTRA);
   // Both billed: nothing open.
   assertEquals(pickTradeWorkOrder([small, mainOrder], JEAN, 700).open, null);
-  // 600 billed covers the main 500 only (approval order), so the 200 is open.
+  // 600 billed covers the main 500 only (the most that fits), so the 200 is open.
   assertEquals(pickTradeWorkOrder([small, mainOrder], JEAN, 600).open?.id, EXTRA);
+  // 200 billed covers the named 200: the main one is open.
+  assertEquals(pickTradeWorkOrder([small, mainOrder], JEAN, 200).open?.id, MAIN);
+});
+
+Deno.test("pick: a larger named order billed first covers itself, never the older main one", () => {
+  // Main 80, the trade's own named order 432 (offered first), billed 432:
+  // the card offers the main 80 next, never the 432 again.
+  const after = pickTradeWorkOrder([extra, main], JEAN, 432);
+  assertEquals(after.options.map((o) => [o.id, o.billed]), [[EXTRA, true], [MAIN, false]]);
+  assertEquals([after.open?.id, after.open?.agreed_ex], [MAIN, 80]);
+  // Made-up amounts, trade B: main 500 and B's named 600; B billed 600, so
+  // B is not asked for 600 again.
+  const forB = { ...extra, agreed_labour_ex: 600, assigned_user_id: OTHER };
+  const b = pickTradeWorkOrder([{ ...main, agreed_labour_ex: 500 }, forB], OTHER, 600);
+  assertEquals(b.options.map((o) => [o.id, o.billed]), [[EXTRA, true], [MAIN, false]]);
+  // Equal amounts: the earliest approved is covered.
+  const twin = pickTradeWorkOrder([{ ...extra, agreed_labour_ex: 80 }, main], JEAN, 80);
+  assertEquals(twin.options.map((o) => [o.id, o.billed]), [[EXTRA, false], [MAIN, true]]);
 });
