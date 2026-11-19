@@ -55,7 +55,9 @@ the main one, then those named for nobody, each group by approval. A work
 order named for another trade is never offered. What this trade has billed on
 the job (lines on invoices in `job_work_order_billed_invoice_statuses`, not on
 a holding invoice, an override first, commission and reimbursement left out:
-the cap's own rule) covers them in turn; a part payment never covers a work
+the cap's own rule) covers them in the order they were approved, so a trade
+who billed the main work order before a named one was added has the main one
+covered and is offered the named one; a part payment never covers a work
 order. Once every one is billed, the card shows the main work order again and
 the cap refuses more.
 
@@ -81,7 +83,11 @@ and raises, and any additional order named for nobody) is drawn on once in
 all, however many trades bill it. The refusal is the cap's code
 (`work_order_total_over_agreed`) with `limit: "own_work_orders"` on the job;
 the figure (`most_this_invoice_ex`, the trade's own room) is shown only on a
-job where every billed line is theirs, as for the job-wide cap.
+job where every billed line is theirs, as for the job-wide cap. On such a job
+a refusal shows the trade's own room even when the job itself is over: the
+job's room carries the other trade's named amount and is never shown. On a
+job whose named work orders are all the billing trade's own, its room is the
+job's, so the job check alone answers, with the words it always had.
 
 It can only add a refusal: the job-wide check runs first and unchanged. A job
 with no additional work order, or with additional ones named for nobody,

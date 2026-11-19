@@ -119,6 +119,12 @@ export function pickTradeWorkOrder(
 ): { options: TradeWorkOrderOption[]; open: TradeWorkOrderOption | null } {
   const rank = (r: JobWorkOrderRow) =>
     namedWorkOrderTrade(r) === String(tradeId) ? 0 : r.kind === "job" ? 1 : 2;
+  const byApproval = (a: JobWorkOrderRow, b: JobWorkOrderRow) => {
+    const at = String(a.approved_at || "").localeCompare(String(b.approved_at || ""));
+    if (at !== 0) return at;
+    if (a.kind !== b.kind) return a.kind === "job" ? -1 : 1;
+    return String(a.id).localeCompare(String(b.id));
+  };
   const usable = rows
     .filter((r) => r && (r.kind === "job" || r.kind === "additional"))
     .filter((r) => {
@@ -129,31 +135,37 @@ export function pickTradeWorkOrder(
     .filter((r) => {
       const named = namedWorkOrderTrade(r);
       return named === null || named === String(tradeId);
-    })
-    .sort((a, b) => {
-      if (rank(a) !== rank(b)) return rank(a) - rank(b);
-      const at = String(a.approved_at || "").localeCompare(String(b.approved_at || ""));
-      return at !== 0 ? at : String(a.id).localeCompare(String(b.id));
     });
+  // What the trade billed covers their work orders in the order they were
+  // approved: a trade who billed the main work order before a named one was
+  // added has the main one covered, never the newer one. A part payment never
+  // covers a work order.
   let left = cents(Number.isFinite(billedEx) ? billedEx : 0);
+  const covered = new Set<JobWorkOrderRow>();
+  for (const r of [...usable].sort(byApproval)) {
+    const agreed = cents(money(Number(r.agreed_labour_ex)));
+    if (left >= agreed) {
+      left -= agreed;
+      covered.add(r);
+    }
+  }
+  // Then the one offered is the first not covered, the trade's own named work
+  // orders before the main one, then those named for nobody.
   let open: TradeWorkOrderOption | null = null;
-  const options = usable.map((r) => {
-    const agreed = money(Number(r.agreed_labour_ex));
-    // Each one the rest still covers is billed, so a trade who billed the
-    // main work order before a named one was added reads it billed.
-    const billed = left >= cents(agreed);
-    if (billed) left -= cents(agreed);
-    const option: TradeWorkOrderOption = {
-      id: String(r.id),
-      wo_number: r.wo_number ?? null,
-      title: r.title ?? null,
-      agreed_ex: agreed,
-      main: r.kind === "job",
-      billed,
-    };
-    if (!billed && !open) open = option;
-    return option;
-  });
+  const options = [...usable]
+    .sort((a, b) => rank(a) !== rank(b) ? rank(a) - rank(b) : byApproval(a, b))
+    .map((r) => {
+      const option: TradeWorkOrderOption = {
+        id: String(r.id),
+        wo_number: r.wo_number ?? null,
+        title: r.title ?? null,
+        agreed_ex: money(Number(r.agreed_labour_ex)),
+        main: r.kind === "job",
+        billed: covered.has(r),
+      };
+      if (!option.billed && !open) open = option;
+      return option;
+    });
   return { options, open };
 }
 

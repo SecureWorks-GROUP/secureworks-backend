@@ -286,3 +286,20 @@ Deno.test("loader: what was billed cannot be read, so nothing is decided", async
     TradeInvoiceModeReadError,
   );
 });
+
+Deno.test("pick: billed covers the work orders in approval order; a smaller named order added later is open", () => {
+  // Made-up amounts: the trade billed the main work order (500); a named
+  // work order of 200 for the same trade is approved after. The 500 covers
+  // the main one, never the newer 200, so the card offers the 200.
+  const mainOrder = { ...main, agreed_labour_ex: 500 };
+  const small = { ...extra, agreed_labour_ex: 200 };
+  const { options, open } = pickTradeWorkOrder([small, mainOrder], JEAN, 500);
+  assertEquals(options.map((o) => [o.id, o.billed]), [[EXTRA, false], [MAIN, true]]);
+  assertEquals([open?.id, open?.agreed_ex], [EXTRA, 200]);
+  // Nothing billed: the trade's own named order is still offered first.
+  assertEquals(pickTradeWorkOrder([small, mainOrder], JEAN, 0).open?.id, EXTRA);
+  // Both billed: nothing open.
+  assertEquals(pickTradeWorkOrder([small, mainOrder], JEAN, 700).open, null);
+  // 600 billed covers the main 500 only (approval order), so the 200 is open.
+  assertEquals(pickTradeWorkOrder([small, mainOrder], JEAN, 600).open?.id, EXTRA);
+});

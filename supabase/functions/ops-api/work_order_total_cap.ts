@@ -180,6 +180,18 @@ export function workOrderTotalCapRefusal(input: {
       over.push({ job: job.ref, job_id: job.jobId, amount_hidden: true });
       continue;
     }
+    // On a job with a work order named for another trade the job's room
+    // carries that trade's amount: show this trade's own room only.
+    const ownRoom = input.ownRoom?.get(job.jobId);
+    if (ownRoom !== undefined) {
+      over.push({
+        job: job.ref,
+        job_id: job.jobId,
+        most_this_invoice_ex: Math.max(0, money(Math.min(ownRoom, job.allowedEx - billed))),
+        limit: "own_work_orders" as const,
+      });
+      continue;
+    }
     over.push({
       job: job.ref,
       job_id: job.jobId,
@@ -591,23 +603,31 @@ export async function checkWorkOrderTotalCap(client: any, input: {
     { excludeLineIds: input.excludeLineIds },
   );
   const billedEx = new Map([...facts.billedEx, ...hourlyBilled]);
-  // A job with a work order named for a trade: that trade's room too
-  // (ownWorkOrderRoomEx). Any other job reads nothing more.
-  const named = capped.filter((m) =>
+  // A job with a work order named for another trade than the billing one:
+  // the billing trade's own room too (ownWorkOrderRoomEx). On a job whose
+  // named work orders are all the billing trade's own, that room is the
+  // job's own, so it is left to the job check (same words as before). Any
+  // other job reads nothing more.
+  const namedJobs = capped.filter((m) =>
     (m.additional_orders || []).some((o) => !!o.assigned_user_id)
   );
   let ownRoom: Map<string, number> | undefined;
-  if (named.length > 0) {
+  if (namedJobs.length > 0) {
     const trade = String(
       (input.billingTradeId === undefined ? input.viewerId : input.billingTradeId) ?? "",
     );
     if (!trade) throw new WorkOrderTotalCapReadError();
-    const byTrade = await readBilledByTrade(
+    const named = namedJobs.filter((m) =>
+      (m.additional_orders || []).some((o) =>
+        !!o.assigned_user_id && String(o.assigned_user_id) !== trade
+      )
+    );
+    if (named.length > 0) ownRoom = new Map();
+    const byTrade = named.length === 0 ? new Map() : await readBilledByTrade(
       client,
       named.map((m) => m.job_id),
       input.excludeLineIds,
     );
-    ownRoom = new Map();
     for (const m of named) {
       const job = facts.jobs.find((j) => j.jobId === m.job_id);
       if (!job) throw new WorkOrderTotalCapReadError();
@@ -617,7 +637,7 @@ export async function checkWorkOrderTotalCap(client: any, input: {
         const who = String(o.assigned_user_id);
         namedEx.set(who, money((namedEx.get(who) ?? 0) + Number(o.agreed_ex)));
       }
-      ownRoom.set(m.job_id, ownWorkOrderRoomEx({
+      ownRoom!.set(m.job_id, ownWorkOrderRoomEx({
         allowedEx: job.allowedEx,
         namedEx,
         billedByTrade: byTrade.get(m.job_id) ?? new Map(),

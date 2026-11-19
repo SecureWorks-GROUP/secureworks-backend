@@ -1127,3 +1127,33 @@ Deno.test("named order wiring: only the cap door asks for every additional work 
   assertStringIncludes(door, "viewerId: tradeUser.id, billingTradeId,");
   assertEquals(src.split("includeAdditionalOrders").length - 1, 1, "no answer a trade reads asks for it");
 });
+
+Deno.test("named order: a trade who billed the main order bills its own smaller named order added later", async () => {
+  // One trade: main 500 billed, then its own named order of 200 approved
+  // (allowed 700). The card asks 200 (pick test) and the cap passes it.
+  const mode = { ...NAMED_MODE, additional_orders: [{ assigned_user_id: "trade-a", agreed_ex: 200 }] };
+  const change = [{ id: "c1", work_order_id: WO, delta_ex: 200 }];
+  const aBilled = [tradeLine("a1", "trade-a", 500)];
+  assertEquals((await sendLine({ lines: aBilled, changes: change, mode, viewerId: "trade-a", amount: 200 })).refusal, null);
+  const over = await sendLine({ lines: aBilled, changes: change, mode, viewerId: "trade-a", amount: 200.01 });
+  assertEquals(over.refusal?.jobs, [{ job: "SWF-1", job_id: JOB, most_this_invoice_ex: 200 }]);
+  assertEquals(over.refusal?.message, WORK_ORDER_CAP_WORDS.room("SWF-1", "$200.00"));
+});
+
+Deno.test("named order: the figure shown to a trade is its own room, never the job's, so another trade's amount stays hidden", async () => {
+  // Main 500, trade B's named order 200 (smaller than main): the job allows 700.
+  const mode = { ...NAMED_MODE, additional_orders: [{ assigned_user_id: "trade-b", agreed_ex: 200 }] };
+  const change = [{ id: "c1", work_order_id: WO, delta_ex: 200 }];
+  // Over the whole job: A is told its own 500, never the job's 700.
+  const whole = await sendLine({ lines: [], changes: change, mode, viewerId: "trade-a", amount: 800 });
+  assertEquals(whole.refusal?.jobs, [{ job: "SWF-1", job_id: JOB, most_this_invoice_ex: 500, limit: "own_work_orders" }]);
+  assertEquals(whole.refusal?.message, WORK_ORDER_CAP_WORDS.own_room("SWF-1", "$500.00"));
+  assertEquals(whole.refusal?.message.includes("$700.00"), false);
+  // A billed 300: told 200 both within and over the job's room.
+  const aBilled = [tradeLine("a1", "trade-a", 300)];
+  for (const amount of [300, 500]) {
+    const r = await sendLine({ lines: aBilled, changes: change, mode, viewerId: "trade-a", amount });
+    assertEquals(r.refusal?.jobs, [{ job: "SWF-1", job_id: JOB, most_this_invoice_ex: 200, limit: "own_work_orders" }], String(amount));
+    assertEquals(r.refusal?.message.includes("$400.00"), false);
+  }
+});
