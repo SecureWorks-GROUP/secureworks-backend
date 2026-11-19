@@ -3,9 +3,8 @@
 -- 2. Signed-in office staff can; trades, estimator, roleless and unknown
 --    sessions read nothing.
 -- 3. service_role is unaffected.
--- 4. anon INSERT behaves as before for the patio tool's return=minimal post,
---    until 20261119090900_tighten_table_grants removes it; after that anon
---    INSERT is refused.
+-- 4. anon INSERT behaves as before for the patio tool's return=minimal post.
+--    20261119090900 later changes this; check 2b follows whichever applies.
 -- 5. Neither the public key nor a signed-in session can empty the table:
 --    anon cannot TRUNCATE, UPDATE or DELETE; authenticated cannot TRUNCATE.
 
@@ -148,7 +147,7 @@ BEGIN
 END $$;
 ROLLBACK TO SAVEPOINT anon_insert;
 \else
--- 2b. After 20261119090900_tighten_table_grants, anon INSERT is refused.
+-- 2b. With 20261119090900 applied.
 SAVEPOINT anon_insert;
 SET LOCAL ROLE anon;
 DO $$
