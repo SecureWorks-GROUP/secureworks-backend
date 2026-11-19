@@ -30,6 +30,7 @@ import { createXeroSyncTransport } from './xero_transport.ts'
 import { syncBankTransactionLines } from './bank_transactions.ts'
 import { syncXeroAccounts } from './accounts.ts'
 import { trackingOptionRows } from './tracking_options.ts'
+import { divisionSyncOfficeHours, storeDivisionMonth } from './pl_by_division.ts'
 import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
 import { runInvoiceMirrorCheck } from './xero_mirror_check.ts'
 import { autoReleaseVoidedTradeInvoices } from '../ops-api/trade_invoice_voided_release.ts'
@@ -2919,14 +2920,28 @@ async function syncProjects(sb: any) {
 // Fetches monthly P&L for last 12 months.
 // ════════════════════════════════════════════════════════════
 
-async function syncTrackingPL(sb: any) {
+export async function syncTrackingPL(sb: any, readXero = xeroGet, clock = () => new Date()) {
   const { accessToken, tenantId } = await getToken(sb)
-  const now = new Date()
+  const now = clock()
   const results: any[] = []
+
+  let storeAccounts = false
+  if (!divisionSyncOfficeHours(now)) {
+    try {
+      const { data, error } = await sb.from('feature_flags').select('enabled')
+        .eq('flag_name', 'division_tieout_v1').maybeSingle()
+      if (error) throw error
+      storeAccounts = data?.enabled === true
+    } catch {
+      console.error('[xero-sync] division_tieout_switch_unreadable')
+    }
+  }
+  let accountRows = 0
+  let accountMonths = 0
 
   let optionsSynced: number | null = null
   try {
-    const cats = await xeroGet('/TrackingCategories', accessToken, tenantId, { includeArchived: 'true' })
+    const cats = await readXero('/TrackingCategories', accessToken, tenantId, { includeArchived: 'true' })
     const rows = trackingOptionRows(cats, DEFAULT_ORG_ID, TRACKING_CATEGORY_ID, now.toISOString())
     if (rows.length > 0) {
       const { error } = await sb.from('xero_tracking_options').upsert(rows, { onConflict: 'org_id,option_id' })
@@ -2945,7 +2960,7 @@ async function syncTrackingPL(sb: any) {
     const toDate = monthEnd.toISOString().split('T')[0]
 
     try {
-      const plData = await xeroGet('/Reports/ProfitAndLoss', accessToken, tenantId, {
+      const plData = await readXero('/Reports/ProfitAndLoss', accessToken, tenantId, {
         fromDate,
         toDate,
         trackingCategoryID: TRACKING_CATEGORY_ID,
@@ -3001,7 +3016,7 @@ async function syncTrackingPL(sb: any) {
       }
 
       // Store as a report
-      await sb.from('xero_reports').upsert({
+      const totals = await sb.from('xero_reports').upsert({
         org_id: DEFAULT_ORG_ID,
         report_type: 'pl_by_tracking',
         report_date: toDate,
@@ -3010,6 +3025,16 @@ async function syncTrackingPL(sb: any) {
         report_json: { columns, data: parsed, raw: plData },
         synced_at: new Date().toISOString(),
       }, { onConflict: 'org_id,report_type,report_date' })
+
+      if (storeAccounts && !divisionSyncOfficeHours(clock())) {
+        try {
+          if (totals.error) throw totals.error
+          accountRows += await storeDivisionMonth(sb, report, DEFAULT_ORG_ID, fromDate, now.toISOString())
+          accountMonths++
+        } catch {
+          console.error('[xero-sync] division_account_month_not_stored', fromDate)
+        }
+      }
 
       results.push({ month: fromDate, columns: Object.keys(parsed), status: 'ok' })
     } catch (e: any) {
@@ -3042,6 +3067,7 @@ async function syncTrackingPL(sb: any) {
     success: true,
     months_synced: results.filter(r => r.status === 'ok').length,
     options_synced: optionsSynced,
+    ...(storeAccounts ? { account_rows: accountMonths === 12 ? accountRows : null } : {}),
     months_failed: results.filter(r => r.status === 'error').length,
     results,
     drafts_checked: draftsChecked,
