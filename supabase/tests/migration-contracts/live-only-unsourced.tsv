@@ -1,0 +1,26 @@
+# Director 18 Nov: 23 live objects without a repository declaration.
+# Source: docs/evidence/cx-schema-sort-18nov.md. Not production parity proof.
+# Only absent fresh objects with this exact kind, signature and live hash qualify.
+function	_sw_api_key()	707b018602bbbdd46af3c1eff68b7205
+function	dequeue_next_event(p_worker_id text, p_lock_ttl_seconds integer)	b60275f0fc8d76b0ffc35509031f7e74
+function	increment_observation_count()	6302287ebf98f1a6827975481fc35c65
+function	keep_human_parked_intake_case()	95f164fb3396255e4cba047cbd3fef91
+function	match_observations(query_embedding vector, match_threshold double precision, match_count integer, filter_entity_id uuid)	7826aa8b6d90adfe585f6a4715505313
+function	purge_synthetic_livefire_jobs_without_case_tombstones(p_marker text)	e501488b9b6075eb4f122c4b498d4399
+function	rls_auto_enable()	99be20677b456ea8d3be47bdd44fb369
+function	scan_jobs_touch()	6646ea1d7e9b3d829fa7973a7d44e7eb
+function	set_bookings_updated_at()	5bdc21b8fa8fb1231bdb021e09a5bc8e
+function	staff_pings_claim(p_secret text, p_limit integer)	33adebeb861490c770ca417c4de04e5b
+function	staff_pings_mark(p_secret text, p_id uuid, p_status text, p_error text)	c9194d1a54af81f78cc3849836c01b49
+function	staff_pulse_enqueue(p_secret text, p_person text, p_text text)	979dc86ede94ee0e1b760ecf19d42024
+function	staff_pulse_enqueue_manual(p_secret text, p_person text, p_text text, p_approval text)	ea1ab75f0ce7d020f452f01aa767c1ef
+function	staff_pulse_ping_status(p_secret text, p_ids uuid[])	036f8cce3006b44004b5bbbcb2ca3976
+function	update_timestamp()	9b1889f56258bf9d6554213c05019c76
+view	v_evidence_health	21d2960d706aad7828834553c2f55713
+view	v_evidence_health_mailbox	b0cd94c18013c05e2f3bca0f7ee368f3
+view	v_evidence_health_proposals	0b4ddb74a7cb6b4b730459cb6d2b150a
+view	v_evidence_health_queue	6eb2cd532694b245d4166acadf2388af
+view	v_evidence_health_stale	70f3dbe7e0767ba04ed6023cdc7faa78
+view	v_sales_conversation	c8bb816a7984a5ab9c58711bce3bac58
+view	v_sales_priority	15c84ac2b168ad5108bc89c37d80784b
+view	v_unresolved_evidence	36d8959a0c8fbfc7b032f08ba2b5efc8
