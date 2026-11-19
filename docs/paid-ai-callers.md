@@ -34,7 +34,7 @@ Calls a day not knowable from code are read by the director from the provider us
 
 ## Row 9: caller finding
 
-`B supabase/functions/ops-api/index.ts:38915-38916` exports `_retiredPaidAiIntakeImplementationForManualTest`. `makesafe_deterministic_intake_migration_test.ts:178` names the declaration as source proof. No production invocation or cron was found in either repository. No production caller found: safe to delete in a follow-up together with its manual-test export and the proof naming it. Nothing is deleted here.
+`B supabase/functions/ops-api/index.ts:38919-38920` exports `_retiredPaidAiIntakeImplementationForManualTest`. `makesafe_deterministic_intake_migration_test.ts:178` names the declaration as source proof. No production invocation or cron was found in either repository. No production caller found: safe to delete in a follow-up together with its manual-test export and the proof naming it. Nothing is deleted here.
 
 ## Row 14: callers outside chat
 
