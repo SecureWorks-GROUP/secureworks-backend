@@ -53,6 +53,9 @@
 // (475, director 03:36) is skipped the same way, counted `hidden_account_bill`:
 // never proposed, its kind unchanged. Both sets are people_account_codes
 // (_shared/people_accounts.ts), checked on our cost lines and Xero's lines.
+// The backlog pick leaves out a bill with a cost line on a hidden code (exact
+// code, the same set the skip then uses), so it is not read again every lap;
+// a changed or queued bill still runs and keeps its skip code.
 
 import { jobNumbersIn } from "../bill_prematch.ts";
 import { hiddenSkip, type PeopleAccounts, peopleAccountsCode, readPeopleAccounts } from "../../_shared/people_accounts.ts";
@@ -552,7 +555,7 @@ async function runCore(
   deadline: number,
   now: () => number,
   report: MatchRunReport,
-  opts: { budgetMs: number; fresh?: Set<string> },
+  opts: { budgetMs: number; fresh?: Set<string>; accounts?: PeopleAccounts },
 ): Promise<{ requeue: Requeue[]; reached: Set<string>; slow: SlowPlan }> {
   const out: Requeue[] = [];
   const reached = new Set<string>();
@@ -577,11 +580,12 @@ async function runCore(
     for (const id of fresh) slow.clear.add(id);
     return { requeue: ids.map((id) => ({ id, reason: "read_failed" })), reached, slow };
   }
-  // The people accounts (labour and hidden), once a run: unreadable or empty
-  // runs nothing and writes nothing (every bill is requeued).
+  // The people accounts (labour and hidden), once a run (or the set the
+  // backlog pick read, so pick and skip use one set): unreadable or empty runs
+  // nothing and writes nothing (every bill is requeued).
   let accounts: PeopleAccounts;
   try {
-    accounts = await readPeopleAccounts(sb, { timeoutMs: MATCH_STATEMENT_TIMEOUT_MS });
+    accounts = opts.accounts ?? await readPeopleAccounts(sb, { timeoutMs: MATCH_STATEMENT_TIMEOUT_MS });
   } catch (e) {
     const code = peopleAccountsCode(e) ?? "people_accounts_unreadable";
     bump(report.failed, code);
@@ -709,15 +713,21 @@ type BacklogPlan = {
   after: { created_at: string; document_id: string } | null;
   /** The position was set before this run. */
   hadPosition: boolean;
+  /** The people accounts read for the pick: the run's skip uses this same set. */
+  accounts?: PeopleAccounts;
   error?: string;
 };
 
 /**
- * Up to `room` waiting bills (documents) with no open item and no labour line,
- * oldest first by (line created_at, document id), from the position kept in
- * xero_sync_state. Reads only; the caller moves the position after the run, to
- * the last bill it reached. Bills in `exclude` (run already this sync) are
- * passed over. A failed read takes nothing and leaves the position alone.
+ * Up to `room` waiting bills (documents) with no open item, no labour line and
+ * no cost line on an account hidden from Reconcile, oldest first by (line
+ * created_at, document id), from the position kept in xero_sync_state. Reads
+ * only; the caller moves the position after the run, to the last bill it
+ * reached. Bills in `exclude` (run already this sync) are passed over. A failed
+ * read (the people accounts included) takes nothing and leaves the position
+ * alone. A bill left out here is one the run's skip would skip: same lines, the
+ * same set, an exact code (a padded code or a hidden line only on Xero's own
+ * bill is still picked, and skipped by the run as before).
  */
 async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<BacklogPlan> {
   const none: BacklogPlan = { picks: [], after: null, hadPosition: false };
@@ -765,23 +775,38 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
       docs.push(l);
     }
     if (!docs.length) return { picks: [], after: null, hadPosition: !!at };
+    // Once a pick, only when there is a bill to pick; handed to the run.
+    let accounts: PeopleAccounts;
+    try {
+      accounts = await readPeopleAccounts(sb, { timeoutMs: MATCH_STATEMENT_TIMEOUT_MS });
+    } catch (e) {
+      return { ...none, error: peopleAccountsCode(e) ?? "people_accounts_unreadable" };
+    }
+    const hiddenCodes = [...accounts.hidden];
     const ids = docs.map((d) => d.document_id);
     const openSet = new Set<string>();
     const labourSet = new Set<string>();
-    // reconcile_items_open_subject_idx; job_cost_lines_document_idx. In chunks,
-    // so a request URL stays short.
+    const hiddenSet = new Set<string>();
+    // reconcile_items_open_subject_idx; job_cost_lines_document_idx (labour and
+    // hidden). In chunks, so a request URL stays short.
     for (let i = 0; i < ids.length; i += MATCH_BACKLOG_CHUNK) {
       const chunk = ids.slice(i, i + MATCH_BACKLOG_CHUNK);
-      const [open, labour] = await Promise.all([
+      const [open, labour, hidden] = await Promise.all([
         timedRead<Array<{ subject_id: string }>>("backlog_items",
           sb.from("reconcile_items").select("subject_id").eq("subject_table", "cost_document").eq("status", "open")
             .in("subject_id", chunk.map((d) => `xero_bill:${d}`))),
         timedRead<Array<{ document_id: string }>>("backlog_labour",
           sb.from("job_cost_lines").select("document_id").eq("document_kind", "xero_bill")
             .in("kind", [...LABOUR_LINE_KINDS]).in("document_id", chunk)),
+        hiddenCodes.length
+          ? timedRead<Array<{ document_id: string }>>("backlog_hidden",
+            sb.from("job_cost_lines").select("document_id").eq("document_kind", "xero_bill")
+              .in("account_code", hiddenCodes).in("document_id", chunk))
+          : Promise.resolve([] as Array<{ document_id: string }>),
       ]);
       for (const r of open ?? []) openSet.add(r.subject_id);
       for (const r of labour ?? []) labourSet.add(r.document_id);
+      for (const r of hidden ?? []) hiddenSet.add(r.document_id);
     }
     const picks: BacklogPick[] = [];
     let last = docs[docs.length - 1];
@@ -793,7 +818,7 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
       }
       last = d;
       const subject = `xero_bill:${d.document_id}`;
-      if (openSet.has(subject) || labourSet.has(d.document_id) || exclude.has(subject)) continue;
+      if (openSet.has(subject) || labourSet.has(d.document_id) || hiddenSet.has(d.document_id) || exclude.has(subject)) continue;
       picks.push({ subject, created_at: d.created_at, document_id: d.document_id });
     }
     const reachedEnd = !full && !capped && !stopped;
@@ -801,6 +826,7 @@ async function backlogPlan(sb: Sb, room: number, exclude: Set<string>): Promise<
       picks,
       after: reachedEnd ? null : { created_at: last.created_at, document_id: last.document_id },
       hadPosition: !!at,
+      accounts,
     };
   } catch (e) {
     return { ...none, error: e instanceof ReadFailed ? e.code : "backlog_failed" };
@@ -877,7 +903,11 @@ export async function syncMatchRun(
     run.push(...plan.picks.map((p) => p.subject));
   }
 
-  const { requeue: failed, reached, slow } = await runCore(sb, run, deadline, now, report, { budgetMs, fresh: new Set(changed) });
+  const { requeue: failed, reached, slow } = await runCore(sb, run, deadline, now, report, {
+    budgetMs,
+    fresh: new Set(changed),
+    accounts: plan && !plan.error ? plan.accounts : undefined,
+  });
   // A backlog bill the budget did not reach is not requeued: the position
   // stops before it, so the next run starts there.
   const backlogSubjects = new Set((plan?.picks ?? []).map((p) => p.subject));

@@ -178,6 +178,15 @@ function fake(w: World) {
             return { data: w.people ?? peopleRows(), error: null };
           case "job_cost_lines":
             if (filters.document_number) return { data: [], error: null };
+            if (filters["in:account_code"]) {
+              // The backlog's hidden-account read: cost lines on an exact code.
+              const ids = filters["in:document_id"] as string[];
+              const codes = filters["in:account_code"] as string[];
+              return {
+                data: ids.flatMap((id) => (w.lines?.[id] ?? []).filter((l) => codes.includes(l.account_code)).map(() => ({ document_id: id }))),
+                error: null,
+              };
+            }
             if (filters["in:kind"]) {
               // The backlog's labour read.
               const ids = filters["in:document_id"] as string[];
@@ -894,7 +903,9 @@ Deno.test("parking: a statement Postgres ended at its 5 s limit is a cut and cou
 });
 
 Deno.test("parking: the queue and the backlog pass over a parked bill; the sync runs it again once its lines change, and clears it", async () => {
-  const parked = [{ subject_id: "xero_bill:a", cuts: 2, reason: "parked_slow_bill", parked_at: "2026-11-18T00:00:00Z" }];
+  // Parked an hour ago on the real clock (the sync's default `now`): under the
+  // 24-hour retry. A fixed date here turned into a retry once it was a day old.
+  const parked = [{ subject_id: "xero_bill:a", cuts: 2, reason: "parked_slow_bill", parked_at: new Date(Date.now() - 3_600_000).toISOString() }];
   // Queued: taken off the queue, passed over, not requeued.
   const q = world({ lines: billLines("a"), queue: [{ subject_kind: "cost_document", subject_id: "xero_bill:a" }], slowBills: [...parked] });
   const out = await syncMatchRun(fake(q), { on: true, changed: [] });
@@ -1075,4 +1086,75 @@ Deno.test("people accounts: an unreadable or empty set runs nothing, writes noth
     assertEquals([r.failed, r.requeued, w.rpcs.length], [{ [code]: 1 }, 1, 0], code);
     assert(!w.queries.some((q) => q.table === "xero_invoices" || q.table === "job_cost_lines"), code);
   }
+});
+
+// The backlog pick leaves out hidden bills (director 09:14). A bill on `code`:
+const linesOn = (id: string, code: string, state = "needs_person") => {
+  const l = billLines(id);
+  l[id][0] = { ...l[id][0], account_code: code, state };
+  return l;
+};
+const billReadsFor = (w: World, id: string) =>
+  w.rpcs.filter((r) => r.fn === "match_bill_read" && r.args.p_args?.document_id === id).length;
+
+Deno.test("backlog: a bill with a cost line on a hidden account is never picked, lap after lap; the position moves past it and its neighbours run as before", async () => {
+  const waiting = [waitingAt("h1", 1), waitingAt("a1", 1), waitingAt("a2", 2), waitingAt("h2", 2), waitingAt("a3", 3)];
+  const lines = Object.assign({}, billLines("a1"), billLines("a2"), billLines("a3"), linesOn("h1", "475"), linesOn("h2", "301"));
+  // Lap one, from the oldest, to the end.
+  const w = world({ waiting, lines, backlogAt: null });
+  const one = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:a1", "xero_bill:a2", "xero_bill:a3"]);
+  assertEquals([one.backlog, one.run, one.skipped], [3, 3, {}], "no hidden_account_bill or labour_bill: the hidden bills never ran");
+  assertEquals([billReadsFor(w, "h1"), billReadsFor(w, "h2")], [0, 0], "no bill read for a hidden bill");
+  assertEquals(w.queries.filter((q) => q.table === "people_account_codes").length, 1, "one people read: the pick and the skip share it");
+  // The wrap: the next lap starts from the oldest again and still never picks them.
+  const w2 = world({ waiting, lines, backlogAt: w.backlogAt });
+  await syncMatchRun(fake(w2), { on: true, changed: [] });
+  assertEquals(applies(w2).map((a) => a.args.p_subject_id), ["xero_bill:a1", "xero_bill:a2", "xero_bill:a3"]);
+  assertEquals([billReadsFor(w2, "h1"), billReadsFor(w2, "h2")], [0, 0]);
+  // Room for one bill: the pick looks past the hidden h1 and the position stops at a1.
+  const w3 = world({ waiting, lines, backlogAt: null });
+  let t = 0;
+  const r3 = await syncMatchRun(fake(w3), { on: true, changed: [], budgetMs: 25, now: () => (t += 10) });
+  assertEquals([r3.backlog, applies(w3).map((a) => a.args.p_subject_id)], [1, ["xero_bill:a1"]]);
+  assertEquals(w3.backlogAt, { cursor_at: at(1), note: "a1" });
+});
+
+Deno.test("MUST NOT CHANGE: a changed bill still runs and keeps its skip code, hidden or not; a hidden backlog bill beside it is not picked", async () => {
+  const waiting = [waitingAt("hb", 1), waitingAt("ok", 1)];
+  const lines = Object.assign({}, linesOn("hb", "475"), billLines("ok"), linesOn("done", "300", "on_job"), linesOn("hc", "475"));
+  const w = world({ waiting, lines, backlogAt: null });
+  const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:done", "xero_bill:hc"] });
+  assertEquals(out.skipped, { nothing_waiting: 1, hidden_account_bill: 1 }, "the changed bills' skip codes, as on main");
+  assertEquals(applies(w).map((a) => a.args.p_subject_id), ["xero_bill:ok"], "only the non-hidden backlog bill is proposed");
+  assertEquals([out.changed, out.backlog, billReadsFor(w, "hb")], [2, 1, 0]);
+  assertEquals(writes(w).filter((r) => r.args?.p_subject_id === "xero_bill:hc").length, 0, "a changed hidden bill writes nothing");
+});
+
+Deno.test("backlog: only an exact hidden code on a cost line leaves a bill out; a padded code or a hidden line only on Xero's bill is still picked and skipped as before, writing nothing", async () => {
+  const padded = linesOn("pad", " 475 ");
+  const waiting = [waitingAt("pad", 1), waitingAt("xo", 1)];
+  const w = world({ waiting, lines: { ...padded, ...billLines("xo") }, xeroLines: { xo: [{ AccountCode: "305", LineAmount: 90 }, { AccountCode: "475", LineAmount: 0 }] }, backlogAt: null });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals([out.backlog, out.skipped, writes(w).length], [2, { hidden_account_bill: 2 }, 0]);
+});
+
+Deno.test("backlog: an unreadable people set picks nothing and keeps the position; a changed bill is requeued exactly as on main", async () => {
+  const waiting = [waitingAt("a1", 1)];
+  const pos = { cursor_at: at(0), note: "a0" };
+  for (const over of [{ fail: "people_account_codes" }, { people: [] as Array<Record<string, unknown>> }]) {
+    const w = world({ waiting, lines: { ...billLines("a1"), ...billLines("c1") }, backlogAt: { ...pos }, ...over });
+    const out = await syncMatchRun(fake(w), { on: true, changed: ["xero_bill:c1"] });
+    const code = over.fail ? "people_accounts_unreadable" : "people_accounts_empty";
+    assertEquals([out.backlog, out.requeued, out.failed, applies(w).length], [0, 1, { [code]: 1 }, 0], code);
+    assertEquals(out.errors, [code], code);
+    assertEquals(w.backlogAt, pos, code);
+  }
+});
+
+Deno.test("backlog: nothing waiting adds no people read", async () => {
+  const w = world({ waiting: [], backlogAt: null });
+  const out = await syncMatchRun(fake(w), { on: true, changed: [] });
+  assertEquals([out.run, out.backlog], [0, 0]);
+  assert(!w.queries.some((q) => q.table === "people_account_codes"));
 });
