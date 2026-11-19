@@ -894,10 +894,15 @@ Deno.test("parking: a statement Postgres ended at its 5 s limit is a cut and cou
 });
 
 Deno.test("parking: the queue and the backlog pass over a parked bill; the sync runs it again once its lines change, and clears it", async () => {
-  const parked = [{ subject_id: "xero_bill:a", cuts: 2, reason: "parked_slow_bill", parked_at: "2026-11-18T00:00:00Z" }];
+  // The test's own clock: parked an hour before it, so under the 24-hour retry
+  // whatever the real date (a fixed date on the real clock failed once a day old).
+  const parkedAt = "2026-11-18T00:00:00.000Z";
+  const t = Date.parse(parkedAt) + 60 * 60 * 1000;
+  const at1h = () => ({ t });
+  const parked = [{ subject_id: "xero_bill:a", cuts: 2, reason: "parked_slow_bill", parked_at: parkedAt }];
   // Queued: taken off the queue, passed over, not requeued.
-  const q = world({ lines: billLines("a"), queue: [{ subject_kind: "cost_document", subject_id: "xero_bill:a" }], slowBills: [...parked] });
-  const out = await syncMatchRun(fake(q), { on: true, changed: [] });
+  const q = world({ lines: billLines("a"), queue: [{ subject_kind: "cost_document", subject_id: "xero_bill:a" }], slowBills: [...parked], clock: at1h() });
+  const out = await syncMatchRun(fake(q), { on: true, changed: [], now: clockOf(q) });
   assertEquals([applies(q).length, out.skipped, requeues(q).length], [0, { parked_slow_bill: 1 }, 0]);
   assertEquals(q.slowBills?.length, 1, "still parked");
   // Backlog: passed over, and the position moves past it.
@@ -906,21 +911,29 @@ Deno.test("parking: the queue and the backlog pass over a parked bill; the sync 
     waiting: [waitingAt("a", 1), waitingAt("b", 2)],
     backlogAt: { cursor_at: at(0), note: "x0" },
     slowBills: [...parked],
+    clock: at1h(),
   });
-  const bo = await syncMatchRun(fake(b), { on: true, changed: [] });
+  const bo = await syncMatchRun(fake(b), { on: true, changed: [], now: clockOf(b) });
   assertEquals(applies(b).map((x) => x.args.p_subject_id), ["xero_bill:b"]);
   assertEquals(bo.skipped, { parked_slow_bill: 1 });
   assertEquals(b.backlogAt, { cursor_at: null, note: null }, "the position reached the end past the parked bill");
   // Changed: it runs, and its count is cleared.
-  const c = world({ lines: billLines("a"), slowBills: [...parked] });
-  const co = await syncMatchRun(fake(c), { on: true, changed: ["xero_bill:a"] });
+  const c = world({ lines: billLines("a"), slowBills: [...parked], clock: at1h() });
+  const co = await syncMatchRun(fake(c), { on: true, changed: ["xero_bill:a"], now: clockOf(c) });
   assertEquals([applies(c).length, co.skipped], [1, {}]);
   assertEquals(c.slowBills, []);
-  // match_pending and match_sweep pass over it too.
+  // match_pending and match_sweep pass over it too. match_pending takes no
+  // clock, so the test holds Date.now at its own instant for that call.
   const m = world({ lines: billLines("a"), queue: [{ subject_kind: "cost_document", subject_id: "xero_bill:a" }], slowBills: [...parked] });
-  await matchPending(fake(m));
-  const s = world({ lines: billLines("a"), waiting: waitingBills(["a"]), slowBills: [...parked] });
-  await matchSweep(fake(s));
+  const realNow = Date.now;
+  Date.now = () => t;
+  try {
+    await matchPending(fake(m));
+  } finally {
+    Date.now = realNow;
+  }
+  const s = world({ lines: billLines("a"), waiting: waitingBills(["a"]), slowBills: [...parked], clock: at1h() });
+  await matchSweep(fake(s), { now: clockOf(s) });
   assertEquals([applies(m).length, applies(s).length], [0, 0]);
 });
 
