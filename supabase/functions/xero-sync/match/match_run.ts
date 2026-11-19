@@ -767,21 +767,28 @@ type BacklogPlan = {
  * The plan runs before the run's bills, so it ends by the run's deadline:
  * `leftMs` is the time the run has left when the plan starts. Each read is
  * cut at the deadline, none starts after it, and a plan that reaches it picks
- * nothing and keeps the position (BACKLOG_OVER_DEADLINE). It is timed on the
- * real clock from its start, so it adds no read of the run's clock.
+ * nothing and keeps the position (BACKLOG_OVER_DEADLINE). It is timed on its
+ * own clock (`clock`, the real one unless a test passes another) from its
+ * start, so it adds no read of the run's clock.
  */
-async function backlogPlan(sb: Sb, room: number, exclude: Set<string>, leftMs = Infinity): Promise<BacklogPlan> {
+async function backlogPlan(
+  sb: Sb,
+  room: number,
+  exclude: Set<string>,
+  leftMs = Infinity,
+  clock: () => number = Date.now,
+): Promise<BacklogPlan> {
   const none: BacklogPlan = { picks: [], after: null, hadPosition: false };
   if (room <= 0) return none;
-  const endsAt = Date.now() + leftMs;
+  const endsAt = clock() + leftMs;
   // The limit for the next read: the statement limit, or the time left before
   // the deadline when that is shorter. None starts once the deadline passed.
   const limitMs = () => {
-    const left = endsAt - Date.now();
+    const left = endsAt - clock();
     if (!(left > 0)) throw new ReadFailed(BACKLOG_OVER_DEADLINE);
     return Math.min(MATCH_STATEMENT_TIMEOUT_MS, left);
   };
-  const overDeadline = () => !(endsAt - Date.now() > 0);
+  const overDeadline = () => !(endsAt - clock() > 0);
   try {
     const state = await read<{ cursor_at: string | null; note: string | null } | null>("backlog_state",
       sb.from("xero_sync_state").select("cursor_at,note").eq("key", MATCH_BACKLOG_STATE_KEY)
@@ -972,7 +979,15 @@ export type SyncMatchReport = MatchRunReport & {
  */
 export async function syncMatchRun(
   sb: Sb,
-  opts: { on: boolean; changed: string[]; now?: () => number; budgetMs?: number; deadline?: number },
+  opts: {
+    on: boolean;
+    changed: string[];
+    now?: () => number;
+    budgetMs?: number;
+    deadline?: number;
+    /** The backlog plan's own clock (the real one); a test passes its fake clock. */
+    planClock?: () => number;
+  },
 ): Promise<SyncMatchReport> {
   const report: SyncMatchReport = { ...emptyReport(), switch: opts.on ? "on" : "off", changed: 0, queued: 0, backlog: 0, errors: [] };
   if (!opts.on) return report;
@@ -1014,7 +1029,7 @@ export async function syncMatchRun(
   // One read of the run's clock, as before; the plan keeps to what is left.
   const leftAtPlan = room > 0 ? deadline - now() : -1;
   if (room > 0 && leftAtPlan >= 0) {
-    plan = await backlogPlan(sb, room, new Set([...run, ...requeue.map((r) => r.id)]), leftAtPlan);
+    plan = await backlogPlan(sb, room, new Set([...run, ...requeue.map((r) => r.id)]), leftAtPlan, opts.planClock);
     if (plan.error) report.errors.push(plan.error);
     run.push(...plan.picks.map((p) => p.subject));
   }
