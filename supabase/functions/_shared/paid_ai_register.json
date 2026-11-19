@@ -146,7 +146,7 @@
     "repo": "B",
     "file": "supabase/functions/ops-api/index.ts",
     "line": [
-      33587
+      34849
     ],
     "function": [
       "_reextractExtractFields"
@@ -164,7 +164,7 @@
     "repo": "B",
     "file": "supabase/functions/ops-api/index.ts",
     "line": [
-      36301
+      37563
     ],
     "function": [
       "retiredPaidAiIntakeImplementation"
@@ -182,7 +182,7 @@
     "repo": "B",
     "file": "supabase/functions/ops-api/index.ts",
     "line": [
-      60386
+      61909
     ],
     "function": [
       "analyseSupplierQuote"
@@ -200,7 +200,7 @@
     "repo": "B",
     "file": "supabase/functions/ops-api/index.ts",
     "line": [
-      63779
+      65313
     ],
     "function": [
       "submitExpense"
@@ -218,7 +218,7 @@
     "repo": "B",
     "file": "supabase/functions/ops-api/index.ts",
     "line": [
-      66213
+      67825
     ],
     "function": [
       "_callClaude"

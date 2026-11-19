@@ -176,7 +176,8 @@ Deno.test("reject stores the timestamp in the Xero-guarded office update", async
     "ZZTEST",
     "office",
   );
-  assertEquals(absent, ["xero_bill_id", "xero_pushed_at"]);
+  // PR 1638: a run's invoice is not rejected, so the update also needs pay_run_id null.
+  assertEquals(absent, ["xero_bill_id", "xero_pushed_at", "pay_run_id"]);
   assertEquals(changes.status, "ops-reject");
   assert(Number.isFinite(Date.parse(String(changes.office_sent_back_at))));
 });
@@ -245,6 +246,10 @@ Deno.test("office work-order presentation keeps each sorted line's own suggestio
           return this;
         },
         is() {
+          return this;
+        },
+        // PR 1590: the office list leaves out held invoices (invoice_kind <> 'held').
+        neq() {
           return this;
         },
         lte() {
