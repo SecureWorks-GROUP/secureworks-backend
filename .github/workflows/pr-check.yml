@@ -914,7 +914,8 @@ jobs:
         run: |
           deno test --no-check --allow-read --allow-env \
             supabase/functions/xero-sync/match/match_run_test.ts \
-            supabase/functions/xero-sync/paused_run_log_test.ts
+            supabase/functions/xero-sync/paused_run_log_test.ts \
+            supabase/functions/xero-sync/bill_attachments_test.ts
 
       # Division months (division_tieout_v1, off): the parse, the store and
       # trim, and the lease that lets one run at a time store. Fake client only.
