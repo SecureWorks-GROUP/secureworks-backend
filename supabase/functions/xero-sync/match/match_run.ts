@@ -105,8 +105,15 @@ export const BACKLOG_MIXED_CUT = "backlog_trade_mixed_cut";
 export const MATCH_BACKLOG_MIXED_PAGES = 2;
 /** The other-contact read needed more pages than MATCH_BACKLOG_MIXED_PAGES. */
 export const BACKLOG_MIXED_PAGE_CAP = "backlog_trade_mixed_page_cap";
-/** The backlog plan reached the run's deadline: nothing picked, position kept. */
+/** The backlog plan reached its deadline: nothing picked, position kept. */
 export const BACKLOG_OVER_DEADLINE = "backlog_over_deadline";
+/**
+ * The backlog plan may spend at most this share of what is left of the run when
+ * it starts, so the run's bills always keep the rest (director 14:43).
+ */
+export const MATCH_BACKLOG_PLAN_SHARE = 0.5;
+/** Why the backlog had no plan this run (`backlog_skip`); absent when it had one. */
+export type BacklogSkip = "no_room" | "over_deadline";
 /** Client-side limit on the batched requeue and the backlog reads. */
 export const MATCH_STATEMENT_TIMEOUT_MS = 5_000;
 /** A person's labour: never matched or raised here (#1678 hides these bills from the list). */
@@ -764,9 +771,9 @@ type BacklogPlan = {
  * bill is left out only when every contact on its lines is a Trade App user's,
  * so the contact the skip reads (its first line's) is one.
  *
- * The plan runs before the run's bills, so it ends by the run's deadline:
- * `leftMs` is the time the run has left when the plan starts. Each read is
- * cut at the deadline, none starts after it, and a plan that reaches it picks
+ * The plan runs before the run's bills, so it ends by its own deadline:
+ * `leftMs`, a share of what the run has left when the plan starts. Each read
+ * is cut at it, none starts after it, and a plan that reaches it picks
  * nothing and keeps the position (BACKLOG_OVER_DEADLINE). It is timed on its
  * own clock (`clock`, the real one unless a test passes another) from its
  * start, so it adds no read of the run's clock.
@@ -968,6 +975,8 @@ export type SyncMatchReport = MatchRunReport & {
   changed: number;
   queued: number;
   backlog: number;
+  /** Set only when the backlog had no plan this run, so repeated starvation shows. */
+  backlog_skip?: BacklogSkip;
   errors: string[];
 };
 
@@ -1026,10 +1035,14 @@ export async function syncMatchRun(
 
   room = Math.min(MATCH_BACKLOG_LIMIT, MATCH_RUN_LIMIT - run.length);
   let plan: BacklogPlan | null = null;
-  // One read of the run's clock, as before; the plan keeps to what is left.
-  const leftAtPlan = room > 0 ? deadline - now() : -1;
-  if (room > 0 && leftAtPlan >= 0) {
-    plan = await backlogPlan(sb, room, new Set([...run, ...requeue.map((r) => r.id)]), leftAtPlan, opts.planClock);
+  // One read of the run's clock, as before. The plan may spend at most
+  // MATCH_BACKLOG_PLAN_SHARE of what is left; the run's bills keep the rest.
+  const leftAtPlan = room > 0 ? deadline - now() : 0;
+  if (room <= 0) report.backlog_skip = "no_room";
+  else if (!(leftAtPlan > 0)) report.backlog_skip = "over_deadline";
+  else {
+    const planMs = Math.floor(leftAtPlan * MATCH_BACKLOG_PLAN_SHARE);
+    plan = await backlogPlan(sb, room, new Set([...run, ...requeue.map((r) => r.id)]), planMs, opts.planClock);
     if (plan.error) report.errors.push(plan.error);
     run.push(...plan.picks.map((p) => p.subject));
   }
