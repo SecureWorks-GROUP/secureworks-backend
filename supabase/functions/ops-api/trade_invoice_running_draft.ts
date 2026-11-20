@@ -1025,6 +1025,7 @@ export function keepAgentCardsOnTradeSave(
   priorCards: unknown[],
   dismissed: string[],
   phoneSawDraft: boolean,
+  restored: string[] = [],
 ): unknown[] {
   if (phoneSawDraft) return cards;
   const agentCards = priorCards.filter((card): card is Record<
@@ -1053,6 +1054,7 @@ export function keepAgentCardsOnTradeSave(
     if (at != null) {
       if (untouchedSuggestion(next[at] as Record<string, unknown>)) {
         next[at] = JSON.parse(JSON.stringify(prior));
+        restored.push(key);
       }
       continue;
     }
@@ -1061,6 +1063,7 @@ export function keepAgentCardsOnTradeSave(
     if (day && touchedJobDays.has(day)) continue;
     next.push(JSON.parse(JSON.stringify(prior)));
     indexByKey.set(key, next.length - 1);
+    restored.push(key);
   }
   return next;
 }
@@ -1250,6 +1253,9 @@ export async function saveRunningInvoiceDraft(
     claimed,
     suggested,
   });
+  // Agent lines a trade save put back that the phone did not send. The save
+  // answer lists them so the app reads the draft again before its next save.
+  const restoredAgentKeys: string[] = [];
   const jobCards = mode === "auto"
     ? restoreAgentCards(merged.cards, priorCards, merged.dismissed)
     : mode === "staff"
@@ -1260,6 +1266,7 @@ export async function saveRunningInvoiceDraft(
       // A save naming a draft id gets here only when it named the week's
       // current draft: any other id is refused above as draft_replaced.
       !!body?.draft_id,
+      restoredAgentKeys,
     ) as Array<Record<string, unknown>>
     : merged.cards;
   const locked = !!(incoming.manualLock || command.locked || priorLocked ||
@@ -1350,5 +1357,6 @@ export async function saveRunningInvoiceDraft(
     edited: command.edited,
     missing: command.missing,
     pay_rules: "unchanged_until_submit",
+    restored_agent_keys: [...new Set(restoredAgentKeys)],
   };
 }
