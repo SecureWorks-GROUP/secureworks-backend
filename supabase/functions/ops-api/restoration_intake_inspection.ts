@@ -3,19 +3,23 @@
 // matching the sibling store modules.
 //
 // A new restoration card's first visit (owner, 20 Nov 2026): every restoration
-// job that comes in through ses@ is booked to Marnin and Jean for the
-// inspection, and Jean's pay for that visit is always the same: 2 hours at
-// $44 an hour, $88 ex GST, for the moisture inspection, readings, photos and
-// room scan the report and quote are built from. The owner's standing rule is
-// that this work order is filled and approved automatically, and that Jean is
-// texted when the job comes through.
+// job that comes in through ses@ puts Marnin and Jean on the job with NO date
+// ("it shouldn't be booked for the day it comes in"). Jean arranges a time with
+// the client and books it in the Trade App (restoration_visit_booking.ts).
+// Jean's pay for that visit is always the same: 2 hours at $44 an hour, $88 ex
+// GST, for the moisture inspection, readings, photos and room scan the report
+// and quote are built from. The owner's standing rule is that this work order
+// is filled and approved automatically, and that Jean is texted when the job
+// comes through.
 //
-// So at mint, after the restoration crew is booked:
+// So at mint, after the restoration crew is put on the job:
 //   1. the job's ONE job work order (kind 'job') is filled with that visit
-//      (scope line, agreed amount, date, site address, builder references) and
+//      (scope line, agreed amount, site address, builder references; no date,
+//      because none is agreed yet) and
 //      approved through approve_job_work_order_by_agent, which records the
 //      actor and the standing rule's name and never claims a person pressed it;
-//   2. the paid trade gets one text, claimed first as a job event so a retry
+//   2. the paid trade gets one text asking him to arrange the visit with the
+//      client and book it in the app, claimed first as a job event so a retry
 //      never texts twice.
 //
 // Neither step may fail the mint: each is logged and left for the office.
@@ -34,6 +38,10 @@ export const RESTORATION_INSPECTION_ACTOR = "agent:restoration-intake";
 export const RESTORATION_INSPECTION_APPROVED_BY_NAME =
   "Marnin (standing rule for restoration inspections, 20 Nov 2026)";
 
+/** The note on the crew rows restoration intake puts on a job, undated. */
+export const RESTORATION_INTAKE_ASSIGNMENT_NOTE =
+  "Auto-allocated at intake (restoration crew); date to be arranged with the client";
+
 export const RESTORATION_INSPECTION_TEXT_EVENT = "restoration_inspection_trade_texted";
 export const RESTORATION_INSPECTION_WORK_ORDER_EVENT = "restoration_inspection_work_order_set";
 
@@ -48,8 +56,8 @@ export interface RestorationInspectionContext {
   suburb: string | null;
   builderReference: string | null;
   builderPoNumber: string | null;
-  /** Perth day the crew is booked (YYYY-MM-DD). */
-  scheduledDate: string;
+  clientName?: string | null;
+  clientPhone?: string | null;
 }
 
 export interface RestorationInspectionTrade {
@@ -94,7 +102,6 @@ export function buildRestorationInspectionWorkOrder(
 ): {
   scope_items: Array<{ description: string; quantity: number; unit: string }>;
   agreed_labour_ex: number;
-  scheduled_date: string;
   site_address: string | null;
   special_instructions: string;
 } {
@@ -111,7 +118,6 @@ export function buildRestorationInspectionWorkOrder(
       unit: "hours",
     }],
     agreed_labour_ex: RESTORATION_INSPECTION_AGREED_EX,
-    scheduled_date: ctx.scheduledDate,
     site_address: site || null,
     special_instructions: instructions,
   };
@@ -126,11 +132,14 @@ export function buildRestorationInspectionText(
   const first = text(trade.name).split(/\s+/)[0] || "Hi";
   const site = restorationInspectionSite(ctx.siteAddress, ctx.suburb);
   const reference = restorationInspectionReference(ctx.builderReference, ctx.builderPoNumber);
+  const client = [text(ctx.clientName), text(ctx.clientPhone)].filter(Boolean).join(", ");
   return [
-    `Hi ${first}, new restoration job ${ctx.jobNumber || ""} booked for you and Marnin today.`.replace(/\s+/g, " "),
+    `Hi ${first}, new restoration job ${ctx.jobNumber || ""} for you and Marnin.`.replace(/\s+/g, " "),
     site ? `Site: ${site}` : "",
+    client ? `Client: ${client}` : "",
     reference ? `Builder ref: ${reference}` : "",
     "Job: moisture inspection, readings, photos and room scan for the report and quote.",
+    "Please call the client to arrange a time, then book the date in the Trade App.",
     workOrderApproved
       ? `Your work order is approved: ${RESTORATION_INSPECTION_HOURS} hours ($${RESTORATION_INSPECTION_AGREED_EX}).`
       : "",

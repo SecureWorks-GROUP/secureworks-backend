@@ -24,7 +24,8 @@ const CTX = {
   suburb: "Testville",
   builderReference: "MLB-10001",
   builderPoNumber: "PO-20002",
-  scheduledDate: "2026-11-20",
+  clientName: "Test Client",
+  clientPhone: "0400000002",
 };
 const JEAN = {
   id: "33333333-3333-4333-8333-333333333333",
@@ -119,21 +120,24 @@ Deno.test("site and reference read cleanly without repeats", () => {
   assertEquals(restorationInspectionReference(null, "PO-20002"), "PO-20002");
 });
 
-Deno.test("the inspection work order is 2 hours, $88, dated, with the site and references", () => {
+Deno.test("the inspection work order is 2 hours, $88, undated, with the site and references", () => {
   const f = buildRestorationInspectionWorkOrder(CTX, JEAN);
   assertEquals(f.agreed_labour_ex, 88);
   assertEquals(f.scope_items[0].quantity, 2);
   assertEquals(f.scope_items[0].unit, "hours");
   assert(f.scope_items[0].description.includes("moisture inspection"));
-  assertEquals(f.scheduled_date, "2026-11-20");
+  assertEquals("scheduled_date" in f, false);
   assertEquals(f.site_address, "1 Test Street, Testville");
   assert(f.special_instructions.startsWith("Jean Crous: 2 hours"));
   assert(f.special_instructions.includes("MLB-10001 / PO-20002"));
 });
 
-Deno.test("the text names the job, site, reference, the work and the trade link", () => {
+Deno.test("the text names the job, site, client, reference, the work, the booking ask and the link", () => {
   const t = buildRestorationInspectionText(CTX, JEAN, true);
-  assert(t.startsWith("Hi Jean, new restoration job SWRESTO-260001"));
+  assert(t.startsWith("Hi Jean, new restoration job SWRESTO-260001 for you and Marnin."));
+  assert(t.includes("Client: Test Client, 0400000002"));
+  assert(t.includes("call the client to arrange a time, then book the date in the Trade App"));
+  assert(!t.includes("today"));
   assert(t.includes("Site: 1 Test Street, Testville"));
   assert(t.includes("Builder ref: MLB-10001 / PO-20002"));
   assert(t.includes("2 hours ($88)"));
