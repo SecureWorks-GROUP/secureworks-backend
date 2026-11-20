@@ -251,12 +251,13 @@ export async function loadTradeInvoiceJobModes(
   };
   const readAgreedPart = async (part: string[]) => {
     const { data, error } = await client.from("work_orders")
-      .select("id, job_id, kind, wo_number, title, agreed_labour_ex, approved_at, assigned_user_id")
+      .select("id, job_id, kind, wo_number, title, agreed_labour_ex, approved_at, assigned_user_id, amount_change_id")
       .eq("org_id", orgId)
       .in("kind", ["job", "additional"])
       .eq("status", "approved")
       .in("job_id", part);
     if (error) throw new TradeInvoiceModeReadError("the job work orders");
+    await applyOfficeAmountChanges(client, data || []);
     const seen = new Set<string>();
     for (const row of data || []) {
       const jobId = String(row?.job_id || "");
@@ -367,6 +368,42 @@ export async function loadTradeInvoiceJobModes(
     });
   }
   return { jobs: out, not_found: notFound };
+}
+
+/** A main job work order's agreed labour is its sealed amount plus every
+ *  office amount change on it (change_work_order_amount), the same total the
+ *  work order cap reads (work_order_total_cap.ts). An additional work order's
+ *  approval also writes an amount change on the main order; that one is the
+ *  additional order's own money, so it is left out here. Mutates the rows'
+ *  agreed_labour_ex so every reader below sees one figure. Unreadable changes
+ *  fail closed. */
+async function applyOfficeAmountChanges(client: any, rows: any[]): Promise<void> {
+  const mains = rows.filter((r) => r?.kind === "job" && r?.id);
+  if (mains.length === 0) return;
+  const additionalChangeIds = new Set(
+    rows.filter((r) => r?.kind === "additional" && r?.amount_change_id).map((r) => String(r.amount_change_id)),
+  );
+  const { data, error } = await client.from("work_order_amount_changes")
+    .select("id, work_order_id, delta_ex")
+    .eq("kind", "amount")
+    .in("work_order_id", mains.map((r) => String(r.id)))
+    .order("id")
+    .range(0, 999);
+  if (error || (data || []).length >= 1000) throw new TradeInvoiceModeReadError("the work order changes");
+  const delta = new Map<string, number>();
+  for (const c of data || []) {
+    if (additionalChangeIds.has(String(c.id))) continue;
+    const d = Number(c.delta_ex);
+    if (!Number.isFinite(d)) throw new TradeInvoiceModeReadError("the work order changes");
+    delta.set(String(c.work_order_id), (delta.get(String(c.work_order_id)) ?? 0) + d);
+  }
+  for (const row of mains) {
+    const d = delta.get(String(row.id));
+    if (d === undefined) continue;
+    const base = Number(row.agreed_labour_ex);
+    if (!Number.isFinite(base)) continue;
+    row.agreed_labour_ex = Math.round((base + d) * 100) / 100;
+  }
 }
 
 /** Pure. A job's approved additional work orders, for the cap: the trade

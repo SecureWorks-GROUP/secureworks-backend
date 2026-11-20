@@ -102,6 +102,7 @@ type World = {
   fail?: "users" | "jobs" | "group_work_orders" | "work_orders" | "v_job_commission";
   workOrders?: any[];
   commissions?: any[];
+  amountChanges?: any[];
 };
 
 function fakeClient(world: World = {}) {
@@ -124,6 +125,7 @@ function fakeClient(world: World = {}) {
         if (table === "group_work_orders") return GROUPS;
         if (table === "work_orders") return world.workOrders ?? WORK_ORDERS;
         if (table === "v_job_commission") return world.commissions ?? [];
+        if (table === "work_order_amount_changes") return world.amountChanges ?? [];
         return [];
       };
       const matching = () =>
@@ -142,6 +144,8 @@ function fakeClient(world: World = {}) {
       const builder: any = {
         select: () => builder,
         neq: () => builder,
+        order: () => builder,
+        range: () => builder,
         eq(col: string, val: unknown) {
           filters.push(["eq", col, val]);
           return builder;
@@ -890,4 +894,31 @@ Deno.test("commission offers: job modes carry only the caller's offer and keep a
   const failed = await load(fakeClient({ fail: "v_job_commission" }), [FENCE]);
   assertEquals(failed.jobs[0].commission, { state: "not_known", offer_ex: null });
   assertEquals(failed.jobs[0].can_claim_commission, null);
+});
+
+Deno.test("an office work order amount change moves the agreed amount; an additional order's change does not", async () => {
+  const ADD = "7a1e0a52-0000-4000-8000-00000000c0a1";
+  const workOrders = [
+    { id: WO_FENCE, org_id: ORG, job_id: FENCE, kind: "job", status: "approved", agreed_labour_ex: "8530.00" },
+    { id: ADD, org_id: ORG, job_id: FENCE, kind: "additional", status: "approved", agreed_labour_ex: 500, amount_change_id: "ch-add" },
+  ];
+  const amountChanges = [
+    { id: "ch-office", work_order_id: WO_FENCE, kind: "amount", delta_ex: -1810 },
+    { id: "ch-add", work_order_id: WO_FENCE, kind: "amount", delta_ex: 500 },
+  ];
+  const out = await load(fakeClient({ invoiceType: "hourly", workOrders, amountChanges }), [FENCE]);
+  const fence = out.jobs.find((j: any) => j.job_id === FENCE)!;
+  assertEquals((fence as any).cap_agreed_ex ?? fence.work_order_agreed_ex, 6720);
+});
+
+Deno.test("an unreadable work order change refuses rather than reading the sealed amount", async () => {
+  const client: any = fakeClient({ invoiceType: "hourly" });
+  const from = client.from.bind(client);
+  client.from = (table: string) => {
+    const b = from(table);
+    if (table !== "work_order_amount_changes") return b;
+    b.then = (resolve: any, reject: any) => Promise.resolve({ data: null, error: { message: "boom" } }).then(resolve, reject);
+    return b;
+  };
+  await assertRejects(() => load(client, [FENCE]));
 });
