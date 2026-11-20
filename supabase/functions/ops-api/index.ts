@@ -10435,13 +10435,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       }
 
       // G4: the office enters a missing crew member's days, with a reason
-      // (group_office_days.ts). A signed-in person only.
+      // (group_office_days.ts). A signed-in person, or the ops agent's server
+      // key naming the office person it acts for in actor_user_id.
       case 'office_enter_group_hours': {
         if (req.method !== 'POST') return json({ error: 'POST required' }, 405)
         return await groupWorkOrderJson(officeEnterGroupHours(client, {
-          // A person's own session; the server key and a named actor header are not one.
+          // A person's own session; a named actor header is not one.
           userId: requestActor.source === 'jwt' && authMode === 'jwt' ? (authUser?.id || null) : null,
           isStaff: _opsApiCallerIsStaffOperator(authMode, authUser),
+          serverKey: authMode === 'api_key' && serverSecretPresented,
         }, groupBody(body), getAWSTDate()))
       }
 
