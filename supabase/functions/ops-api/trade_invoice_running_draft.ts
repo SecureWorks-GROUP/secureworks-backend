@@ -960,34 +960,50 @@ function restoreAgentCards(
 // A trade save (save_running_invoice_draft) sends the phone's whole local
 // copy: the Trade App and the Crew app both post every card they hold. A copy
 // read before an agent saved this week does not carry the agent's lines, so
-// taking it whole loses them. Every agent line the trade did not remove is
-// kept. Removed means its key is in dismissedKeys or body.remove (both are in
-// `dismissed` here), nothing else. Where the phone sends a card with the same
-// key, the phone's card wins, unless it is an untouched empty suggestion
-// (the phone never saw the agent's line for that booking): then the agent's
-// line is kept. A Crew app line the trade re-dated carries crew_key
-// "add:<old key>"; that line replaced the agent line, so the old one is not
-// put back beside it.
+// taking it whole loses them. Only a line the phone could not have seen is
+// put back:
 //
-// "Untouched" is decided on the trade's own marks only. Both apps put a card
-// into work-order mode (and fill the agreed amount) on their own when the job
-// is invoiced as a work order, and the Crew app turns off every card after
-// the first of a grouped work-order line, so neither mode nor a work-order
-// card's off switch is a mark. An hours card turned off is.
+// - Every save replaces the draft row with a new id, and a save naming any id
+//   but the week's current draft is refused (draft_replaced). So a save that
+//   names the current draft id was built on the draft that holds every agent
+//   line: a line it leaves out was removed (the Crew app removes a line with
+//   no booking by leaving it out). Nothing is put back (`phoneSawDraft`).
+// - A save naming no draft id (an old cached client, or a phone that opened
+//   the week before any draft existed) never saw the agent's lines. Each one
+//   is put back unless its key is in dismissedKeys or body.remove (both in
+//   `dismissed` here), or the phone already holds that work:
+//   - a card with the same key wins, unless the trade never touched it (an
+//     empty suggestion for the booking): then the agent's line replaces it;
+//   - a card the trade touched for the same job and the same work day, under
+//     any key (the booking's as:<id> beside the agent's job:<id>:<day>), wins
+//     and the agent's line is not put back, so the day is never billed twice;
+//   - a Crew app line the trade re-dated carries crew_key "add:<old key>"; it
+//     replaced the agent line, which is not put back beside it.
+//
+// "Touched" is any mark of the trade's on the card: hours, a start or finish,
+// a typed rate or amount, a work-order amount or work-order mode, a card
+// turned off (included or enabled false), or an edit or mode flag.
 function nonEmptyList(value: unknown): boolean {
   return Array.isArray(value) && value.length > 0;
 }
 
+function isCard(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
 function untouchedSuggestion(card: Record<string, unknown>): boolean {
-  const modeCard = card.wo_mode === true || card.commission_mode === true;
   return card.added_by_agent !== true &&
-    !(card.included === false && !modeCard) &&
+    card.included !== false &&
+    card.enabled !== false &&
+    card.wo_mode !== true &&
+    card.commission_mode !== true &&
     !(Number(card.hours) > 0) &&
     !card.start_time &&
     !card.finish_time &&
     card.owner_edited !== true &&
     card.hours_user_edited !== true &&
     card.mode_picked !== true &&
+    !(Number(card.wo_allocated) > 0) &&
     !(Number(card.typed_rate) > 0) &&
     !(Number(card.commission_amount) > 0) &&
     !(Number(card.travel_amount) > 0) &&
@@ -995,35 +1011,56 @@ function untouchedSuggestion(card: Record<string, unknown>): boolean {
     !nonEmptyList(card.wo_lump_lines);
 }
 
+// The job and the day a card bills, dated as linesFromCards dates its line.
+function jobDay(card: Record<string, unknown>): string {
+  const job = String(card.job_id || "");
+  const day = String(
+    card.work_date || card.scheduled_date || card.line_date || "",
+  ).slice(0, 10);
+  return job && day ? job + "|" + day : "";
+}
+
 export function keepAgentCardsOnTradeSave(
-  cards: Array<Record<string, unknown>>,
-  priorCards: Array<Record<string, unknown>>,
+  cards: unknown[],
+  priorCards: unknown[],
   dismissed: string[],
-): Array<Record<string, unknown>> {
+  phoneSawDraft: boolean,
+): unknown[] {
+  if (phoneSawDraft) return cards;
+  const agentCards = priorCards.filter((card): card is Record<
+    string,
+    unknown
+  > => isCard(card) && card.added_by_agent === true);
+  if (agentCards.length === 0) return cards;
   const dismissedSet = new Set(dismissed.map(String));
-  const next = cards.map((card) => ({ ...card }));
+  const next = [...cards];
   const indexByKey = new Map<string, number>();
   const replaced = new Set<string>();
+  const touchedJobDays = new Set<string>();
   next.forEach((card, index) => {
+    if (!isCard(card)) return;
     const key = sourceKey(card);
     if (key && !indexByKey.has(key)) indexByKey.set(key, index);
     const crewKey = String(card.crew_key || "");
     if (crewKey.startsWith("add:")) replaced.add(crewKey.slice(4));
+    const day = jobDay(card);
+    if (day && !untouchedSuggestion(card)) touchedJobDays.add(day);
   });
-  for (const prior of priorCards) {
-    if (prior?.added_by_agent !== true) continue;
+  for (const prior of agentCards) {
     const key = sourceKey(prior);
     if (!key || dismissedSet.has(key)) continue;
     const at = indexByKey.get(key);
-    if (at == null) {
-      if (replaced.has(key)) continue;
-      next.push(JSON.parse(JSON.stringify(prior)));
-      indexByKey.set(key, next.length - 1);
+    if (at != null) {
+      if (untouchedSuggestion(next[at] as Record<string, unknown>)) {
+        next[at] = JSON.parse(JSON.stringify(prior));
+      }
       continue;
     }
-    if (untouchedSuggestion(next[at])) {
-      next[at] = JSON.parse(JSON.stringify(prior));
-    }
+    if (replaced.has(key)) continue;
+    const day = jobDay(prior);
+    if (day && touchedJobDays.has(day)) continue;
+    next.push(JSON.parse(JSON.stringify(prior)));
+    indexByKey.set(key, next.length - 1);
   }
   return next;
 }
@@ -1216,7 +1253,14 @@ export async function saveRunningInvoiceDraft(
   const jobCards = mode === "auto"
     ? restoreAgentCards(merged.cards, priorCards, merged.dismissed)
     : mode === "staff"
-    ? keepAgentCardsOnTradeSave(merged.cards, priorCards, merged.dismissed)
+    ? keepAgentCardsOnTradeSave(
+      merged.cards,
+      priorCards,
+      merged.dismissed,
+      // A save naming a draft id gets here only when it named the week's
+      // current draft: any other id is refused above as draft_replaced.
+      !!body?.draft_id,
+    ) as Array<Record<string, unknown>>
     : merged.cards;
   const locked = !!(incoming.manualLock || command.locked || priorLocked ||
     body?.manual_lock === true || placed.added.length > 0 ||
