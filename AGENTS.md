@@ -1761,42 +1761,39 @@ Tests: `repair_intake_routing_test.ts`,
 `repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
 `insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
 
-## Labour Hire Is Its Own Job Type, And A Four-Letter Prefix Is Invisible To Most Grammars
+## Labour Hire Is Its Own Job Type, Numbered SWL-
 
 Owner's word, 20 Nov 2026: labour hire (our workers on another builder's site,
-charged by the hour) is `jobs.type = 'labour_hire'`, numbered `SWLH-`
+charged by the hour) is `jobs.type = 'labour_hire'`, numbered `SWL-`
 (`next_job_number`, `20261120101500`, same yearly counter), and books to its own
 Xero Business Unit `SW - LABOUR HIRE`. The type decides the unit whatever the
 number: the four first jobs keep their `SWM-` numbers
 (`scripts/labour-hire-retype-four-jobs.sql`, run by hand, dry run by default).
-The rule is in two languages and one example table: `divisionTrackingOption`
+With no type the number decides, as `SWP`/`SWF`/`SWD`/`SWI` do. The rule is in
+two languages and one example table: `divisionTrackingOption`
 (`_shared/xero_draft_standard.ts`), the SQL `job_division_option`
 (`20261120101600`) and `_shared/division_examples.json`; change all three
 together (`scripts/test-division-twin.sh`). Revenue keeps the default sales
-account 200 until the bookkeeper names another. Everywhere else it takes the
-path a miscellaneous job takes: hourly trade invoices, no deposit gate, no
-closeout review text, the default stage list.
+account 200 until the bookkeeper names another (the account is read from the
+type, never the number). Everywhere else it takes the path a miscellaneous job
+takes: hourly trade invoices, no deposit gate, no closeout review text, the
+default stage list.
 
-`SWLH-` is read by `SW[A-Z]+-` and `SW[A-Z]{1,3}` grammars only. The
-single-letter ones (`SW[A-Z]?-?\d`, `SW(MS|[A-Z])-`) cannot see it, so the
-customer invoice Reference linker names it beside `SWRESTO-`
-(`REFERENCE_JOB_NUMBER` in `xero-sync/builder_reference_match.ts`, and its two
-copies in `xero-sync/index.ts`, pinned together by test). NOT widened, like
-`SWRESTO-` before it: `JOB_NUMBER_RE` (`materials_ingest.ts`) and its
-hyphen-optional twins (`bill_prematch.ts`), `_shared/po_reference.ts`,
-`job_trace.ts` and reporting-api. `JOB_NUMBER_RE` is not only the supplier bill
-grammar: it is also the second-chance invoice link (`matchUnlinkedInvoices`
-strategy 1) and the Xero project name link. So a supplier bill, a purchase
-order or a Xero project quoting an `SWLH-` number is placed by a person, and a
-customer invoice the sync-time linker missed is not picked up later by its
-number. Widening those is a fate-moving matcher change with its own replay.
+`SWL-` is one letter, so every `SW[A-Z]` job number grammar already reads it:
+the customer invoice Reference linker, the supplier bill grammar
+(`JOB_NUMBER_RE`, `bill_prematch.ts`), `job_trace.ts`, Dispatch and the context
+readers. `_shared/po_reference.ts` lists its letters and now carries `L`. The
+readers that list a few letters and skip the rest skip `SWL-` exactly as they
+skip `SWM-` (monitor-inbox `SW[PFD]-`, reporting-api `SW[PFDRI]-`,
+`isRealJobRef` `SW[PF]`, `dispatch_v2_reply_pdf.ts` `SW([FPR])`); none of them
+maps `L` to another trade.
 
-Trade bill pushes (`xeroTracking(job_number)` in the weekly and work order
-invoice paths) read the NUMBER only and name the option without checking Xero
-has it: an `SWLH-` job's bill names `SW - LABOUR HIRE`, so add the option in
+Trade bill, purchase order and expense pushes (`xeroTracking(job_number)`) read
+the NUMBER only and the trade bill paths name the option without checking Xero
+has it: an `SWL-` job's bill names `SW - LABOUR HIRE`, so add the option in
 Xero (`ensure_xero_tracking_option`) before the first such bill, and a labour
 hire job that kept an `SWM-` number gets no Business Unit on its trade bills.
-Tests: `ops-api/labour_hire_job_type_test.ts`.
+Tests: `ops-api/labour_hire_job_type_test.ts`, `_shared/po_reference_test.ts`.
 
 ## Automatic Repair Intake Is One Flag, And The Mint Judges The Draft
 

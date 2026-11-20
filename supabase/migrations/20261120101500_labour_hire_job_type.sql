@@ -4,7 +4,7 @@
 --
 -- Two changes, nothing else:
 --   1. jobs_type_check admits 'labour_hire' beside the twelve reviewed types.
---   2. next_job_number numbers it SWLH-, from the same yearly counter as every
+--   2. next_job_number numbers it SWL-, from the same yearly counter as every
 --      other prefix, so numbers never collide across prefixes.
 --
 -- No job is written, retyped or renumbered here. The four existing labour hire
@@ -28,7 +28,7 @@ BEGIN
   FROM pg_catalog.pg_proc p
   WHERE p.oid = to_regprocedure('public.next_job_number(text)');
   IF v_number_md5 IS NULL
-     OR v_number_md5 NOT IN ('54e49abe7bd3225fb96e016094504d89', '3fc8ff31501aec696bf6cf15d6e757d8') THEN
+     OR v_number_md5 NOT IN ('54e49abe7bd3225fb96e016094504d89', 'f9cc68391bd169891f8f456dee2bd7ea') THEN
     RAISE EXCEPTION 'next_job_number differs from the reviewed restoration body';
   END IF;
 
@@ -73,7 +73,7 @@ BEGIN
     WHEN 'makesafe'       THEN 'SWMS-'
     WHEN 'repair'        THEN 'SWR-'
     WHEN 'restoration'    THEN 'SWRESTO-'
-    WHEN 'labour_hire'    THEN 'SWLH-'
+    WHEN 'labour_hire'    THEN 'SWL-'
     ELSE 'SW-'
   END;
   yr := (EXTRACT(YEAR FROM now()) % 100)::smallint;

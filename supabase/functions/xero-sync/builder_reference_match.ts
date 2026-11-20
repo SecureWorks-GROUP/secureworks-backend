@@ -45,10 +45,8 @@ export const BUILDER_REFERENCE_RULE = "builder_reference_v1";
 /** The first invoice date the rule acts on (the measured population starts here). */
 export const BUILDER_REFERENCE_FROM = "2026-07-01";
 
-/** The sync-time reference link's job number pattern (index.ts upsert loop).
- *  SWLH- (labour hire, 20 Nov 2026) is named like SWRESTO-: the single-letter
- *  form cannot read a four-letter prefix. */
-export const REFERENCE_JOB_NUMBER = /SWMS-\d{4,6}(?!\d)|SWRESTO-\d{4,6}(?!\d)|SWLH-\d{4,6}(?!\d)|SW[A-Z]?-?\d{3,6}(?!\d)/i;
+/** The sync-time reference link's job number pattern (index.ts upsert loop). */
+export const REFERENCE_JOB_NUMBER = /SWMS-\d{4,6}(?!\d)|SWRESTO-\d{4,6}(?!\d)|SW[A-Z]?-?\d{3,6}(?!\d)/i;
 
 const MAKESAFE_UNITS = new Set(["SW - MAKESAFE", "SW - RESTORATION", "ROOF REPORTS", "ASSESSMENT REPORTS"]);
 const WORKS_UNITS = new Set(["SW - INSURANCE WORK", "SW - FENCING", "SW - PATIOS"]);

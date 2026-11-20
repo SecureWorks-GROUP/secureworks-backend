@@ -58,14 +58,14 @@ export function divisionTrackingOption(jobNumber: string, jobType?: string | nul
   // SWRESTO- (restoration) has its own Business Unit option (owner, 12 Nov
   // 2026); it must be read before the 'SWR' slice below, which answers ''.
   if (upper.startsWith('SWRESTO-')) return 'SW - RESTORATION'
-  // SWLH- (labour hire) is four letters too: the 'SWL' slice below answers ''.
-  if (upper.startsWith('SWLH-')) return 'SW - LABOUR HIRE'
   if (upper.startsWith('SWMS-') || upper.startsWith('AJBR') || upper.startsWith('MS1') || upper.startsWith('BWCWA') || upper.startsWith('WB6')) return 'SW - MAKESAFE'
   const prefix = upper.slice(0, 3)
   if (prefix === 'SWP') return 'SW - PATIOS'
   if (prefix === 'SWF') return 'SW - FENCING'
   if (prefix === 'SWD') return 'SW - DECKING'
   if (prefix === 'SWI') return 'SW - INSURANCE WORK'
+  // SWL- is labour hire's own number (owner, 20 Nov 2026).
+  if (prefix === 'SWL') return 'SW - LABOUR HIRE'
   // 'SWR' deliberately falls through to '': renovation | roofing | repair.
   return ''
 }

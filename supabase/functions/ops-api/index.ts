@@ -5098,7 +5098,7 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     body: JSON.stringify({
       to: siTo,
       cc: siCcSafe,
-      subject: siSubj || `Invoice ${siNum} — SecureWorks Group`,
+      subject: siSubj || `Invoice ${siNum} - SecureWorks Group`,
       htmlBody: `<p>Please find your invoice attached.</p><p>Invoice: <strong>${siNum}</strong></p>`,
       job_id: verifiedJobId,
       xero_invoice_id: siId,
@@ -44294,7 +44294,7 @@ async function sendQuickQuoteEmail(client: any, body: any) {
     from: 'SecureWorks Group <orders@secureworksgroup.app>',
     reply_to: getClientReplyTo(job.type, job.job_number),
     to: [job.client_email],
-    subject: `Your Quote — ${job.job_number || 'SecureWorks Group'}`,
+    subject: `Your Quote - ${job.job_number || 'SecureWorks Group'}`,
     html: emailHtml,
   }
 
@@ -66628,7 +66628,7 @@ async function sendVariation(client: any, body: any) {
         <p style="color: #666; font-size: 13px;">If you have questions, reply to this email or call us on 0489 267 771.</p>
       </div>
       <div style="background: #293C46; padding: 12px; text-align: center;">
-        <p style="color: #8FA4B2; font-size: 12px; margin: 0;">SecureWorks Group — Patios | Fencing | Decking | Screening</p>
+        <p style="color: #8FA4B2; font-size: 12px; margin: 0;">SecureWorks Group - Patios | Fencing | Decking | Screening</p>
       </div>
     </div>
   `
@@ -66640,12 +66640,12 @@ async function sendVariation(client: any, body: any) {
       from: 'SecureWorks Group <no-reply@secureworksgroup.app>',
       reply_to: getClientReplyTo(job?.type, job?.job_number),
       to: [job.client_email],
-      subject: `Variation #${variation.variation_number} for ${job.job_number} — ${job.site_address || 'your project'}`,
+      subject: `Variation #${variation.variation_number} for ${job.job_number} - ${job.site_address || 'your project'}`,
       html,
     }),
   })
   const resendResult = await resendResp.json()
-  const variationSubject = `Variation #${variation.variation_number} for ${job.job_number} — ${job.site_address || 'your project'}`
+  const variationSubject = `Variation #${variation.variation_number} for ${job.job_number} - ${job.site_address || 'your project'}`
 
   // Log to po_communications for client email thread
   if (resendResult?.id) {
@@ -66813,6 +66813,7 @@ export function streetFromAddress(address: string | null | undefined): string {
   return street.trim() || 'your property'
 }
 
+// No em dashes in any of these: they are sent to clients (company rule).
 const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string }> = {
   quote_sent: { channel: 'email', template: 'Hi {name}, your quote for {service} at {address} is ready. View it here: {link}' },
   quote_accepted: { channel: 'sms', template: 'Thanks for choosing SecureWorks! Your deposit invoice is on its way.' },
@@ -66834,15 +66835,17 @@ const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string
   daily_progress: { channel: 'sms', template: 'Day {day} update: {progress_note}' },
   job_complete: { channel: 'email', template: 'Your {service} is complete! Please review and sign off here: {link}' },
   invoice_sent: { channel: 'email', template: 'Your final invoice for {amount} is attached. Pay online here: {link}' },
-  payment_received: { channel: 'email', template: "Payment received — thank you! We'd love a Google review: {review_link}" },
+  payment_received: { channel: 'email', template: "Payment received, thank you! We'd love a Google review: {review_link}" },
   follow_up_30d: { channel: 'email', template: "Hi {name}, how's your new {service}? Remember, we also do {cross_sell}. Refer a friend: {referral_link}" },
   // ── Phase 2 additions ──
-  follow_up_day3: { channel: 'sms', template: "Hi {name}, just checking in — have you had a chance to review your {service} quote? Happy to answer any questions." },
+  follow_up_day3: { channel: 'sms', template: "Hi {name}, just checking in, have you had a chance to review your {service} quote? Happy to answer any questions." },
   follow_up_day5: { channel: 'sms', template: "Hi {name}, your quote for {service} at {address} is still open. Would you like to discuss anything?" },
-  follow_up_day7: { channel: 'email', template: "Hi {name}, we noticed you haven't responded to your {service} quote yet. We'd hate for you to miss out — this quote expires soon. Call us anytime on 0489 267 771." },
-  deposit_reminder_day3: { channel: 'sms', template: "Hi {name}, just a reminder — your deposit invoice for {service} is waiting. Pay online anytime: {payment_url}" },
+  follow_up_day7: { channel: 'email', template: "Hi {name}, we noticed you haven't responded to your {service} quote yet. We'd hate for you to miss out. This quote expires soon. Call us anytime on 0489 267 771." },
+  deposit_reminder_day3: { channel: 'sms', template: "Hi {name}, just a reminder, your deposit invoice for {service} is waiting. Pay online anytime: {payment_url}" },
   deposit_reminder_day7: { channel: 'sms', template: "Hi {name}, your deposit for {service} is still outstanding (7 days). Please pay soon to secure your install date: {payment_url}" },
 }
+// Test seam: the templates as sent.
+export const _CLIENT_COMMS_TEMPLATES: Readonly<Record<string, { channel: string; template: string }>> = CLIENT_COMMS_TEMPLATES
 
 // The only client-update texts that may reach a customer. Every other trigger
 // stays off as a text (Captain 28 Oct 2026: "turn only the reschedule text
@@ -66965,7 +66968,7 @@ export async function sendClientUpdate(client: any, body: any) {
   // Append cross-sell footer for SMS — except install_rescheduled, whose wording
   // is approved verbatim and ends "Cheers,\nShaun".
   if (channel === 'sms' && comms_trigger !== 'install_rescheduled') {
-    message += '\n\nSecureWorks Group — Patios | Fencing | Decking | Screening | Makesafe'
+    message += '\n\nSecureWorks Group - Patios | Fencing | Decking | Screening | Makesafe'
   }
 
   let sent = false
@@ -67006,11 +67009,11 @@ export async function sendClientUpdate(client: any, body: any) {
     if (!RESEND_API_KEY || !job.client_email) {
       return { sent: false, reason: 'No RESEND_API_KEY or client email' }
     }
-    const updateSubject = `${job.job_number} — Update from SecureWorks`
+    const updateSubject = `${job.job_number} - Update from SecureWorks`
     const updateHtml = `<div style="font-family: Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px;">
             <p>${message.replace(/\n/g, '<br>')}</p>
             <hr style="border: none; border-top: 1px solid #D4DEE4; margin: 24px 0;">
-            <p style="color: #8FA4B2; font-size: 12px;">SecureWorks Group — Patios | Fencing | Decking | Screening</p>
+            <p style="color: #8FA4B2; font-size: 12px;">SecureWorks Group - Patios | Fencing | Decking | Screening</p>
           </div>`
     try {
       await fetch('https://api.resend.com/emails', {

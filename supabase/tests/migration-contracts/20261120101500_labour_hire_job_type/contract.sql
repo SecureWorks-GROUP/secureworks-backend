@@ -1,4 +1,4 @@
--- 20261120101500: labour hire is a job type numbered SWLH-. The twelve earlier
+-- 20261120101500: labour hire is a job type numbered SWL-. The twelve earlier
 -- types and every earlier prefix behave exactly as before, all prefixes share
 -- one counter, a retyped job keeps its number, and a re-apply changes nothing.
 BEGIN;
@@ -45,18 +45,18 @@ DECLARE
   expectation record;
 BEGIN
   a := public.next_job_number('labour_hire');
-  IF a NOT LIKE 'SWLH-' || yr || '%' THEN
-    RAISE EXCEPTION 'labour_hire must mint SWLH-<yy>..., got %', a;
+  IF a NOT LIKE 'SWL-' || yr || '%' THEN
+    RAISE EXCEPTION 'labour_hire must mint SWL-<yy>..., got %', a;
   END IF;
   b := public.next_job_number('miscellaneous');
   IF b NOT LIKE 'SWM-' || yr || '%' THEN
     RAISE EXCEPTION 'miscellaneous must still mint SWM-, got %', b;
   END IF;
-  IF substr(b, length('SWM-' || yr) + 1)::int <> substr(a, length('SWLH-' || yr) + 1)::int + 1 THEN
+  IF substr(b, length('SWM-' || yr) + 1)::int <> substr(a, length('SWL-' || yr) + 1)::int + 1 THEN
     RAISE EXCEPTION 'labour hire must draw from the shared yearly counter: % then %', a, b;
   END IF;
   c := public.next_job_number('Labour_Hire');
-  IF c NOT LIKE 'SWLH-%' THEN
+  IF c NOT LIKE 'SWL-%' THEN
     RAISE EXCEPTION 'the type is read case-insensitively, got %', c;
   END IF;
   FOR expectation IN
@@ -87,8 +87,8 @@ BEGIN
   INSERT INTO public.jobs (id, org_id, status, type)
   VALUES (new_job, org, 'invoiced', 'labour_hire');
   SELECT job_number INTO minted FROM public.jobs WHERE id = new_job;
-  IF minted NOT LIKE 'SWLH-%' THEN
-    RAISE EXCEPTION 'a labour hire job auto-numbered % instead of SWLH-', minted;
+  IF minted NOT LIKE 'SWL-%' THEN
+    RAISE EXCEPTION 'a labour hire job auto-numbered % instead of SWL-', minted;
   END IF;
 
   INSERT INTO public.jobs (id, org_id, status, type, job_number)

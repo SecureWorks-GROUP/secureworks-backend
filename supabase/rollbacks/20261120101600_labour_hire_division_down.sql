@@ -8,7 +8,7 @@ DO $guard$ BEGIN
   IF EXISTS (
     SELECT 1 FROM (VALUES
       ('public.job_division_option(text,text)', ARRAY['c0c72acded3644ca4268f08761f777af']),
-      ('public.job_division_option(text,text,uuid)', ARRAY['58669cd21b26a952aa57f2ead2189494', '387e0eb966d0e8bb02fe7546e6bbeba2'])
+      ('public.job_division_option(text,text,uuid)', ARRAY['58669cd21b26a952aa57f2ead2189494', '16a8ef5f34c6b7a98fb2fe9eca23d2be'])
     ) AS expected(signature, allowed)
     LEFT JOIN pg_catalog.pg_proc p ON p.oid = to_regprocedure(expected.signature)
     WHERE p.oid IS NULL OR md5(p.prosrc) <> ALL(expected.allowed)

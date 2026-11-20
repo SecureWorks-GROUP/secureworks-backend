@@ -7,7 +7,7 @@
 -- the body 20261118120115_division_rulings installed, and nothing else moves:
 --   - a job typed 'labour_hire' is SW - LABOUR HIRE whatever its number (this is
 --     what covers the four older labour hire jobs that keep their SWM- numbers);
---   - an SWLH- number is SW - LABOUR HIRE unless an explicit type rule above it
+--   - an SWL number is SW - LABOUR HIRE unless a type rule or a longer prefix above it
 --     already answered.
 -- The two-argument wrapper and stock_division_option are untouched. Grants are
 -- kept by CREATE OR REPLACE. It names an option; it never creates one in Xero.
@@ -18,7 +18,7 @@ DO $guard$ BEGIN
   IF EXISTS (
     SELECT 1 FROM (VALUES
       ('public.job_division_option(text,text)', ARRAY['c0c72acded3644ca4268f08761f777af']),
-      ('public.job_division_option(text,text,uuid)', ARRAY['58669cd21b26a952aa57f2ead2189494', '387e0eb966d0e8bb02fe7546e6bbeba2'])
+      ('public.job_division_option(text,text,uuid)', ARRAY['58669cd21b26a952aa57f2ead2189494', '16a8ef5f34c6b7a98fb2fe9eca23d2be'])
     ) AS expected(signature, allowed)
     LEFT JOIN pg_catalog.pg_proc p ON p.oid = to_regprocedure(expected.signature)
     WHERE p.oid IS NULL OR md5(p.prosrc) <> ALL(expected.allowed)
@@ -48,12 +48,12 @@ DECLARE
     WHEN job_type = 'repair' THEN 'SW - MAKESAFE'
     WHEN job_type IN ('roofing', 'renovation') THEN 'SW - PRIVATE ROOFING'
     WHEN job_number_upper LIKE 'SWRESTO-%' THEN 'SW - RESTORATION'
-    WHEN job_number_upper LIKE 'SWLH-%' THEN 'SW - LABOUR HIRE'
     WHEN job_number_upper LIKE ANY (ARRAY['SWMS-%', 'AJBR%', 'MS1%', 'BWCWA%', 'WB6%']) THEN 'SW - MAKESAFE'
     WHEN job_number_upper LIKE 'SWP%' THEN 'SW - PATIOS'
     WHEN job_number_upper LIKE 'SWF%' THEN 'SW - FENCING'
     WHEN job_number_upper LIKE 'SWD%' THEN 'SW - DECKING'
     WHEN job_number_upper LIKE 'SWI%' THEN 'SW - INSURANCE WORK'
+    WHEN job_number_upper LIKE 'SWL%' THEN 'SW - LABOUR HIRE'
     ELSE ''
   END;
 EXCEPTION

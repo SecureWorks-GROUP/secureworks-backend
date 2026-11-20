@@ -2,7 +2,7 @@
 -- twelve-type check and removes the 'labour_hire' numbering branch, so a labour
 -- hire request answers SW- again. Never coerces or reclassifies a job: it
 -- refuses while any labour_hire job exists (undo the retype of those jobs
--- first). Numbers already minted SWLH- are left as they are.
+-- first). Numbers already minted SWL- are left as they are.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
@@ -18,7 +18,7 @@ BEGIN
   FROM pg_catalog.pg_proc p
   WHERE p.oid = to_regprocedure('public.next_job_number(text)');
   IF v_number_md5 IS NULL
-     OR v_number_md5 NOT IN ('54e49abe7bd3225fb96e016094504d89', '3fc8ff31501aec696bf6cf15d6e757d8') THEN
+     OR v_number_md5 NOT IN ('54e49abe7bd3225fb96e016094504d89', 'f9cc68391bd169891f8f456dee2bd7ea') THEN
     RAISE EXCEPTION 'next_job_number differs from the reviewed labour hire body';
   END IF;
 

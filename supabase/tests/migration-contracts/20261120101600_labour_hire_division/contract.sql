@@ -1,5 +1,5 @@
 -- 20261120101600: the SQL division rule answers SW - LABOUR HIRE for a job
--- typed labour_hire (whatever its number) and for an SWLH- number, moves no
+-- typed labour_hire (whatever its number) and for an SWL number, moves no
 -- other answer, and applies twice without change. The shared examples
 -- (division_examples.json) are proved against this body by the
 -- 20261118120115_division_rulings contract.
@@ -13,23 +13,29 @@ DECLARE
   actual text;
 BEGIN
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.job_division_option(text,text,uuid)'::regprocedure)
-       IS DISTINCT FROM '387e0eb966d0e8bb02fe7546e6bbeba2' THEN
+       IS DISTINCT FROM '16a8ef5f34c6b7a98fb2fe9eca23d2be' THEN
     RAISE EXCEPTION 'labour_hire_division_body_mismatch';
   END IF;
   FOR e IN
     SELECT * FROM (VALUES
-      -- Labour hire: the type decides, then the SWLH- number.
-      ('SWLH-ZZTEST01', 'labour_hire', 'SW - LABOUR HIRE'),
+      -- Labour hire: the type decides, then the SWL number.
+      ('SWL-ZZTEST01', 'labour_hire', 'SW - LABOUR HIRE'),
       ('SWM-ZZTEST02', 'labour_hire', 'SW - LABOUR HIRE'),
       (NULL, 'labour_hire', 'SW - LABOUR HIRE'),
       ('SWP-ZZTEST10', E' Labour_Hire\t', 'SW - LABOUR HIRE'),
-      ('swlh-zztest02', NULL, 'SW - LABOUR HIRE'),
-      ('SWLH-ZZTEST03', 'makesafe', 'SW - LABOUR HIRE'),
-      ('SWLH-ZZTEST04', 'repair', 'SW - MAKESAFE'),
-      ('SWLH-ZZTEST06', 'granny_flat', 'SecureBuild'),
-      ('SWLHZZTEST05', NULL, ''),
-      ('SWL-ZZTEST01', NULL, ''),
+      ('SWL-ZZTEST02', NULL, 'SW - LABOUR HIRE'),
+      ('swl-zztest03', NULL, 'SW - LABOUR HIRE'),
+      ('SWLZZTEST04', NULL, 'SW - LABOUR HIRE'),
+      ('SWL-ZZTEST05', 'makesafe', 'SW - LABOUR HIRE'),
+      -- A type rule still outranks the number, as it does for every prefix.
+      ('SWL-ZZTEST06', 'repair', 'SW - MAKESAFE'),
+      ('SWL-ZZTEST07', 'roofing', 'SW - PRIVATE ROOFING'),
+      ('SWL-ZZTEST10', 'granny_flat', 'SecureBuild'),
+      ('SWL-ZZTEST08', 'miscellaneous', ''),
+      (' SWL-ZZTEST09', NULL, ''),
       ('SWM-ZZTEST03', 'labour hire', ''),
+      ('SWM-ZZTEST04', 'miscellaneous', ''),
+      ('SWM-ZZTEST05', NULL, ''),
       -- Controls: every earlier answer is unchanged.
       ('SWRESTO-ZZTEST01', NULL, 'SW - RESTORATION'),
       ('SWMS-ZZTEST01', NULL, 'SW - MAKESAFE'),

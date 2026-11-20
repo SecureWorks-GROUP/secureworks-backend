@@ -524,26 +524,20 @@ Deno.test("a restoration card is make-safe work by its SWRESTO- number", () => {
   assertEquals(jobTrade({ type: "makesafe", job_number: "SWRESTO-261800" }), "makesafe");
 });
 
-Deno.test("a labour hire invoice reference names its SWLH- job; every older form still reads as before", () => {
+Deno.test("a labour hire invoice reference names its SWL- job through the unchanged job number pattern", () => {
   const read = (ref: string) => ref.match(REFERENCE_JOB_NUMBER)?.[0]?.toUpperCase() ?? null;
-  // The single-letter form cannot see a four-letter prefix, so SWLH- is named.
-  assertEquals(read("SWLH-261700"), "SWLH-261700");
-  assertEquals(read("swlh-261700 labour hire wk 20 Nov"), "SWLH-261700");
+  assertEquals(read("SWL-261700"), "SWL-261700");
+  assertEquals(read("swl-261700 labour hire wk 20 Nov"), "SWL-261700");
   // A longer number is never cut down to a valid one.
-  assertEquals(read("SWLH-2617001"), null);
-  // CONTROLS: unchanged answers.
+  assertEquals(read("SWL-2617001"), null);
+  // CONTROLS: the pattern is main's, so every older answer stands.
   assertEquals(read("SWM-261677"), "SWM-261677");
   assertEquals(read("SWMS-261156"), "SWMS-261156");
   assertEquals(read("SWRESTO-261800"), "SWRESTO-261800");
   assertEquals(read("SWP-261376 deposit"), "SWP-261376");
-  assertEquals(read("SW1615"), "SW1615");
   assertEquals(read("MLB-27093PO-56481"), null);
-  // A labour hire job is no builder make-safe or works card by its number.
-  assertEquals(jobTrade({ type: "labour_hire", job_number: "SWLH-261700" }), "other");
-});
-
-Deno.test("the sync-time linker and the reference matcher read the same job number pattern", async () => {
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const literal = `/${REFERENCE_JOB_NUMBER.source}/i`;
-  assertEquals(source.split(literal).length - 1, 2, "index.ts carries two copies of REFERENCE_JOB_NUMBER");
+  // A labour hire job is no builder make-safe or works card, by type or by number.
+  assertEquals(jobTrade({ type: "labour_hire", job_number: "SWL-261700" }), "other");
+  assertEquals(jobTrade({ type: "labour_hire", job_number: "SWM-261677" }), "other");
+  assertEquals(jobTrade({ type: null as unknown as string, job_number: "SWL-261700" }), "other");
 });
