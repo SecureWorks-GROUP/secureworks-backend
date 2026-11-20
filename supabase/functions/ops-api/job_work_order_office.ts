@@ -47,6 +47,35 @@ export interface OfficeActor {
   userId: string | null;
   /** The signed-in user's company; approving needs it. */
   orgId?: string | null;
+  /** True when the ops agent's server key acts for the named office person. */
+  viaAgent?: boolean;
+}
+
+const OFFICE_ROLES = new Set(["admin", "owner", "ops_manager"]);
+const ACTOR_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const OFFICE_AGENT_NOTE_MARK = "Entered by the office agent.";
+
+/**
+ * Owner, 21 Nov 2026: the ops agent's server key reviews a held invoice line
+ * for a named office person (body.actor_user_id), the same pattern as
+ * change_work_order_amount. The person must be office staff; the review is
+ * recorded under their id and the note says an agent entered it. Every other
+ * rule of the review (the line is held, not the submitter's own invoice, not
+ * in Xero, not in a pay run) is unchanged.
+ */
+export async function officeActorNamedByAgent(client: any, named: unknown): Promise<OfficeActor> {
+  const id = String(named ?? "").trim();
+  if (!ACTOR_UUID.test(id)) {
+    throw new JobWorkOrderOfficeError(403, "named_person_required", "Name the office person this review is for (actor_user_id).");
+  }
+  const { data, error } = await client.from("users").select("id, org_id, role").eq("id", id).maybeSingle();
+  if (error) {
+    throw new JobWorkOrderOfficeError(503, "actor_unreadable", "The named office person could not be checked.");
+  }
+  if (!data?.id || !OFFICE_ROLES.has(String(data.role || "").trim().toLowerCase())) {
+    throw new JobWorkOrderOfficeError(403, "actor_not_staff", "The named person is not office staff.");
+  }
+  return { staff: true, userId: String(data.id), orgId: data.org_id ? String(data.org_id) : null, viaAgent: true };
 }
 
 const QUEUE_COLUMNS =
@@ -360,7 +389,10 @@ export async function reviewCrewInvoiceLine(
       "decision must be approve, query, or reject.",
     );
   }
-  const note = typeof body?.note === "string" ? body.note.trim().slice(0, 2000) : null;
+  let note = typeof body?.note === "string" ? body.note.trim().slice(0, 2000) : null;
+  if (actor.viaAgent) {
+    note = [note, OFFICE_AGENT_NOTE_MARK].filter(Boolean).join(" ").slice(0, 2000);
+  }
   const { data: line, error: readErr } = await client.from("trade_invoice_lines")
     .select("id, trade_invoice_id, office_review_status, trade_invoices:trade_invoice_id(id, status, user_id, xero_bill_id, query_note, pay_run_id)")
     .eq("id", lineId)
