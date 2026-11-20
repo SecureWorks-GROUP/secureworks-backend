@@ -1,6 +1,18 @@
 // deno-lint-ignore-file no-explicit-any
 // P1-14. The sealed work order remains unchanged.
-type Caller = { staff: boolean; userId: string | null; orgId: string | null };
+type Caller = {
+  staff: boolean;
+  // A signed-in staff person's own id; null for every other caller.
+  userId: string | null;
+  orgId: string | null;
+  // True only for the server key presented with a server secret (the ops
+  // agent). Such a caller names the staff person it acts for in
+  // body.actor_user_id; that person must be office staff in the company.
+  serverKey?: boolean;
+};
+const STAFF_ROLES = new Set(["admin", "owner", "ops_manager"]);
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const refusal = (status: number, code: string, error: string) => ({
   status,
   body: { code, error },
@@ -70,7 +82,42 @@ export async function workOrderAmountChangeAction(
       },
     };
   }
-  if (!caller.userId) {
+  // Who changes it: the signed-in staff person, or (server key only) the
+  // staff person the agent names. A trade's session never reaches here
+  // (caller.staff is false) and a staff session cannot name someone else.
+  let actorUserId = caller.userId;
+  if (
+    !actorUserId && caller.serverKey === true &&
+    body.actor_user_id !== undefined && body.actor_user_id !== null
+  ) {
+    const named = String(body.actor_user_id).trim();
+    if (!UUID.test(named)) {
+      return refusal(
+        403,
+        "named_person_required",
+        "Name the staff person this change is for (actor_user_id).",
+      );
+    }
+    const person = await client.from("users").select("id, org_id, role").eq(
+      "id",
+      named,
+    ).maybeSingle();
+    if (person.error) {
+      throw new Error("Could not check the named staff person");
+    }
+    if (
+      !person.data?.id || String(person.data.org_id) !== String(caller.orgId) ||
+      !STAFF_ROLES.has(String(person.data.role || "").trim().toLowerCase())
+    ) {
+      return refusal(
+        403,
+        "actor_not_staff",
+        "The named person is not office staff in this company.",
+      );
+    }
+    actorUserId = String(person.data.id);
+  }
+  if (!actorUserId) {
     return refusal(
       403,
       "named_person_required",
@@ -99,7 +146,7 @@ export async function workOrderAmountChangeAction(
     p_work_order_id: body.work_order_id,
     p_to_ex: body.to_ex,
     p_reason: body.reason.trim(),
-    p_actor: caller.userId,
+    p_actor: actorUserId,
     p_org_id: caller.orgId,
   });
   if (read.error) {

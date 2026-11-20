@@ -16,6 +16,7 @@ import { weeklyCheckAction } from "./weekly_check.ts"
 import { setCouncilRequired } from './council_mark.ts'
 import { JobLabourPayReadError, readHourlyCappedJobs, readHourlyLabourLimits } from './job_labour_cap.ts'
 import { TRADE_PREVIEW_PARAM, assertTradePreviewOwner, assertTradePreviewRead, readTradePreviewProfile, tradePreviewContext, TradePreviewError } from './trade_owner_preview.ts'
+import { OfficeTradeInvoiceError, type OfficeTradeInvoiceRequest, recordOfficeTradeInvoiceSubmitted, resolveOfficeTradeInvoiceRequest, stripOfficeTradeInvoiceKeys } from './office_trade_invoice.ts'
 import { presentInvoiceJobPickerRow, readInvoiceAnyJobPermission } from './trade_invoice_job_picker.ts'
 import { addMyselfToJob, jobsNearMe, SelfAddError, SELF_ADDED_CONTACT_ACCESS_FILTER, bookingGrantsContactAccess, contactFreeJob } from './trade_self_add.ts'
 import { SelfAllocationRefusal, selfAllocateForInvoice } from './trade_self_allocation.ts'
@@ -11464,6 +11465,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             staff: _opsApiCallerIsStaffOperator(authMode, authUser),
             userId: authMode === 'jwt' ? authUser?.id || null : null,
             orgId: authMode === 'jwt' ? authUser?.orgId || null : DEFAULT_ORG_ID,
+            // The ops agent's server key names the staff person in actor_user_id.
+            serverKey: authMode === 'api_key' && serverSecretPresented,
           })
         return json(result.body, result.status)
       }
@@ -13883,6 +13886,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'jobs_near_me':
       case 'search_all_jobs':
       case 'generate_trade_invoice':
+      // The office submits a trade's invoice through the trade's own path
+      // (office_trade_invoice.ts). Staff only: it is on no trade-facing list.
+      case 'office_generate_trade_invoice':
       case 'my_invoices':
       case 'acknowledge_invoice_line':
       case 'roof_report_template':
@@ -13890,7 +13896,39 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'submit_roof_report':
       case 'clock_event':
       case 'submit_makesafe_report': {
-        const tradeUser = await authTrade(req, client)
+        // office_generate_trade_invoice: a staff session, or the server key
+        // naming a staff person, submits AS the named trade. Every rule below
+        // (visibility, eligibility, money, locks) is then the trade's own.
+        let officeInvoice: OfficeTradeInvoiceRequest | null = null
+        if (action === 'office_generate_trade_invoice') {
+          if (req.method !== 'POST') return json({ error: 'POST required' }, 405)
+          try {
+            officeInvoice = await resolveOfficeTradeInvoiceRequest(client, {
+              authMode,
+              serverSecretPresented,
+              sessionUser: authMode === 'jwt' && authUser
+                ? { id: authUser.id, orgId: authUser.orgId, role: authUser.role }
+                : null,
+            }, body)
+          } catch (error) {
+            if (error instanceof OfficeTradeInvoiceError) {
+              return json({ ok: false, success: false, saved: false, code: error.code, error: error.message, userMessage: error.message }, error.status)
+            }
+            throw error
+          }
+          stripOfficeTradeInvoiceKeys(body)
+          console.log(JSON.stringify({ event: 'office_trade_invoice', actor: requestActor, actor_user_id: officeInvoice.actorUserId, trade_user_id: officeInvoice.trade.id, via: officeInvoice.via }))
+        }
+        const tradeUser: TradeAuthContext = officeInvoice
+          ? {
+            id: officeInvoice.trade.id,
+            email: officeInvoice.trade.email,
+            orgId: officeInvoice.trade.orgId,
+            role: officeInvoice.trade.role,
+            managedVerticals: _normalizeManagedVerticals(officeInvoice.trade.managedVerticals),
+            seeEverything: officeInvoice.trade.seeEverything,
+          }
+          : await authTrade(req, client)
         // Dispatcher = the ops manager / admin who runs the board: see-all view of
         // every job plus the full open MakeSafe pool (other trades see only their
         // own). A vertical manager (users.managed_verticals contains the vertical,
@@ -15529,6 +15567,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           case 'verify_hours': return json(await verifyHours(client, tradeUser.id, body))
           case 'dispute_hours': return json(await disputeHours(client, tradeUser.id, body))
 
+          case 'office_generate_trade_invoice':
           case 'generate_trade_invoice': {
             const weekAutofill = await readFlag(client, 'trade_week_autofill_v1')
             const paySettingsRead = readTradePaySettings(client)
@@ -17278,6 +17317,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             }
 
             const invoiceId = lineHoldMode ? await saveStandardHeld() : await saveStandard()
+            // office_generate_trade_invoice: the saved invoice names who in the
+            // office submitted it and why (office_trade_invoice.ts).
+            if (officeInvoice && invoiceId !== null) await recordOfficeTradeInvoiceSubmitted(client, String(invoiceId), officeInvoice)
             if (invoiceId === null) {
               // Every line waits for the office: no pay invoice this send.
               try {
@@ -17286,6 +17328,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 console.error('[ops-api] generate_trade_invoice: holding invoice not saved:', lineSendLogCode(error))
                 lineHoldFailed('holding_invoice_not_saved')
               }
+              const heldOnly = lineHoldSaved as { id: string } | null
+              if (officeInvoice && heldOnly) await recordOfficeTradeInvoiceSubmitted(client, String(heldOnly.id), officeInvoice, { invoice_kind: 'held' })
               await lineHoldTellOffice()
               return json({
                 ok: true,

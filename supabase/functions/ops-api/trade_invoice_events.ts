@@ -1,13 +1,16 @@
 // One writer for trade_invoice_events (migration 20261106163712): the
 // append-only record of what the system or the office did to a trade invoice
 // outside the normal submit flow. Ids, codes and plain reasons only, never a
-// rate, an amount or a person's name in `reason`.
+// rate, an amount or a person's name in `reason`. The one exception is
+// office_submitted, whose reason is the office person's own words for why they
+// submitted the trade's invoice (office_trade_invoice.ts).
 
 export type TradeInvoiceEventType =
   | "voided_bill_released"
   | "stuck_invoice_resolved"
   | "xero_bill_reused"
-  | "extra_rate_held";
+  | "extra_rate_held"
+  | "office_submitted";
 
 export interface TradeInvoiceEvent {
   trade_invoice_id: string;

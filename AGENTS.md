@@ -5078,6 +5078,22 @@ Never widen it to book anyone else or to reassign. The app calls it only after
 stay on `OPS_API_PROFILE_SCOPED_JWT_ACTIONS`, or the front door 403s every
 plain trade before the route runs.
 
+## The Office Submits A Trade's Invoice Only Through The Trade's Own Path
+
+`office_generate_trade_invoice` (Marnin, 20 Nov 2026; `office_trade_invoice.ts`)
+lets a staff session, or the server key naming a staff person in
+`actor_user_id`, submit a trade's invoice. It is the `generate_trade_invoice`
+case run AS the named trade (`trade_user_id`, same company): the office keys
+(`trade_user_id`, `actor_user_id`, `reason`) are taken off the body first, so
+every rule, refusal, lock and money figure is the trade's own and the stored
+rows are byte-identical to the trade's submit. Who and why go in one
+append-only `trade_invoice_events` row, `office_submitted` (`20261120143000`).
+Never add a second invoice builder for the office, never let it skip a trade
+refusal, and never put it on a trade-facing list. The same rule lets the server
+key call `change_work_order_amount` only for a named staff person
+(`actor_user_id`, same company), who is then `p_actor`. Tests:
+`office_trade_invoice_test.ts`, `work_order_amount_change_test.ts`.
+
 ## A Job Is Invoiced One Way, Decided By The Job
 
 `trade_invoice_mode.ts` (Marnin, 11 Nov 2026) is the one rule: live group work
