@@ -968,17 +968,31 @@ function restoreAgentCards(
 // line is kept. A Crew app line the trade re-dated carries crew_key
 // "add:<old key>"; that line replaced the agent line, so the old one is not
 // put back beside it.
+//
+// "Untouched" is decided on the trade's own marks only. Both apps put a card
+// into work-order mode (and fill the agreed amount) on their own when the job
+// is invoiced as a work order, and the Crew app turns off every card after
+// the first of a grouped work-order line, so neither mode nor a work-order
+// card's off switch is a mark. An hours card turned off is.
+function nonEmptyList(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0;
+}
+
 function untouchedSuggestion(card: Record<string, unknown>): boolean {
+  const modeCard = card.wo_mode === true || card.commission_mode === true;
   return card.added_by_agent !== true &&
-    card.included !== false &&
+    !(card.included === false && !modeCard) &&
     !(Number(card.hours) > 0) &&
     !card.start_time &&
     !card.finish_time &&
     card.owner_edited !== true &&
     card.hours_user_edited !== true &&
     card.mode_picked !== true &&
-    card.wo_mode !== true &&
-    card.commission_mode !== true;
+    !(Number(card.typed_rate) > 0) &&
+    !(Number(card.commission_amount) > 0) &&
+    !(Number(card.travel_amount) > 0) &&
+    !nonEmptyList(card.wo_labour_lines) &&
+    !nonEmptyList(card.wo_lump_lines);
 }
 
 export function keepAgentCardsOnTradeSave(

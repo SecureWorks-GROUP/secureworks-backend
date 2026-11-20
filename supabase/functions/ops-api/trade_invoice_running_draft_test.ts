@@ -1784,3 +1784,51 @@ Deno.test("draft_replaced names the week's draft now", async () => {
   assert(at >= 0);
   assert(INDEX_SRC.slice(at, at + 400).includes("...(error.details || {})"));
 });
+
+Deno.test("a stale card the app put in work-order mode on its own does not drop the agent's hours", async () => {
+  // Both apps open a work-order job as that work order with the agreed
+  // amount, and the Crew app turns off every card after the first of a
+  // grouped work-order line. None of that is the trade's own edit.
+  for (const included of [true, false]) {
+    const { db, draftId } = await agentSavedWeek();
+    const appMode = {
+      ...staleSuggestionForA(),
+      included,
+      wo_mode: true,
+      commission_mode: false,
+      wo_allocated: 500,
+      agreed_applied: 500,
+      invoice_mode: "work_order",
+      invoice_mode_checked: true,
+      wo_labour_lines: [],
+      hours_user_edited: false,
+      typed_rate: null,
+    };
+    const saved = await saveRunningInvoiceDraft(
+      db,
+      USER,
+      phoneSave(draftId, [appMode]),
+      "staff",
+    );
+    assertEquals(cardByKey(saved, KEY_A)?.added_by_agent, true, String(included));
+    assertEquals(cardByKey(saved, KEY_A)?.hours, 4);
+    assertEquals(cardByKey(saved, KEY_A)?.wo_mode, undefined);
+  }
+
+  // The trade picking the work order themselves wins.
+  const { db, draftId } = await agentSavedWeek();
+  const picked = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    phoneSave(draftId, [{
+      ...staleSuggestionForA(),
+      wo_mode: true,
+      wo_allocated: 500,
+      mode_picked: true,
+    }]),
+    "staff",
+  );
+  assertEquals(cardByKey(picked, KEY_A)?.wo_mode, true);
+  assertEquals(cardByKey(picked, KEY_A)?.added_by_agent, undefined);
+  assertEquals(savedLines(db).some((line) => line.job_id === JOB), false);
+});
