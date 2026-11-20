@@ -14,6 +14,9 @@ BEGIN
   END;
   RAISE EXCEPTION 'ZZTEST expected refusal %', expected;
 END $$;
+-- A later migration (20261119091300) stops PUBLIC executing new functions;
+-- the helper is called as anon below.
+GRANT EXECUTE ON FUNCTION pg_temp.zztest_refuses(text, text) TO anon;
 SELECT pg_temp.zztest_refuses($q$INSERT INTO public.trade_savings_goals (user_id,label,target_amount)
   VALUES ('f1070001-0000-4000-8000-000000000001','ZZTEST goal',0)$q$, '23514');
 SELECT pg_temp.zztest_refuses($q$INSERT INTO public.trade_savings_goals (user_id,label,target_amount)
