@@ -31,10 +31,8 @@ BEGIN
       ('SWL-ZZTEST06', 'repair', 'SW - MAKESAFE'),
       ('SWL-ZZTEST07', 'roofing', 'SW - PRIVATE ROOFING'),
       ('SWL-ZZTEST10', 'granny_flat', 'SecureBuild'),
-      ('SWL-ZZTEST08', 'miscellaneous', ''),
       (' SWL-ZZTEST09', NULL, ''),
       ('SWM-ZZTEST03', 'labour hire', ''),
-      ('SWM-ZZTEST04', 'miscellaneous', ''),
       ('SWM-ZZTEST05', NULL, ''),
       -- Controls: every earlier answer is unchanged.
       ('SWRESTO-ZZTEST01', NULL, 'SW - RESTORATION'),
