@@ -674,6 +674,19 @@ jobs:
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/trade_pay_run_wait_test.ts
 
+      # The office submits a trade's invoice through the trade's own path
+      # (office_generate_trade_invoice): byte-identical rows to the trade's
+      # submit, one office_submitted event, every trade refusal kept; and the
+      # ops agent's server key may change a work order amount only for a named
+      # staff person. Drives the real handler against a fetch stub. The amount
+      # change file carries older type errors, hence --no-check there.
+      - name: Test office trade invoice and work order amount change
+        run: |
+          deno test --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/office_trade_invoice_test.ts
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/work_order_amount_change_test.ts
+
       # Automated money messages are off (captain, 30 Sep 2026). Drives the
       # real ops-api and daily-digest request handlers with every database,
       # Xero and GHL call answered by a fetch spy. Same --no-check reason as
