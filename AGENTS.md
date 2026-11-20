@@ -5072,7 +5072,8 @@ company, through `createAssignment` with no text, plus a
 `trade_self_allocated` job event. Being booked is what passes the invoice's
 `booked_on_job` rule; it also grants the allocated Trade App tier on that job.
 Never widen it to book anyone else or to reassign. The app calls it only after
-`generate_trade_invoice` refuses with `extra_job_not_allowed`. Contract:
+`generate_trade_invoice` refuses with `extra_job_not_allowed`, whose body's
+`refused_jobs` names each refused job by id and number only. Contract:
 `docs/trade-self-allocation-v1.md`. Both it and `trade_invoice_job_modes` must
 stay on `OPS_API_PROFILE_SCOPED_JWT_ACTIONS`, or the front door 403s every
 plain trade before the route runs.
