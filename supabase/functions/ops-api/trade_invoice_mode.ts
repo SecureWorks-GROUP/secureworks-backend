@@ -81,6 +81,9 @@ export type TradeInvoiceJobMode = TradeInvoiceModeDecision & {
   // this is the first one this trade has not billed yet; once every one is
   // billed, the job's main work order (and the cap refuses more).
   work_order_agreed_ex: number | null;
+  /** Office amount changes already inside work_order_agreed_ex / cap_agreed_ex.
+   *  Present only when non-zero; the cap reads it so it does not add them twice. */
+  work_order_office_change_ex?: number;
   job_work_order_id: string | null;
   // The job's main work order and its own agreed labour: what the job-level
   // cap reads (its amount changes carry every additional work order). Only on
@@ -219,7 +222,7 @@ export async function loadTradeInvoiceJobModes(
   // what the trade bills. Read only for jobs invoiced as a work order, and for
   // restoration jobs (whose mode it decides). More than one approved job work
   // order on a job is never guessed between.
-  const agreedByJob = new Map<string, { id: string; agreed: number }>();
+  const agreedByJob = new Map<string, { id: string; agreed: number; officeChange?: number }>();
   // Every approved work order (main and additional) on those jobs, for the
   // trade's pick (pickTradeWorkOrder).
   const ordersByJob = new Map<string, any[]>();
@@ -270,7 +273,11 @@ export async function loadTradeInvoiceJobModes(
       const raw = row?.agreed_labour_ex;
       const agreed = raw === null || raw === undefined || raw === "" ? NaN : Number(raw);
       if (row?.id && Number.isFinite(agreed) && agreed >= 0) {
-        agreedByJob.set(jobId, { id: String(row.id), agreed: Math.round(agreed * 100) / 100 });
+        agreedByJob.set(jobId, {
+          id: String(row.id),
+          agreed: Math.round(agreed * 100) / 100,
+          officeChange: Number(row.office_change_ex) || 0,
+        });
       }
     }
   };
@@ -341,6 +348,7 @@ export async function loadTradeInvoiceJobModes(
       ...mode,
       work_order_agreed_ex: next ? next.agreed_ex : agreed ? agreed.agreed : null,
       job_work_order_id: next ? next.id : agreed ? agreed.id : null,
+      ...(agreed && agreed.officeChange ? { work_order_office_change_ex: agreed.officeChange } : {}),
       // Only a job with more than one work order carries these, so every
       // other answer is byte for byte what it was.
       ...(pick && pick.options.length > 1
@@ -403,6 +411,7 @@ async function applyOfficeAmountChanges(client: any, rows: any[]): Promise<void>
     const base = Number(row.agreed_labour_ex);
     if (!Number.isFinite(base)) continue;
     row.agreed_labour_ex = Math.round((base + d) * 100) / 100;
+    row.office_change_ex = Math.round(d * 100) / 100;
   }
 }
 

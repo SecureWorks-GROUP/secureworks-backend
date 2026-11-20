@@ -506,6 +506,8 @@ export type WorkOrderCapMode = {
    *  Absent from an older answer: the two fields above. */
   cap_work_order_id?: string | null;
   cap_agreed_ex?: number | null;
+  /** Office amount changes already inside the agreed figures above. */
+  work_order_office_change_ex?: number;
   /** Every approved additional work order on the job and the trade it is
    *  named for (loadTradeInvoiceJobModes includeAdditionalOrders). Absent on
    *  a job with none: the job is checked exactly as before. */
@@ -592,7 +594,9 @@ export async function checkWorkOrderTotalCap(client: any, input: {
     capped.map((m) => ({
       jobId: m.job_id,
       ref: refs.get(m.job_id) || m.job_id,
-      agreedEx: Number(m.cap_agreed_ex ?? m.work_order_agreed_ex),
+      // The mode's agreed amount already holds the office's amount changes;
+      // readWorkOrderCapFacts adds every change, so take them out here.
+      agreedEx: money(Number(m.cap_agreed_ex ?? m.work_order_agreed_ex) - Number(m.work_order_office_change_ex ?? 0)),
       workOrderId: String(m.cap_work_order_id ?? m.job_work_order_id),
     })),
     { excludeLineIds: input.excludeLineIds },
