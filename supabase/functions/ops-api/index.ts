@@ -931,6 +931,7 @@ import {
   fillJobWorkOrderAllowance,
   JobWorkOrderOfficeError,
   listOfficeJobWorkOrderQueue,
+  officeActorNamedByAgent,
   openBlankJobWorkOrder,
   reviewCrewInvoiceLine,
   shouldOpenBlankJobWorkOrder,
@@ -11303,7 +11304,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (req.method !== 'POST') {
           return json({ error: 'review_crew_invoice_line is POST only', code: 'method_not_allowed' }, 405)
         }
-        const reviewed = await runJobWorkOrder(() => reviewCrewInvoiceLine(client, body, officeJobWorkOrderActor(authMode, authUser)))
+        // The ops agent's server key reviews for the office person it names
+        // in actor_user_id (owner, 21 Nov 2026); anyone else is their session.
+        const reviewed = await runJobWorkOrder(async () => reviewCrewInvoiceLine(
+          client,
+          body,
+          authMode === 'api_key' && serverSecretPresented && body?.actor_user_id
+            ? await officeActorNamedByAgent(client, body.actor_user_id)
+            : officeJobWorkOrderActor(authMode, authUser),
+        ))
         if (reviewed.ready_for_xero_push && reviewed.trade_invoice_id) {
           try {
             const pushed = await pushTradeInvoiceToXeroAction(client, { invoice_id: reviewed.trade_invoice_id }, reviewActorLabel(authUser))
