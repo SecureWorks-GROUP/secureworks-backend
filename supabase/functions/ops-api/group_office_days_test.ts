@@ -189,3 +189,21 @@ Deno.test("wiring: office door uses the session person; dispute is a trade door 
   assertStringIncludes(src, "disputeOfficeGroupHours(client, groupCaller.userId, groupPayload)");
   assertStringIncludes(src, "withOwnOfficeEntryMarks(client, groupCaller.userId, share)");
 });
+
+Deno.test("office entry: the ops agent's server key must name the office person; the reason says an agent keyed it", async () => {
+  const { client, log } = fakeClient({ flag: true });
+  // No person and no server key: refused as before.
+  assertEquals(await code(officeEnterGroupHours(client, { userId: null, isStaff: true }, body({ actor_user_id: OFFICE }), TODAY)), ["group_actor_required", 403]);
+  // Server key with no named person, or a bad id: refused.
+  assertEquals(await code(officeEnterGroupHours(client, { userId: null, isStaff: true, serverKey: true }, body(), TODAY)), ["group_actor_required", 403]);
+  assertEquals(await code(officeEnterGroupHours(client, { userId: null, isStaff: true, serverKey: true }, body({ actor_user_id: "nope" }), TODAY)), ["group_actor_required", 403]);
+  assertEquals(log.rpc.length, 0);
+  await officeEnterGroupHours(client, { userId: null, isStaff: true, serverKey: true }, body({ actor_user_id: OFFICE }), TODAY);
+  assertEquals(log.rpc.length, 1);
+  assertEquals(log.rpc[0].args.p_actor, OFFICE);
+  assertEquals(log.rpc[0].args.p_reason, "ZZTEST trade away, foreman confirmed (entered by the office agent)");
+  // A signed-in person cannot name someone else: their own id is used and the reason is untouched.
+  await officeEnterGroupHours(client, { userId: OFFICE, isStaff: true, serverKey: true }, body({ actor_user_id: TRADE }), TODAY);
+  assertEquals(log.rpc[1].args.p_actor, OFFICE);
+  assertEquals(log.rpc[1].args.p_reason, "ZZTEST trade away, foreman confirmed");
+});

@@ -2,7 +2,8 @@
 // ════════════════════════════════════════════════════════════
 // The office enters a missing crew member's days on a group work order (G4).
 //
-//   office_enter_group_hours    POST  office staff, a signed-in person
+//   office_enter_group_hours    POST  office staff: a signed-in person, or the
+//                                     ops agent's server key naming one
 //   dispute_office_group_hours  POST  the crew member, their own days only
 //
 // One trade who never enters hours holds the whole crew's claim in
@@ -119,7 +120,19 @@ export function officeDaysFromBody(body: Record<string, unknown>, today?: string
   });
 }
 
-export type OfficeActor = { userId: string | null; isStaff: boolean };
+export type OfficeActor = {
+  userId: string | null;
+  isStaff: boolean;
+  // True only for the ops agent's server key presented with a server secret.
+  // Such a caller is no person: it names the office person it acts for in
+  // body.actor_user_id (owner, 21 Nov 2026: the office backfills days for the
+  // crew, through an agent too). The database checks that person is office
+  // staff or a pay run approver, exactly as it checks a signed-in one.
+  serverKey?: boolean;
+};
+
+/** Marks a reason as entered by the office agent, so the crew member reads who really keyed it. */
+export const OFFICE_AGENT_REASON_MARK = " (entered by the office agent)";
 
 export async function officeEnterGroupHours(
   client: any,
@@ -127,8 +140,23 @@ export async function officeEnterGroupHours(
   body: Record<string, unknown>,
   today?: string,
 ) {
-  // A person, never the server key: the entry names who made it.
-  if (!actor.userId || !UUID_RE.test(actor.userId)) {
+  // The entry names a person. A signed-in person is that person. The ops
+  // agent's server key is not one, so it must name the office person it acts
+  // for; any other caller with no person is refused.
+  let actorUserId = actor.userId && UUID_RE.test(actor.userId) ? actor.userId : null;
+  const viaAgent = !actorUserId && actor.serverKey === true;
+  if (viaAgent) {
+    const named = String(body.actor_user_id ?? "").trim();
+    if (!UUID_RE.test(named)) {
+      throw new GroupWorkOrderError(
+        "group_actor_required",
+        "Name the office person these days are entered for (actor_user_id).",
+        403,
+      );
+    }
+    actorUserId = named;
+  }
+  if (!actorUserId) {
     throw new GroupWorkOrderError(
       "group_actor_required",
       "Sign in as yourself to enter days for a crew member.",
@@ -140,12 +168,16 @@ export async function officeEnterGroupHours(
   if (!UUID_RE.test(groupId) || !UUID_RE.test(target)) {
     throw new GroupWorkOrderError("group_office_target_invalid", "Send group_id and target_user_id.", 400);
   }
-  const reason = officeReason(body.reason);
+  let reason = officeReason(body.reason);
+  if (viaAgent) {
+    // Kept inside the database's 500 character limit.
+    reason = reason.slice(0, OFFICE_REASON_MAX - OFFICE_AGENT_REASON_MARK.length) + OFFICE_AGENT_REASON_MARK;
+  }
   const days = officeDaysFromBody(body, today);
   await assertOfficeDayEntryOn(client);
   const { data, error } = await client.rpc("group_office_enter_hours", {
     p_group_id: groupId,
-    p_actor: actor.userId,
+    p_actor: actorUserId,
     p_target: target,
     p_days: days,
     p_reason: reason,
