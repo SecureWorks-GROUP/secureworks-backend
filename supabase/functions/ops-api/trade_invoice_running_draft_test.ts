@@ -1461,3 +1461,326 @@ Deno.test("an agent draft is what the Trade App opens, and a sync does not drop 
   assertEquals((again.money as Row).gross_earned, expected.gross_earned);
   assertEquals((again.money as Row).recurring_deduction, null);
 });
+
+// ── A trade save keeps the agent's lines (the owner's texted hours) ──────────
+// The Trade App and the Crew app post their whole local copy on every save.
+// A copy read before the agent saved does not hold the agent's lines.
+
+const AGENT_DAY_B = "2026-10-22";
+
+function agentLines(): Row[] {
+  return [{
+    assignment_id: AS_HOURS,
+    job_id: JOB,
+    job_number: "SW-3331",
+    client_name: "Ada Quartermain",
+    site_suburb: "Fremantle",
+    scheduled_date: "2026-10-20",
+    start_time: "07:00",
+    finish_time: "11:00",
+    break_minutes: 0,
+    rate: 50,
+    description: "Texted: fence A",
+  }, {
+    job_id: JOB_B,
+    job_number: "SW-3332",
+    client_name: "Ada Quartermain",
+    scheduled_date: AGENT_DAY_B,
+    start_time: "10:00",
+    finish_time: "12:00",
+    break_minutes: 0,
+    rate: 40,
+    description: "Texted: job B",
+  }];
+}
+
+const KEY_A = "as:" + AS_HOURS;
+const KEY_B = `job:${JOB_B}:${AGENT_DAY_B}`;
+
+// The agent saves A and B. Returns the db and the draft id it saved.
+async function agentSavedWeek(): Promise<{ db: FakeDb; draftId: string }> {
+  const db = baseDb();
+  db.tables.job_assignments.push(assignment({ id: AS_HOURS }));
+  const saved = await saveRunningInvoiceDraft(db, USER, {
+    action: "agent_save_running_invoice_draft",
+    week_start: WEEK,
+    agent_label: "Jarvis",
+    gst_on: false,
+    lines: agentLines(),
+  }, "agent");
+  return { db, draftId: String(saved.draft_id) };
+}
+
+// What a phone that opened the week before the agent saved still holds: the
+// server's suggestion for the booking, untouched, and nothing for B.
+function staleSuggestionForA(): Row {
+  return {
+    assignment_id: AS_HOURS,
+    job_id: JOB,
+    job_number: "SW-3331",
+    client_name: "Ada Quartermain",
+    site_suburb: "Fremantle",
+    job_type: "fencing",
+    scheduled_date: "2026-10-20",
+    included: true,
+    auto: true,
+  };
+}
+
+function phoneSave(
+  draftId: string,
+  jobCards: Row[],
+  dismissedKeys: string[] = [],
+  over: Row = {},
+): Row {
+  return {
+    action: "save_running_invoice_draft",
+    week_start: WEEK,
+    draft_id: draftId,
+    gst_on: false,
+    notes: "",
+    draft_builder: {
+      version: 1,
+      jobCards,
+      invRows: [],
+      invLumpLines: [],
+      dismissedKeys,
+      notes: "",
+      gst_on: false,
+      weekStart: WEEK,
+      weekEnd: WEEK_END,
+    },
+    dismissed_source_keys: dismissedKeys,
+    ...over,
+  };
+}
+
+function cardByKey(
+  result: Record<string, unknown>,
+  key: string,
+): Row | undefined {
+  return ((result.draft_builder as Row).jobCards as Row[]).find((card) =>
+    sourceKey(card) === key
+  );
+}
+
+function savedLines(db: FakeDb): Row[] {
+  return (lastRpc(db).args.p_lines as Row[]) || [];
+}
+
+Deno.test("a phone saving an older copy keeps the agent's lines A and B", async () => {
+  const { db, draftId } = await agentSavedWeek();
+  const saved = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    phoneSave(draftId, [staleSuggestionForA()]),
+    "staff",
+  );
+  const a = cardByKey(saved, KEY_A);
+  const b = cardByKey(saved, KEY_B);
+  assertEquals(a?.added_by_agent, true);
+  assertEquals(a?.hours, 4);
+  assertEquals(a?.description, "Texted: fence A");
+  assertEquals(b?.added_by_agent, true);
+  assertEquals(b?.hours, 2);
+  const keys = keysOf((saved.draft_builder as Row).jobCards as Row[]);
+  assertEquals(keys.filter((key) => key === KEY_A).length, 1);
+  assertEquals(keys.filter((key) => key === KEY_B).length, 1);
+  const lines = savedLines(db);
+  assertEquals(lines.length, 2);
+  assertEquals(lines.map((line) => line.total_hours).sort(), [2, 4]);
+  assertEquals(saved.submitted, false);
+  assertEquals(saved.xero, false);
+
+  // A phone that holds no cards at all loses nothing either.
+  const empty = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    phoneSave(String(saved.draft_id), []),
+    "staff",
+  );
+  assertEquals(cardByKey(empty, KEY_A)?.hours, 4);
+  assertEquals(cardByKey(empty, KEY_B)?.hours, 2);
+  assertEquals(savedLines(db).length, 2);
+});
+
+Deno.test("a line the phone dismissed stays gone; the other agent line is kept", async () => {
+  const { db, draftId } = await agentSavedWeek();
+  const saved = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    phoneSave(draftId, [], [KEY_A]),
+    "staff",
+  );
+  assertEquals(cardByKey(saved, KEY_A), undefined);
+  assertEquals(cardByKey(saved, KEY_B)?.hours, 2);
+  assertEquals(
+    ((saved.draft_builder as Row).dismissedKeys as string[]).includes(KEY_A),
+    true,
+  );
+  const lines = savedLines(db);
+  assertEquals(lines.length, 1);
+  assertEquals(lines[0].job_id, JOB_B);
+
+  // body.remove is a removal too.
+  const removed = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    phoneSave(String(saved.draft_id), [], [KEY_A], { remove: [KEY_B] }),
+    "staff",
+  );
+  assertEquals(cardByKey(removed, KEY_B), undefined);
+  assertEquals(savedLines(db).length, 0);
+});
+
+Deno.test("the phone's edit to an agent line wins", async () => {
+  const { db, draftId } = await agentSavedWeek();
+  const opened = await getRunningInvoiceDraft(db, USER, WEEK);
+  const cards = JSON.parse(
+    JSON.stringify((opened.draft_builder as Row).jobCards),
+  ) as Row[];
+  const b = cards.find((card) => sourceKey(card) === KEY_B)!;
+  b.start_time = "08:00";
+  b.finish_time = "13:00";
+  b.hours = 5;
+  b.owner_edited = true;
+  const saved = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    phoneSave(draftId, cards),
+    "staff",
+  );
+  assertEquals(cardByKey(saved, KEY_B)?.hours, 5);
+  assertEquals(cardByKey(saved, KEY_B)?.finish_time, "13:00");
+  assertEquals(cardByKey(saved, KEY_A)?.hours, 4);
+  const lineB = savedLines(db).find((line) => line.job_id === JOB_B);
+  assertEquals(lineB?.total_hours, 5);
+
+  // A card the phone turned off stays off.
+  const off = JSON.parse(JSON.stringify(cards)) as Row[];
+  off.find((card) => sourceKey(card) === KEY_A)!.included = false;
+  const turnedOff = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    phoneSave(String(saved.draft_id), off),
+    "staff",
+  );
+  assertEquals(cardByKey(turnedOff, KEY_A)?.included, false);
+  assertEquals(savedLines(db).some((line) => line.job_id === JOB), false);
+});
+
+Deno.test("hours the trade typed on the booking win over the agent's line for it", async () => {
+  const { db, draftId } = await agentSavedWeek();
+  const typed = {
+    ...staleSuggestionForA(),
+    auto: false,
+    start_time: "06:00",
+    finish_time: "07:00",
+    break_minutes: 0,
+    hours: 1,
+    rate: 50,
+    hours_user_edited: true,
+  };
+  const saved = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    phoneSave(draftId, [typed]),
+    "staff",
+  );
+  assertEquals(cardByKey(saved, KEY_A)?.hours, 1);
+  assertEquals(cardByKey(saved, KEY_A)?.added_by_agent, undefined);
+  assertEquals(cardByKey(saved, KEY_B)?.hours, 2);
+});
+
+Deno.test("a Crew app line re-dated by the trade replaces the agent line, not a second copy", async () => {
+  const { db, draftId } = await agentSavedWeek();
+  // Crew app: a job with no booking is rebuilt with no source_key and
+  // crew_key "add:<the key it was read under>".
+  const moved: Row = {
+    assignment_id: null,
+    manually_added: true,
+    job_id: JOB_B,
+    job_number: "SW-3332",
+    client_name: "Ada Quartermain",
+    scheduled_date: "2026-10-23",
+    work_date: "2026-10-23",
+    start_time: "10:00",
+    finish_time: "12:00",
+    break_minutes: 0,
+    hours: 2,
+    rate: 40,
+    included: true,
+    crew_key: "add:" + KEY_B,
+  };
+  const saved = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    phoneSave(draftId, [moved]),
+    "staff",
+  );
+  const jobB = ((saved.draft_builder as Row).jobCards as Row[]).filter((
+    card,
+  ) => card.job_id === JOB_B);
+  assertEquals(jobB.length, 1);
+  assertEquals(sourceKey(jobB[0]), `job:${JOB_B}:2026-10-23`);
+  assertEquals(cardByKey(saved, KEY_A)?.hours, 4);
+});
+
+Deno.test("draft_replaced names the week's draft now", async () => {
+  const { db, draftId } = await agentSavedWeek();
+  const stale = await assertRejects(
+    () =>
+      saveRunningInvoiceDraft(
+        db,
+        USER,
+        phoneSave("99999999-9999-4999-8999-999999999999", []),
+        "staff",
+      ),
+    RunningDraftError,
+  );
+  assertEquals(stale.code, "draft_replaced");
+  assertEquals(stale.status, 409);
+  assertEquals(stale.details, { current_draft_id: draftId, week_start: WEEK });
+
+  const none = baseDb();
+  const empty = await assertRejects(
+    () => saveRunningInvoiceDraft(none, USER, phoneSave(draftId, []), "staff"),
+    RunningDraftError,
+  );
+  assertEquals(empty.code, "draft_replaced");
+  assertEquals(empty.details, { current_draft_id: null, week_start: WEEK });
+
+  // The database refused because another save replaced it first: re-read.
+  const raced = await agentSavedWeek();
+  const replacement = "99999999-9999-4999-8999-000000000001";
+  raced.db.rpc = (name: string, args: Record<string, unknown>) => {
+    raced.db.rpcs.push({ name, args });
+    raced.db.tables.trade_invoices = raced.db.tables.trade_invoices.map((
+      row,
+    ) => row.week_start === WEEK ? { ...row, id: replacement } : row);
+    return Promise.resolve({
+      data: null,
+      error: { message: "running draft is no longer replaceable" },
+    });
+  };
+  const race = await assertRejects(
+    () =>
+      saveRunningInvoiceDraft(
+        raced.db,
+        USER,
+        phoneSave(raced.draftId, []),
+        "staff",
+      ),
+    RunningDraftError,
+  );
+  assertEquals(race.code, "draft_replaced");
+  assertEquals(race.details, {
+    current_draft_id: replacement,
+    week_start: WEEK,
+  });
+
+  // ops-api puts these fields on the 409 body.
+  const at = INDEX_SRC.indexOf("function runningDraftApiError");
+  assert(at >= 0);
+  assert(INDEX_SRC.slice(at, at + 400).includes("...(error.details || {})"));
+});

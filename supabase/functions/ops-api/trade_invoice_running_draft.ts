@@ -45,11 +45,31 @@ import {
 export class RunningDraftError extends Error {
   status: number;
   code: string;
-  constructor(message: string, status: number, code: string) {
+  // Extra answer fields. draft_replaced carries current_draft_id and
+  // week_start so a client can re-read the week without another round trip.
+  details?: Record<string, unknown>;
+  constructor(
+    message: string,
+    status: number,
+    code: string,
+    details?: Record<string, unknown>,
+  ) {
     super(message);
     this.status = status;
     this.code = code;
+    if (details) this.details = details;
   }
+}
+
+const DRAFT_REPLACED_WORDS = "That draft was replaced. Open the week again.";
+
+function draftReplaced(details?: Record<string, unknown>): RunningDraftError {
+  return new RunningDraftError(
+    DRAFT_REPLACED_WORDS,
+    409,
+    "draft_replaced",
+    details,
+  );
 }
 
 const BLOCKED_KEYS = [
@@ -937,6 +957,76 @@ function restoreAgentCards(
   return next;
 }
 
+// A trade save (save_running_invoice_draft) sends the phone's whole local
+// copy: the Trade App and the Crew app both post every card they hold. A copy
+// read before an agent saved this week does not carry the agent's lines, so
+// taking it whole loses them. Every agent line the trade did not remove is
+// kept. Removed means its key is in dismissedKeys or body.remove (both are in
+// `dismissed` here), nothing else. Where the phone sends a card with the same
+// key, the phone's card wins, unless it is an untouched empty suggestion
+// (the phone never saw the agent's line for that booking): then the agent's
+// line is kept. A Crew app line the trade re-dated carries crew_key
+// "add:<old key>"; that line replaced the agent line, so the old one is not
+// put back beside it.
+function untouchedSuggestion(card: Record<string, unknown>): boolean {
+  return card.added_by_agent !== true &&
+    card.included !== false &&
+    !(Number(card.hours) > 0) &&
+    !card.start_time &&
+    !card.finish_time &&
+    card.owner_edited !== true &&
+    card.hours_user_edited !== true &&
+    card.mode_picked !== true &&
+    card.wo_mode !== true &&
+    card.commission_mode !== true;
+}
+
+export function keepAgentCardsOnTradeSave(
+  cards: Array<Record<string, unknown>>,
+  priorCards: Array<Record<string, unknown>>,
+  dismissed: string[],
+): Array<Record<string, unknown>> {
+  const dismissedSet = new Set(dismissed.map(String));
+  const next = cards.map((card) => ({ ...card }));
+  const indexByKey = new Map<string, number>();
+  const replaced = new Set<string>();
+  next.forEach((card, index) => {
+    const key = sourceKey(card);
+    if (key && !indexByKey.has(key)) indexByKey.set(key, index);
+    const crewKey = String(card.crew_key || "");
+    if (crewKey.startsWith("add:")) replaced.add(crewKey.slice(4));
+  });
+  for (const prior of priorCards) {
+    if (prior?.added_by_agent !== true) continue;
+    const key = sourceKey(prior);
+    if (!key || dismissedSet.has(key)) continue;
+    const at = indexByKey.get(key);
+    if (at == null) {
+      if (replaced.has(key)) continue;
+      next.push(JSON.parse(JSON.stringify(prior)));
+      indexByKey.set(key, next.length - 1);
+      continue;
+    }
+    if (untouchedSuggestion(next[at])) {
+      next[at] = JSON.parse(JSON.stringify(prior));
+    }
+  }
+  return next;
+}
+
+async function currentDraftDetails(
+  client: any,
+  user: { id: string; org_id: string },
+  weekStart: string,
+): Promise<Record<string, unknown>> {
+  try {
+    const row = await loadWeekDrafts(client, user.id, user.org_id, weekStart);
+    return { current_draft_id: row?.id || null, week_start: weekStart };
+  } catch {
+    return { week_start: weekStart };
+  }
+}
+
 export async function getRunningInvoiceDraft(
   client: any,
   userId: string,
@@ -989,7 +1079,10 @@ export async function getRunningInvoiceDraft(
   };
 }
 
-function saveFailure(error: { message?: string } | null): never {
+function saveFailure(
+  error: { message?: string } | null,
+  replacedDetails?: Record<string, unknown>,
+): never {
   const message = String(error?.message || "no invoice id returned");
   if (/not installed|function .* does not exist|draft_builder/i.test(message)) {
     throw new RunningDraftError(
@@ -999,11 +1092,7 @@ function saveFailure(error: { message?: string } | null): never {
     );
   }
   if (/no longer replaceable/i.test(message)) {
-    throw new RunningDraftError(
-      "That draft was replaced. Open the week again.",
-      409,
-      "draft_replaced",
-    );
+    throw draftReplaced(replacedDetails);
   }
   if (/multiple weekly drafts/i.test(message)) {
     throw new RunningDraftError(
@@ -1047,18 +1136,10 @@ export async function saveRunningInvoiceDraft(
   const weekEnd = addDays(weekStart, 6);
   const prior = await loadWeekDrafts(client, user.id, user.org_id, weekStart);
   if (body?.draft_id && prior && String(body.draft_id) !== String(prior.id)) {
-    throw new RunningDraftError(
-      "That draft was replaced. Open the week again.",
-      409,
-      "draft_replaced",
-    );
+    throw draftReplaced({ current_draft_id: prior.id, week_start: weekStart });
   }
   if (body?.draft_id && !prior) {
-    throw new RunningDraftError(
-      "That draft was replaced. Open the week again.",
-      409,
-      "draft_replaced",
-    );
+    throw draftReplaced({ current_draft_id: null, week_start: weekStart });
   }
   const incoming = body?.draft_builder && typeof body.draft_builder === "object"
     ? body.draft_builder
@@ -1120,6 +1201,8 @@ export async function saveRunningInvoiceDraft(
   });
   const jobCards = mode === "auto"
     ? restoreAgentCards(merged.cards, priorCards, merged.dismissed)
+    : mode === "staff"
+    ? keepAgentCardsOnTradeSave(merged.cards, priorCards, merged.dismissed)
     : merged.cards;
   const locked = !!(incoming.manualLock || command.locked || priorLocked ||
     body?.manual_lock === true || placed.added.length > 0 ||
@@ -1184,7 +1267,16 @@ export async function saveRunningInvoiceDraft(
     "persist_running_trade_invoice_draft_v1",
     payload,
   );
-  if (error || !data) saveFailure(error);
+  if (error || !data) {
+    // The database refused because another save replaced the draft first:
+    // name the week's draft now. An unreadable re-read leaves the id out
+    // (never null, which means the week has no draft).
+    const replacedDetails =
+      /no longer replaceable/i.test(String(error?.message || ""))
+        ? await currentDraftDetails(client, user, weekStart)
+        : undefined;
+    saveFailure(error, replacedDetails);
+  }
   return {
     ok: true,
     draft_id: data,
