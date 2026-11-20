@@ -354,6 +354,7 @@ import {
   setRestorationStageAction,
 } from './restoration_stage_store.ts'
 import { setRestorationWorkOrderAction } from './restoration_work_order.ts'
+import { runRestorationInspectionIntake } from './restoration_intake_inspection.ts'
 import {
   AdditionalWorkOrderError,
   addJobWorkOrderAction,
@@ -24261,8 +24262,8 @@ export const RESTORATION_INTAKE_CREW_EMAILS: readonly string[] = [
 
 async function resolveRestorationIntakeCrew(
   client: any,
-): Promise<Array<{ id: string; name: string }>> {
-  const { data, error } = await client.from('users').select('id, name, email, role')
+): Promise<Array<{ id: string; name: string; email: string; phone: string | null }>> {
+  const { data, error } = await client.from('users').select('id, name, email, role, phone')
   if (error) {
     console.error(
       '[ops-api] restoration crew lookup failed:',
@@ -24271,7 +24272,7 @@ async function resolveRestorationIntakeCrew(
     return []
   }
   const rows = Array.isArray(data) ? data : (data ? [data] : [])
-  const crew: Array<{ id: string; name: string }> = []
+  const crew: Array<{ id: string; name: string; email: string; phone: string | null }> = []
   for (const email of RESTORATION_INTAKE_CREW_EMAILS) {
     const user = rows.find((u: any) =>
       String(u?.email || '').trim().toLowerCase() === email
@@ -24280,7 +24281,12 @@ async function resolveRestorationIntakeCrew(
       console.error(`[ops-api] restoration crew member not found: ${email}`)
       continue
     }
-    crew.push({ id: String(user.id), name: String(user.name || email) })
+    crew.push({
+      id: String(user.id),
+      name: String(user.name || email),
+      email,
+      phone: user.phone ? String(user.phone) : null,
+    })
   }
   return crew
 }
@@ -24288,15 +24294,22 @@ async function resolveRestorationIntakeCrew(
 async function autoAllocateRestorationIntake(
   client: any,
   job: any,
+  details: {
+    siteAddress?: string | null
+    suburb?: string | null
+    builderReference?: string | null
+    builderPoNumber?: string | null
+  } = {},
 ): Promise<void> {
   if (!job?.id) return
   const crew = await resolveRestorationIntakeCrew(client)
+  const scheduledDate = getAWSTDate()
   for (const member of crew) {
     await createAssignment(client, {
       jobId: job.id,
       userId: member.id,
       crewName: member.name,
-      scheduledDate: getAWSTDate(),
+      scheduledDate,
       startTime: '07:00',
       endTime: '15:00',
       assignmentType: 'install',
@@ -24306,6 +24319,21 @@ async function autoAllocateRestorationIntake(
       suppress_notifications: true,
     })
   }
+  // The inspection visit's work order (2 hours, $88, approved by the owner's
+  // standing rule) and the trade's text. restoration_intake_inspection.ts.
+  await runRestorationInspectionIntake(client, {
+    jobId: String(job.id),
+    orgId: job.org_id ? String(job.org_id) : null,
+    jobNumber: job.job_number ? String(job.job_number) : null,
+    siteAddress: details.siteAddress ?? job.site_address ?? null,
+    suburb: details.suburb ?? job.site_suburb ?? null,
+    builderReference: details.builderReference ?? null,
+    builderPoNumber: details.builderPoNumber ?? null,
+    scheduledDate,
+  }, crew, {
+    sendSms: (phone, message, recipient) =>
+      sendSmsViaGhlWithReceipt(phone, message, undefined, recipient),
+  })
 }
 export const _resolveRestorationIntakeCrewForTest = resolveRestorationIntakeCrew
 export const _resolveMakesafeDefaultAssigneeForTest = resolveMakesafeDefaultAssignee
@@ -24801,7 +24829,12 @@ async function createMakesafeJob(
   ) {
     try {
       if (reviewedJobFamily === 'restoration') {
-        await autoAllocateRestorationIntake(client, job)
+        await autoAllocateRestorationIntake(client, job, {
+          siteAddress: site_address || null,
+          suburb: suburb || null,
+          builderReference: external_ref || builder_claim_ref || null,
+          builderPoNumber: builder_po_number || null,
+        })
       } else {
         await autoAllocateMakesafeIntakeToHugo(client, job)
       }

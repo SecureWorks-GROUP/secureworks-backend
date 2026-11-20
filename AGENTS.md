@@ -1673,6 +1673,14 @@ actions `restoration_*`. What must not regress:
   ML Builders: its Prime mailer, so its team sees it when the coordinator is
   away). Outbound only, like `restoration_recipients`.
 
+- **Its first visit is set at mint** (owner, 20 Nov 2026): after the
+  restoration crew is booked, `restoration_intake_inspection.ts` fills the
+  job's work order for the inspection trade (2 hours, $88 ex GST, the visit,
+  the site and builder references), approves it with
+  `approve_job_work_order_by_agent` under the owner's standing rule (never
+  as a person), and texts that trade once (a job event is claimed before the
+  send). An approved or hand-filled work order is left alone, and neither
+  step can fail the mint. The works get their own additional work order.
 - **Its own board** (owner, 12 Nov 2026): restoration cards leave the ops
   make-safe board (`excludeRestoration`) for `restoration_board`, seven stages
   stored in `jobs.metadata.restoration_stage` with the job status, moved by
