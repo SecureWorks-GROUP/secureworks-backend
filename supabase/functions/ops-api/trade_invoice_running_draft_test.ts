@@ -2019,3 +2019,52 @@ Deno.test("draft_replaced names the week's draft now", async () => {
   assert(at >= 0);
   assert(INDEX_SRC.slice(at, at + 400).includes("...(error.details || {})"));
 });
+
+// The save answer names the agent lines the server put back, so the app can
+// read the draft again before its next save. Empty when it put none back.
+Deno.test("the save answer lists the agent lines the server put back", async () => {
+  const { db } = await agentSavedWeek();
+  // A copy that never saw the agent's lines: A replaces the untouched
+  // suggestion and B is added.
+  const stale = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    phoneSave(null, [staleSuggestionForA()]),
+    "staff",
+  );
+  assertEquals(
+    [...(stale.restored_agent_keys as string[])].sort(),
+    [KEY_A, KEY_B].sort(),
+  );
+
+  // A copy holding both lines gets nothing back.
+  const opened = await getRunningInvoiceDraft(db, USER, WEEK);
+  const held = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    phoneSave(
+      String(opened.draft_id),
+      jobCardsOf(opened as Record<string, unknown>),
+    ),
+    "staff",
+  );
+  assertEquals(held.restored_agent_keys, []);
+
+  // A dismissed line is not put back and not listed.
+  const dismissed = await saveRunningInvoiceDraft(
+    db,
+    USER,
+    phoneSave(null, [], [KEY_A]),
+    "staff",
+  );
+  assertEquals(dismissed.restored_agent_keys, [KEY_B]);
+
+  // An agent save lists nothing.
+  const agent = await saveRunningInvoiceDraft(db, USER, {
+    action: "agent_save_running_invoice_draft",
+    week_start: WEEK,
+    agent_label: "Jarvis",
+    lines: [],
+  }, "agent");
+  assertEquals(agent.restored_agent_keys, []);
+});
