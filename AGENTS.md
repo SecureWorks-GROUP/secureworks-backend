@@ -1782,12 +1782,21 @@ single-letter ones (`SW[A-Z]?-?\d`, `SW(MS|[A-Z])-`) cannot see it, so the
 customer invoice Reference linker names it beside `SWRESTO-`
 (`REFERENCE_JOB_NUMBER` in `xero-sync/builder_reference_match.ts`, and its two
 copies in `xero-sync/index.ts`, pinned together by test). NOT widened, like
-`SWRESTO-` before it: the supplier bill grammars (`bill_prematch.ts`,
-`materials_ingest.ts` `JOB_NUMBER_RE`), `_shared/po_reference.ts`,
-`job_trace.ts` and reporting-api. A supplier bill or purchase order quoting an
-`SWLH-` number is therefore placed by a person; widening those is a
-fate-moving matcher change with its own replay. Tests:
-`ops-api/labour_hire_job_type_test.ts`.
+`SWRESTO-` before it: `JOB_NUMBER_RE` (`materials_ingest.ts`) and its
+hyphen-optional twins (`bill_prematch.ts`), `_shared/po_reference.ts`,
+`job_trace.ts` and reporting-api. `JOB_NUMBER_RE` is not only the supplier bill
+grammar: it is also the second-chance invoice link (`matchUnlinkedInvoices`
+strategy 1) and the Xero project name link. So a supplier bill, a purchase
+order or a Xero project quoting an `SWLH-` number is placed by a person, and a
+customer invoice the sync-time linker missed is not picked up later by its
+number. Widening those is a fate-moving matcher change with its own replay.
+
+Trade bill pushes (`xeroTracking(job_number)` in the weekly and work order
+invoice paths) read the NUMBER only and name the option without checking Xero
+has it: an `SWLH-` job's bill names `SW - LABOUR HIRE`, so add the option in
+Xero (`ensure_xero_tracking_option`) before the first such bill, and a labour
+hire job that kept an `SWM-` number gets no Business Unit on its trade bills.
+Tests: `ops-api/labour_hire_job_type_test.ts`.
 
 ## Automatic Repair Intake Is One Flag, And The Mint Judges The Draft
 
