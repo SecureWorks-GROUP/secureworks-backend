@@ -478,6 +478,19 @@ jobs:
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/scope_job_drafts_test.ts
 
+      # The weekly invoice draft keeps the agent's lines when a trade saves an
+      # older copy, draft_replaced names the week's draft, an extra-job refusal
+      # names the refused jobs by id, the job search survives a comma or
+      # bracket, and every refused request logs one line. --no-check: the
+      # running draft suite carries one known pre-existing test type error.
+      - name: Test the weekly invoice draft, extra-job refusal, job search and refusal log
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/trade_invoice_running_draft_test.ts \
+            supabase/functions/ops-api/trade_invoice_extra_job_authority_test.ts \
+            supabase/functions/ops-api/trade_job_search_filter_test.ts \
+            supabase/functions/ops-api/ops_api_refusal_log_test.ts
+
       # A service-role key committed in 2026-03 stayed live for six months.
       # Refuse any tracked service_role JWT or sb_secret_ key, whatever path
       # it sits under.

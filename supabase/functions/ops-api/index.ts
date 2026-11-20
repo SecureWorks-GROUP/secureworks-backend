@@ -47,6 +47,8 @@ import {
   isCommissionLine,
   normaliseExtraItem,
 } from './trade_invoice_extra_job_authority.ts'
+import { tradeJobSearchOrFilter } from './trade_job_search_filter.ts'
+import { opsApiRefusalLogLine } from './ops_api_refusal_log.ts'
 import { invoiceEmailStatusRefusal, sendIssuedInvoiceEmail } from './invoice_email_status.ts'
 import { divisionTrackingOption, loadDraftStandard } from '../_shared/xero_draft_standard.ts'
 import { recordXeroDraft } from '../_shared/xero_draft_register.ts'
@@ -2237,6 +2239,7 @@ function tradeInvoiceMoneyApiError(error: unknown): never {
 function runningDraftApiError(error: unknown): never {
   if (error instanceof RunningDraftError) {
     throw new ApiError(error.message, error.status, {
+      ...(error.details || {}),
       ok: false,
       code: error.code,
       error: error.message,
@@ -16260,6 +16263,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                       saved: false,
                       code: error.code,
                       jobs: error.jobs,
+                      // Each refused job the server found, by id and number,
+                      // so the app can offer self_allocate_for_invoice. Only
+                      // jobs this trade named on their own lines.
+                      refused_jobs: error.refusedJobs,
                       // Commission lines refused (only on a job they created,
                       // manage, or hold the grant for). Adding themselves to
                       // these jobs does not help.
@@ -18436,6 +18443,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     }
     if (err instanceof ExpenseCaptureError) return json(err.body, err.status)
     if (err instanceof ApiError) {
+      console.warn(opsApiRefusalLogLine(auditAction, err.status, err.body))
       return json(err.body || { error: err.message }, err.status)
     }
     if (err instanceof JobStartDepositError) {
@@ -46380,9 +46388,9 @@ export async function searchAllJobs(
       .not('status', 'in', _GLOBAL_SEARCH_STATUS_EXCLUDE)
     if (q) {
       // Search covers job_number + client_name + site_suburb + site_address.
-      jobQuery = jobQuery.or(
-        `job_number.ilike.%${q}%,client_name.ilike.%${q}%,site_suburb.ilike.%${q}%,site_address.ilike.%${q}%`,
-      )
+      // The or() filter is built from the trade's text, so its reserved
+      // characters become single-character wildcards (trade_job_search_filter.ts).
+      jobQuery = jobQuery.or(tradeJobSearchOrFilter(q))
     }
     if (idChunk) {
       jobQuery = jobQuery.in('id', idChunk)

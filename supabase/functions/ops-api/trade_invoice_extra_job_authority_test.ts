@@ -527,3 +527,40 @@ handlerTest("commission record: a record that cannot be read refuses the commiss
   // A submission with no commission line never reads it.
   assertAccepted(await submit([line({ job_id: BOOKED })], { commissions: "error" }));
 });
+
+// ── refused_jobs: what the app needs to offer "Add yourself" ───────────────
+
+handlerTest("extra job: refused_jobs names each refused job the server found, by id and number only", async () => {
+  // By id, by number, twice, and beside a booked line.
+  const out = await submit([
+    line({ job_id: NOT_BOOKED }),
+    line({ job_number: "ZZF-1002" }),
+    line({ job_id: CANCELLED_CARD_JOB }),
+    line({ job_id: BOOKED, job_number: "ZZF-1001" }),
+  ]);
+  assertRefused(out, "extra_job_not_allowed", "ZZF-1002");
+  assertEquals(out.body.jobs, ["ZZF-1002", "ZZF-1008"]);
+  assertEquals(out.body.refused_jobs, [
+    { job_id: NOT_BOOKED, job_number: "ZZF-1002" },
+    { job_id: CANCELLED_CARD_JOB, job_number: "ZZF-1008" },
+  ]);
+  for (const job of out.body.refused_jobs) {
+    assertEquals(Object.keys(job).sort(), ["job_id", "job_number"]);
+  }
+});
+
+handlerTest("extra job: refused_jobs is empty when adding yourself would not help or the job was not found", async () => {
+  const commission = await submit([line({ job_id: NOT_BOOKED }, "Commission")]);
+  assertRefused(commission, "commission_not_allowed", "ZZF-1002");
+  assertEquals(commission.body.refused_jobs, []);
+  // A not-booked job beside a refused commission: only the not-booked job.
+  const mixed = await submit([
+    line({ job_id: NOT_BOOKED }),
+    line({ job_id: BOOKED }, "Commission"),
+  ]);
+  assertEquals(mixed.body.refused_jobs, [{ job_id: NOT_BOOKED, job_number: "ZZF-1002" }]);
+  // Another company's job is never named by id.
+  const foreign = await submit([line({ job_id: FOREIGN })], { invoiceAnyJob: true });
+  assertRefused(foreign, "extra_job_not_found", FOREIGN);
+  assertEquals(foreign.body.refused_jobs, []);
+});

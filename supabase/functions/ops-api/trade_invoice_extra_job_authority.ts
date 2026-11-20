@@ -171,22 +171,31 @@ export type ExtraJobBillingRefusalCode =
   | "commission_not_allowed"
   | "commission_not_salesperson";
 
+export type RefusedExtraJob = { job_id: string; job_number: string | null };
+
 export class ExtraJobBillingRefusal extends Error {
   code: ExtraJobBillingRefusalCode;
   // Jobs refused because the trade is not on them (adding themselves helps).
   jobs: string[];
   // Jobs whose commission line was refused (adding themselves does not help).
   commissionJobs: string[];
+  // The same refused jobs as `jobs`, by id and number, when the server found
+  // them in the caller's company: what the app needs to offer
+  // self_allocate_for_invoice. Nothing else about the job. Empty on every
+  // other refusal.
+  refusedJobs: RefusedExtraJob[];
   constructor(
     code: ExtraJobBillingRefusalCode,
     jobs: string[],
     message: string,
     commissionJobs: string[] = [],
+    refusedJobs: RefusedExtraJob[] = [],
   ) {
     super(message);
     this.code = code;
     this.jobs = jobs;
     this.commissionJobs = commissionJobs;
+    this.refusedJobs = refusedJobs;
   }
 }
 
@@ -216,6 +225,7 @@ const COMMISSION_ONLY_ON_OWN_JOB =
 export function extraJobNotAllowedRefusal(
   refs: string[],
   commissionRefs: string[] = [],
+  refusedJobs: RefusedExtraJob[] = [],
 ): ExtraJobBillingRefusal {
   const unique = [...new Set(refs)];
   const commission = [...new Set(commissionRefs)];
@@ -238,7 +248,16 @@ export function extraJobNotAllowedRefusal(
       "Add yourself to the job on your invoice (pick the job again), or ask the office, then submit again." +
       commissionNote,
     commission,
+    uniqueRefusedJobs(refusedJobs),
   );
+}
+
+function uniqueRefusedJobs(jobs: RefusedExtraJob[]): RefusedExtraJob[] {
+  const byId = new Map<string, RefusedExtraJob>();
+  for (const job of jobs) {
+    if (job?.job_id && !byId.has(job.job_id)) byId.set(job.job_id, job);
+  }
+  return [...byId.values()];
 }
 
 // Commission lines on jobs whose commission record names someone else (or
@@ -323,6 +342,7 @@ export async function assertTradeMayBillExtraJobs(
   let invoiceAnyJob: boolean | null = null;
   const passed: string[] = [];
   const refused: string[] = [];
+  const refusedJobs: RefusedExtraJob[] = [];
   const refusedCommission: string[] = [];
   const refusedSalesperson: string[] = [];
   for (const line of lines) {
@@ -360,10 +380,20 @@ export async function assertTradeMayBillExtraJobs(
       refusedSalesperson.push(String(row.job_number || line.ref));
     } else if (isCommissionLine(line.lineType)) {
       refusedCommission.push(String(row.job_number || line.ref));
-    } else refused.push(String(row.job_number || line.ref));
+    } else {
+      refused.push(String(row.job_number || line.ref));
+      refusedJobs.push({
+        job_id: String(row.id),
+        job_number: row.job_number ? String(row.job_number) : null,
+      });
+    }
   }
   if (refused.length > 0 || refusedCommission.length > 0) {
-    throw extraJobNotAllowedRefusal(refused, [...refusedCommission, ...refusedSalesperson]);
+    throw extraJobNotAllowedRefusal(
+      refused,
+      [...refusedCommission, ...refusedSalesperson],
+      refusedJobs,
+    );
   }
   if (refusedSalesperson.length > 0) throw commissionNotSalespersonRefusal(refusedSalesperson);
   return passed;
