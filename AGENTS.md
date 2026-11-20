@@ -1761,6 +1761,40 @@ Tests: `repair_intake_routing_test.ts`,
 `repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
 `insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
 
+## Labour Hire Is Its Own Job Type, Numbered SWL-
+
+Owner's word, 20 Nov 2026: labour hire (our workers on another builder's site,
+charged by the hour) is `jobs.type = 'labour_hire'`, numbered `SWL-`
+(`next_job_number`, `20261120101500`, same yearly counter), and books to its own
+Xero Business Unit `SW - LABOUR HIRE`. The type decides the unit whatever the
+number: the four first jobs keep their `SWM-` numbers
+(`scripts/labour-hire-retype-four-jobs.sql`, run by hand, dry run by default).
+With no type the number decides, as `SWP`/`SWF`/`SWD`/`SWI` do. The rule is in
+two languages and one example table: `divisionTrackingOption`
+(`_shared/xero_draft_standard.ts`), the SQL `job_division_option`
+(`20261120101600`) and `_shared/division_examples.json`; change all three
+together (`scripts/test-division-twin.sh`). Revenue keeps the default sales
+account 200 until the bookkeeper names another (the account is read from the
+type, never the number). Everywhere else it takes the path a miscellaneous job
+takes: hourly trade invoices, no deposit gate, no closeout review text, the
+default stage list.
+
+`SWL-` is one letter, so every `SW[A-Z]` job number grammar already reads it:
+the customer invoice Reference linker, the supplier bill grammar
+(`JOB_NUMBER_RE`, `bill_prematch.ts`), `job_trace.ts`, Dispatch and the context
+readers. `_shared/po_reference.ts` lists its letters and now carries `L`. The
+readers that list a few letters and skip the rest skip `SWL-` exactly as they
+skip `SWM-` (monitor-inbox `SW[PFD]-`, reporting-api `SW[PFDRI]-`,
+`isRealJobRef` `SW[PF]`, `dispatch_v2_reply_pdf.ts` `SW([FPR])`); none of them
+maps `L` to another trade.
+
+Trade bill, purchase order and expense pushes (`xeroTracking(job_number)`) read
+the NUMBER only and the trade bill paths name the option without checking Xero
+has it: an `SWL-` job's bill names `SW - LABOUR HIRE`, so add the option in
+Xero (`ensure_xero_tracking_option`) before the first such bill, and a labour
+hire job that kept an `SWM-` number gets no Business Unit on its trade bills.
+Tests: `ops-api/labour_hire_job_type_test.ts`, `_shared/po_reference_test.ts`.
+
 ## Automatic Repair Intake Is One Flag, And The Mint Judges The Draft
 
 Owner's word, 13 Oct 2026: behind `feature_flags.repair_intake_auto_v1` (seeded

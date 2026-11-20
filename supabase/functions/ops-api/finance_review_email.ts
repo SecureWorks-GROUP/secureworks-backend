@@ -158,10 +158,10 @@ export function buildFinanceReviewEmail(
   // flag reads as expected, not an exception.
   const intro =
     (input.isUpdate
-      ? "This is an updated review notice — it supersedes the earlier one for this invoice. "
+      ? "This is an updated review notice. It supersedes the earlier one for this invoice. "
       : "") +
     "This trade invoice has " + n + " make-safe line" + (n === 1 ? "" : "s") +
-    " billing above the allowed hours. This is a routine check — around 40% of make-safe jobs " +
+    " billing above the allowed hours. This is a routine check: around 40% of make-safe jobs " +
     "legitimately run over, so a flag here is expected rather than a problem. Please review the " +
     "detail below against the trade's explanation before approving payment in Xero.";
 
@@ -195,7 +195,7 @@ export function buildFinanceReviewEmail(
     textLines.push("");
   }
   textLines.push(
-    "The pay decision stays with you in Xero — this notice never holds or pays anything.",
+    "The pay decision stays with you in Xero. This notice never holds or pays anything.",
   );
   const text = textLines.join("\n");
 
@@ -242,7 +242,7 @@ export function buildFinanceReviewEmail(
 <div style="font-family:Helvetica,Arial,sans-serif;max-width:640px;margin:0 auto;">
   <div style="background:#293C46;padding:18px 24px;border-radius:8px 8px 0 0;">
     <h1 style="color:#fff;margin:0;font-size:18px;">SecureWorks Group</h1>
-    <p style="color:#8FA4B2;margin:4px 0 0;font-size:12px;">Trade invoice — hours review</p>
+    <p style="color:#8FA4B2;margin:4px 0 0;font-size:12px;">Trade invoice hours review</p>
   </div>
   <div style="padding:24px;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 8px 8px;color:#293C46;">
     <p style="margin:0 0 4px;">${esc(intro)}</p>
@@ -257,7 +257,7 @@ export function buildFinanceReviewEmail(
       }" style="background:#F15A29;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;display:inline-block;">Open the Xero draft bill</a></p>`
       : ""
   }
-    <p style="margin:18px 0 0;font-size:12px;color:#4C6A7C;">The pay decision stays with you in Xero — this notice never holds or pays anything.</p>
+    <p style="margin:18px 0 0;font-size:12px;color:#4C6A7C;">The pay decision stays with you in Xero. This notice never holds or pays anything.</p>
   </div>
 </div>`;
 

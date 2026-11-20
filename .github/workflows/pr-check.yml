@@ -823,6 +823,9 @@ jobs:
             supabase/functions/_shared/xero_draft_standard_test.ts \
             supabase/functions/_shared/xero_write_register_test.ts \
             supabase/functions/ops-api/invoice_create_contract_test.ts \
+            supabase/functions/_shared/po_reference_test.ts \
+            supabase/functions/ops-api/labour_hire_job_type_test.ts \
+            supabase/functions/ops-api/outbound_client_text_no_em_dash_test.ts \
             supabase/functions/ops-api/ops_api_operator_auth_test.ts \
             supabase/functions/ops-api/xero_accpay_books_test.ts \
             supabase/functions/ops-api/xero_receivables_read_test.ts \

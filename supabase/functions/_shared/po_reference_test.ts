@@ -189,3 +189,26 @@ Deno.test("canonicalJobRef: an SWRESTO- restoration job number keeps its own ref
   assertEquals(canonicalJobRef("SWRESTO-261800"), "SWRESTO-261800");
   assertEquals(canonicalJobRef("swresto-261800-01"), "SWRESTO-261800-01");
 });
+
+// Labour hire jobs are numbered SWL- (owner, 20 Nov 2026).
+Deno.test("canonicalJobRef: an SWL- labour hire job number is canonical and is recovered for its order", () => {
+  assert(isCanonicalJobRef("SWL-261700"));
+  assertEquals(canonicalJobRef("SWL-261700"), "SWL-261700");
+  assertEquals(canonicalJobRef("swl-261700-01"), "SWL-261700-01");
+  assertEquals(canonicalJobRef("Job SWL-261700 hire order"), "SWL-261700");
+  // The order stored some other reference: the job number is what the supplier
+  // is asked to quote. Before L was a known letter this returned the raw text.
+  assertEquals(canonicalJobRef("PO-1000123", "SWL-261700"), "SWL-261700");
+  assertEquals(canonicalJobRef("", "SWL-261700"), "SWL-261700");
+  // Seven digits are no job number, and a hyphenless form is not canonical.
+  assert(!isCanonicalJobRef("SWL-2617001"));
+  assert(!isCanonicalJobRef("SWL261700"));
+  // The primary bill linker reads the form this emits, whole.
+  assertEquals(canonicalJobRef("PO-1000123", "SWL-261700").match(SYNC_REGEX)?.[0], "SWL-261700");
+  // CONTROLS: letters outside the list are still not canonical, and the
+  // letters that were in it answer as before.
+  assert(!isCanonicalJobRef("SWG-261700"));
+  assert(!isCanonicalJobRef("SWB-261700"));
+  assertEquals(canonicalJobRef("PO-1000123", "SWM-261677"), "SWM-261677");
+  assertEquals(canonicalJobRef("PO-1000123", "SWG-261700"), "PO-1000123");
+});

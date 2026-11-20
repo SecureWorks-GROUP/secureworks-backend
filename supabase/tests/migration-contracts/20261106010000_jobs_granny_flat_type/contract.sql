@@ -11,7 +11,10 @@ BEGIN
     INTO v_definition, v_expression
   FROM pg_constraint WHERE conrelid = 'public.jobs'::regclass
     AND conname = 'jobs_type_check' AND contype = 'c' AND convalidated;
-  IF v_definition IS DISTINCT FROM 'CHECK ((type = ANY (ARRAY[''fencing''::text, ''patio''::text, ''combo''::text, ''decking''::text, ''renovation''::text, ''insurance''::text, ''roofing''::text, ''miscellaneous''::text, ''general''::text, ''makesafe''::text, ''repair''::text, ''granny_flat''::text])))' THEN
+  -- The second definition is the registered successor
+  -- (20261120101500_labour_hire_job_type), which adds one type and drops none.
+  IF v_definition IS DISTINCT FROM 'CHECK ((type = ANY (ARRAY[''fencing''::text, ''patio''::text, ''combo''::text, ''decking''::text, ''renovation''::text, ''insurance''::text, ''roofing''::text, ''miscellaneous''::text, ''general''::text, ''makesafe''::text, ''repair''::text, ''granny_flat''::text])))'
+     AND v_definition IS DISTINCT FROM 'CHECK ((type = ANY (ARRAY[''fencing''::text, ''patio''::text, ''combo''::text, ''decking''::text, ''renovation''::text, ''insurance''::text, ''roofing''::text, ''miscellaneous''::text, ''general''::text, ''makesafe''::text, ''repair''::text, ''granny_flat''::text, ''labour_hire''::text])))' THEN
     RAISE EXCEPTION 'unexpected job type vocabulary';
   END IF;
   FOREACH v_type IN ARRAY ARRAY['fencing', 'patio', 'combo', 'decking', 'renovation',

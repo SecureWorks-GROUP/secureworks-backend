@@ -22,6 +22,7 @@ import {
   invoiceTrade,
   jobTrade,
   parseBuilderKeys,
+  REFERENCE_JOB_NUMBER,
 } from "./builder_reference_match.ts";
 import { matchUnlinkedInvoices } from "./index.ts";
 
@@ -521,4 +522,22 @@ Deno.test("Matcher: customer invoices are read with their date and lines; bills 
 Deno.test("a restoration card is make-safe work by its SWRESTO- number", () => {
   assertEquals(jobTrade({ type: null as unknown as string, job_number: "SWRESTO-261800" }), "makesafe");
   assertEquals(jobTrade({ type: "makesafe", job_number: "SWRESTO-261800" }), "makesafe");
+});
+
+Deno.test("a labour hire invoice reference names its SWL- job through the unchanged job number pattern", () => {
+  const read = (ref: string) => ref.match(REFERENCE_JOB_NUMBER)?.[0]?.toUpperCase() ?? null;
+  assertEquals(read("SWL-261700"), "SWL-261700");
+  assertEquals(read("swl-261700 labour hire wk 20 Nov"), "SWL-261700");
+  // A longer number is never cut down to a valid one.
+  assertEquals(read("SWL-2617001"), null);
+  // CONTROLS: the pattern is main's, so every older answer stands.
+  assertEquals(read("SWM-261677"), "SWM-261677");
+  assertEquals(read("SWMS-261156"), "SWMS-261156");
+  assertEquals(read("SWRESTO-261800"), "SWRESTO-261800");
+  assertEquals(read("SWP-261376 deposit"), "SWP-261376");
+  assertEquals(read("MLB-27093PO-56481"), null);
+  // A labour hire job is no builder make-safe or works card, by type or by number.
+  assertEquals(jobTrade({ type: "labour_hire", job_number: "SWL-261700" }), "other");
+  assertEquals(jobTrade({ type: "labour_hire", job_number: "SWM-261677" }), "other");
+  assertEquals(jobTrade({ type: null as unknown as string, job_number: "SWL-261700" }), "other");
 });
