@@ -20,7 +20,12 @@ migration=("$root"/supabase/migrations/*_job_division_option.sql)
 [[ ${#migration[@]} == 1 && -f "${migration[0]}" ]] || { echo 'Expected one division migration' >&2; exit 2; }
 name=$(basename "${migration[0]}" .sql)
 
-results=$(psql -XqAtw "$url" -v ON_ERROR_STOP=1 -v examples="$examples" \
+# The first migration predates labour hire (20261120101600 teaches the SQL rule
+# that answer), so it is compared with every example except those. The
+# successor run below reads the whole table.
+base_examples=$(jq -ce 'map(select(.expect != "SW - LABOUR HIRE"))' <<<"$examples")
+
+results=$(psql -XqAtw "$url" -v ON_ERROR_STOP=1 -v examples="$base_examples" \
   -v migration="${migration[0]}" -v down="$root/supabase/rollbacks/${name}_down.sql" <<'SQL'
 BEGIN;
 \i :migration
@@ -65,7 +70,11 @@ CREATE TABLE IF NOT EXISTS public.feature_flags (flag_name text PRIMARY KEY, ena
 \i supabase/migrations/20261118080638_job_division_option.sql
 \i supabase/migrations/20261118120115_division_rulings.sql
 \i supabase/migrations/20261118120115_division_rulings.sql
+\i supabase/migrations/20261120101600_labour_hire_division.sql
+\i supabase/migrations/20261120101600_labour_hire_division.sql
 \i supabase/tests/migration-contracts/20261118120115_division_rulings/examples.sql
+\i supabase/rollbacks/20261120101600_labour_hire_division_down.sql
+\i supabase/tests/migration-contracts/20261120101600_labour_hire_division/rollback-contract.sql
 \i supabase/rollbacks/20261118120115_division_rulings_down.sql
 \i supabase/tests/migration-contracts/20261118120115_division_rulings/rollback-contract.sql
 ROLLBACK;

@@ -211,7 +211,7 @@
     },
     {
       "id": "X16",
-      "write": "Add a Business Unit tracking option (allow-listed name: SW - RESTORATION)",
+      "write": "Add a Business Unit tracking option (allow-listed names: SW - RESTORATION, SW - LABOUR HIRE)",
       "owner": "Bookkeeping (owner, 12 Nov 2026)",
       "gate_today": "Ops server key only; POST; the option name must be on XERO_TRACKING_OPTIONS_WE_MAY_ADD; an existing option is returned, never changed",
       "cfo_confirmed": false,

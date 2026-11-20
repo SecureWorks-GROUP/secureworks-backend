@@ -1761,6 +1761,34 @@ Tests: `repair_intake_routing_test.ts`,
 `repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
 `insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
 
+## Labour Hire Is Its Own Job Type, And A Four-Letter Prefix Is Invisible To Most Grammars
+
+Owner's word, 20 Nov 2026: labour hire (our workers on another builder's site,
+charged by the hour) is `jobs.type = 'labour_hire'`, numbered `SWLH-`
+(`next_job_number`, `20261120101500`, same yearly counter), and books to its own
+Xero Business Unit `SW - LABOUR HIRE`. The type decides the unit whatever the
+number: the four first jobs keep their `SWM-` numbers
+(`scripts/labour-hire-retype-four-jobs.sql`, run by hand, dry run by default).
+The rule is in two languages and one example table: `divisionTrackingOption`
+(`_shared/xero_draft_standard.ts`), the SQL `job_division_option`
+(`20261120101600`) and `_shared/division_examples.json`; change all three
+together (`scripts/test-division-twin.sh`). Revenue keeps the default sales
+account 200 until the bookkeeper names another. Everywhere else it takes the
+path a miscellaneous job takes: hourly trade invoices, no deposit gate, no
+closeout review text, the default stage list.
+
+`SWLH-` is read by `SW[A-Z]+-` and `SW[A-Z]{1,3}` grammars only. The
+single-letter ones (`SW[A-Z]?-?\d`, `SW(MS|[A-Z])-`) cannot see it, so the
+customer invoice Reference linker names it beside `SWRESTO-`
+(`REFERENCE_JOB_NUMBER` in `xero-sync/builder_reference_match.ts`, and its two
+copies in `xero-sync/index.ts`, pinned together by test). NOT widened, like
+`SWRESTO-` before it: the supplier bill grammars (`bill_prematch.ts`,
+`materials_ingest.ts` `JOB_NUMBER_RE`), `_shared/po_reference.ts`,
+`job_trace.ts` and reporting-api. A supplier bill or purchase order quoting an
+`SWLH-` number is therefore placed by a person; widening those is a
+fate-moving matcher change with its own replay. Tests:
+`ops-api/labour_hire_job_type_test.ts`.
+
 ## Automatic Repair Intake Is One Flag, And The Mint Judges The Draft
 
 Owner's word, 13 Oct 2026: behind `feature_flags.repair_intake_auto_v1` (seeded

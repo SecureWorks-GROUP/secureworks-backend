@@ -13297,7 +13297,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         return json(restorationSendResult)
       }
-      // Restoration's Xero tracking option (owner, 12 Nov 2026). Adds an
+      // Restoration's Xero tracking option (owner, 12 Nov 2026), and labour
+      // hire's (owner, 20 Nov 2026). Adds an
       // option to the Business Unit tracking category when it is missing.
       // Server key only, and only a name on this list: nothing else in Xero.
       case 'ensure_xero_tracking_option': {
@@ -41765,7 +41766,9 @@ async function preflightInvoiceCreation(client: any, body: any): Promise<{
   // 'repair' joins the list with the job type itself: without it an invoice
   // preflight on a real repair job would report a missing division, which reads
   // as a data fault rather than the truth that the division is simply new.
-  const knownDivisions = new Set(['patio', 'fencing', 'decking', 'roofing', 'insurance', 'renovation', 'combo', 'general', 'makesafe', 'repair'])
+  // 'labour_hire' (owner, 20 Nov 2026) is its own job type and Business Unit:
+  // a labour hire job has a division, and its tracking option is resolved below.
+  const knownDivisions = new Set(['patio', 'fencing', 'decking', 'roofing', 'insurance', 'renovation', 'combo', 'general', 'makesafe', 'repair', 'labour_hire'])
   const divisionRaw = (job.type || '').toLowerCase().trim()
   const division = knownDivisions.has(divisionRaw) ? divisionRaw : null
   if (!division) missing.push('division')
@@ -44598,7 +44601,8 @@ async function addPOEvent(client: any, body: any) {
 // bare SWR- number answers '', live in divisionTrackingOption
 // (_shared/xero_draft_standard.ts). New draft rules have a separate opt-in entry.
 // The only Business Unit options ensure_xero_tracking_option may add.
-const XERO_TRACKING_OPTIONS_WE_MAY_ADD = ['SW - RESTORATION']
+// 'SW - LABOUR HIRE': labour hire is its own business unit (owner, 20 Nov 2026).
+const XERO_TRACKING_OPTIONS_WE_MAY_ADD = ['SW - RESTORATION', 'SW - LABOUR HIRE']
 
 function trackingCategoryForJob(jobNumber: string, jobType?: string | null): string {
   return divisionTrackingOption(jobNumber, jobType)
@@ -44650,6 +44654,9 @@ function accountCodeForJob(jobType: string, fallback = '200'): string {
 // Test-only export aliases (mirror the `_`-prefixed convention used across this file).
 export const _trackingCategoryForJob = trackingCategoryForJob
 export const _accountCodeForJob = accountCodeForJob
+export const _preflightInvoiceCreation = preflightInvoiceCreation
+export const _buildRichDescription = buildRichDescription
+export const _XERO_TRACKING_OPTIONS_WE_MAY_ADD: readonly string[] = XERO_TRACKING_OPTIONS_WE_MAY_ADD
 
 // ── Rich line item description builder ──
 // Bakes job number, type, scope summary, client, and address into every
@@ -44668,6 +44675,7 @@ function buildRichDescription(job: any, prefix: string): string {
   else if (typeLabel === 'decking') typeParts.push('Composite Decking Installation')
   else if (typeLabel === 'makesafe') typeParts.push('Make-Safe Works')
   else if (typeLabel === 'granny_flat') typeParts.push('Granny flat build')
+  else if (typeLabel === 'labour_hire') typeParts.push('Labour Hire')
   else typeParts.push('Insulated Patio Installation')
   lines.push(typeParts.join(' | '))
 

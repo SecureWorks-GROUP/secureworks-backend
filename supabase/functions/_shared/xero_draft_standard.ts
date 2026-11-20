@@ -48,6 +48,9 @@ export function divisionTrackingOption(jobNumber: string, jobType?: string | nul
   const type = String(jobType || '').trim().toLowerCase()
   // The legacy invoice path keeps its original answer when a granny flat retains a patio number.
   if (type === 'granny_flat') return ''
+  // Labour hire (owner, 20 Nov 2026) is its own job type and Business Unit.
+  // The type decides whatever the number: older labour hire jobs keep SWM-.
+  if (type === 'labour_hire') return 'SW - LABOUR HIRE'
   if (type === 'repair') return 'SW - MAKESAFE'
   if (type === 'roofing' || type === 'renovation') return 'SW - PRIVATE ROOFING'
   if (!jobNumber) return ''
@@ -55,6 +58,8 @@ export function divisionTrackingOption(jobNumber: string, jobType?: string | nul
   // SWRESTO- (restoration) has its own Business Unit option (owner, 12 Nov
   // 2026); it must be read before the 'SWR' slice below, which answers ''.
   if (upper.startsWith('SWRESTO-')) return 'SW - RESTORATION'
+  // SWLH- (labour hire) is four letters too: the 'SWL' slice below answers ''.
+  if (upper.startsWith('SWLH-')) return 'SW - LABOUR HIRE'
   if (upper.startsWith('SWMS-') || upper.startsWith('AJBR') || upper.startsWith('MS1') || upper.startsWith('BWCWA') || upper.startsWith('WB6')) return 'SW - MAKESAFE'
   const prefix = upper.slice(0, 3)
   if (prefix === 'SWP') return 'SW - PATIOS'
