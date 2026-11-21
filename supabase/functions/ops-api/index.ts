@@ -358,6 +358,11 @@ import {
 } from './restoration_stage_store.ts'
 import { setRestorationWorkOrderAction } from './restoration_work_order.ts'
 import {
+  RESTORATION_INTAKE_ASSIGNMENT_NOTE,
+  runRestorationInspectionIntake,
+} from './restoration_intake_inspection.ts'
+import { bookRestorationVisit, RestorationVisitRefusal } from './restoration_visit_booking.ts'
+import {
   AdditionalWorkOrderError,
   addJobWorkOrderAction,
   approveAdditionalWorkOrderAction,
@@ -5480,6 +5485,9 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   // for the signed-in trade, inside their company.
   'trade_invoice_job_modes',
   'self_allocate_for_invoice',
+  // A trade books the first visit on a restoration job they are on
+  // (restoration_visit_booking.ts, owner 20 Nov 2026).
+  'book_restoration_visit',
   'add_myself_to_job',
   'jobs_near_me',
   'submit_trade_invoice',
@@ -13853,6 +13861,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'waive_neighbour_signoff':
       case 'log_my_job_hours':
       case 'self_allocate_for_invoice':
+      case 'book_restoration_visit':
       case 'trade_invoice_job_modes':
       case 'create_group_work_order':
       case 'join_group_work_order':
@@ -14065,6 +14074,24 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               }))
             } catch (error) {
               if (error instanceof SelfAllocationRefusal) {
+                return json({ ok: false, error: error.message, code: error.code }, error.status)
+              }
+              throw error
+            }
+          }
+          // Owner, 20 Nov 2026: a new restoration job waits undated until the
+          // trade has arranged the visit with the client; he books it here.
+          case 'book_restoration_visit': {
+            if (req.method !== 'POST') return json({ error: 'book_restoration_visit requires POST' }, 405)
+            try {
+              return json(await bookRestorationVisit(client, {
+                body,
+                trade: { id: tradeUser.id, orgId: tradeUser.orgId, name: await tradeDisplayName(client, tradeUser) },
+              }, {
+                updateAssignment: (assignmentBody) => updateAssignment(client, assignmentBody),
+              }))
+            } catch (error) {
+              if (error instanceof RestorationVisitRefusal) {
                 return json({ ok: false, error: error.message, code: error.code }, error.status)
               }
               throw error
@@ -24339,8 +24366,8 @@ export const RESTORATION_INTAKE_CREW_EMAILS: readonly string[] = [
 
 async function resolveRestorationIntakeCrew(
   client: any,
-): Promise<Array<{ id: string; name: string }>> {
-  const { data, error } = await client.from('users').select('id, name, email, role')
+): Promise<Array<{ id: string; name: string; email: string; phone: string | null }>> {
+  const { data, error } = await client.from('users').select('id, name, email, role, phone')
   if (error) {
     console.error(
       '[ops-api] restoration crew lookup failed:',
@@ -24349,7 +24376,7 @@ async function resolveRestorationIntakeCrew(
     return []
   }
   const rows = Array.isArray(data) ? data : (data ? [data] : [])
-  const crew: Array<{ id: string; name: string }> = []
+  const crew: Array<{ id: string; name: string; email: string; phone: string | null }> = []
   for (const email of RESTORATION_INTAKE_CREW_EMAILS) {
     const user = rows.find((u: any) =>
       String(u?.email || '').trim().toLowerCase() === email
@@ -24358,7 +24385,12 @@ async function resolveRestorationIntakeCrew(
       console.error(`[ops-api] restoration crew member not found: ${email}`)
       continue
     }
-    crew.push({ id: String(user.id), name: String(user.name || email) })
+    crew.push({
+      id: String(user.id),
+      name: String(user.name || email),
+      email,
+      phone: user.phone ? String(user.phone) : null,
+    })
   }
   return crew
 }
@@ -24366,24 +24398,49 @@ async function resolveRestorationIntakeCrew(
 async function autoAllocateRestorationIntake(
   client: any,
   job: any,
+  details: {
+    siteAddress?: string | null
+    suburb?: string | null
+    builderReference?: string | null
+    builderPoNumber?: string | null
+    clientName?: string | null
+    clientPhone?: string | null
+  } = {},
 ): Promise<void> {
   if (!job?.id) return
+  // Owner, 20 Nov 2026: the crew is put on the job with NO date. Jean
+  // arranges the visit with the client and books it in the Trade App
+  // (book_restoration_visit, restoration_visit_booking.ts), which dates these
+  // rows; an undated row is on no calendar and texts nobody.
   const crew = await resolveRestorationIntakeCrew(client)
   for (const member of crew) {
     await createAssignment(client, {
       jobId: job.id,
       userId: member.id,
       crewName: member.name,
-      scheduledDate: getAWSTDate(),
-      startTime: '07:00',
-      endTime: '15:00',
       assignmentType: 'install',
       role: 'lead_installer',
-      notes: 'Auto-allocated at intake (restoration crew)',
-      confirmation_status: 'confirmed',
+      notes: RESTORATION_INTAKE_ASSIGNMENT_NOTE,
+      confirmation_status: 'tentative',
       suppress_notifications: true,
-    })
+    }, { allowUndated: true })
   }
+  // The inspection visit's work order (2 hours, $88, approved by the owner's
+  // standing rule) and the trade's text. restoration_intake_inspection.ts.
+  await runRestorationInspectionIntake(client, {
+    jobId: String(job.id),
+    orgId: job.org_id ? String(job.org_id) : null,
+    jobNumber: job.job_number ? String(job.job_number) : null,
+    siteAddress: details.siteAddress ?? job.site_address ?? null,
+    suburb: details.suburb ?? job.site_suburb ?? null,
+    builderReference: details.builderReference ?? null,
+    builderPoNumber: details.builderPoNumber ?? null,
+    clientName: details.clientName ?? job.client_name ?? null,
+    clientPhone: details.clientPhone ?? null,
+  }, crew, {
+    sendSms: (phone, message, recipient) =>
+      sendSmsViaGhlWithReceipt(phone, message, undefined, recipient),
+  })
 }
 export const _resolveRestorationIntakeCrewForTest = resolveRestorationIntakeCrew
 export const _resolveMakesafeDefaultAssigneeForTest = resolveMakesafeDefaultAssignee
@@ -24879,7 +24936,14 @@ async function createMakesafeJob(
   ) {
     try {
       if (reviewedJobFamily === 'restoration') {
-        await autoAllocateRestorationIntake(client, job)
+        await autoAllocateRestorationIntake(client, job, {
+          siteAddress: site_address || null,
+          suburb: suburb || null,
+          builderReference: external_ref || builder_claim_ref || null,
+          builderPoNumber: builder_po_number || null,
+          clientName: client_name || null,
+          clientPhone: mobile || phone || null,
+        })
       } else {
         await autoAllocateMakesafeIntakeToHugo(client, job)
       }
@@ -39666,7 +39730,13 @@ export async function allocateJob(client: any, args: {
   }
 }
 
-export async function createAssignment(client: any, body: any) {
+export async function createAssignment(
+  client: any,
+  body: any,
+  // allowUndated: an internal caller (restoration intake) may put a crew member
+  // on a job before a date is agreed. Never read from a request body.
+  options: { allowUndated?: boolean } = {},
+) {
   const { jobId, job_id, userId, user_id, scheduledDate, scheduled_date, date,
           scheduledEnd, scheduled_end, startTime, start_time, endTime, end_time,
           assignmentType, assignment_type, crewName, crew_name, role, notes } = body
@@ -39681,7 +39751,7 @@ export async function createAssignment(client: any, body: any) {
   if (!jId || wantsRecurrence(body.recurrence_rule ?? body.recurrenceRule)) {
     return await createPlanningEntries(client, body)
   }
-  if (!sDate) throw new Error('jobId and scheduledDate required')
+  if (!sDate && options.allowUndated !== true) throw new Error('jobId and scheduledDate required')
 
   // CP1 fold-forward (calendar-overhaul Feature 2): a NEW assignment must carry
   // a REAL crew member. Trade myJobs filters .eq('user_id', userId), so a
@@ -39718,7 +39788,7 @@ export async function createAssignment(client: any, body: any) {
   const insertRow: Record<string, any> = {
     job_id: jId,
     user_id: userId || user_id || null,
-    scheduled_date: sDate,
+    scheduled_date: sDate || null,
     scheduled_end: scheduledEnd || scheduled_end || null,
     // CP1: working-day span length. Only written when the caller provides a
     // number that rounds to a positive integer, so legacy callers keep the
@@ -39751,7 +39821,7 @@ export async function createAssignment(client: any, body: any) {
   // allocateJob. Give that live MakeSafe caller the same exact-date/current-
   // cycle idempotency so a retry after reconciliation failure cannot insert or
   // notify a second explicit allocation.
-  if (isMakesafe && insertRow.attendance_cycle_id && insertRow.user_id) {
+  if (isMakesafe && sDate && insertRow.attendance_cycle_id && insertRow.user_id) {
     const { data: exactDateRows, error: exactDateErr } = await client
       .from('job_assignments')
       .select('id, job_id, user_id, status, role, assignment_type, scheduled_date, attendance_cycle_id, cycle_attribution')
@@ -39785,7 +39855,7 @@ export async function createAssignment(client: any, body: any) {
 
   // Ghost observer auto-mirror: the ops manager allocated as REAL crew must
   // win the (job, user, date) unique key over his own auto-mirrored ghost.
-  if (isGenuineCrewAssignmentRow(insertRow) && insertRow.user_id) {
+  if (sDate && isGenuineCrewAssignmentRow(insertRow) && insertRow.user_id) {
     await releaseGhostObserverMirrorForRealAssignee(client, {
       jobId: jId,
       scheduledDate: sDate,
@@ -39904,7 +39974,7 @@ export async function createAssignment(client: any, body: any) {
       },
       metadata: { operator: body.operator_email || body.user_email || null },
     })
-    if (jobData?.ghl_opportunity_id && body.self_added !== true) {
+    if (sDate && jobData?.ghl_opportunity_id && body.self_added !== true) {
       const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=update_custom_fields`
       fetch(ghlUrl, {
         method: 'POST',

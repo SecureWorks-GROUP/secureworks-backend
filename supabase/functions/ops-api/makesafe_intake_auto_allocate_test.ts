@@ -321,7 +321,7 @@ Deno.test("mint still succeeds when Hugo is missing, and no assignment is invent
   }
 });
 
-Deno.test("restoration mint books Marnin and Jean, never Hugo", async () => {
+Deno.test("restoration mint puts Marnin and Jean on the job undated, never Hugo", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch =
     (() =>
@@ -342,6 +342,9 @@ Deno.test("restoration mint books Marnin and Jean, never Hugo", async () => {
       [JEAN.id, MARNIN.id].sort(),
     );
     assert(real.every((row) => row.user_id !== HUGO.id));
+    // Owner, 20 Nov 2026: not booked for the day it comes in. The crew waits
+    // undated until Jean books the visit in the Trade App.
+    assert(real.every((row) => !row.scheduled_date));
   } finally {
     globalThis.fetch = originalFetch;
   }
