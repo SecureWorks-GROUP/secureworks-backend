@@ -13609,8 +13609,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'remove_group_work_order_participant':
       case 'restore_group_work_order_participant':
       case 'office_approve_group_hours': {
+        // Taking a person off a crew, or putting them back, may also be done
+        // by the ops agent's server key for the office person it names in
+        // actor_user_id (owner, 21 Nov 2026). The named person is checked to
+        // be office staff here. Every other office group action stays a
+        // person's own.
+        let groupCrewAgentActor = ''
+        if ((action === 'remove_group_work_order_participant' || action === 'restore_group_work_order_participant')
+          && authMode === 'api_key' && serverSecretPresented && !authUser?.id && body?.actor_user_id) {
+          try {
+            groupCrewAgentActor = (await officeActorNamedByAgent(client, body.actor_user_id)).userId || ''
+          } catch (e: any) {
+            return json(e?.body || { error: 'The named office person could not be checked.' }, e?.status || 403)
+          }
+        }
         const officeCaller: GroupCaller = {
-          userId: authUser?.id || '',
+          userId: authUser?.id || groupCrewAgentActor,
           orgId: authUser?.orgId || null,
           role: authUser?.role || '',
           isStaff: _opsApiCallerIsStaffOperator(authMode, authUser),
