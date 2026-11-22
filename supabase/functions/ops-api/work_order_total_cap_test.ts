@@ -928,6 +928,25 @@ Deno.test("shared job: the figure shows only when every billed line is the trade
   assertEquals((await send([tradeLine("a1", "trade-a", 1500)], undefined))?.jobs[0].amount_hidden, true);
 });
 
+Deno.test("shared job: the trade billing the work order line sees the most they may bill", async () => {
+  const lines = [tradeLine("b1", "trade-b", 700)];
+  const send = (line: any) =>
+    checkWorkOrderTotalCap(fakeClient({ lines }), {
+      viewerId: "trade-a",
+      lines: [{ job_id: JOB, line_total_ex: 1500, ...line }],
+      loadModes: () => Promise.resolve([MODE]),
+      jobRefs: refs,
+    });
+  // The helper billed 700 of 2000. The installer's work order row asks 1500.
+  for (const row of [{ line_type: "Work Order" }, { line_type: "other", row_type: "work_order" }]) {
+    const r = await send(row);
+    assertEquals(r?.jobs, [{ job: "SWF-1", job_id: JOB, most_this_invoice_ex: 1300 }]);
+    assert(r?.message.includes("$1,300.00"));
+  }
+  // Hours on the same job stay figureless.
+  assertEquals((await send({ line_type: "labour" }))?.jobs, [{ job: "SWF-1", job_id: JOB, amount_hidden: true }]);
+});
+
 Deno.test("shared job: an unreadable owner read hides the figure, never shows it on a guess", async () => {
   let calls = 0;
   const base = fakeClient({ lines: [tradeLine("a1", "trade-a", 1500)] });
