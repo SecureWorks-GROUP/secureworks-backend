@@ -38,6 +38,10 @@
 // billed on it would let the trade work out what the others billed: there the
 // words are WORK_ORDER_CAP_WORDS.shared_job and carry no figure (director
 // ruling, 18 Nov 2026). An unreadable owner read hides the figure too.
+// The one exception (owner, 23 Nov 2026): the trade billing the work order
+// line itself on that job, who takes the crew's part off it, is shown the
+// most the invoice may bill. They have to list what the crew billed to send
+// at all, and without the figure they could not (isWorkOrderCapLine).
 //
 // Known limits: the read and the save are not one transaction, so two
 // invoices sent at the same moment can both pass (the commission cap has a
@@ -73,6 +77,20 @@ export function countsAgainstWorkOrder(lineType: unknown): boolean {
   return !NOT_AGAINST_WORK_ORDER_LINE_TYPES.has(
     String(lineType ?? "").trim().toLowerCase(),
   );
+}
+
+/**
+ * A line that bills the work order itself (the Pay tab's work order row), as
+ * against hours, travel or another line on the job. The trade sending one is
+ * splitting the work order with the crew, so the cap's figure is shown to
+ * them even on a job another trade billed on (owner, 23 Nov 2026).
+ */
+export function isWorkOrderCapLine(line: any): boolean {
+  if (!line || typeof line !== "object") return false;
+  if (line.row_type === "work_order") return true;
+  if (Array.isArray(line.wo_labour_lines) && line.wo_labour_lines.length > 0) return true;
+  const type = String(line.line_type ?? line.type ?? "").trim().toLowerCase();
+  return type === "work order" || type === "work_order";
 }
 
 export type WorkOrderCapJob = {
@@ -672,9 +690,12 @@ export async function checkWorkOrderTotalCap(client: any, input: {
     input.viewerId,
     input.excludeLineIds,
   );
+  const splitting = new Set(
+    input.lines.filter(isWorkOrderCapLine).map((l) => String(l.job_id ?? "")),
+  );
   return workOrderTotalCapRefusal({
     ...capInput,
-    amountShown: (jobId) => own.has(jobId),
+    amountShown: (jobId) => own.has(jobId) || splitting.has(jobId),
   });
 }
 
