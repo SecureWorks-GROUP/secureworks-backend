@@ -6,18 +6,28 @@
 // reader already extracted, with every money line taken out and the builder's
 // terms cut off. It reads email_attachments only. It writes nothing.
 //
-// A line is dropped, never rewritten, so a figure cannot survive in part.
+// A money line is dropped whole. A scope line that only mentions a rate
+// ("3 technicians at $60 per hour - lift carpet, strip linings") keeps its
+// words and loses the figure, because the words are the scope of works. A
+// line that still shows a dollar sign after that is dropped.
 // deno-lint-ignore-file no-explicit-any
 
-export const TRADE_WORK_ORDER_BRIEF_MAX = 1800;
+export const TRADE_WORK_ORDER_BRIEF_MAX = 2400;
 
 // The builder's terms start here. Nothing after it is an instruction.
 const STOP_LINE =
   /^(please note|code of conduct|terms and conditions|by accepting this offer)/i;
 
-// Any line that names money goes: a dollar sign, a total, a limit, a rate.
-const MONEY_LINE =
-  /\$|\b(sub\s?totals?|totals?|gst|dal|excess|rates?|prices?|amounts?|limits?|inc\.?\s?gst|ex\.?\s?gst)\b|\b(hours?|hrs?)\b.*(@|\bat\b|\bx\b)\s*\d/i;
+// A line that is only money: it starts with the money word.
+const MONEY_LABEL_LINE =
+  /^(sub\s?totals?|totals?|gst|cost|costs|dal|excess|limit|price|amount|rate)\b/i;
+
+// Hours at a rate with no dollar sign ("3 hours at 90").
+const HOURS_AT_RATE = /\b(hours?|hrs?)\b.*(@|\bat\b|\bx\b)\s*\d/i;
+
+// A figure inside a sentence, with the "at" before it and the "per hour" after.
+const MONEY_PHRASE =
+  /\s*(?:\bat\b|@)?\s*\(?\s*(?:AUD\s*)?\$\s?\d[\d,]*(?:\.\d+)?k?(?:\s*(?:\+|inc\.?|ex\.?|incl\.?)\s*GST)?(?:\s*(?:per|\/)\s*[a-z0-9]+(?:\s*,\s*per\s+[a-z0-9]+)?)?\s*\)?/gi;
 
 // The builder's own footer (company numbers, page marks).
 const FOOTER_LINE =
@@ -30,9 +40,13 @@ export function buildTradeWorkOrderBrief(text: unknown): string {
     const line = raw.replace(/\s+/g, " ").trim();
     if (!line) continue;
     if (STOP_LINE.test(line)) break;
-    if (MONEY_LINE.test(line) || FOOTER_LINE.test(line)) continue;
-    if (kept.length && kept[kept.length - 1] === line) continue;
-    kept.push(line);
+    if (FOOTER_LINE.test(line)) continue;
+    if (MONEY_LABEL_LINE.test(line) || HOURS_AT_RATE.test(line)) continue;
+    const words = line.replace(MONEY_PHRASE, " ").replace(/\s+/g, " ")
+      .replace(/^[\s\-:,.]+|[\s\-:,]+$/g, "").trim();
+    if (!words || words.includes("$") || !/[a-z]{2}/i.test(words)) continue;
+    if (kept.length && kept[kept.length - 1] === words) continue;
+    kept.push(words);
   }
   let out = kept.join("\n");
   if (out.length > TRADE_WORK_ORDER_BRIEF_MAX) {
