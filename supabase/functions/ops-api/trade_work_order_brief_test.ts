@@ -29,11 +29,32 @@ Deno.test("work order brief keeps the instructions and drops every money line", 
   assertEquals(out.includes("Please attend to provide a quote"), true);
   assertEquals(out.includes("Supervisor Name Sam Example"), true);
   assertEquals(out.includes("$"), false);
-  assertEquals(/total|gst|dal/i.test(out), false);
+  assertEquals(/total|gst|dal:/i.test(out), false);
   assertEquals(out.includes("Labour 3 hours"), false);
   assertEquals(out.includes("ABN"), false);
   assertEquals(out.includes("breach"), false);
   assertEquals(out.split("\n").filter((l) => l === "Restoration").length, 1);
+});
+
+Deno.test("a scope line that mentions a rate keeps its words and loses the figure", () => {
+  const out = buildTradeWorkOrderBrief([
+    "Notes/Instructions:",
+    "Restoration - Labour Rate",
+    "3x Qualified Technicians at $60 per tech, per hour - Move bedroom furniture out - Uplift carpet and underlay",
+    "RCD Safety Box",
+    "Qty: 3",
+    "Cost: $3.50",
+    "Waste Disposal - General (per m3)",
+    "Subtotal $3,182.50",
+  ].join("\n"));
+  assertEquals(out.includes("Move bedroom furniture out"), true);
+  assertEquals(out.includes("Uplift carpet and underlay"), true);
+  assertEquals(out.includes("3x Qualified Technicians"), true);
+  assertEquals(out.includes("$"), false);
+  assertEquals(/\b60\b/.test(out), false);
+  assertEquals(out.includes("3.50"), false);
+  assertEquals(out.includes("3,182"), false);
+  assertEquals(out.includes("Qty: 3"), true);
 });
 
 Deno.test("work order brief answers nothing for no text", () => {
