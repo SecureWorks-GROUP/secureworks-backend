@@ -248,6 +248,7 @@ import {
   loadCompletionEvidenceByJob,
   type CompletionEvidence,
 } from './trade_completion_evidence.ts'
+import { readTradeWorkOrderBriefs } from './trade_work_order_brief.ts'
 import {
   CLIENT_SIGNED_OFF_EVENT,
   CLIENT_SIGNOFF_BLOCK_REASON,
@@ -49574,6 +49575,13 @@ async function tradeJobDetail(
     workOrderDocuments: visibleDocuments.filter((d: any) =>
       d?.type === 'work_order' || d?.type === 'supplier_work_order'
     ),
+    // Additive (owner, 22 Nov 2026): the builder's work order as words, with
+    // every money line taken out, for every tier. A trade never opens the
+    // priced PDF, but the instructions, the supervisor and the site contact
+    // are on it. Make-safe family jobs only. trade_work_order_brief.ts.
+    work_order_briefs: makesafeDetails
+      ? await readTradeWorkOrderBriefs(client, docsRes.data || [])
+      : [],
     // Additive: the scope line derived from jobs.scope_json by the same helper
     // ops uses for invoice descriptions. Before this the ONLY route to scope on
     // the trade payload was the raw scope_json blob (measured up to 1.6 MB on a
