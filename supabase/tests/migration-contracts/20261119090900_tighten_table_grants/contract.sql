@@ -131,9 +131,12 @@ END
 $c5$;
 ROLLBACK;
 BEGIN;
-SET LOCAL ROLE anon;
+SET LOCAL ROLE ztg_link_reader;
 DO $c5b$
 BEGIN
+  IF has_table_privilege('ztg_link_reader', 'public.ztg_open_read', 'SELECT') THEN
+    RAISE EXCEPTION 'contract 5: the reader''s caller holds a grant on the table';
+  END IF;
   IF public.ztg_definer_read(1) IS DISTINCT FROM 'a' THEN
     RAISE EXCEPTION 'contract 5: the owner-rights reader changed';
   END IF;
