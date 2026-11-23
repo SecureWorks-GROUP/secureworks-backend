@@ -1,6 +1,7 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildTradeWorkOrderBrief,
+  layoutTradeWorkOrderBrief,
   readTradeWorkOrderBriefs,
 } from "./trade_work_order_brief.ts";
 
@@ -98,4 +99,58 @@ Deno.test("a failed read answers an empty list", async () => {
     { id: "d1", type: "work_order", file_name: "wo.pdf", storage_url: `x/sha256-${"b".repeat(64)}.pdf` },
   ]);
   assertEquals(briefs, []);
+});
+
+
+Deno.test("layout: facts from the header, one item per task or piece of equipment, no money", () => {
+  const brief = buildTradeWorkOrderBrief([
+    "Work Order",
+    "Work Order Assigned Our Company Pty Ltd Work Order Number ABC-100PO-200",
+    "Job Number ABC-100 Date 23/11/2026",
+    "Supervisor Name Sam Person Supervisor Contact 0400 000 000",
+    "Policyholders Name A CLIENT",
+    "Insurer Name An Insurer Pty Ltd",
+    "Additional",
+    "Notes/Instructions:",
+    "ABC-100PO-200",
+    "Restoration",
+    "Restoration - TO BE COMPLETED",
+    "Restoration - Labour Rate",
+    "2x Qualified Technicians at $60 per tech, per hour Hallway and Bathroom - Protect floors - Strip wall lining to about 1.6m",
+    "high - Install drying equipment",
+    "Equipment - Air Mover (per day)",
+    "Qty: 3 Days: 5",
+    "RCD safety box hire",
+    "Qty: 2",
+    "Days: 5",
+    "Cost: $3.50",
+    "Restoration - Labour Rate",
+    "Equipment removal: final readings, collect equipment",
+    "A Builder Pty Ltd",
+    "39 Some Way Malaga WA 6090",
+    "Totals Totals",
+    "Subtotal $2,430.00",
+    "PLEASE NOTE",
+    "terms",
+  ].join("\n"));
+  const layout = layoutTradeWorkOrderBrief(brief);
+  assertEquals(layout?.facts, [
+    { label: "Builder work order", value: "ABC-100PO-200" },
+    { label: "Issued", value: "23/11/2026" },
+    { label: "Builder supervisor", value: "Sam Person, 0400 000 000" },
+    { label: "Insurer", value: "An Insurer Pty Ltd" },
+  ]);
+  assertEquals(layout?.items, [
+    {
+      title: "Hallway and Bathroom",
+      lines: ["Protect floors", "Strip wall lining to about 1.6m high", "Install drying equipment"],
+      crew: "2 technicians",
+    },
+    { title: "Air Mover", lines: [], qty: "3, for 5 days" },
+    { title: "RCD safety box hire", lines: [], qty: "2, for 5 days" },
+    { title: "Equipment removal", lines: ["final readings, collect equipment"] },
+  ]);
+  assertEquals(JSON.stringify(layout).includes("$"), false);
+  // A layout it does not know answers null, and the plain text is shown.
+  assertEquals(layoutTradeWorkOrderBrief("Please fix the fence.\nThanks"), null);
 });

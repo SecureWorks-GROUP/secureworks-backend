@@ -56,11 +56,138 @@ export function buildTradeWorkOrderBrief(text: unknown): string {
   return out;
 }
 
+export type TradeWorkOrderBriefItem = {
+  /** What the item is: a task heading or a piece of equipment. */
+  title: string;
+  /** "2 technicians", when the builder said how many. */
+  crew?: string;
+  /** "3, for 5 days", when the builder gave a quantity. */
+  qty?: string;
+  /** The steps under the heading, one per line. */
+  lines: string[];
+};
+
+export type TradeWorkOrderBriefLayout = {
+  facts: Array<{ label: string; value: string }>;
+  items: TradeWorkOrderBriefItem[];
+};
+
 export type TradeWorkOrderBrief = {
   document_id: string;
   file_name: string | null;
   text: string;
+  /** The same words laid out to read; absent when the layout is not recognised. */
+  layout?: TradeWorkOrderBriefLayout;
 };
+
+const NOTES_MARK = /^notes\s*\/?\s*instructions:?$/i;
+const LAYOUT_SKIP = [
+  /^[A-Z]{2,5}-\d+PO-\d+$/i, // the work order number on its own line
+  /^(restoration|make ?safe|repairs?|allocation work order|additional|work order)$/i,
+  /\s-\sto be completed$/i,
+  /\bpty ltd$/i,
+  /^\d+\s.+\b(WA|NSW|VIC|QLD|SA|NT|TAS|ACT)\s\d{4}$/,
+  /^cu\s*-\s*comm\b/i,
+];
+
+function splitSteps(text: string): string[] {
+  return text.split(/\s+-\s+/).map((t) => t.trim().replace(/^[-:]\s*/, "")).filter(Boolean);
+}
+
+/**
+ * Lays a brief out to read: a few facts from the builder's header, then one
+ * item per task or piece of equipment. Works on the brief's own words, which
+ * already carry no money, and adds none. Returns null when the builder's
+ * layout is not the one it knows, so the caller shows the plain text.
+ */
+export function layoutTradeWorkOrderBrief(brief: string): TradeWorkOrderBriefLayout | null {
+  const lines = String(brief || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const mark = lines.findIndex((l) => NOTES_MARK.test(l));
+  if (mark < 0) return null;
+  const head = lines.slice(0, mark);
+  const facts: Array<{ label: string; value: string }> = [];
+  const fact = (label: string, value: string | undefined) => {
+    const v = String(value || "").trim();
+    if (v) facts.push({ label, value: v });
+  };
+  for (const l of head) {
+    let m = l.match(/Work Order Number\s+(\S+)/i);
+    if (m) fact("Builder work order", m[1]);
+    m = l.match(/\bDate\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+    if (m) fact("Issued", m[1]);
+    m = l.match(/Supervisor Name\s+(.+?)\s+Supervisor Contact\s*(.*)$/i);
+    if (m) fact("Builder supervisor", [m[1], m[2]].map((x) => x.trim()).filter(Boolean).join(", "));
+    m = l.match(/Insurer Name\s+(.+)$/i);
+    if (m) fact("Insurer", m[1]);
+  }
+
+  type Draft = { title: string; text: string; qty: string; days: string; labour: boolean };
+  const drafts: Draft[] = [];
+  let cur: Draft | null = null;
+  const open = (title: string, labour = false) => {
+    cur = { title, text: "", qty: "", days: "", labour };
+    drafts.push(cur);
+  };
+  const body = lines.slice(mark + 1).filter((l) => !LAYOUT_SKIP.some((re) => re.test(l)));
+  for (let i = 0; i < body.length; i++) {
+    const l = body[i];
+    const next = body[i + 1] || "";
+    let m = l.match(/^(.+?)\s-\sLabour Rate$/i);
+    if (m) { open("", true); continue; }
+    m = l.match(/^Equipment\s-\s(.+?)(?:\s*\(per day\))?$/i);
+    if (m) { open(m[1].replace(/\s-\s/g, ", ")); continue; }
+    m = l.match(/^Qty:\s*(\d+(?:\.\d+)?)(?:\s+Days:\s*(\d+))?$/i);
+    if (m) {
+      if (!cur) open("Item");
+      cur!.qty = m[1];
+      if (m[2]) cur!.days = m[2];
+      continue;
+    }
+    m = l.match(/^Days:\s*(\d+)$/i);
+    if (m) { if (cur) (cur as Draft).days = m[1]; continue; }
+    const c = cur as Draft | null;
+    // A line followed by a quantity names a new item; so does one after an
+    // item that already has its quantity. Anything else carries the item on.
+    if (/^(qty|days):/i.test(next) || !c || c.qty || c.days || (!c.labour && c.text === "" && c.title && /[.:]$/.test(c.title))) {
+      open(l);
+    } else {
+      c.text = c.text ? c.text + " " + l : l;
+    }
+  }
+
+  const items: TradeWorkOrderBriefItem[] = [];
+  for (const d of drafts) {
+    let text = d.text.trim();
+    let crew = "";
+    const cm = text.match(/^(\d+)\s*x\s+Qualified Technician(?:'s|s)?\s*/i);
+    if (cm) {
+      crew = cm[1] + (cm[1] === "1" ? " technician" : " technicians");
+      text = text.slice(cm[0].length).trim();
+    }
+    let title = d.title;
+    let steps = text ? splitSteps(text) : [];
+    const words = (t: string) => t.split(/\s+/).filter(Boolean).length;
+    if (!title) {
+      if (steps.length > 1) {
+        // A short first part is the builder's heading ("Hallway and Bathroom").
+        title = words(steps[0]) <= 4 ? steps.shift() as string : "Works";
+      } else {
+        const one = steps[0] || "";
+        const colon = one.match(/^([^:]{2,60}):\s+(.+)$/);
+        if (colon && words(colon[1]) <= 8) { title = colon[1]; steps = [colon[2]]; }
+        else { title = one || "Labour"; steps = []; }
+      }
+    }
+    if (!title && !steps.length) continue;
+    const qty = d.qty ? d.qty + (d.days ? `, for ${d.days} days` : "") : (d.days ? `${d.days} days` : "");
+    const item: TradeWorkOrderBriefItem = { title, lines: steps };
+    if (crew) item.crew = crew;
+    if (qty) item.qty = qty;
+    items.push(item);
+  }
+  if (!items.length) return null;
+  return { facts, items };
+}
 
 function shaOf(doc: any): string {
   const m = String(doc?.storage_url || doc?.pdf_url || "").match(
@@ -120,10 +247,12 @@ export async function readTradeWorkOrderBriefs(
       : rows.find((r) => r.name === doc.file_name);
     const text = buildTradeWorkOrderBrief(row?.pdf_extraction_text);
     if (text) {
+      const layout = layoutTradeWorkOrderBrief(text);
       out.push({
         document_id: String(doc.id),
         file_name: doc.file_name || null,
         text,
+        ...(layout ? { layout } : {}),
       });
     }
   }
