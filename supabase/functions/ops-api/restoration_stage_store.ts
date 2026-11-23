@@ -201,7 +201,9 @@ function factsFor(job: any, ctx: JobContext): {
       mode: text(plan.mode) || null,
       phase: text(plan.phase) || null,
       stored: metadata.restoration_stage,
-      live_assignments: ctx.crew.length,
+      // A booking counts once it has a date: restoration intake puts the crew
+      // on the job undated until the visit is arranged (owner, 20 Nov 2026).
+      live_assignments: ctx.crew.filter((c) => Boolean(c.scheduled_date)).length,
       report_received: Boolean(ctx.detail?.report_received_at),
       invoices: ctx.invoices,
     },
