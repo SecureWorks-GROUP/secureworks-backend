@@ -805,3 +805,80 @@ export async function withWorkOrderCaps<
     })),
   };
 }
+
+
+// ── What a work order allows, what is billed on it, and by whom ─────────────
+// Owner, 23 Nov 2026: on a fencing work order the trade sees the allowed
+// amount, what has been billed against it so far and who billed it, so the
+// installer can take the right amount off for the crew before sending. This
+// replaces the hidden figure of 18 Nov for these jobs. Same figures as the
+// cap refuses by (readWorkOrderCapFacts, the billed rule). Restoration work
+// orders and hourly maximums are left out.
+
+export type WorkOrderBilledView = {
+  /** The work order amount plus approved variations and office changes. */
+  allowed_ex: number;
+  /** Billed on the job so far by every trade (drafts and rejected hold nothing). */
+  billed_ex: number;
+  /** allowed less billed; negative when the job is over. */
+  left_ex: number;
+  /** Who billed, largest first. A line with no known trade is "Someone else". */
+  billed_by: Array<{ name: string; amount_ex: number; you: boolean }>;
+};
+
+/** Pure. The jobs whose work order view a trade is shown. */
+export function workOrderBilledViewModes<T extends WorkOrderCapMode>(modes: readonly T[]): T[] {
+  return modes.filter((m) =>
+    m.invoice_mode === "work_order" && m.work_order_agreed_ex != null &&
+    !!m.job_work_order_id && m.invoice_mode_reason !== "restoration_work_order"
+  );
+}
+
+/**
+ * Reads the view for each such job. Throws WorkOrderTotalCapReadError on any
+ * failed read; the caller leaves the view out, never shows nothing billed.
+ */
+export async function readWorkOrderBilledViews(
+  client: any,
+  modes: readonly WorkOrderCapMode[],
+  viewerId: string,
+): Promise<Map<string, WorkOrderBilledView>> {
+  const out = new Map<string, WorkOrderBilledView>();
+  const shown = workOrderBilledViewModes(modes);
+  if (shown.length === 0) return out;
+  const facts = await readWorkOrderCapFacts(
+    client,
+    shown.map((m) => ({
+      jobId: m.job_id,
+      ref: m.job_id,
+      agreedEx: money(Number(m.cap_agreed_ex ?? m.work_order_agreed_ex) - Number(m.work_order_office_change_ex ?? 0)),
+      workOrderId: String(m.cap_work_order_id ?? m.job_work_order_id),
+    })),
+  );
+  const byTrade = await readBilledByTrade(client, shown.map((m) => m.job_id));
+  const ids = [...new Set([...byTrade.values()].flatMap((t) => [...t.keys()]).filter(Boolean))];
+  const names = new Map<string, string>();
+  for (let i = 0; i < ids.length; i += 50) {
+    const read = await client.from("users").select("id, name").in("id", ids.slice(i, i + 50));
+    if (read.error) throw new WorkOrderTotalCapReadError();
+    for (const row of read.data || []) names.set(String(row.id), String(row.name || "").trim());
+  }
+  for (const job of facts.jobs) {
+    const trades = byTrade.get(job.jobId) ?? new Map<string, number>();
+    const billedBy = [...trades].filter(([, ex]) => cents(ex) !== 0)
+      .map(([id, ex]) => ({
+        name: names.get(id) || "Someone else",
+        amount_ex: money(ex),
+        you: id === viewerId,
+      }))
+      .sort((a, b) => b.amount_ex - a.amount_ex || a.name.localeCompare(b.name));
+    const billed = money(billedBy.reduce((sum, b) => sum + b.amount_ex, 0));
+    out.set(job.jobId, {
+      allowed_ex: job.allowedEx,
+      billed_ex: billed,
+      left_ex: money(job.allowedEx - billed),
+      billed_by: billedBy,
+    });
+  }
+  return out;
+}

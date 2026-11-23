@@ -32,6 +32,7 @@ import {
 } from './trade_invoice_mode.ts'
 import {
   checkWorkOrderTotalCap,
+  readWorkOrderBilledViews,
   readBilledOnJobs,
   withWorkOrderCaps,
   WorkOrderTotalCapReadError,
@@ -14096,6 +14097,19 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 normaliseManagedVerticals: _normalizeManagedVerticals,
               })
               const jobs = await withAgreedLabourForAllocatedJobsOnly(client, modes.jobs, tradeUser.id, isDispatcher, tradeJobAccess)
+              // Owner, 23 Nov 2026: a work order's allowed amount, what is
+              // billed on it and by whom. Only on a job whose agreed amount
+              // this caller is shown; a failed read leaves it out.
+              try {
+                const views = await readWorkOrderBilledViews(client, jobs as any[], tradeUser.id)
+                for (const job of jobs as any[]) {
+                  const view = views.get(job.job_id)
+                  if (view) job.work_order_billed = view
+                }
+              } catch (viewErr) {
+                if (!(viewErr instanceof WorkOrderTotalCapReadError)) throw viewErr
+                console.error('[ops-api] trade_invoice_job_modes: work order billed view unreadable')
+              }
               return json({ ok: true, jobs, not_found: modes.not_found })
             } catch (error) {
               if (error instanceof TradeInvoiceModeReadError) {
@@ -59726,6 +59740,22 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   }
   for (const a of enriched) stampInvoiceMode(a, String(a.jobs?.id || ''))
   for (const r of groupRouteJobs) stampInvoiceMode(r, String(r.job_id || ''))
+
+  // Owner, 23 Nov 2026: each work order card says what the work order
+  // allows, what is billed on it so far and by whom (work_order_billed). A
+  // failed read leaves it out; it is never read as nothing billed.
+  if (!invoiceModeUnavailable && invoiceModeByJob.size > 0) {
+    try {
+      const views = await readWorkOrderBilledViews(client, [...invoiceModeByJob.values()], userId)
+      for (const a of enriched) {
+        const view = views.get(String(a.jobs?.id || ''))
+        if (view) a.work_order_billed = view
+      }
+    } catch (viewErr) {
+      if (!(viewErr instanceof WorkOrderTotalCapReadError)) throw viewErr
+      console.error('[ops-api] my_hours: work order billed view unreadable')
+    }
+  }
 
   // P1-05.8: with the held-line rule on for this week, each card says what its
   // job has left on its approved work order (null: no approved amount), so the

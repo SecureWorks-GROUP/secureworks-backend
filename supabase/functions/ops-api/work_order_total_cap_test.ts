@@ -7,6 +7,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   checkWorkOrderTotalCap,
+  readWorkOrderBilledViews,
   countsAgainstWorkOrder,
   incomingLabourByJob,
   isHourlyCappedMode,
@@ -1193,4 +1194,33 @@ Deno.test("own room: pinned with SQL job_backed_trade_room (held line decision)"
   assertEquals(room(350, [["trade-one", 250]], "trade-one"), 0);
   assertEquals(room(350, [["trade-one", 250]], "trade-two"), 100);
   assertEquals(room(350, [["trade-one", 250], ["trade-two", 100]], "trade-two"), 0);
+});
+
+Deno.test("work order billed view: allowed, billed so far and who billed it", async () => {
+  const lines = [tradeLine("a1", "trade-a", 400), tradeLine("b1", "trade-b", 700), tradeLine("b2", "trade-b", 50)];
+  const base = fakeClient({ lines });
+  const client = {
+    ...base,
+    from(table: string) {
+      if (table !== "users") return base.from(table);
+      return {
+        select: () => ({
+          in: () => Promise.resolve({ data: [{ id: "trade-a", name: "Trade A" }, { id: "trade-b", name: "Trade B" }], error: null }),
+        }),
+      };
+    },
+  };
+  const views = await readWorkOrderBilledViews(client, [MODE], "trade-a");
+  assertEquals(views.get(JOB), {
+    allowed_ex: 2000,
+    billed_ex: 1150,
+    left_ex: 850,
+    billed_by: [
+      { name: "Trade B", amount_ex: 750, you: false },
+      { name: "Trade A", amount_ex: 400, you: true },
+    ],
+  });
+  // A restoration work order and a job with no agreed amount show nothing.
+  assertEquals((await readWorkOrderBilledViews(client, [{ ...MODE, invoice_mode_reason: "restoration_work_order" }], "trade-a")).size, 0);
+  assertEquals((await readWorkOrderBilledViews(client, [{ ...MODE, work_order_agreed_ex: null }], "trade-a")).size, 0);
 });
