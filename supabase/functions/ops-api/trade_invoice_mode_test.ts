@@ -684,6 +684,7 @@ handlerTest("trade_invoice_job_modes: a plain trade gets each job's mode; anothe
         commission: { state: "not_known", offer_ex: null },
         can_claim_commission: false,
         work_order_agreed_ex: 1850.5,
+        work_order_billed: { allowed_ex: 1850.5, billed_ex: 0, left_ex: 1850.5, billed_by: [] },
         job_work_order_id: WO_FENCE,
       },
       {
