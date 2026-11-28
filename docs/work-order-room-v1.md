@@ -29,7 +29,10 @@ draws on the same pot, whoever draws it and however.
 - **The most this trade may bill now** (`most_now_ex`): what is left, never
   below $0. On a job with a work order named for another trade, no more than
   this trade's own room (`ownWorkOrderRoomEx`), so nobody bills into another
-  trade's named work order.
+  trade's named work order. The named orders are read from the job's own
+  approved additional work orders every time, never from the trade's own
+  options (a trade offered only the main order still cannot bill into
+  another trade's named one).
 
 On a work order billed this way (`work_order_amount_rule: "up_to_left"`) the
 trade types what they bill this time. The work order line's amount
@@ -37,6 +40,10 @@ trade types what they bill this time. The work order line's amount
 included) must be more than $0.00 and at most `most_now_ex`. A work order may
 be billed in as many bills as it takes (progress billing), each within what
 is left. One work order line per job on one invoice.
+
+The amount checked is the larger of the line's work order amount
+(`wo_allocated`) and what the line itself bills (quantity times rate), so a
+line typed "Work Order" with no work order amount is held by what it bills.
 
 Nothing new is counted: the per-line check reads the cap's own figures
 (`readWorkOrderBilledViews`), and the job-level cap
@@ -64,11 +71,27 @@ Added fields only; nothing renamed.
   `trade_invoice_job_modes` and each `my_hours` card, beside
   `work_order_agreed_ex`. Absent when there is no agreed amount.
 - `work_order_billed` (from 23 Nov: `allowed_ex`, `billed_ex`, `left_ex`,
-  `billed_by`) now also carries `most_now_ex` and `amount_rule`.
+  `billed_by`) now also carries `most_now_ex` and `amount_rule`. `billed_ex`
+  and `left_ex` are the cap's own count, the same count as `most_now_ex`
+  (the database sum with `trade_line_hold_v1` on). `billed_by` stays per
+  trade; with held lines on it can add up to more than `billed_ex`, because
+  a held line is listed but not counted.
+- `work_order_billed_unavailable: true` when that read failed, on a job
+  billed up to what is left. The field `work_order_billed` is then absent.
+  The apps say what is left could not be read and send nothing for that job;
+  they never fall back to the locked agreed amount.
 
 An app that sees no `work_order_amount_rule` keeps the agreed amount locked,
 so a front end deployed before the back end, or the other way round, never
 offers an amount the server would refuse.
+
+### Held lines
+
+With `trade_line_hold_v1` on, the server would accept a line over what is
+left and hold it for the office. The apps refuse anything over `most_now_ex`
+before sending, and the per-line check refuses it too. That matches the
+owner's ruling (at most what the work order allows); an office approval of
+a held line is not a way to bill past the work order.
 
 ## Groups: the same pot
 
@@ -129,7 +152,9 @@ All figures ex GST and made up.
 
 - `RESTORATION_WORK_ORDER_BILLED_EXACTLY = true` (`trade_invoice_mode.ts`):
   a restoration work order is still billed at exactly its agreed labour.
-  Default true, owner to confirm.
+  Default true, owner to confirm. Set to false, restoration jobs answer
+  `work_order_amount_rule: "up_to_left"`, get their `work_order_billed`
+  view and are checked the same way (tested both ways).
 - One work order line per job on one invoice: kept from 12 Nov.
 - A group cannot open on a job that already has a live work order bill (the
   22 Oct database rule): kept. See question 2.
