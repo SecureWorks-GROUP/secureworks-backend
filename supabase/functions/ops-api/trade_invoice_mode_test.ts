@@ -576,6 +576,8 @@ async function call(
     seesAll?: boolean;
     /** The job_assignments read fails. */
     assignmentsFail?: boolean;
+    /** The trade lines read (what is billed on a work order) fails. */
+    billedFails?: boolean;
   } = {},
 ): Promise<{ status: number; body: any; tables: string[] }> {
   const tables: string[] = [];
@@ -628,6 +630,9 @@ async function call(
       const jobs = values("job_id");
       return reply(GROUPS.filter((row) => !jobs || jobs.includes(row.job_id)));
     }
+    if (table === "trade_invoice_lines" && init.billedFails) {
+      return Promise.resolve(Response.json({ code: "57014", message: "timeout" }, { status: 500 }));
+    }
     if (table === "job_assignments" && init.assignmentsFail) {
       return Promise.resolve(Response.json({ code: "57014", message: "timeout" }, { status: 500 }));
     }
@@ -674,6 +679,21 @@ async function call(
 
 const handlerTest = (name: string, fn: () => Promise<void>) =>
   Deno.test({ name, fn, sanitizeOps: false, sanitizeResources: false });
+
+// Review fix 3: a failed read of what is left is said, never left out. With
+// the rule up_to_left and no figure, the apps would otherwise lock the box.
+handlerTest("trade_invoice_job_modes: a failed read of what is left is marked, not left out", async () => {
+  const out = await call("trade_invoice_job_modes", {
+    assignedJobs: [FENCE],
+    billedFails: true,
+    query: { job_ids: FENCE },
+  });
+  assertEquals(out.status, 200, JSON.stringify(out.body));
+  const fence = out.body.jobs.find((j: any) => j.job_id === FENCE);
+  assertEquals(fence.work_order_amount_rule, "up_to_left");
+  assert(!("work_order_billed" in fence), JSON.stringify(fence));
+  assertEquals(fence.work_order_billed_unavailable, true);
+});
 
 handlerTest("trade_invoice_job_modes: a plain trade gets each job's mode; another company's job is not decided", async () => {
   for (const role of ["lead_installer", "installer"]) {
@@ -928,6 +948,9 @@ Deno.test("work order amount: what is left that was not read refuses, never gues
 
 Deno.test("work order amount rule: restoration keeps the agreed amount; every other work order is up to what is left", () => {
   assertEquals(workOrderAmountRuleFor("restoration_work_order"), "agreed");
+  // Review fix 4: the setting switched off puts restoration under the same rule.
+  assertEquals(workOrderAmountRuleFor("restoration_work_order", false), "up_to_left");
+  assertEquals(workOrderAmountRuleFor("fencing_job", false), "up_to_left");
   for (const reason of ["fencing_job", "per_metre_trade", null, undefined]) {
     assertEquals(workOrderAmountRuleFor(reason), "up_to_left", String(reason));
   }

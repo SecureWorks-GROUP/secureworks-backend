@@ -82,9 +82,14 @@ export type WorkOrderAmountRule = "up_to_left" | "agreed";
  */
 export const RESTORATION_WORK_ORDER_BILLED_EXACTLY = true;
 
-/** Pure. The rule a work-order job with an agreed amount is billed under. */
-export function workOrderAmountRuleFor(reason: TradeInvoiceModeReason | string | null | undefined): WorkOrderAmountRule {
-  return reason === "restoration_work_order" && RESTORATION_WORK_ORDER_BILLED_EXACTLY ? "agreed" : "up_to_left";
+/** Pure. The rule a work-order job with an agreed amount is billed under.
+ *  `restorationExact` is the setting above (a parameter so both ways are
+ *  tested; every caller takes the default). */
+export function workOrderAmountRuleFor(
+  reason: TradeInvoiceModeReason | string | null | undefined,
+  restorationExact: boolean = RESTORATION_WORK_ORDER_BILLED_EXACTLY,
+): WorkOrderAmountRule {
+  return reason === "restoration_work_order" && restorationExact ? "agreed" : "up_to_left";
 }
 
 export type TradeInvoiceModeDecision = {

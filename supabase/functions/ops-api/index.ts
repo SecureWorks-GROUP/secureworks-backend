@@ -14111,6 +14111,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               } catch (viewErr) {
                 if (!(viewErr instanceof WorkOrderTotalCapReadError)) throw viewErr
                 console.error('[ops-api] trade_invoice_job_modes: work order billed view unreadable')
+                // Owner, 28 Nov 2026: say it could not be read, never leave it
+                // out, so a box billed up to what is left is never locked.
+                for (const job of jobs as any[]) {
+                  if ((job as any).work_order_amount_rule === 'up_to_left') (job as any).work_order_billed_unavailable = true
+                }
               }
               return json({ ok: true, jobs, not_found: modes.not_found })
             } catch (error) {
@@ -16335,8 +16340,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   isWorkOrderInvoiceItem(item)
                 ).map((item: any) => {
                   const job = item.job_id ? (jobById[item.job_id] || null) : (jobByNumber[item.job_number] || null)
+                  // Review item 7: the larger of the work order amount and what
+                  // the line itself bills (quantity x rate), so a "Work Order"
+                  // typed line with no row_type is held by what it bills.
+                  const allocated = Number(item.wo_allocated)
+                  const ownBill = Number(item.quantity ?? 1) * Number(item.rate)
+                  const parts = [allocated, ownBill].filter((n) => Number.isFinite(n) && n > 0)
+                  const woAllocated = parts.length ? Math.round(Math.max(...parts) * 100) / 100 : item.wo_allocated
                   return job?.id
-                    ? { ref: String(job.job_number || item.job_number || job.id), jobId: String(job.id), woAllocated: item.wo_allocated }
+                    ? { ref: String(job.job_number || item.job_number || job.id), jobId: String(job.id), woAllocated }
                     : null
                 }).filter(Boolean) as Array<{ ref: string; jobId: string; woAllocated: unknown }>
                 if (woAmountLines.length > 0) {
@@ -59794,6 +59806,10 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     } catch (viewErr) {
       if (!(viewErr instanceof WorkOrderTotalCapReadError)) throw viewErr
       console.error('[ops-api] my_hours: work order billed view unreadable')
+      // Said, never left out (see trade_invoice_job_modes).
+      for (const a of enriched) {
+        if (a.work_order_amount_rule === 'up_to_left') a.work_order_billed_unavailable = true
+      }
     }
   }
 

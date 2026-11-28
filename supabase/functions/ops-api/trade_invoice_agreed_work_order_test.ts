@@ -330,10 +330,14 @@ handlerTest("work order: nothing typed, $0, a second line on one job, or one bad
     assertEquals(out.body.code, "work_order_amount_required");
     assertEquals(out.writes, []);
   }
-  // A line typed as a work order with no amount on it is refused too.
-  const typed = await submit([plainLine(AGREED_JOB, "ZZF-2001", "Work Order", 1, 1850.5)]);
-  assertEquals(typed.body.code, "work_order_amount_required", JSON.stringify(typed.body));
-  assertEquals(typed.writes, []);
+  // Review item 7: a line typed as a work order with no work order amount is
+  // checked by what it bills (quantity x rate), never let through or refused
+  // for a missing field. Within what is left it is saved.
+  assertSaved(await submit([plainLine(AGREED_JOB, "ZZF-2001", "Work Order", 1, 1850.5)]));
+  // A small wo_allocated beside a big rate does not hide the bill.
+  const hidden = await submit([{ ...plainLine(AGREED_JOB, "ZZF-2001", "Work Order", 1, 5000), wo_allocated: 100 }]);
+  assertEquals(hidden.body.code, "work_order_amount_over_left", JSON.stringify(hidden.body));
+  assertEquals(hidden.writes, []);
   // Billing the work order on two lines on one invoice is refused.
   const twice = await submit([woRow(AGREED_JOB, "ZZF-2001", 500), woRow(AGREED_JOB, "ZZF-2001", 500)]);
   assertEquals(twice.body.code, "work_order_line_twice", JSON.stringify(twice.body));
