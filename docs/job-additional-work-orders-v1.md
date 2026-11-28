@@ -65,8 +65,10 @@ the cap refuses more.
 
 So a trade with a work order named for them is offered it first, at its
 agreed amount, even when the same trade also holds the main work order, and
-`generate_trade_invoice` refuses any other figure
-(`work_order_amount_not_agreed`), exactly as before.
+`generate_trade_invoice` refuses more than is left for this trade
+(`work_order_amount_over_left`; owner, 28 Nov 2026, `docs/work-order-room-v1.md`).
+The most a trade may bill is never more than its own room on a job with a work
+order named for another trade.
 
 ## The cap holds a named work order for its trade
 

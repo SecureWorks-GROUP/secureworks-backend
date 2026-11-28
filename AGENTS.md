@@ -5111,12 +5111,18 @@ on unless `trade_details.runningInvoiceDraft` is exactly false
 (`runningInvoiceDraftEnabled`, one helper). `submit_trade_invoice` is retired:
 410 `use_weekly_invoice` before any read. Patio hours are refused only while
 `patio_pay_group_only_v1` AND `group_work_order_v1` are on. A work-order job
-with an APPROVED job work order bills its `agreed_labour_ex` (Marnin,
-12 Nov 2026): the mode answer carries `work_order_agreed_ex` /
-`job_work_order_id`, and `generate_trade_invoice` refuses any other
-work-order amount, or a second work-order line on that job, before any write
-(409 `work_order_amount_not_agreed`, `workOrderAmountRefusal`). Contract:
-`docs/trade-invoice-mode-v1.md`.
+with an APPROVED job work order is billed up to what is LEFT on it (owner,
+28 Nov 2026, replacing the 12 Nov exact amount; restoration keeps the exact
+amount, `RESTORATION_WORK_ORDER_BILLED_EXACTLY`): the mode answer carries
+`work_order_agreed_ex`, `job_work_order_id` and `work_order_amount_rule`, and
+`work_order_billed.most_now_ex` is the most this trade may bill now, read by
+the work order cap's own counting (`readWorkOrderBilledViews`; group shares,
+hours and every other trade's lines are drawn on the same pot). Each
+work-order line must be more than $0 and at most that, once per job per
+invoice, or nothing is saved (409 `work_order_amount_over_left` /
+`_required` / `work_order_line_twice`, `workOrderAmountRefusal`); never add a
+second room rule. Contracts: `docs/trade-invoice-mode-v1.md`,
+`docs/work-order-room-v1.md`.
 
 ## A Recurring Deduction Comes Off The Payable, Never The Gross
 
