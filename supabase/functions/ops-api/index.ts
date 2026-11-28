@@ -16344,7 +16344,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   // the line itself bills (quantity x rate), so a "Work Order"
                   // typed line with no row_type is held by what it bills.
                   const allocated = Number(item.wo_allocated)
-                  const ownBill = Number(item.quantity ?? 1) * Number(item.rate)
+                  const ownBill = Number(item.quantity || 1) * Number(item.rate) // priced as the line is (quantity || 1)
                   const parts = [allocated, ownBill].filter((n) => Number.isFinite(n) && n > 0)
                   const woAllocated = parts.length ? Math.round(Math.max(...parts) * 100) / 100 : item.wo_allocated
                   return job?.id

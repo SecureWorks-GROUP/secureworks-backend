@@ -104,7 +104,7 @@ const billedLine = (id: string, jobId: string, userId: string, type: string, amo
 
 async function submit(
   extra_items: any[],
-  world: { failWorkOrders?: boolean; billed?: any[]; failBilled?: boolean } = {},
+  world: { failWorkOrders?: boolean; billed?: any[]; failBilled?: boolean; noWeek?: boolean } = {},
 ): Promise<Captured> {
   const writes: string[] = [];
   const invoiceRows: any[] = [];
@@ -209,7 +209,7 @@ async function submit(
     const res = await _opsApiRequestHandlerForTest(new Request(url, {
       method: "POST",
       headers: { authorization: "Bearer trade-jwt", "content-type": "application/json" },
-      body: JSON.stringify({ week_start: WEEK_START, gst_on: false, extra_items }),
+      body: JSON.stringify({ ...(world.noWeek ? {} : { week_start: WEEK_START }), gst_on: false, extra_items }),
     }));
     const text = await res.text();
     let parsed: any;
@@ -338,6 +338,13 @@ handlerTest("work order: nothing typed, $0, a second line on one job, or one bad
   const hidden = await submit([{ ...plainLine(AGREED_JOB, "ZZF-2001", "Work Order", 1, 5000), wo_allocated: 100 }]);
   assertEquals(hidden.body.code, "work_order_amount_over_left", JSON.stringify(hidden.body));
   assertEquals(hidden.writes, []);
+  // A quantity of 0 or blank is priced as 1 (quantity || 1), so the check reads it the same way. A call with no pay
+  // week is the one the hours guard does not stop (re-review).
+  for (const quantity of [0, ""]) {
+    const zero = await submit([{ ...plainLine(AGREED_JOB, "ZZF-2001", "Work Order", 1, 5000), quantity, wo_allocated: 1 }], { noWeek: true });
+    assertEquals(zero.body.code, "work_order_amount_over_left", `quantity ${JSON.stringify(quantity)}: ${JSON.stringify(zero.body)}`);
+    assertEquals(zero.writes, []);
+  }
   // Billing the work order on two lines on one invoice is refused.
   const twice = await submit([woRow(AGREED_JOB, "ZZF-2001", 500), woRow(AGREED_JOB, "ZZF-2001", 500)]);
   assertEquals(twice.body.code, "work_order_line_twice", JSON.stringify(twice.body));

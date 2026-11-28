@@ -87,11 +87,14 @@ offers an amount the server would refuse.
 
 ### Held lines
 
-With `trade_line_hold_v1` on, the server would accept a line over what is
-left and hold it for the office. The apps refuse anything over `most_now_ex`
-before sending, and the per-line check refuses it too. That matches the
-owner's ruling (at most what the work order allows); an office approval of
-a held line is not a way to bill past the work order.
+With `trade_line_hold_v1` on and the hold mode in force, the server accepts a
+line over what is left and holds the extra for the office: the per-line check
+and the job cap do not run in that mode (`index.ts`, inside `!lineHoldMode`).
+So there the apps alone refuse anything over `most_now_ex` before sending; a
+call straight to the API is held for the office, not refused. The apps' refusal
+matches the owner's ruling (at most what the work order allows). If the server
+itself should refuse in that mode too, the check has to move out of the
+`!lineHoldMode` branch: a separate change.
 
 ## Groups: the same pot
 
