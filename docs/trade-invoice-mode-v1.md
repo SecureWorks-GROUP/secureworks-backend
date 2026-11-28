@@ -67,7 +67,14 @@ app must not guess a mode. The job work orders are read the same way: a
 failed read (or two approved job work orders on one job) makes every field
 null and `invoice_mode_unavailable` true.
 
-## The agreed work order (Marnin, 12 Nov 2026)
+## The agreed work order (Marnin, 12 Nov 2026; amount rule changed 28 Nov 2026)
+
+Owner, 28 Nov 2026: a work order is billed up to what is LEFT on it, in as
+many bills as it takes, not at exactly its agreed amount. Restoration work
+orders keep the exact rule below. The new rule, its refusals, the fields the
+apps read (`work_order_amount_rule`, `work_order_billed.most_now_ex`) and the
+group design are in `docs/work-order-room-v1.md`. What follows is the 12 Nov
+rule, which now holds only where `work_order_amount_rule` is `"agreed"`.
 
 A job whose `invoice_mode` is `work_order` and which has an APPROVED job work
 order (`work_orders.kind = 'job'`, `status = 'approved'`, `agreed_labour_ex`

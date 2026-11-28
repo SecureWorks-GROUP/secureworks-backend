@@ -3,9 +3,10 @@
 // the office ... they shouldn't be able to, in total, charge more than what
 // the work order has allowed").
 //
-// workOrderAmountRefusal (trade_invoice_mode.ts) already makes each invoice's
-// work-order line carry exactly the agreed amount. It looks at one invoice.
-// This rule looks at the job: the labour already billed on it by every trade
+// workOrderAmountRefusal (trade_invoice_mode.ts) holds each invoice's
+// work-order line to more than $0 and at most what is left on the work order
+// for that trade (owner, 28 Nov 2026: most_now_ex below, read by this file's
+// own counting). It looks at one line. This rule looks at the job: the labour already billed on it by every trade
 // (every live invoice, the lead's and the crew's), plus the labour on the
 // invoice being sent, may not go over the work order's agreed labour plus its
 // approved customer variations. Over it, nothing is saved (409).
@@ -824,14 +825,29 @@ export type WorkOrderBilledView = {
   left_ex: number;
   /** Who billed, largest first. A line with no known trade is "Someone else". */
   billed_by: Array<{ name: string; amount_ex: number; you: boolean }>;
+  /** Owner, 28 Nov 2026: the most THIS trade may bill on the work order now,
+   *  never below 0. The cap's own figures: allowed less what is billed by the
+   *  cap's billed rule (readBilledOnJobs, so held lines follow the same
+   *  switch), and on a job with a work order named for another trade, no more
+   *  than this trade's own room (ownWorkOrderRoomEx). The amount box on the
+   *  trade's work order line may be anything above $0 up to this. */
+  most_now_ex: number;
+  /** "up_to_left": the trade types what they bill this time (progress
+   *  billing allowed). Only on jobs under that rule. */
+  amount_rule: "up_to_left";
 };
 
 /** Pure. The jobs whose work order view a trade is shown. */
 export function workOrderBilledViewModes<T extends WorkOrderCapMode>(modes: readonly T[]): T[] {
-  return modes.filter((m) =>
-    m.invoice_mode === "work_order" && m.work_order_agreed_ex != null &&
-    !!m.job_work_order_id && m.invoice_mode_reason !== "restoration_work_order"
-  );
+  return modes.filter((m) => {
+    if (m.invoice_mode !== "work_order" || m.work_order_agreed_ex == null || !m.job_work_order_id) return false;
+    // The amount rule decides (a restoration work order billed up to what is
+    // left has a view too). With no rule (an older answer) restoration has
+    // none, as on 23 Nov.
+    const rule = (m as { work_order_amount_rule?: string }).work_order_amount_rule;
+    if (rule) return rule === "up_to_left";
+    return m.invoice_mode_reason !== "restoration_work_order";
+  });
 }
 
 /**
@@ -856,6 +872,30 @@ export async function readWorkOrderBilledViews(
     })),
   );
   const byTrade = await readBilledByTrade(client, shown.map((m) => m.job_id));
+  // Every shown job's approved additional work orders and who each is named
+  // for, so a trade is never shown room that is another trade's (the same
+  // rule the cap refuses by, ownWorkOrderRoomEx). Read for every job, never
+  // from the trade's own options: a trade offered only the main order carries
+  // no work_orders, yet another trade's named order still holds its money.
+  const multi = shown.map((m) => m.job_id);
+  const namedByJob = new Map<string, Map<string, number>>();
+  for (let i = 0; i < multi.length; i += 50) {
+    const read = await client.from("work_orders")
+      .select("job_id, kind, status, agreed_labour_ex, assigned_user_id")
+      .eq("kind", "additional").eq("status", "approved")
+      .in("job_id", multi.slice(i, i + 50));
+    if (read.error || !Array.isArray(read.data)) throw new WorkOrderTotalCapReadError();
+    for (const row of read.data) {
+      if (row?.kind !== "additional" || row?.status !== "approved" || !row?.assigned_user_id) continue;
+      const agreed = Number(row.agreed_labour_ex);
+      if (row.agreed_labour_ex === null || !Number.isFinite(agreed) || agreed < 0) continue;
+      const job = String(row.job_id);
+      if (!namedByJob.has(job)) namedByJob.set(job, new Map());
+      const named = namedByJob.get(job)!;
+      const who = String(row.assigned_user_id);
+      named.set(who, money((named.get(who) ?? 0) + agreed));
+    }
+  }
   const ids = [...new Set([...byTrade.values()].flatMap((t) => [...t.keys()]).filter(Boolean))];
   const names = new Map<string, string>();
   for (let i = 0; i < ids.length; i += 50) {
@@ -872,12 +912,29 @@ export async function readWorkOrderBilledViews(
         you: id === viewerId,
       }))
       .sort((a, b) => b.amount_ex - a.amount_ex || a.name.localeCompare(b.name));
-    const billed = money(billedBy.reduce((sum, b) => sum + b.amount_ex, 0));
+    const capBilled = facts.billedEx.get(job.jobId) ?? 0;
+    let most = job.allowedEx - capBilled;
+    const named = namedByJob.get(job.jobId);
+    if (named && [...named.keys()].some((who) => who !== viewerId)) {
+      most = Math.min(most, ownWorkOrderRoomEx({
+        allowedEx: job.allowedEx,
+        namedEx: named,
+        billedByTrade: trades,
+        tradeId: viewerId,
+      }));
+    }
+    // billed_ex and left_ex are the cap's own count (readBilledOnJobs: the
+    // database sum with held lines on), the same count as most_now_ex, so a
+    // card never shows two "left" figures. billed_by stays per trade and, with
+    // held lines on, can add up to more than billed_ex (a held line is listed
+    // but not counted).
     out.set(job.jobId, {
       allowed_ex: job.allowedEx,
-      billed_ex: billed,
-      left_ex: money(job.allowedEx - billed),
+      billed_ex: money(capBilled),
+      left_ex: money(job.allowedEx - capBilled),
       billed_by: billedBy,
+      most_now_ex: Math.max(0, money(most)),
+      amount_rule: "up_to_left",
     });
   }
   return out;

@@ -27,10 +27,16 @@
 // line is refused here).
 //
 // A work-order job with an APPROVED job work order (work_orders.kind = 'job',
-// status = 'approved') is billed at its agreed labour (Marnin, 12 Nov 2026):
-// the answer carries `work_order_agreed_ex` and `job_work_order_id`, and
-// generate_trade_invoice refuses a work-order line on that job at any other
-// amount through workOrderAmountRefusal below.
+// status = 'approved') carries `work_order_agreed_ex` and `job_work_order_id`.
+// Owner, 28 Nov 2026: the trade types what they bill this time, from more
+// than $0 up to what is LEFT on the work order (what it allows less what
+// every trade has billed on it), so one work order may be billed in more than
+// one bill (progress billing). `work_order_amount_rule` says which rule a job
+// is under: "up_to_left", or "agreed" (a restoration work order, still billed
+// at exactly its agreed labour; RESTORATION_WORK_ORDER_BILLED_EXACTLY).
+// generate_trade_invoice refuses through workOrderAmountRefusal below; what is
+// left comes from the work order cap's own counting (work_order_total_cap.ts,
+// readWorkOrderBilledViews). Design: docs/work-order-room-v1.md.
 //
 // Contract: docs/trade-invoice-mode-v1.md.
 // deno-lint-ignore-file no-explicit-any
@@ -65,6 +71,27 @@ export type TradeInvoiceModeReason =
   | "hourly_capped"
   | "other_job";
 
+/** How a work-order line on a job with an agreed work order is billed. */
+export type WorkOrderAmountRule = "up_to_left" | "agreed";
+
+/**
+ * SETTING (default marked, owner to confirm): a restoration job's work order
+ * is still billed at exactly its agreed labour, as ruled on 12 Nov 2026. The
+ * 28 Nov ruling (bill up to what is left) was given for fencing work orders;
+ * set this to false to put restoration under the same rule.
+ */
+export const RESTORATION_WORK_ORDER_BILLED_EXACTLY = true;
+
+/** Pure. The rule a work-order job with an agreed amount is billed under.
+ *  `restorationExact` is the setting above (a parameter so both ways are
+ *  tested; every caller takes the default). */
+export function workOrderAmountRuleFor(
+  reason: TradeInvoiceModeReason | string | null | undefined,
+  restorationExact: boolean = RESTORATION_WORK_ORDER_BILLED_EXACTLY,
+): WorkOrderAmountRule {
+  return reason === "restoration_work_order" && restorationExact ? "agreed" : "up_to_left";
+}
+
 export type TradeInvoiceModeDecision = {
   invoice_mode: TradeInvoiceMode;
   invoice_mode_reason: TradeInvoiceModeReason;
@@ -85,6 +112,12 @@ export type TradeInvoiceJobMode = TradeInvoiceModeDecision & {
    *  Present only when non-zero; the cap reads it so it does not add them twice. */
   work_order_office_change_ex?: number;
   job_work_order_id: string | null;
+  /** Owner, 28 Nov 2026. Only beside a work_order_agreed_ex: how the trade
+   *  bills it. "up_to_left": any amount above $0 up to what is left on the
+   *  work order (work_order_billed.most_now_ex). "agreed": exactly
+   *  work_order_agreed_ex (restoration). Absent when there is no agreed
+   *  amount, so every other answer reads as before. */
+  work_order_amount_rule?: WorkOrderAmountRule;
   // The job's main work order and its own agreed labour: what the job-level
   // cap reads (its amount changes carry every additional work order). Only on
   // a job with more than one work order.
@@ -348,6 +381,7 @@ export async function loadTradeInvoiceJobModes(
       ...mode,
       work_order_agreed_ex: next ? next.agreed_ex : agreed ? agreed.agreed : null,
       job_work_order_id: next ? next.id : agreed ? agreed.id : null,
+      ...(agreed ? { work_order_amount_rule: workOrderAmountRuleFor(mode.invoice_mode_reason) } : {}),
       ...(agreed && agreed.officeChange ? { work_order_office_change_ex: agreed.officeChange } : {}),
       // Only a job with more than one work order carries these, so every
       // other answer is byte for byte what it was.
@@ -497,11 +531,34 @@ export type WorkOrderAmountLine = {
   woAllocated: unknown;
 };
 
+export type WorkOrderAmountRefusalCode =
+  | "work_order_amount_not_agreed"
+  | "work_order_amount_over_left"
+  | "work_order_amount_required"
+  | "work_order_line_twice";
+
 export type WorkOrderAmountRefusal = {
-  code: "work_order_amount_not_agreed";
+  code: WorkOrderAmountRefusalCode;
   message: string;
-  jobs: Array<{ job: string; job_id: string; agreed_ex: number; billed_ex: number | null }>;
+  jobs: Array<{
+    job: string;
+    job_id: string;
+    agreed_ex: number;
+    billed_ex: number | null;
+    /** Up to what is left only: this job's own reason and the most this
+     *  trade may bill on its work order now. */
+    code?: WorkOrderAmountRefusalCode;
+    most_now_ex?: number;
+  }>;
 };
+
+/** What is left on a work order could not be read: never read as "nothing
+ *  billed" (the caller answers 503 and saves nothing). */
+export class WorkOrderRoomUnreadable extends Error {
+  constructor() {
+    super("Could not read what is left on the work order");
+  }
+}
 
 function dollars(value: number): string {
   const fixed = (Math.round(value * 100) / 100).toFixed(2);
@@ -509,40 +566,113 @@ function dollars(value: number): string {
   return `$${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${cents}`;
 }
 
+/** The words a trade sees, one per case. Change them here, never at a door. */
+export const WORK_ORDER_AMOUNT_WORDS = {
+  agreed: (job: string, agreed: string) =>
+    `Job ${job} has an agreed work order of ${agreed}. Bill it at that amount, or ask the office.`,
+  over_left: (job: string, most: string) =>
+    `Job ${job}: up to ${most} is left on its work order. Bill at most that this time, or ask the office.`,
+  nothing_left: (job: string) =>
+    `Job ${job}: its work order has been billed in full. Ask the office if it needs changing.`,
+  required: (job: string, most: string) =>
+    `Job ${job}: type the amount you are billing on its work order this time. It must be more than $0.00 and at most ${most}.`,
+  twice: (job: string) => `Job ${job}: put its work order on one line on this invoice.`,
+} as const;
+
+type AmountModes = ReadonlyMap<
+  string,
+  Pick<TradeInvoiceJobMode, "work_order_agreed_ex" | "work_order_amount_rule">
+>;
+
+/** Pure. The jobs whose work-order lines need what is left read first. */
+export function workOrderJobsNeedingRoom(
+  lines: readonly WorkOrderAmountLine[],
+  modes: AmountModes,
+): string[] {
+  return [
+    ...new Set(lines.map((l) => l.jobId).filter((id) => {
+      const mode = modes.get(id);
+      return mode?.work_order_agreed_ex != null &&
+        (mode.work_order_amount_rule ?? "up_to_left") === "up_to_left";
+    })),
+  ];
+}
+
+const cents = (v: number) => Math.round(v * 100);
+
 /**
- * Pure. Every work-order line on a job with an agreed work order must carry
- * exactly the agreed amount (within a cent), and such a job is billed as a
- * work order once per invoice. null when every line agrees. Labour lines and
- * pass-throughs on the row still come off it as before; this checks only the
- * work order's amount the row starts from.
+ * Pure. A job with an agreed work order is billed as a work order once per
+ * invoice. Under "up_to_left" (owner, 28 Nov 2026) the line's work order
+ * amount (wo_allocated: this bill's part of the work order, the crew it names
+ * included) must be more than $0 and at most `mostNow` for that job: what is
+ * left on the work order for this trade, by the cap's own counting
+ * (readWorkOrderBilledViews most_now_ex). Under "agreed" (restoration) it must
+ * be exactly the agreed amount, as before. null when every line is allowed.
+ * An up-to-left job missing from `mostNow` throws WorkOrderRoomUnreadable.
  */
 export function workOrderAmountRefusal(
   lines: readonly WorkOrderAmountLine[],
-  modes: ReadonlyMap<string, Pick<TradeInvoiceJobMode, "work_order_agreed_ex">>,
+  modes: AmountModes,
+  mostNow: ReadonlyMap<string, number> = new Map(),
 ): WorkOrderAmountRefusal | null {
-  const refused = new Map<string, WorkOrderAmountRefusal["jobs"][number]>();
+  type Refused = WorkOrderAmountRefusal["jobs"][number] & { words: string };
+  const refused = new Map<string, Refused>();
   const seen = new Set<string>();
   for (const line of lines) {
-    const agreed = modes.get(line.jobId)?.work_order_agreed_ex ?? null;
+    const mode = modes.get(line.jobId);
+    const agreed = mode?.work_order_agreed_ex ?? null;
     if (agreed === null) continue;
     const raw = line.woAllocated;
     const billed = raw === null || raw === undefined || raw === "" ? NaN : Number(raw);
+    const billedEx = Number.isFinite(billed) ? Math.round(billed * 100) / 100 : null;
     const twice = seen.has(line.jobId);
     seen.add(line.jobId);
-    if (!twice && Number.isFinite(billed) && Math.abs(billed - agreed) <= 0.01) continue;
-    if (!refused.has(line.jobId)) {
+    if (refused.has(line.jobId)) continue;
+    const base = { job: line.ref, job_id: line.jobId, agreed_ex: agreed, billed_ex: billedEx };
+    if ((mode?.work_order_amount_rule ?? "up_to_left") === "agreed") {
+      if (!twice && billedEx !== null && Math.abs(billed - agreed) <= 0.01) continue;
+      refused.set(line.jobId, { ...base, words: WORK_ORDER_AMOUNT_WORDS.agreed(line.ref, dollars(agreed)) });
+      continue;
+    }
+    const most = mostNow.get(line.jobId);
+    if (most === undefined || !Number.isFinite(most)) throw new WorkOrderRoomUnreadable();
+    const mostEx = Math.max(0, Math.round(most * 100) / 100);
+    const extra = { most_now_ex: mostEx };
+    if (twice) {
       refused.set(line.jobId, {
-        job: line.ref,
-        job_id: line.jobId,
-        agreed_ex: agreed,
-        billed_ex: Number.isFinite(billed) ? Math.round(billed * 100) / 100 : null,
+        ...base,
+        code: "work_order_line_twice",
+        ...extra,
+        words: WORK_ORDER_AMOUNT_WORDS.twice(line.ref),
+      });
+    } else if (billedEx !== null && cents(billed) > 0 && cents(billed) <= cents(mostEx)) {
+      continue;
+    } else if (cents(mostEx) <= 0) {
+      refused.set(line.jobId, {
+        ...base,
+        code: "work_order_amount_over_left",
+        ...extra,
+        words: WORK_ORDER_AMOUNT_WORDS.nothing_left(line.ref),
+      });
+    } else if (billedEx === null || cents(billed) <= 0) {
+      refused.set(line.jobId, {
+        ...base,
+        code: "work_order_amount_required",
+        ...extra,
+        words: WORK_ORDER_AMOUNT_WORDS.required(line.ref, dollars(mostEx)),
+      });
+    } else {
+      refused.set(line.jobId, {
+        ...base,
+        code: "work_order_amount_over_left",
+        ...extra,
+        words: WORK_ORDER_AMOUNT_WORDS.over_left(line.ref, dollars(mostEx)),
       });
     }
   }
   if (refused.size === 0) return null;
-  const jobs = [...refused.values()];
-  const message = jobs.map((j) =>
-    `Job ${j.job} has an agreed work order of ${dollars(j.agreed_ex)}. Bill it at that amount, or ask the office.`
-  ).join(" ");
-  return { code: "work_order_amount_not_agreed", message, jobs };
+  const all = [...refused.values()];
+  const jobs = all.map(({ words: _w, ...j }) => j);
+  const message = all.map((j) => j.words).join(" ");
+  return { code: all[0].code ?? "work_order_amount_not_agreed", message, jobs };
 }

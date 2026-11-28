@@ -17,8 +17,10 @@ import {
   WORK_ORDER_CAP_WORDS,
   withWorkOrderCaps,
   WorkOrderTotalCapReadError,
+  workOrderBilledViewModes,
   workOrderTotalCapRefusal,
 } from "./work_order_total_cap.ts";
+import { pickTradeWorkOrder } from "./job_additional_work_orders.ts";
 
 const JOB = "00000000-0000-4000-8000-000000000001";
 const WO = "00000000-0000-4000-8000-0000000000a1";
@@ -135,11 +137,15 @@ Deno.test("incoming: every line but commission counts per job; deductions come o
 });
 
 function fakeClient(
-  opts: { lines?: any[]; lanes?: any[]; variations?: any[]; changes?: any[]; fail?: string },
+  opts: { lines?: any[]; lanes?: any[]; variations?: any[]; changes?: any[]; orders?: any[]; flags?: any[]; fail?: string },
 ) {
   return {
     from(table: string) {
-      const rows = table === "trade_invoice_lines"
+      const rows = table === "work_orders"
+        ? opts.orders || []
+        : table === "feature_flags"
+        ? opts.flags || []
+        : table === "trade_invoice_lines"
         ? opts.lines || []
         : table === "v_trade_charge_resolved"
         ? opts.lanes || []
@@ -1219,8 +1225,130 @@ Deno.test("work order billed view: allowed, billed so far and who billed it", as
       { name: "Trade B", amount_ex: 750, you: false },
       { name: "Trade A", amount_ex: 400, you: true },
     ],
+    // Owner, 28 Nov 2026 (added fields): the most trade A may bill now.
+    most_now_ex: 850,
+    amount_rule: "up_to_left",
   });
+  // A restoration work order billed at exactly its agreed amount shows none.
+  assertEquals((await readWorkOrderBilledViews(client, [{ ...MODE, work_order_amount_rule: "agreed" } as any], "trade-a")).size, 0);
   // A restoration work order and a job with no agreed amount show nothing.
   assertEquals((await readWorkOrderBilledViews(client, [{ ...MODE, invoice_mode_reason: "restoration_work_order" }], "trade-a")).size, 0);
   assertEquals((await readWorkOrderBilledViews(client, [{ ...MODE, work_order_agreed_ex: null }], "trade-a")).size, 0);
+});
+
+// ── Owner, 28 Nov 2026: what is left, one pot (docs/work-order-room-v1.md) ──
+
+const namesClient = (opts: Parameters<typeof fakeClient>[0], names: Array<[string, string]>) => {
+  const base = fakeClient(opts);
+  return {
+    ...base,
+    from(table: string) {
+      if (table !== "users") return base.from(table);
+      return {
+        select: () => ({
+          in: () => Promise.resolve({ data: names.map(([id, name]) => ({ id, name })), error: null }),
+        }),
+      };
+    },
+  };
+};
+
+function shareLine(id: string, userId: string, amount: number) {
+  return { ...line(id, "approved", "group share", amount), trade_invoices: { id: "inv-" + id, user_id: userId, status: "approved" } };
+}
+
+Deno.test("room: one trade, two progress bills; the second sees what the first left", async () => {
+  const client = namesClient({ lines: [tradeLine("p1", "trade-a", 1200)] }, [["trade-a", "Trade A"]]);
+  const view = (await readWorkOrderBilledViews(client, [MODE], "trade-a")).get(JOB)!;
+  assertEquals([view.allowed_ex, view.billed_ex, view.left_ex, view.most_now_ex], [2000, 1200, 800, 800]);
+  const full = namesClient({ lines: [tradeLine("p1", "trade-a", 1200), tradeLine("p2", "trade-a", 800)] }, [["trade-a", "Trade A"]]);
+  assertEquals((await readWorkOrderBilledViews(full, [MODE], "trade-a")).get(JOB)?.most_now_ex, 0);
+});
+
+Deno.test("room: group shares draw on the same pot, so an individual bill after them sees only what is left", async () => {
+  // Three made-up crew billed shares of 600, 500 and 400 on a 2,000 work order.
+  const lines = [shareLine("g1", "trade-a", 600), shareLine("g2", "trade-b", 500), shareLine("g3", "trade-c", 400)];
+  const client = namesClient({ lines }, [["trade-a", "Trade A"], ["trade-b", "Trade B"], ["trade-c", "Trade C"]]);
+  const view = (await readWorkOrderBilledViews(client, [MODE], "trade-a")).get(JOB)!;
+  assertEquals([view.billed_ex, view.left_ex, view.most_now_ex], [1500, 500, 500]);
+  assertEquals(view.billed_by.map((b) => [b.name, b.amount_ex, b.you]), [
+    ["Trade A", 600, true],
+    ["Trade B", 500, false],
+    ["Trade C", 400, false],
+  ]);
+  // The cap refuses one cent more than what the shares left.
+  const over = await checkWorkOrderTotalCap(client, {
+    viewerId: "trade-a",
+    lines: [{ job_id: JOB, line_type: "work order", line_total_ex: 500.01, row_type: "work_order" } as any],
+    loadModes: () => Promise.resolve([MODE]),
+    jobRefs: refs,
+  });
+  assertEquals(over?.jobs, [{ job: "SWF-1", job_id: JOB, most_this_invoice_ex: 500 }]);
+});
+
+Deno.test("room: a variation raise adds to what is left for everyone", async () => {
+  const lines = [shareLine("g1", "trade-a", 1000), shareLine("g2", "trade-b", 1000)];
+  const variations = [{ job_id: JOB, work_order_id: WO, status: "approved", trade_allocation_ex: 300 }];
+  const client = namesClient({ lines, variations }, [["trade-a", "Trade A"], ["trade-b", "Trade B"]]);
+  const view = (await readWorkOrderBilledViews(client, [MODE], "trade-b")).get(JOB)!;
+  assertEquals([view.allowed_ex, view.billed_ex, view.most_now_ex], [2300, 2000, 300]);
+  // An office amount change is counted the same way.
+  const changed = namesClient({ lines, changes: [{ id: "c1", work_order_id: WO, delta_ex: 150 }] }, []);
+  assertEquals((await readWorkOrderBilledViews(changed, [MODE], "trade-b")).get(JOB)?.most_now_ex, 150);
+});
+
+// Review fix 1 (28 Nov 2026): the mode here is the shape
+// loadTradeInvoiceJobModes really gives trade A on this job. A is offered only
+// the main work order, so the mode carries no work_orders and no
+// additional_orders; the named limit is read from the job's own approved
+// additional work orders.
+Deno.test("room: a work order named for another trade is never offered as this trade's room", async () => {
+  const rows = [
+    { id: WO, kind: "job", agreed_labour_ex: 2000, assigned_user_id: null, approved_at: "2026-11-01" },
+    { id: "add-b", kind: "additional", agreed_labour_ex: 500, assigned_user_id: "trade-b", approved_at: "2026-11-02" },
+  ];
+  assertEquals(pickTradeWorkOrder(rows as any, "trade-a", 0).options.length, 1, "A is offered the main order only");
+  const realModeA = { ...MODE, work_order_amount_rule: "up_to_left" };
+  const orders = [{ job_id: JOB, kind: "additional", status: "approved", agreed_labour_ex: 500, assigned_user_id: "trade-b" }];
+  const changes = [{ id: "c-add", work_order_id: WO, delta_ex: 500 }];
+  const client = namesClient({ orders, changes }, []);
+  const viewA = (await readWorkOrderBilledViews(client, [realModeA], "trade-a")).get(JOB)!;
+  assertEquals([viewA.allowed_ex, viewA.left_ex, viewA.most_now_ex], [2500, 2500, 2000]);
+  // Trade B (offered both orders) may bill the shared part and their own.
+  const modeB = { ...realModeA, work_orders: [{}, {}] } as any;
+  assertEquals((await readWorkOrderBilledViews(client, [modeB], "trade-b")).get(JOB)?.most_now_ex, 2500);
+  // An unreadable list of work orders hides the view rather than guessing.
+  await assertRejects(
+    () => readWorkOrderBilledViews(namesClient({ orders, changes, fail: "work_orders" }, []), [realModeA], "trade-a"),
+    WorkOrderTotalCapReadError,
+  );
+});
+
+// Review fix 4: the restoration setting works both ways. A restoration work
+// order under "up_to_left" gets its view (and so its most); under "agreed", or
+// with no rule (an older answer), none.
+Deno.test("room: a restoration work order gets a view only when it is billed up to what is left", async () => {
+  const resto = { ...MODE, invoice_mode_reason: "restoration_work_order" };
+  assertEquals(workOrderBilledViewModes([{ ...resto, work_order_amount_rule: "up_to_left" } as any]).length, 1);
+  assertEquals(workOrderBilledViewModes([{ ...resto, work_order_amount_rule: "agreed" } as any]).length, 0);
+  assertEquals(workOrderBilledViewModes([resto as any]).length, 0);
+  const client = namesClient({ lines: [tradeLine("r1", "trade-a", 300)] }, [["trade-a", "Trade A"]]);
+  const view = (await readWorkOrderBilledViews(client, [{ ...resto, work_order_amount_rule: "up_to_left" } as any], "trade-a")).get(JOB);
+  assertEquals(view?.most_now_ex, 1700);
+});
+
+// Review fix 5: with held lines on, the card's billed and left figures are the
+// cap's own (the database sum), the same as most_now_ex, never a second count.
+Deno.test("room: with held lines on, billed and left are the cap's figures", async () => {
+  const lines = [tradeLine("h1", "trade-a", 400), tradeLine("h2", "trade-b", 750)];
+  const base = namesClient({ lines, flags: [{ enabled: true }] }, [["trade-a", "Trade A"], ["trade-b", "Trade B"]]);
+  const client = {
+    ...base,
+    rpc: (name: string, args: any) => Promise.resolve(name === "work_order_backed_billed"
+      ? { data: args.p_job_ids.map((id: string) => ({ job_id: id, billed_ex: 400 })), error: null }
+      : { data: null, error: { message: "x" } }),
+  };
+  const view = (await readWorkOrderBilledViews(client, [MODE], "trade-a")).get(JOB)!;
+  // Trade B's 750 is held with the office, so the database counts 400.
+  assertEquals([view.billed_ex, view.left_ex, view.most_now_ex], [400, 1600, 1600]);
 });
