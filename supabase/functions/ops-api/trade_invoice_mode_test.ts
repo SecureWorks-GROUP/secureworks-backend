@@ -33,6 +33,9 @@ import {
   TradeInvoiceJobModesRequestError,
   TradeInvoiceModeReadError,
   workOrderAmountRefusal,
+  workOrderAmountRuleFor,
+  workOrderJobsNeedingRoom,
+  WorkOrderRoomUnreadable,
 } from "./trade_invoice_mode.ts";
 
 const TRADE = "7a1e0a52-0000-4000-8000-00000000aa01";
@@ -517,7 +520,12 @@ Deno.test("cap left: my_hours shows a job's amount left only when every billed l
   const s = shared.assignments.find((c: any) => c.id === "card-fence");
   assertEquals([s.job_left_ex, s.job_left_hidden, s.job_left_words], [null, true, LEFT_HIDDEN_WORDS.my_hours]);
   assertEquals(s.job_capped, true, "still capped; only the figure is withheld");
-  assert(!JSON.stringify(s).includes("1000"), "no remainder anywhere on the card");
+  // Owner, 28 Nov 2026 (after 23 Nov): the old "no remainder anywhere on the
+  // card" pin is changed ON PURPOSE. The held-line figure stays hidden, but
+  // the work order view now says the most this trade may bill on it.
+  const { work_order_billed: view, ...rest } = s;
+  assert(!JSON.stringify(rest).includes("1000"), "no remainder outside the work order view");
+  assertEquals(view?.most_now_ex, 1000);
   // A job with no approved amount says nothing either way.
   const m = shared.assignments.find((c: any) => c.id === "card-makesafe");
   assertEquals([m.job_left_ex, m.job_left_hidden, m.job_left_words], [null, false, null]);
@@ -684,7 +692,9 @@ handlerTest("trade_invoice_job_modes: a plain trade gets each job's mode; anothe
         commission: { state: "not_known", offer_ex: null },
         can_claim_commission: false,
         work_order_agreed_ex: 1850.5,
-        work_order_billed: { allowed_ex: 1850.5, billed_ex: 0, left_ex: 1850.5, billed_by: [] },
+        // Owner, 28 Nov 2026: billed up to what is left (added fields).
+        work_order_amount_rule: "up_to_left",
+        work_order_billed: { allowed_ex: 1850.5, billed_ex: 0, left_ex: 1850.5, billed_by: [], most_now_ex: 1850.5, amount_rule: "up_to_left" },
         job_work_order_id: WO_FENCE,
       },
       {
@@ -841,29 +851,86 @@ Deno.test("work-order line: a work-order row, labour lines or a work-order type;
   }
 });
 
-Deno.test("agreed amount: billed at the agreed figure passes, any other figure is refused by job", () => {
+// Owner, 28 Nov 2026: the old pin here (any amount but the agreed one is
+// refused) is replaced ON PURPOSE. A work order is billed up to what is left
+// on it; only a restoration work order keeps the exact agreed amount.
+Deno.test("work order amount: restoration keeps the agreed figure exactly", () => {
   const modes = new Map([
-    [FENCE, { work_order_agreed_ex: 1850.5 }],
+    [FENCE, { work_order_agreed_ex: 1850.5, work_order_amount_rule: "agreed" as const }],
     [MAKESAFE, { work_order_agreed_ex: null }],
   ]);
-  assertEquals(workOrderAmountRefusal([{ ref: "SWF-123", jobId: FENCE, woAllocated: 1850.5 }], modes), null);
-  assertEquals(workOrderAmountRefusal([{ ref: "SWF-123", jobId: FENCE, woAllocated: "1850.495" }], modes), null);
+  assertEquals(workOrderAmountRefusal([{ ref: "SWR-123", jobId: FENCE, woAllocated: 1850.5 }], modes), null);
+  assertEquals(workOrderAmountRefusal([{ ref: "SWR-123", jobId: FENCE, woAllocated: "1850.495" }], modes), null);
   // No agreed work order: the trade's figure stands, as before.
   assertEquals(workOrderAmountRefusal([{ ref: "ZZ-1", jobId: MAKESAFE, woAllocated: 99 }], modes), null);
-  const over = workOrderAmountRefusal([{ ref: "SWF-123", jobId: FENCE, woAllocated: 2000 }], modes);
+  const over = workOrderAmountRefusal([{ ref: "SWR-123", jobId: FENCE, woAllocated: 2000 }], modes);
   assertEquals(over?.code, "work_order_amount_not_agreed");
   assertEquals(
     over?.message,
-    "Job SWF-123 has an agreed work order of $1,850.50. Bill it at that amount, or ask the office.",
+    "Job SWR-123 has an agreed work order of $1,850.50. Bill it at that amount, or ask the office.",
   );
-  assertEquals(over?.jobs, [{ job: "SWF-123", job_id: FENCE, agreed_ex: 1850.5, billed_ex: 2000 }]);
-  // Missing amount, and a second work-order line on the same job.
-  assertEquals(workOrderAmountRefusal([{ ref: "SWF-123", jobId: FENCE, woAllocated: null }], modes)?.jobs[0].billed_ex, null);
+  assertEquals(over?.jobs, [{ job: "SWR-123", job_id: FENCE, agreed_ex: 1850.5, billed_ex: 2000 }]);
   const twice = workOrderAmountRefusal([
-    { ref: "SWF-123", jobId: FENCE, woAllocated: 1850.5 },
-    { ref: "SWF-123", jobId: FENCE, woAllocated: 1850.5 },
+    { ref: "SWR-123", jobId: FENCE, woAllocated: 1850.5 },
+    { ref: "SWR-123", jobId: FENCE, woAllocated: 1850.5 },
   ], modes);
   assertEquals(twice?.jobs.length, 1);
+});
+
+Deno.test("work order amount: anything above $0 up to what is left passes; over it is refused with the most named", () => {
+  const modes = new Map([[FENCE, { work_order_agreed_ex: 3000, work_order_amount_rule: "up_to_left" as const }]]);
+  const left = new Map([[FENCE, 1800]]);
+  const one = (woAllocated: unknown) => workOrderAmountRefusal([{ ref: "ZZF-1", jobId: FENCE, woAllocated }], modes, left);
+  // A progress bill, the whole of what is left, and one cent.
+  for (const amount of [1000, 1800, "1800.004", 0.01]) assertEquals(one(amount), null, String(amount));
+  const over = one(1800.01);
+  assertEquals(over?.code, "work_order_amount_over_left");
+  assertEquals(over?.message, "Job ZZF-1: up to $1,800.00 is left on its work order. Bill at most that this time, or ask the office.");
+  assertEquals(over?.jobs, [{
+    job: "ZZF-1", job_id: FENCE, agreed_ex: 3000, billed_ex: 1800.01,
+    code: "work_order_amount_over_left", most_now_ex: 1800,
+  }]);
+  // Nothing typed, $0 or less: the amount is asked for, with the most named.
+  for (const amount of [null, "", 0, -5, "abc"]) {
+    const r = one(amount);
+    assertEquals(r?.code, "work_order_amount_required", String(amount));
+    assertEquals(r?.message, "Job ZZF-1: type the amount you are billing on its work order this time. It must be more than $0.00 and at most $1,800.00.");
+  }
+  // Billed in full: no amount passes.
+  const full = workOrderAmountRefusal([{ ref: "ZZF-1", jobId: FENCE, woAllocated: 1 }], modes, new Map([[FENCE, 0]]));
+  assertEquals(full?.message, "Job ZZF-1: its work order has been billed in full. Ask the office if it needs changing.");
+  assertEquals(full?.jobs[0].most_now_ex, 0);
+  // Over billed already (negative left) reads as nothing left, never below 0.
+  assertEquals(workOrderAmountRefusal([{ ref: "ZZF-1", jobId: FENCE, woAllocated: 1 }], modes, new Map([[FENCE, -50]]))?.jobs[0].most_now_ex, 0);
+  // One work order line per job on one invoice.
+  const twice = workOrderAmountRefusal([
+    { ref: "ZZF-1", jobId: FENCE, woAllocated: 500 },
+    { ref: "ZZF-1", jobId: FENCE, woAllocated: 500 },
+  ], modes, left);
+  assertEquals(twice?.code, "work_order_line_twice");
+  assertEquals(twice?.message, "Job ZZF-1: put its work order on one line on this invoice.");
+  // A mode with no rule (an older answer) is up to what is left too.
+  assertEquals(workOrderAmountRefusal([{ ref: "ZZF-1", jobId: FENCE, woAllocated: 900 }], new Map([[FENCE, { work_order_agreed_ex: 3000 }]]), left), null);
+});
+
+Deno.test("work order amount: what is left that was not read refuses, never guesses", () => {
+  const modes = new Map([[FENCE, { work_order_agreed_ex: 3000, work_order_amount_rule: "up_to_left" as const }]]);
+  assertThrows(
+    () => workOrderAmountRefusal([{ ref: "ZZF-1", jobId: FENCE, woAllocated: 100 }], modes, new Map()),
+    WorkOrderRoomUnreadable,
+  );
+  assertEquals(workOrderJobsNeedingRoom([{ ref: "ZZF-1", jobId: FENCE, woAllocated: 100 }], modes), [FENCE]);
+  assertEquals(
+    workOrderJobsNeedingRoom([{ ref: "ZZF-1", jobId: FENCE, woAllocated: 100 }], new Map([[FENCE, { work_order_agreed_ex: 3000, work_order_amount_rule: "agreed" as const }]])),
+    [],
+  );
+});
+
+Deno.test("work order amount rule: restoration keeps the agreed amount; every other work order is up to what is left", () => {
+  assertEquals(workOrderAmountRuleFor("restoration_work_order"), "agreed");
+  for (const reason of ["fencing_job", "per_metre_trade", null, undefined]) {
+    assertEquals(workOrderAmountRuleFor(reason), "up_to_left", String(reason));
+  }
 });
 
 Deno.test("mode rule: a restoration job with an agreed work order is billed as that work order; without one it is hourly", async () => {

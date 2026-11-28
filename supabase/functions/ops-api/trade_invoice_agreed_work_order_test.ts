@@ -3,9 +3,12 @@
  * through the REAL generate_trade_invoice handler against a PostgREST-shaped
  * fetch stub:
  *
- *   A. A work-order job with an approved job work order is billed at its
- *      agreed labour. A work-order line at any other amount is refused before
- *      anything is written (work_order_amount_not_agreed). Labour lines still
+ *   A. A work-order job with an approved job work order. Owner, 28 Nov 2026
+ *      (replacing the 12 Nov exact-amount rule ON PURPOSE): the trade types
+ *      what they bill this time, more than $0 and up to what is left on the
+ *      work order after every trade's billing, in as many bills as it takes.
+ *      Over what is left is refused before anything is written
+ *      (work_order_amount_over_left), naming the most. Labour lines still
  *      come off it; hourly lines on the job stay allowed.
  *   B. No super on commission: the invoice saved carries super on the gross
  *      less its commission lines, and stores that super base.
@@ -75,7 +78,34 @@ function filterValues(url: URL, column: string): string[] | null {
   return null;
 }
 
-async function submit(extra_items: any[], world: { failWorkOrders?: boolean } = {}): Promise<Captured> {
+// A line already billed on a job by someone (an approved invoice, so it
+// counts against the work order). Made-up figures and names.
+const billedLine = (id: string, jobId: string, userId: string, type: string, amount: number) => ({
+  id: `6c2f0a52-0000-4000-8000-0000000e${id.padStart(4, "0")}`,
+  trade_invoice_id: `6c2f0a52-0000-4000-8000-0000000f${id.padStart(4, "0")}`,
+  job_id: jobId,
+  job_work_order_id: null,
+  line_type: type,
+  description: `${type} already billed`,
+  total_hours: null,
+  work_order_hours: null,
+  line_total_ex: amount,
+  override_amount: null,
+  trade_invoices: {
+    id: `6c2f0a52-0000-4000-8000-0000000f${id.padStart(4, "0")}`,
+    user_id: userId,
+    invoice_number: `ZZTEST-${id}`,
+    status: "approved",
+    invoice_kind: "standard",
+    submitted_at: "2026-11-01T00:00:00Z",
+    users: { name: userId === TRADE_ID ? "Fixture Trade" : "ZZTEST Helper" },
+  },
+});
+
+async function submit(
+  extra_items: any[],
+  world: { failWorkOrders?: boolean; billed?: any[]; failBilled?: boolean } = {},
+): Promise<Captured> {
   const writes: string[] = [];
   const invoiceRows: any[] = [];
   const lineRows: any[] = [];
@@ -106,6 +136,15 @@ async function submit(extra_items: any[], world: { failWorkOrders?: boolean } = 
     if (table === "trade_invoice_lines" && method === "POST") {
       lineRows.push(...posted());
       return reply([]);
+    }
+    if (table === "trade_invoice_lines" && method === "GET" && (world.billed || world.failBilled)) {
+      if (world.failBilled) return Promise.resolve(Response.json({ code: "XX000", message: "boom" }, { status: 500 }));
+      const jobs = filterValues(url, "job_id");
+      const select = url.searchParams.get("select") || "";
+      // Only the work order's billed read embeds the invoice; other reads
+      // of the table see nothing, as before.
+      if (!select.includes("trade_invoices!inner")) return reply([]);
+      return reply(world.billed!.filter((row) => !jobs || jobs.includes(row.job_id)));
     }
     if (table === "users") {
       return reply([{
@@ -223,50 +262,96 @@ function assertSaved(out: Captured) {
   assert(out.writes.some((w) => w.includes("trade_invoice")), out.writes.join(", "));
 }
 
-function assertNotAgreed(out: Captured, jobNumber: string) {
+function assertOverLeft(out: Captured, jobNumber: string, most: string) {
   assertEquals(out.status, 409, JSON.stringify(out.body));
-  assertEquals(out.body.code, "work_order_amount_not_agreed");
+  assertEquals(out.body.code, "work_order_amount_over_left");
   assertEquals(out.body.saved, false);
-  assertStringIncludes(out.body.userMessage, `Job ${jobNumber} has an agreed work order of $1,850.50.`);
-  assertStringIncludes(out.body.userMessage, "Bill it at that amount, or ask the office.");
+  assertEquals(
+    out.body.userMessage,
+    `Job ${jobNumber}: up to ${most} is left on its work order. Bill at most that this time, or ask the office.`,
+  );
   assertEquals(out.writes, [], "nothing is written");
 }
 
-// ── A. The agreed amount ────────────────────────────────────────────────────
+// ── A. Up to what is left on the work order ─────────────────────────────────
 
-handlerTest("agreed work order: billed at the agreed amount is saved", async () => {
+handlerTest("work order: billed at the whole amount, with nothing billed yet, is saved", async () => {
   const out = await submit([woRow(AGREED_JOB, "ZZF-2001", 1850.5)]);
   assertSaved(out);
   const line = out.lineRows.find((l) => l.job_id === AGREED_JOB);
   assertEquals([line?.wo_allocated, line?.line_total_ex], [1850.5, 1850.5]);
 });
 
-handlerTest("agreed work order: labour still comes off the agreed amount", async () => {
+handlerTest("work order: labour still comes off the amount billed", async () => {
   const out = await submit([woRow(AGREED_JOB, "ZZF-2001", 1850.5, [{ hours: 4, rate: 50 }, { hours: 2, rate: 40 }])]);
   assertSaved(out);
   const line = out.lineRows.find((l) => l.job_id === AGREED_JOB);
   assertEquals([line?.wo_allocated, line?.wo_labour_deduction, line?.line_total_ex], [1850.5, 280, 1570.5]);
 });
 
-handlerTest("agreed work order: any other amount is refused before any write", async () => {
-  for (const allocated of [2000, 1850, 0]) {
-    assertNotAgreed(await submit([woRow(AGREED_JOB, "ZZF-2001", allocated)]), "ZZF-2001");
+// Worked example 1: one trade alone, two progress bills.
+handlerTest("work order: one trade bills it in two progress bills, each within what is left", async () => {
+  const first = await submit([woRow(AGREED_JOB, "ZZF-2001", 1000)]);
+  assertSaved(first);
+  assertEquals(first.lineRows.find((l) => l.job_id === AGREED_JOB)?.line_total_ex, 1000);
+  const already = [billedLine("1", AGREED_JOB, TRADE_ID, "Work Order", 1000)];
+  const second = await submit([woRow(AGREED_JOB, "ZZF-2001", 850.5)], { billed: already });
+  assertSaved(second);
+  assertEquals(second.lineRows.find((l) => l.job_id === AGREED_JOB)?.line_total_ex, 850.5);
+  // One cent past what is left is refused, naming the most.
+  assertOverLeft(await submit([woRow(AGREED_JOB, "ZZF-2001", 850.51)], { billed: already }), "ZZF-2001", "$850.50");
+  // Billed in full: any amount is refused.
+  const full = await submit([woRow(AGREED_JOB, "ZZF-2001", 1)], {
+    billed: [...already, billedLine("2", AGREED_JOB, TRADE_ID, "Work Order", 850.5)],
+  });
+  assertEquals(full.status, 409, JSON.stringify(full.body));
+  assertEquals(full.body.userMessage, "Job ZZF-2001: its work order has been billed in full. Ask the office if it needs changing.");
+  assertEquals(full.writes, []);
+});
+
+// Worked example 2: a lead and a helper.
+handlerTest("work order: a helper's billing comes off what the lead may bill", async () => {
+  const helper = [billedLine("3", AGREED_JOB, OTHER_USER, "Labour", 400)];
+  // Left: 1,850.50 less the helper's 400 = 1,450.50.
+  const ok = await submit([woRow(AGREED_JOB, "ZZF-2001", 1450.5)], { billed: helper });
+  assertSaved(ok);
+  assertOverLeft(await submit([woRow(AGREED_JOB, "ZZF-2001", 1850.5)], { billed: helper }), "ZZF-2001", "$1,450.50");
+  const refused = await submit([woRow(AGREED_JOB, "ZZF-2001", 1850.5)], { billed: helper });
+  assertEquals(refused.body.jobs, [{
+    job: "ZZF-2001", job_id: AGREED_JOB, agreed_ex: 1850.5, billed_ex: 1850.5,
+    code: "work_order_amount_over_left", most_now_ex: 1450.5,
+  }]);
+});
+
+handlerTest("work order: nothing typed, $0, a second line on one job, or one bad line among good ones is refused before any write", async () => {
+  for (const allocated of [0, -10]) {
+    const out = await submit([woRow(AGREED_JOB, "ZZF-2001", allocated)]);
+    assertEquals(out.status, 409, JSON.stringify(out.body));
+    assertEquals(out.body.code, "work_order_amount_required");
+    assertEquals(out.writes, []);
   }
-  const out = await submit([woRow(AGREED_JOB, "ZZF-2001", 2000)]);
-  assertEquals(out.body.jobs, [{ job: "ZZF-2001", job_id: AGREED_JOB, agreed_ex: 1850.5, billed_ex: 2000 }]);
   // A line typed as a work order with no amount on it is refused too.
-  const typed = { ...plainLine(AGREED_JOB, "ZZF-2001", "Work Order", 1, 1850.5) };
-  assertNotAgreed(await submit([typed]), "ZZF-2001");
-  // Billing the agreed work order twice on one invoice is refused.
-  assertNotAgreed(
-    await submit([woRow(AGREED_JOB, "ZZF-2001", 1850.5), woRow(AGREED_JOB, "ZZF-2001", 1850.5)]),
-    "ZZF-2001",
-  );
+  const typed = await submit([plainLine(AGREED_JOB, "ZZF-2001", "Work Order", 1, 1850.5)]);
+  assertEquals(typed.body.code, "work_order_amount_required", JSON.stringify(typed.body));
+  assertEquals(typed.writes, []);
+  // Billing the work order on two lines on one invoice is refused.
+  const twice = await submit([woRow(AGREED_JOB, "ZZF-2001", 500), woRow(AGREED_JOB, "ZZF-2001", 500)]);
+  assertEquals(twice.body.code, "work_order_line_twice", JSON.stringify(twice.body));
+  assertEquals(twice.writes, []);
   // One wrong line refuses the whole invoice, good lines included.
-  assertNotAgreed(
-    await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 2, 10), woRow(AGREED_JOB, "ZZF-2001", 999)]),
+  assertOverLeft(
+    await submit([plainLine(OPEN_JOB, "ZZF-2002", "Materials", 2, 10), woRow(AGREED_JOB, "ZZF-2001", 1999)]),
     "ZZF-2001",
+    "$1,850.50",
   );
+});
+
+handlerTest("work order: what is left that cannot be read refuses 503, never guesses", async () => {
+  const out = await submit([woRow(AGREED_JOB, "ZZF-2001", 100)], { failBilled: true });
+  assertEquals(out.status, 503, JSON.stringify(out.body));
+  assertEquals(out.body.code, "work_order_cap_unavailable");
+  assertEquals(out.body.saved, false);
+  assertEquals(out.writes, []);
 });
 
 handlerTest("agreed work order: hourly lines on the job stay allowed (helpers)", async () => {

@@ -8,7 +8,7 @@
  *    naming a staff person, and records one office_submitted event;
  *  - a trade session, a missing reason, an unknown trade, a server key naming
  *    no staff person: refused before any write;
- *  - the trade path's own refusals still apply (work_order_amount_not_agreed).
+ *  - the trade path's own refusals still apply (work_order_amount_over_left).
  *
  * Every name, number and id below is made up.
  */
@@ -361,7 +361,7 @@ handlerTest("office invoice: no reason, no trade, an unknown trade or an unnamed
   }
 });
 
-handlerTest("office invoice: the trade's refusals still apply (an amount that is not the agreed work order)", async () => {
+handlerTest("office invoice: the trade's refusals still apply (an amount past what is left on the work order)", async () => {
   const trade = await send("generate_trade_invoice", "trade-jwt", tradeBody(5100));
   const office = await send("office_generate_trade_invoice", "office-jwt", {
     ...tradeBody(5100),
@@ -370,7 +370,8 @@ handlerTest("office invoice: the trade's refusals still apply (an amount that is
   });
   for (const out of [trade, office]) {
     assertEquals(out.status, 409, JSON.stringify(out.body));
-    assertEquals(out.body.code, "work_order_amount_not_agreed");
+    // Owner, 28 Nov 2026: up to what is left, no longer exactly the agreed amount.
+    assertEquals(out.body.code, "work_order_amount_over_left");
     assertNothingWritten(out);
   }
   assertEquals(office.body, trade.body);

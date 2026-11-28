@@ -372,12 +372,13 @@ handlerTest("pay rule: an agreed work order on the new rule bills its total, sup
     ["inclusive_12_112_v1", 1850.5, 198.27, 1652.23, 1850.5],
   );
   assert(Math.round(inv.net_pay * 100) + Math.round(inv.super_amount * 100) <= 185050);
-  // One cent over is caught by the work order cap; any other amount by the
-  // agreed-amount check. Either way nothing is saved.
+  // Owner, 28 Nov 2026 (changed ON PURPOSE from the exact-amount rule): any
+  // amount past what is left on the work order, one cent or more, is refused
+  // by the amount check before the cap. Either way nothing is saved.
   for (
     const [allocated, code] of [
-      [1850.51, "work_order_total_over_agreed"],
-      [2000, "work_order_amount_not_agreed"],
+      [1850.51, "work_order_amount_over_left"],
+      [2000, "work_order_amount_over_left"],
     ] as const
   ) {
     const refused = await submit([woRow(AGREED_JOB, "ZZF-2001", allocated)], ON_FROM);

@@ -29,6 +29,8 @@ import {
   TradeInvoiceModeReadError,
   type TradeInvoiceJobMode,
   workOrderAmountRefusal,
+  workOrderJobsNeedingRoom,
+  WorkOrderRoomUnreadable,
 } from './trade_invoice_mode.ts'
 import {
   checkWorkOrderTotalCap,
@@ -16318,11 +16320,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   throw new ApiError(error?.message || 'Could not check the jobs on this invoice', 500)
                 })
 
-                // An approved job work order is billed at its agreed labour
-                // (Marnin, 12 Nov 2026). Every work-order line on such a job
-                // must carry exactly that amount, once, or nothing is saved.
-                // The agreed figure comes from the same rule my_hours shows
-                // (trade_invoice_mode.ts). Hourly lines are not checked here.
+                // An approved job work order is billed up to what is left on
+                // it (owner, 28 Nov 2026; restoration still at exactly its
+                // agreed labour, 12 Nov 2026). Every work-order line on such
+                // a job must be more than $0 and at most what is left for
+                // this trade, once per invoice, or nothing is saved. What is
+                // left is the work order cap's own figure, the one my_hours
+                // shows (work_order_billed.most_now_ex). Hourly lines are not
+                // checked here; the cap below holds the job's total.
                 const woAmountLines = extraItemsIn.filter((item: any) =>
                   item &&
                   item.source !== 'clock' && item._source !== 'clock' && item.source !== 'server_labour' &&
@@ -16357,7 +16362,38 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     }
                     throw error
                   }
-                  const woRefusal = workOrderAmountRefusal(woAmountLines, woModes)
+                  // What is left for this trade on each work order, read only
+                  // for jobs billed up to it. Unreadable: 503, never a guess.
+                  const woRoomFailed = () => {
+                    console.error('[ops-api] generate_trade_invoice: work order room unreadable')
+                    const message = 'This invoice was not saved. What is left on its work order could not be checked. Try again in a minute.'
+                    return new ApiError(message, 503, {
+                      ok: false, success: false, saved: false,
+                      code: 'work_order_cap_unavailable', error: message, userMessage: message,
+                    })
+                  }
+                  const woRoomJobs = workOrderJobsNeedingRoom(woAmountLines, woModes)
+                  const woMostNow = new Map<string, number>()
+                  if (woRoomJobs.length > 0) {
+                    try {
+                      const views = await readWorkOrderBilledViews(
+                        client,
+                        woRoomJobs.map((id) => woModes.get(id)!).filter(Boolean) as any[],
+                        tradeUser.id,
+                      )
+                      for (const [jobId, view] of views) woMostNow.set(jobId, view.most_now_ex)
+                    } catch (error) {
+                      if (error instanceof WorkOrderTotalCapReadError) throw woRoomFailed()
+                      throw error
+                    }
+                  }
+                  let woRefusal
+                  try {
+                    woRefusal = workOrderAmountRefusal(woAmountLines, woModes, woMostNow)
+                  } catch (error) {
+                    if (error instanceof WorkOrderRoomUnreadable) throw woRoomFailed()
+                    throw error
+                  }
                   if (woRefusal) {
                     throw new ApiError(woRefusal.message, 409, {
                       ok: false, success: false, saved: false,
@@ -59737,6 +59773,10 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     // there is none or it could not be read.
     row.work_order_agreed_ex = mode?.work_order_agreed_ex ?? null
     row.job_work_order_id = mode?.job_work_order_id ?? null
+    // Owner, 28 Nov 2026: how that work order is billed ("up_to_left": any
+    // amount above $0 up to work_order_billed.most_now_ex; "agreed": exactly
+    // work_order_agreed_ex). Only beside an agreed amount.
+    if (mode?.work_order_amount_rule) row.work_order_amount_rule = mode.work_order_amount_rule
   }
   for (const a of enriched) stampInvoiceMode(a, String(a.jobs?.id || ''))
   for (const r of groupRouteJobs) stampInvoiceMode(r, String(r.job_id || ''))
@@ -60428,7 +60468,7 @@ async function withAgreedLabourForAllocatedJobsOnly(
     }
     out.push(tier === 'office' || tier === 'division_manager' || tier === 'allocated'
       ? job
-      : (({ cap_work_order_id: _capId, cap_agreed_ex: _capEx, work_orders: _orders, ...rest }) =>
+      : (({ cap_work_order_id: _capId, cap_agreed_ex: _capEx, work_orders: _orders, work_order_amount_rule: _rule, ...rest }) =>
         ({ ...rest, work_order_agreed_ex: null, job_work_order_id: null }))(job))
   }
   return out
